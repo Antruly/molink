@@ -1,9 +1,9 @@
 ; moLink Windows installer. Build with:
-;   makensis /DVERSION=0.2.0 /DPKG_DIR=<abs path to staged pkg> installer.nsi
+;   makensis /DVERSION=0.3.0 /DPKG_DIR=<abs path to staged pkg> installer.nsi
 !include "MUI2.nsh"
 
 !ifndef VERSION
-  !define VERSION "0.2.0"
+  !define VERSION "0.3.0"
 !endif
 !ifndef PKG_DIR
   !error "PKG_DIR must point at the staged package directory"

@@ -9,6 +9,7 @@
 #include <webapp/uvcpp_web_json.h>
 
 #include "config.h"
+#include "identity.h"
 #include "util.h"
 #include "version.h"
 #ifdef _WIN32
@@ -28,12 +29,9 @@ using uvcpp::uvcpp_web_request;
 using uvcpp::uvcpp_web_response;
 
 bool origin_allowed(const std::string& origin) {
-  // Tauri v2 serves the shell from these origins, depending on platform. The
-  // two localhost entries are the Vite dev server.
-  return origin == "tauri://localhost" ||
-         origin == "http://tauri.localhost" ||
-         origin == "https://tauri.localhost" ||
-         origin == "http://localhost:1420" ||
+  // The shell loads the core's own origin, so only the Vite dev server needs
+  // to be allowed here.
+  return origin == "http://localhost:1420" ||
          origin == "http://127.0.0.1:1420";
 }
 
@@ -46,6 +44,10 @@ std::string bearer_token(const uvcpp_web_request& req) {
     return authz.substr(prefix.size());
   }
   return std::string();
+}
+
+bool is_loopback_peer(const std::string& peer) {
+  return peer == "127.0.0.1" || peer == "::1" || peer == "::ffff:127.0.0.1";
 }
 
 long current_pid() { return static_cast<long>(MOLINK_GETPID()); }
@@ -87,6 +89,32 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
     next();
   });
 
+  // ---- Idle lock -------------------------------------------------------
+  // While locked only the state probe and the login/unlock endpoint remain
+  // reachable; everything else (including the local device credentials) is
+  // blocked until the verification code is entered again.
+  app.use([deps](uvcpp_web_request& req, uvcpp_web_response& resp,
+                 uvcpp_web_next next) {
+    if (!deps.lock) {
+      next();
+      return;
+    }
+    const std::string& path = req.path();
+    const bool is_api = path.compare(0, 5, "/api/") == 0;
+    const bool allowed = path == "/api/state" || path == "/api/login" ||
+                         path == "/api/health";
+    if (is_api && !allowed && deps.lock->locked()) {
+      uvcpp_json body;
+      body["type"] = "error";
+      body["code"] = "locked";
+      body["message"] = "the UI is locked; enter the verification code";
+      resp.status(423).json(body);
+      resp.end();
+      return;
+    }
+    next();
+  });
+
   // ---- Token guard for /api/* -----------------------------------------
   // /healthz and /api/health stay open: the shell's readiness probe and
   // monitoring need them, and they expose nothing beyond version and uptime.
@@ -96,7 +124,8 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
     const std::string& path = req.path();
     const bool is_api = path.compare(0, 5, "/api/") == 0;
     // /api/device is loopback-only and self-checks the peer address.
-    if (!is_api || path == "/api/health" || path == "/api/device") {
+    if (!is_api || path == "/api/health" || path == "/api/device" ||
+        path == "/api/state" || path == "/api/login") {
       next();
       return;
     }
@@ -128,12 +157,131 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
   app.get("/healthz", health);
   app.get("/api/health", health);
 
+  app.get("/api/state",
+          [deps](uvcpp_web_request& req, uvcpp_web_response& resp,
+                 uvcpp_web_next) {
+            uvcpp_json j;
+            j["service"] = MOLINK_CORE_SERVICE;
+            j["product"] = MOLINK_PRODUCT_NAME;
+            j["version"] = MOLINK_VERSION;
+            j["protocol"] = 1;
+            j["device_id"] = deps.device_id;
+            j["local"] = is_loopback_peer(req.peer_ip());
+            j["locked"] = deps.lock != nullptr && deps.lock->locked();
+            j["lock_timeout"] =
+                deps.lock != nullptr ? deps.lock->timeout_seconds() : 0;
+            j["open_sessions"] =
+                deps.lock != nullptr ? deps.lock->open_sessions() : 0;
+            j["host"] = deps.config.host;
+            j["port"] = effective_port(deps);
+            resp.set_header("Cache-Control", "no-store").json(j);
+            resp.end();
+          });
+
+  app.post("/api/login",
+           [deps](uvcpp_web_request& req, uvcpp_web_response& resp,
+                  uvcpp_web_next) {
+             if (!deps.lock) {
+               resp.status(503).json_str(R"({"error":"locking unavailable"})");
+               resp.end();
+               return;
+             }
+             if (!deps.lock->try_unlock(bearer_token(req), deps.config.token)) {
+               uvcpp_json body;
+               body["type"] = "error";
+               body["code"] = "invalid_token";
+               body["message"] = "the verification code is not valid";
+               resp.status(401).json(body);
+               resp.end();
+               return;
+             }
+             uvcpp_json j;
+             j["ok"] = true;
+             j["device_id"] = deps.device_id;
+             j["service"] = MOLINK_CORE_SERVICE;
+             j["version"] = MOLINK_VERSION;
+             j["protocol"] = 1;
+             j["local"] = is_loopback_peer(req.peer_ip());
+             j["lock_timeout"] = deps.lock->timeout_seconds();
+             resp.set_header("Cache-Control", "no-store").json(j);
+             resp.end();
+           });
+
+  app.post("/api/activity",
+           [deps](uvcpp_web_request&, uvcpp_web_response& resp,
+                  uvcpp_web_next) {
+             if (deps.lock) deps.lock->touch();
+             resp.status(204).end();
+           });
+
+  app.post("/api/ui-state",
+           [deps](uvcpp_web_request& req, uvcpp_web_response& resp,
+                  uvcpp_web_next) {
+             if (!deps.lock) {
+               resp.status(204).end();
+               return;
+             }
+             const std::string* sessions = req.query("sessions");
+             const std::string* client = req.query("client");
+             int count = 0;
+             if (sessions != nullptr) {
+               try {
+                 count = std::stoi(*sessions);
+               } catch (...) {
+                 count = 0;
+               }
+             }
+             deps.lock->set_ui_sessions(
+                 client != nullptr ? *client : std::string(),
+                 count < 0 ? 0 : (count > 64 ? 64 : count));
+             resp.status(204).end();
+           });
+
+  app.post("/api/lock-timeout",
+           [deps](uvcpp_web_request& req, uvcpp_web_response& resp,
+                  uvcpp_web_next) {
+             if (!deps.lock) {
+               resp.status(503).json_str(R"({"error":"locking unavailable"})");
+               resp.end();
+               return;
+             }
+             const std::string* seconds = req.query("seconds");
+             int value = -1;
+             if (seconds != nullptr) {
+               try {
+                 value = std::stoi(*seconds);
+               } catch (...) {
+                 value = -1;
+               }
+             }
+             if (value < 0 || value > 86400) {
+               resp.status(400).json_str(
+                   R"({"error":"seconds must be between 0 and 86400"})");
+               resp.end();
+               return;
+             }
+             deps.lock->set_timeout_seconds(value);
+             save_lock_timeout_setting(value);
+             uvcpp_json j;
+             j["lock_timeout"] = value;
+             resp.json(j);
+             resp.end();
+           });
+
   app.get("/api/device",
           [deps](uvcpp_web_request& req, uvcpp_web_response& resp,
                  uvcpp_web_next) {
+            if (deps.lock && deps.lock->locked()) {
+              uvcpp_json body;
+              body["type"] = "error";
+              body["code"] = "locked";
+              body["message"] = "the UI is locked";
+              resp.status(423).json(body);
+              resp.end();
+              return;
+            }
             const std::string peer = req.peer_ip();
-            const bool loopback = peer == "127.0.0.1" || peer == "::1" ||
-                                  peer == "::ffff:127.0.0.1";
+            const bool loopback = is_loopback_peer(peer);
             if (!loopback) {
               uvcpp_json body;
               body["type"] = "error";
@@ -158,6 +306,7 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
                 deps.input != nullptr && deps.input->available();
             j["capabilities"]["clipboard"] =
                 deps.clipboard != nullptr && deps.clipboard->available();
+            if (deps.lock) deps.lock->touch();
             resp.set_header("Cache-Control", "no-store").json(j);
             resp.end();
           });

@@ -46,7 +46,7 @@ export function SettingsPanel() {
         <div className="mt-6 border-t border-line-soft pt-4 text-[11px] leading-relaxed text-muted">
           <div className="flex justify-between">
             <span>{t('settings.version')}</span>
-            <span className="font-mono">{device?.version ?? '0.2.0'}</span>
+            <span className="font-mono">{device?.version ?? '0.3.0'}</span>
           </div>
           <div className="mt-1 flex justify-between">
             <span>{t('settings.protocol')}</span>

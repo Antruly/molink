@@ -55,6 +55,7 @@ export function SessionView({
   popout?: boolean
 }) {
   const { t } = useTranslation()
+  const localMode = useAppStore((state) => state.localMode)
   const qualityWatermark = useAppStore((state) => state.qualityWatermark)
   const setQualityWatermark = useAppStore((state) => state.setQualityWatermark)
   const setControlEnabled = useAppStore((state) => state.setControlEnabled)
@@ -306,7 +307,7 @@ export function SessionView({
             <Activity size={14} />
           </button>
 
-          {!popout ? (
+          {!popout && localMode ? (
             <button
               type="button"
               onClick={openPopout}

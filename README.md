@@ -2,7 +2,7 @@
 
 跨平台远程桌面。Web 优先，一套后台 + 浏览器壳层，桌面端直连，移动端经服务端中转。
 
-> 版本 0.2.0 · MIT · 协议版本 1
+> 版本 0.3.0 · MIT · 协议版本 1
 
 ![主页（亮色）](docs/screenshots/home-light.png)
 ![会话页（合成测试帧）](docs/screenshots/session-light.png)
@@ -22,6 +22,9 @@
 | Windows 抓屏/输入/剪贴板 | ✅ DXGI Desktop Duplication · SendInput · CF_UNICODETEXT |
 | macOS 抓屏/输入/剪贴板 | ✅ CoreGraphics · CGEvent · NSPasteboard |
 | 设备 ID / 验证码（持久化，默认隐藏） | ✅ 令牌保存在配置目录 |
+| 本机免验证 / 远程验证码登录 | ✅ 回环免验证；非本机必须验证 |
+| 远程一键控制核心所在主机 | ✅ 验证后点击即可 |
+| 空闲自动锁定（默认 60 秒） | ✅ 无操作且无远程会话时锁定，可配置/持久化 |
 | 首次连接独立窗口、后续连接 Tab、标签拖出 | ✅ 三个平台的原生多窗口 |
 | 亮/暗主题、无边框圆角、自绘标题栏、关闭到托盘 | ✅ Linux/Windows；macOS 使用原生标题栏 |
 | 连接质量水印（默认关闭） | ✅ |
@@ -109,9 +112,9 @@ cmake --build shell/native/build --parallel
 生成 Linux 安装包：
 
 ```bash
-./packaging/linux/build-deb.sh       # build/package/molink_0.2.0_amd64.deb
-./packaging/linux/build-appimage.sh  # build/package/moLink-0.2.0-x86_64.AppImage
-./packaging/linux/build-rpm.sh       # build/package/molink-0.2.0-1.x86_64.rpm
+./packaging/linux/build-deb.sh       # build/package/molink_0.3.0_amd64.deb
+./packaging/linux/build-appimage.sh  # build/package/moLink-0.3.0-x86_64.AppImage
+./packaging/linux/build-rpm.sh       # build/package/molink-0.3.0-1.x86_64.rpm
 ```
 
 Windows（需 WebView2 SDK 与 NSIS）与 macOS（`.app` + `.dmg`）的构建步骤见
@@ -128,6 +131,20 @@ Windows（需 WebView2 SDK 与 NSIS）与 macOS（`.app` + `.dmg`）的构建步
 - **窗口**：Linux/Windows 为无边框圆角窗口 + 自绘标题栏，关闭按钮收进托盘；macOS 使用原生标题栏，关闭后保留在 Dock。
 - **主题**：亮色 / 暗色一键切换，跟随系统初始值并记住选择。
 - **质量水印**：默认关闭，可在偏好设置或会话工具栏开启，显示帧率、延迟与带宽。
+
+## 访问与锁定
+
+- **本机访问**：从本机启动的壳层/浏览器（peer 为回环地址）无需输入验证码，页面会自动通过 `/api/device` 取得本机令牌。本机不能连接自己（会形成递归），因此设备页不提供“连接本机”。
+- **远程访问**：其他设备打开 `http://<本机IP>:端口` 时必须输入这台设备的验证码。验证通过后可进入主页、从这台设备连接其他设备，并可点击“控制这台设备”直接控制核心所在主机（无需再次输入）。
+- **自动锁定**：在没有任何远程会话、且界面无操作超过设定时间后，后台把界面锁定。默认 60 秒；`--lock-timeout` 或偏好设置修改（持久化到配置目录）。锁定后除 `/api/state` 与 `/api/login` 外的 API 返回 `423 locked`，WebSocket 以 `1008 locked` 关闭。
+- **远程访问前提**：核心需要监听局域网地址：
+
+```bash
+./backend/build/molink-core --host 0.0.0.0 --allow-remote --web-root frontend/dist
+# 其他设备打开 http://<本机局域网IP>:21118，输入本机验证码
+```
+
+验证码保存在配置目录（Linux `~/.config/molink/token`，权限 0600）。
 
 ## 测试
 

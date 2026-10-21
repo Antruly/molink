@@ -29,6 +29,10 @@ struct core_config {
   bool no_clipboard = false;
   /// Directory served at "/" (the built frontend). Empty = auto-detect.
   std::string web_root;
+  /// Idle seconds before the UI locks; 0 disables. Default 60.
+  int lock_timeout_seconds = 60;
+  /// True when --lock-timeout was given, so a persisted UI setting is ignored.
+  bool lock_timeout_explicit = false;
 };
 
 /// Parse command-line arguments. Unknown arguments are reported through

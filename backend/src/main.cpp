@@ -17,6 +17,7 @@
 #include "clipboard/clipboard.h"
 #include "config.h"
 #include "identity.h"
+#include "lock_state.h"
 #include "input/input.h"
 #include "session_registry.h"
 #include "util.h"
@@ -174,6 +175,13 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  int lock_timeout = cfg.lock_timeout_seconds;
+  if (!cfg.lock_timeout_explicit) {
+    const int saved = load_lock_timeout_setting(-1);
+    if (saved >= 0) lock_timeout = saved;
+  }
+  auto lock = std::make_shared<lock_state>(lock_timeout);
+
   ws_options wsopt;
   wsopt.token = cfg.token;
   wsopt.version = MOLINK_VERSION;
@@ -218,6 +226,7 @@ int main(int argc, char** argv) {
   }
   wsopt.clipboard = clipboard;
   wsopt.device_id = identity.device_id;
+  wsopt.lock = lock;
 
   uvcpp::uvcpp_web_app app;
   wsopt.post = [&app](std::function<void()> fn) { app.post(std::move(fn)); };
@@ -237,6 +246,7 @@ int main(int argc, char** argv) {
   deps.input = input;
   deps.clipboard = clipboard;
   deps.device_id = identity.device_id;
+  deps.lock = lock;
   deps.config = cfg;
   deps.started_ms = started_ms;
   register_http_routes(app, deps);
@@ -298,6 +308,7 @@ int main(int argc, char** argv) {
               << "/healthz\n"
               << "  capture: " << capture_note << "\n"
               << "  device:  " << identity.device_id << "\n"
+              << "  lock:    " << lock_timeout << " s idle\n"
               << "  input:   " << (input ? input->backend() : "disabled")
               << "\n"
               << "  web:     "

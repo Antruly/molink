@@ -534,7 +534,7 @@ int main(int argc, char** argv) {
     }
 
     url = "http://127.0.0.1:" + std::to_string(port) + "/?host=";
-    url += "127.0.0.1&port=" + std::to_string(port) + "&token=" + token;
+    url += "127.0.0.1&port=" + std::to_string(port);
     url += "&shell=1&platform=linux";
   }
 

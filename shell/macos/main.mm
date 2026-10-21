@@ -431,7 +431,7 @@ int main(int argc, char** argv) {
 
     const std::string url = "http://127.0.0.1:" + std::to_string(port) +
                             "/?host=127.0.0.1&port=" + std::to_string(port) +
-                            "&token=" + token + "&shell=1&platform=macos";
+                            "&shell=1&platform=macos";
 
     [NSApplication sharedApplication];
     [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];

@@ -9,6 +9,7 @@
 #include "clipboard/clipboard.h"
 #include "config.h"
 #include "input/input.h"
+#include "lock_state.h"
 #include "session_registry.h"
 
 namespace uvcpp {
@@ -22,6 +23,7 @@ struct api_deps {
   std::shared_ptr<capture_source> capture;
   std::shared_ptr<input_injector> input;
   std::shared_ptr<clipboard_service> clipboard;
+  std::shared_ptr<lock_state> lock;
   std::string device_id;
   std::shared_ptr<std::atomic<int>> bound_port;
   core_config config;

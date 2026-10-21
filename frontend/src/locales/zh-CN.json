@@ -36,7 +36,12 @@
     "idNote": "同网络内可直接连接；通过设备 ID 连接需要 moLink Server（二阶段）。",
     "recent": "最近连接",
     "recentEmpty": "还没有连接记录。",
-    "forget": "从历史中移除"
+    "forget": "从历史中移除",
+    "localBadge": "本机",
+    "remoteBadge": "远程",
+    "thisHost": "这台设备",
+    "localAccess": "本机已验证",
+    "controlThisDevice": "控制这台设备"
   },
   "settings": {
     "title": "偏好设置",
@@ -49,7 +54,16 @@
     "language": "语言",
     "version": "核心版本",
     "protocol": "协议",
-    "license": "许可证"
+    "license": "许可证",
+    "autoLock": "自动锁定",
+    "autoLockHint": "在没有任何远程会话且长时间无操作后锁定界面。",
+    "sec30": "30 秒",
+    "min1": "1 分钟",
+    "min5": "5 分钟",
+    "min15": "15 分钟",
+    "never": "从不",
+    "secondsValue": "{{count}} 秒",
+    "minutesValue": "{{count}} 分钟"
   },
   "session": {
     "connecting": "连接中…",
@@ -82,9 +96,29 @@
     "invalid_port": "端口必须是 1–65535 之间的整数。",
     "clipboard_read_failed": "无法读取本机剪贴板",
     "clipboard_write_failed": "无法写入本机剪贴板",
-    "clipboard_unavailable": "当前浏览器环境不提供剪贴板"
+    "clipboard_unavailable": "当前浏览器环境不提供剪贴板",
+    "self_connect": "本机不能连接自己。",
+    "core_unreachable": "无法连接本机后台。",
+    "local_auth_failed": "本机验证失败。",
+    "settings_failed": "设置保存失败。"
   },
   "popout": {
     "noToken": "这个窗口缺少连接验证码。"
+  },
+  "auth": {
+    "lockedTitle": "设备已锁定",
+    "lockedSubtitle": "长时间没有操作，已自动锁定。请输入验证码继续。",
+    "loginTitle": "需要验证",
+    "loginSubtitle": "请输入这台设备上显示的验证码。",
+    "remoteNote": "本机访问免验证；来自其他设备的访问必须输入验证码。",
+    "device": "设备",
+    "code": "验证码",
+    "verify": "验证并进入",
+    "unlock": "解锁",
+    "invalid_token": "验证码不正确。",
+    "core_unreachable": "无法连接本机后台。",
+    "local_auth_failed": "本机验证失败。",
+    "settings_failed": "设置保存失败。",
+    "retry": "重试"
   }
 }

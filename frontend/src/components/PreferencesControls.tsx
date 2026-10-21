@@ -1,4 +1,4 @@
-import { Languages, Moon, Sun, Waves } from 'lucide-react'
+import { Languages, Moon, Sun, Timer, Waves } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { setLanguage } from '../i18n'
@@ -75,6 +75,8 @@ export function PreferencesControls() {
   const setTheme = useAppStore((state) => state.setTheme)
   const quality = useAppStore((state) => state.qualityWatermark)
   const setQuality = useAppStore((state) => state.setQualityWatermark)
+  const lockTimeout = useAppStore((state) => state.lockTimeout)
+  const setLockTimeout = useAppStore((state) => state.setLockTimeout)
   const language = i18n.language.startsWith('zh') ? 'zh-CN' : 'en'
 
   return (
@@ -117,6 +119,37 @@ export function PreferencesControls() {
           onChange={setQuality}
           label={t('settings.watermark')}
         />
+      </div>
+
+      <div className="space-y-2">
+        <div className="flex items-center gap-2 text-[12px] font-medium text-ink">
+          <Timer size={14} className="text-accent" />
+          {t('settings.autoLock')}
+        </div>
+        <p className="text-[11px] leading-relaxed text-muted">
+          {t('settings.autoLockHint')}
+        </p>
+        <select
+          value={lockTimeout}
+          onChange={(event) => void setLockTimeout(Number(event.target.value))}
+          className="field"
+        >
+          {(lockTimeout === 0 ||
+          [30, 60, 120, 300, 900].includes(lockTimeout)
+            ? [30, 60, 120, 300, 900, 0]
+            : [30, 60, 120, 300, 900, lockTimeout, 0]
+          ).map((seconds) => (
+            <option key={seconds} value={seconds}>
+              {seconds === 0
+                ? t('settings.never')
+                : seconds < 60
+                  ? t('settings.secondsValue', { count: seconds })
+                  : t('settings.minutesValue', {
+                      count: Math.round(seconds / 60),
+                    })}
+            </option>
+          ))}
+        </select>
       </div>
 
       <div className="space-y-2">

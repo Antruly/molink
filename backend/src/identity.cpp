@@ -68,6 +68,26 @@ void write_file(const fs::path& path, const std::string& value) {
 
 }  // namespace
 
+int load_lock_timeout_setting(int fallback) {
+  const std::string dir = config_directory();
+  if (dir.empty()) return fallback;
+  std::string value;
+  if (!read_file(fs::path(dir) / "lock_timeout", value)) return fallback;
+  try {
+    const int seconds = std::stoi(value);
+    if (seconds < 0 || seconds > 86400) return fallback;
+    return seconds;
+  } catch (...) {
+    return fallback;
+  }
+}
+
+void save_lock_timeout_setting(int seconds) {
+  const std::string dir = config_directory();
+  if (dir.empty()) return;
+  write_file(fs::path(dir) / "lock_timeout", std::to_string(seconds));
+}
+
 std::string config_directory() {
   const std::string override_dir = env("MOLINK_CONFIG_DIR");
   if (!override_dir.empty()) return override_dir;

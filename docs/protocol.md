@@ -172,7 +172,7 @@
   "session_id": 1,
   "protocol": 1,
   "service": "moLink Core",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "transport": "websocket",
   "tiles": {
     "codec": "deflate-bgra",
@@ -323,8 +323,14 @@ X11 的屏幕抓取**不包含鼠标光标**，服务端单独发送形状与位
 |---|---|---|---|
 | GET | `/healthz` | 否 | 健康检查，含 `service: "moLink Core"` |
 | GET | `/api/health` | 否 | 同 `/healthz` |
+| GET | `/api/state` | 否 | 本机/远程、锁定状态、设备 ID、锁定超时 |
+| POST | `/api/login` | 否 | 用验证码登录/解锁；失败限速 |
+| GET | `/api/device` | 仅回环 | 设备 ID 与验证码；锁定时 423 |
 | GET | `/api/info` | 是 | 版本、绑定地址、能力开关、会话数 |
 | GET | `/api/sessions` | 是 | 当前会话快照 |
+| POST | `/api/activity` | 是 | 记录一次用户活动 |
+| POST | `/api/ui-state?client=&sessions=` | 是 | 上报某窗口打开的会话数 |
+| POST | `/api/lock-timeout?seconds=` | 是 | 修改并持久化空闲锁定时间（0 = 从不） |
 | GET | `/` | 否 | 配置了 `--web-root` 时返回前端 `index.html`，否则返回服务自述 JSON |
 
 鉴权头（二者其一）：
@@ -340,7 +346,7 @@ X-MoLink-Token: <token>
 {
   "status": "ok",
   "service": "moLink Core",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "protocol": 1,
   "pid": 12345,
   "uptime_ms": 2032,
@@ -348,7 +354,15 @@ X-MoLink-Token: <token>
 }
 ```
 
-CORS 只对以下来源开放：`tauri://localhost`、`http://tauri.localhost`、`https://tauri.localhost`、`http://localhost:1420`、`http://127.0.0.1:1420`。
+CORS 只对本地开发来源 `http://localhost:1420`、`http://127.0.0.1:1420` 开放；核心托管的 UI 与接口同源，不需要 CORS。
+
+### 5.1 访问模型与锁定
+
+- `peer` 为回环地址（`127.0.0.1`、`::1`、`::ffff:127.0.0.1`）时视为本机访问，可免验证读取 `/api/device`。
+- 其他来源必须用验证码登录（`POST /api/login`，Bearer/`X-MoLink-Token`）；通过后可访问其余 API 与 WebSocket。
+- 没有已鉴权 WebSocket 会话、且所有 UI 窗口上报的 `sessions` 为 0、且空闲超过 `lock_timeout` 秒时，核心锁定。
+- 锁定期间：除 `/api/state`、`/api/login`、`/api/health` 外的 `/api/*` 返回 `423 locked`；WS `hello` 以 `1008 locked` 关闭。
+- `POST /api/login` 连续失败 5 次后暂停接受 30 秒。
 
 ---
 
@@ -362,7 +376,7 @@ molink-core [--host <addr>] [--port <n>] [--token <secret>]
 `--print-ready` 在开始监听后向 stdout 输出一行 JSON，壳层据此得到端口与令牌：
 
 ```json
-{"event":"ready","service":"moLink Core","version":"0.2.0","protocol":1,
+{"event":"ready","service":"moLink Core","version":"0.3.0","protocol":1,
  "pid":12345,"host":"127.0.0.1","port":21118,"token":"<32 hex>",
  "session_endpoint":"/ws/session","synthetic_frames":true}
 ```

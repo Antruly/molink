@@ -337,7 +337,13 @@ uvcpp::uvcpp_web_ws_handler make_ws_handler(
         registry->add(conn, ws.request().peer_ip(), ws.request().peer_port());
 
     if (const std::string* token = ws.query("token")) {
-      session->authenticated = constant_time_equals(*token, options.token);
+      // A locked core leaves the session unauthenticated; the hello handler
+      // reports "locked" once the connection is fully established, where the
+      // error and close frame are actually delivered.
+      if (constant_time_equals(*token, options.token) &&
+          !(options.lock && options.lock->locked())) {
+        session->authenticated = true;
+      }
     }
     if (session->authenticated && options.capture) {
       options.capture->set_active(true);
@@ -363,6 +369,7 @@ uvcpp::uvcpp_web_ws_handler make_ws_handler(
     conn->on_text([conn, session, registry, options,
                    require_auth](const std::string& text) {
       session->last_seen_ms = now_ms();
+      if (options.lock) options.lock->touch();
 
       uvcpp_json j;
       const uvcpp::json_status status = uvcpp::uvcpp_json_parse(text, j);
@@ -376,6 +383,11 @@ uvcpp::uvcpp_web_ws_handler make_ws_handler(
         if (!constant_time_equals(string_field(j, "token"), options.token)) {
           send_error(conn, "unauthorized", "invalid token");
           conn->close(ws_close_code::POLICY_VIOLATION, "invalid token");
+          return;
+        }
+        if (options.lock && options.lock->locked()) {
+          send_error(conn, "locked", "the UI is locked");
+          conn->close(ws_close_code::POLICY_VIOLATION, "locked");
           return;
         }
         session->authenticated = true;
@@ -486,8 +498,9 @@ uvcpp::uvcpp_web_ws_handler make_ws_handler(
       send_error(conn, "unknown_type", "unsupported control type: " + type);
     });
 
-    conn->on_binary([conn, session](const uint8_t* data, std::size_t len) {
+    conn->on_binary([conn, session, options](const uint8_t* data, std::size_t len) {
       session->last_seen_ms = now_ms();
+      if (options.lock) options.lock->touch();
       protocol::packet pkt;
       std::string err;
       if (!protocol::decode_packet(data, len, pkt, err)) {
@@ -562,6 +575,12 @@ void session_supervisor::run() {
     if (!running_.load()) break;
 
     const uint64_t now = now_ms();
+    if (options_.lock &&
+        options_.lock->should_lock(now, registry_->has_authenticated())) {
+      options_.lock->lock();
+      std::fprintf(stderr, "molink: UI locked after %d seconds idle\n",
+                   options_.lock->timeout_seconds());
+    }
     if (options_.capture) {
       // Safety net in case a close callback was missed during shutdown.
       options_.capture->set_active(registry_->has_authenticated());

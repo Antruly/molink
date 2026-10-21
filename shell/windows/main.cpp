@@ -740,8 +740,8 @@ int run(HINSTANCE instance) {
   }
 
   g_url = L"http://127.0.0.1:" + std::to_wstring(port) +
-          L"/?host=127.0.0.1&port=" + std::to_wstring(port) + L"&token=" +
-          widen(token) + L"&shell=1&platform=windows";
+          L"/?host=127.0.0.1&port=" + std::to_wstring(port) +
+          L"&shell=1&platform=windows";
   g_origin = L"http://127.0.0.1:" + std::to_wstring(port);
   }
 

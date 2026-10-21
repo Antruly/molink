@@ -22,6 +22,7 @@ export function TabBar() {
   const activeTabId = useAppStore((state) => state.activeTabId)
   const setActiveTab = useAppStore((state) => state.setActiveTab)
   const closeTab = useAppStore((state) => state.closeTab)
+  const localMode = useAppStore((state) => state.localMode)
 
   return (
     <div className="flex h-11 shrink-0 items-center gap-1 overflow-x-auto border-b border-line-soft bg-surface/40 px-2">
@@ -53,7 +54,7 @@ export function TabBar() {
               event.clientY <= 0 ||
               event.clientX >= window.innerWidth ||
               event.clientY >= window.innerHeight
-            if (!outside) return
+            if (!outside || !localMode) return
             if (
               openSessionWindow({
                 host: tab.host,

@@ -50,16 +50,18 @@ function Capability({
 export function HomeView() {
   const { t, i18n } = useTranslation()
   const device = useAppStore((state) => state.device)
-  const deviceError = useAppStore((state) => state.deviceError)
-  const deviceLoading = useAppStore((state) => state.deviceLoading)
-  const refreshDevice = useAppStore((state) => state.refreshDevice)
+  const localMode = useAppStore((state) => state.localMode)
+  const server = useAppStore((state) => state.server)
+  const authToken = useAppStore((state) => state.token)
+  const stateError = useAppStore((state) => state.stateError)
+  const refreshState = useAppStore((state) => state.refreshState)
   const createSession = useAppStore((state) => state.createSession)
   const recents = useAppStore((state) => state.recents)
   const forgetRecent = useAppStore((state) => state.forgetRecent)
 
-  const [host, setHost] = useState(params.get('host') ?? '127.0.0.1')
+  const [host, setHost] = useState('')
   const [port, setPort] = useState(params.get('port') ?? '21118')
-  const [token, setToken] = useState('')
+  const [code, setCode] = useState('')
   const [showCode, setShowCode] = useState(false)
   const [showDeviceCode, setShowDeviceCode] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -81,7 +83,7 @@ export function HomeView() {
     targetToken: string,
     label?: string,
   ) => {
-    if (claimFirstWindow()) {
+    if (localMode && claimFirstWindow()) {
       if (openSessionWindow({
         host: targetHost,
         port: targetPort,
@@ -105,28 +107,41 @@ export function HomeView() {
       setError('invalid_port')
       return
     }
-    if (token.trim() === '') {
+    if (code.trim() === '') {
       setError('no_token')
       return
     }
+    if (localMode) {
+      const targetHost = host.trim().toLowerCase()
+      const servingPort = server?.port || Number(window.location.port)
+      const servingHost = window.location.hostname.toLowerCase()
+      const loopback = ['127.0.0.1', 'localhost', '::1', '0.0.0.0'].includes(
+        targetHost,
+      )
+      if (
+        numericPort === servingPort &&
+        (loopback || targetHost === servingHost)
+      ) {
+        setError('self_connect')
+        return
+      }
+    }
     setError(null)
-    startConnection(host.trim(), numericPort, token.trim(), host.trim())
+    startConnection(host.trim(), numericPort, code.trim(), host.trim())
   }
 
-  const connectLocal = () => {
-    if (!device) return
-    startConnection(
-      device.host,
-      device.port,
-      device.token,
-      t('home.thisDevice'),
-    )
+  const controlHost = () => {
+    if (!device || !authToken) return
+    const host = window.location.hostname || server?.host || '127.0.0.1'
+    const port =
+      Number(window.location.port) || server?.port || device.port || 21118
+    createSession(host, port, authToken, device.device_id)
   }
 
   const prefillFromRecent = (recent: RecentConnection) => {
     setHost(recent.host)
     setPort(String(recent.port))
-    setToken('')
+    setCode('')
     setError(null)
     document.getElementById('connect-code')?.focus()
   }
@@ -153,7 +168,10 @@ export function HomeView() {
             <div className="flex flex-wrap items-center gap-2">
               <span className="flex items-center gap-2 text-sm font-medium">
                 <span className="h-2 w-2 rounded-full bg-accent" />
-                {t('home.thisDevice')}
+                {localMode ? t('home.thisDevice') : t('home.thisHost')}
+                <span className="chip">
+                  {localMode ? t('home.localBadge') : t('home.remoteBadge')}
+                </span>
               </span>
               {device ? (
                 <>
@@ -252,26 +270,30 @@ export function HomeView() {
                   />
                 </div>
 
-                <div className="mt-5 flex items-center gap-2">
+                <div className="mt-5 flex flex-wrap items-center gap-2">
+                  {localMode ? (
+                    <span className="chip chip-on">
+                      <Wifi size={11} />
+                      {t('home.localAccess')}
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={controlHost}
+                      className="btn btn-primary"
+                    >
+                      <Wifi size={14} />
+                      {t('home.controlThisDevice')}
+                    </button>
+                  )}
                   <button
                     type="button"
-                    onClick={connectLocal}
-                    className="btn btn-primary"
-                  >
-                    <Wifi size={14} />
-                    {t('home.connectLocal')}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void refreshDevice()}
+                    onClick={() => void refreshState()}
                     className="btn btn-quiet h-9 w-9 !px-0"
                     title={t('home.refresh')}
                     aria-label={t('home.refresh')}
                   >
-                    <RefreshCw
-                      size={14}
-                      className={deviceLoading ? 'animate-spin' : ''}
-                    />
+                    <RefreshCw size={14} />
                   </button>
                 </div>
               </>
@@ -282,11 +304,11 @@ export function HomeView() {
                   {t('home.noDevice')}
                 </div>
                 <div className="mt-1 text-[12px] text-muted">
-                  {deviceError ?? t('home.noDeviceHint')}
+                  {stateError ?? t('home.noDeviceHint')}
                 </div>
                 <button
                   type="button"
-                  onClick={() => void refreshDevice()}
+                  onClick={() => void refreshState()}
                   className="btn mt-3"
                 >
                   <RefreshCw size={13} />
@@ -313,6 +335,7 @@ export function HomeView() {
                   value={host}
                   onChange={(event) => setHost(event.target.value)}
                   className="field font-mono"
+                  placeholder="192.168.1.20"
                   spellCheck={false}
                   autoComplete="off"
                 />
@@ -338,8 +361,8 @@ export function HomeView() {
               <div className="relative">
                 <input
                   id="connect-code"
-                  value={token}
-                  onChange={(event) => setToken(event.target.value)}
+                  value={code}
+                  onChange={(event) => setCode(event.target.value)}
                   type={showCode ? 'text' : 'password'}
                   className="field pr-10 font-mono"
                   autoComplete="off"
@@ -365,20 +388,6 @@ export function HomeView() {
             <div className="flex flex-wrap items-center gap-2">
               <button type="submit" className="btn btn-primary">
                 {t('home.connect')}
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  if (!device) return
-                  setHost(device.host)
-                  setPort(String(device.port))
-                  setToken(device.token)
-                  setError(null)
-                }}
-                className="btn btn-quiet"
-                disabled={!device}
-              >
-                {t('home.useLocalCode')}
               </button>
             </div>
           </form>

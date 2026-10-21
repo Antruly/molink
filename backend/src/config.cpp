@@ -110,6 +110,16 @@ bool parse_args(int argc, char** argv, core_config& cfg, std::string& err) {
       if (!value(cfg.web_root)) return false;
       continue;
     }
+    if (arg == "--lock-timeout") {
+      std::string v;
+      if (!value(v)) return false;
+      if (!parse_int(v, 0, 86400, cfg.lock_timeout_seconds)) {
+        err = "invalid --lock-timeout: " + v;
+        return false;
+      }
+      cfg.lock_timeout_explicit = true;
+      continue;
+    }
     err = "unknown argument: " + arg;
     return false;
   }
