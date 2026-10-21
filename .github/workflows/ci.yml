@@ -94,3 +94,54 @@ jobs:
 
       - name: Build
         run: cmake --build shell/macos/build --parallel
+
+  windows-core:
+    # Builds libuvcpp and molink-core with MSVC so the Windows capture, input
+    # and clipboard backends are compiled on every main push.
+    if: github.event_name != 'pull_request' && vars.UVCPP_REPO != ''
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build libuvcpp
+        shell: bash
+        run: |
+          REF="${{ vars.UVCPP_REF }}"; REF="${REF:-master}"
+          git clone --depth 1 --branch "$REF" "${{ vars.UVCPP_REPO }}" "$RUNNER_TEMP/libuvcpp"
+          cmake -S "$RUNNER_TEMP/libuvcpp" -B "$RUNNER_TEMP/libuvcpp/build" \
+            -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
+            -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/uvcpp"
+          cmake --build "$RUNNER_TEMP/libuvcpp/build" --config Release --parallel
+          cmake --install "$RUNNER_TEMP/libuvcpp/build" --config Release
+
+      - name: Build core
+        shell: bash
+        run: |
+          cmake -S backend -B backend/build -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/uvcpp"
+          cmake --build backend/build --config Release --parallel
+
+  macos-core:
+    if: github.event_name != 'pull_request' && vars.UVCPP_REPO != ''
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build libuvcpp
+        shell: bash
+        run: |
+          REF="${{ vars.UVCPP_REF }}"; REF="${REF:-master}"
+          git clone --depth 1 --branch "$REF" "${{ vars.UVCPP_REPO }}" "$RUNNER_TEMP/libuvcpp"
+          cmake -S "$RUNNER_TEMP/libuvcpp" -B "$RUNNER_TEMP/libuvcpp/build" \
+            -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/uvcpp"
+          cmake --build "$RUNNER_TEMP/libuvcpp/build" --parallel
+          cmake --install "$RUNNER_TEMP/libuvcpp/build"
+
+      - name: Build core
+        shell: bash
+        run: |
+          cmake -S backend -B backend/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/uvcpp"
+          cmake --build backend/build --parallel
