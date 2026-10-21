@@ -44,9 +44,19 @@ cmake --build build && ctest --test-dir build --output-on-failure
 | `--no-input` | 禁用指针与键盘注入 |
 | `--no-compress` | 关闭 zlib 瓦片压缩，发送原始 BGRA |
 | `--no-clipboard` | 关闭剪贴板同步 |
+| `--web-root <dir>` | 在 `/` 托管构建好的前端（默认自动查找 `frontend/dist`） |
 | `--print-ready` | 就绪后向 stdout 输出一行 JSON |
 
 `MOLINK_DISPLAY` 可指定 X display（默认沿用 `DISPLAY`）。
+
+## Web UI 托管
+
+`--web-root`（或 `MOLINK_WEB_ROOT`）指向构建产物时，核心用 libuvcpp 的静态文件
+服务把前端挂在 `/`：ETag/304、Range、路径穿越防护都由框架处理。查找顺序是
+显式参数、环境变量、`frontend/dist`、可执行文件旁的 `web/` 与 `../share/molink/web`。
+
+桌面壳就是靠这条路径把 UI 加载进 WebKitGTK；不装壳时浏览器直接访问
+`http://127.0.0.1:21118/?token=...` 即可。
 
 ## 屏幕捕获
 

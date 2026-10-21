@@ -25,11 +25,14 @@
 - 剪贴板复制/发送按钮
 - FPS / 延迟 / 带宽 / 帧数统计
 
-**shell / 仓库**
-- Tauri 2 壳层源码：启动并监管核心、注入端口与令牌、退出回收
-- CI（前端 lint/typecheck/build、协议测试、shell check）
-- 桌面发布工作流（三平台矩阵，libuvcpp 源码构建）
-- MIT LICENSE、协议文档、上游问题记录
+**shell / 打包 / 仓库**
+- C++20 + GTK3 + WebKitGTK 桌面壳：启动核心、解析 ready 行、加载核心托管的前端、
+  退出回收、F11 全屏、`--smoke-test`
+- 核心静态托管前端（`--web-root`），Web 版与桌面壳共用同一入口
+- `.deb` 打包：`/opt/molink/{bin,lib,web}`，核心 `$ORIGIN/../lib` 查找随包库
+- CI（前端 lint/typecheck/build、协议测试、壳层编译）
+- Linux 发布工作流（libuvcpp 源码构建、deb 产物）
+- MIT LICENSE、协议文档、发布检查清单、上游问题记录
 
 ### Verified
 
@@ -37,6 +40,8 @@
 - Xephyr 嵌套 X server 中的输入注入、光标与剪贴板端到端验证
 - 压缩路径像素级比对（画布中心像素与源窗口一致）
 - 1280×800 / 2880×1920 真实桌面抓屏；活跃会话约 7–24% 单核、7.4 Mbps（zlib）
+- 桌面壳在 Xephyr 中通过冒烟测试（`SHELL_SMOKE_OK title=moLink`）
+- 解包 `.deb` 后从暂存目录启动壳层，冒烟测试同样通过
 - `uvp_verify`：健康检查、鉴权、根路由断言全部通过
 
 ### Known gaps
@@ -45,5 +50,5 @@
 - Wayland / PipeWire 门户抓屏未实现（没有 dev 头文件，无法在本机构建验证）
 - H.264 / AV1 + WebCodecs 未接入（本机无编码器库）
 - UDP 直连、WebRTC、P2P、`moLink Server`、移动端属于二阶段
-- Tauri 壳层未编译：本机缺 Rust 工具链与 `webkit2gtk-4.1` 开发包
-- 未生成任何安装包
+- Windows / macOS 壳未实现（需要 WebView2 / WKWebView）
+- AppImage 尚未生成（当前产物为 `.deb`）

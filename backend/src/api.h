@@ -23,6 +23,9 @@ struct api_deps {
   std::shared_ptr<clipboard_service> clipboard;
   core_config config;
   uint64_t started_ms = 0;
+  /// True when a built frontend is mounted at "/", so the JSON index route is
+  /// not registered and the static handler owns that path.
+  bool serve_web = false;
 };
 
 /// Registers CORS, the bearer-token guard for /api/*, and the JSON endpoints.

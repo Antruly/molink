@@ -28,13 +28,14 @@
 | Linux Wayland / PipeWire 门户抓屏 | ⏳ 未实现（接口已抽象） |
 | Windows / macOS 捕获与注入 | ⏳ 未实现 |
 | UDP 直连、WebRTC、P2P、服务端 | ⏳ 二阶段 |
-| Tauri 壳层 | 🧩 源码与配置就绪，本机无 Rust 工具链，未编译验证 |
+| **Linux 桌面壳（C++/WebKitGTK）** | ✅ 冒烟测试通过，可生成 `.deb` |
+| Windows / macOS 壳 | ⏳ 未实现（WebView2 / WKWebView） |
 
 ## 架构
 
 ```
 ┌──────────────┐        ┌────────────────────────────────┐
-│ Tauri 壳层   │        │ molink-core (C++/libuvcpp)     │
+│ 桌面壳层     │        │ molink-core (C++/libuvcpp)     │
 │ React 前端   │◄──────►│ HTTP/WS 127.0.0.1:21118        │
 └──────────────┘        │ 捕获/编码 · 输入注入 · UDP     │
                         └────────────────────────────────┘
@@ -42,7 +43,7 @@
 
 - **molink-core**：C++20 + libuvcpp 后台。负责 HTTP/WS 接口、瓦片帧编码、会话管理；捕获与注入待接入。
 - **frontend/**：React 19 + TypeScript + Vite + Tailwind 4 + Zustand + react-i18next。
-- **shell/**：Tauri 2 壳层，启动并监管 `molink-core`，把端口与令牌注入前端 URL。
+- **shell/native/**：C++ + GTK3 + WebKitGTK 壳层，启动并监管 `molink-core`，加载核心托管的前端。
 - **server/**、移动端：二阶段。
 
 ## 目录
@@ -52,7 +53,8 @@ molink/
 ├── .github/workflows/   ci.yml · release-desktop.yml · release-mobile.yml（占位）
 ├── backend/             molink-core（CMake，libuvcpp）
 ├── frontend/            React 前端
-├── shell/src-tauri/     Tauri 壳层
+├── shell/native/        C++ WebKitGTK 壳层
+├── packaging/linux/     .deb 打包脚本
 ├── docs/
 │   ├── dev.md           架构基线与发布策略（需求文档）
 │   └── protocol.md      MOLK 线协议与 HTTP/WS 契约
@@ -95,10 +97,18 @@ MOLINK_DISPLAY=:1 ./backend/build/molink-core     # 指定 X display
 http://localhost:1420/?host=127.0.0.1&port=21118&token=dev-token
 ```
 
-桌面壳层（需要 Rust + Tauri 2 工具链）：
+桌面壳层（Linux，需要 `libgtk-3-dev` 与 `libwebkit2gtk-4.1-dev`）：
 
 ```bash
-cd shell/src-tauri && cargo tauri dev
+cmake -S shell/native -B shell/native/build -DCMAKE_BUILD_TYPE=Release
+cmake --build shell/native/build --parallel
+./shell/native/build/moLink
+```
+
+生成 `.deb`：
+
+```bash
+./packaging/linux/build-deb.sh   # build/package/molink_0.1.0_amd64.deb
 ```
 
 > 本机若出现 `libllhttp.so.9.2: cannot open shared object file`，说明安装的
@@ -133,7 +143,7 @@ cd frontend && pnpm lint && pnpm typecheck && pnpm build
 
 版本记录见 [CHANGELOG.md](CHANGELOG.md)，发布前检查项与当前阻塞见
 [docs/release-checklist.md](docs/release-checklist.md)。目前可交付的是
-**Linux / X11 源码构建**；三平台安装包需要 Rust/Tauri 工具链与 Windows/macOS 后端。
+**Linux / X11 源码构建与 `.deb`**；Windows/macOS 需要各自的原生 WebView 壳。
 
 ## 许可证
 

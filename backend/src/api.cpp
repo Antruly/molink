@@ -197,16 +197,18 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
             resp.end();
           });
 
-  app.get("/", [](uvcpp_web_request&, uvcpp_web_response& resp,
-                  uvcpp_web_next) {
-    uvcpp_json j;
-    j["service"] = MOLINK_CORE_SERVICE;
-    j["version"] = MOLINK_VERSION;
-    j["health"] = "/healthz";
-    j["session_endpoint"] = "/ws/session";
-    resp.json(j);
-    resp.end();
-  });
+  if (!deps.serve_web) {
+    app.get("/", [](uvcpp_web_request&, uvcpp_web_response& resp,
+                    uvcpp_web_next) {
+      uvcpp_json j;
+      j["service"] = MOLINK_CORE_SERVICE;
+      j["version"] = MOLINK_VERSION;
+      j["health"] = "/healthz";
+      j["session_endpoint"] = "/ws/session";
+      resp.json(j);
+      resp.end();
+    });
+  }
 }
 
 }  // namespace molink

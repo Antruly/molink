@@ -27,6 +27,8 @@ struct core_config {
   bool no_compress = false;
   /// Disable clipboard synchronization.
   bool no_clipboard = false;
+  /// Directory served at "/" (the built frontend). Empty = auto-detect.
+  std::string web_root;
 };
 
 /// Parse command-line arguments. Unknown arguments are reported through

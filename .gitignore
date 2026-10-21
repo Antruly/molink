@@ -1,9 +1,3 @@
-# Rust / Tauri
-shell/src-tauri/target/
-shell/src-tauri/gen/
-**/*.rs.bk
-Cargo.lock
-
 # Node / 前端
 node_modules/
 frontend/dist/
@@ -11,16 +5,15 @@ frontend/dist/
 
 # C++ 构建
 backend/build/
+shell/native/build/
+build/
+
 backend/cmake-build-*/
 *.o
 *.a
 *.so
 *.dylib
 *.dll
-
-# 打包前暂存的 molink-core（CI 生成，不入库）
-shell/src-tauri/binaries/molink-core
-shell/src-tauri/binaries/molink-core.exe
 
 # IDE
 .vscode/

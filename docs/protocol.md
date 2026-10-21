@@ -325,7 +325,7 @@ X11 的屏幕抓取**不包含鼠标光标**，服务端单独发送形状与位
 | GET | `/api/health` | 否 | 同 `/healthz` |
 | GET | `/api/info` | 是 | 版本、绑定地址、能力开关、会话数 |
 | GET | `/api/sessions` | 是 | 当前会话快照 |
-| GET | `/` | 否 | 服务自述 |
+| GET | `/` | 否 | 配置了 `--web-root` 时返回前端 `index.html`，否则返回服务自述 JSON |
 
 鉴权头（二者其一）：
 

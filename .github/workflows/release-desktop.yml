@@ -8,30 +8,19 @@ permissions:
   contents: write
 
 jobs:
-  publish-tauri:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: macos-latest
-            args: '--target aarch64-apple-darwin'
-          - platform: macos-latest
-            args: '--target x86_64-apple-darwin'
-          - platform: ubuntu-22.04
-            args: '--target x86_64-unknown-linux-gnu --bundles appimage,deb'
-          - platform: windows-latest
-            args: '--target x86_64-pc-windows-msvc'
-    runs-on: ${{ matrix.platform }}
+  linux:
+    # The Linux shell uses GTK 3 + WebKitGTK 4.1. Windows and macOS need their
+    # own native shells (WebView2 / WKWebView) and are not built yet.
+    runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Linux dependencies
-        if: matrix.platform == 'ubuntu-22.04'
+      - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev \
-            librsvg2-dev patchelf cmake libuv1-dev
+          sudo apt-get install -y cmake libgtk-3-dev libwebkit2gtk-4.1-dev \
+            librsvg2-dev patchelf libuv1-dev
 
       - uses: pnpm/action-setup@v4
         with:
@@ -43,17 +32,8 @@ jobs:
           cache: pnpm
           cache-dependency-path: frontend/pnpm-lock.yaml
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
-
-      - uses: swatinem/rust-cache@v2
-        with:
-          workspaces: shell/src-tauri
-
-      # libuvcpp is not packaged by the distributions, so the release build
-      # compiles it from source. Set the UVCPP_REPO repository variable (and
-      # optionally UVCPP_REF) to the libuvcpp source location.
+      # libuvcpp is not packaged by the distributions. Set the UVCPP_REPO
+      # repository variable (and optionally UVCPP_REF) to its git location.
       - name: Build libuvcpp
         shell: bash
         run: |
@@ -72,42 +52,20 @@ jobs:
           cmake --build "$RUNNER_TEMP/libuvcpp/build" --config Release --parallel
           cmake --install "$RUNNER_TEMP/libuvcpp/build" --config Release
 
-      - name: Build molink-core
-        shell: bash
-        run: |
-          cmake -S backend -B backend/build \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/uvcpp"
-          cmake --build backend/build --config Release --parallel
-
-      - name: Stage core and runtime libraries
-        shell: bash
-        run: |
-          mkdir -p shell/src-tauri/binaries
-          if [ -f backend/build/molink-core.exe ]; then
-            cp backend/build/molink-core.exe shell/src-tauri/binaries/molink-core.exe
-          else
-            cp backend/build/molink-core shell/src-tauri/binaries/molink-core
-          fi
-
-          if [ "$RUNNER_OS" = "Linux" ]; then
-            cp -P "$RUNNER_TEMP/uvcpp/lib/"*.so* shell/src-tauri/binaries/ || true
-          fi
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            cp "$RUNNER_TEMP/uvcpp/lib/"*.dylib shell/src-tauri/binaries/ || true
-          fi
-
-      - run: pnpm install --frozen-lockfile
-        working-directory: frontend
-
-      - uses: tauri-apps/tauri-action@v1
+      - name: Build core, frontend, shell and the .deb
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CMAKE_PREFIX_PATH: ${{ runner.temp }}/uvcpp
+          UVCPP_LIB_DIR: ${{ runner.temp }}/uvcpp/lib
+          VERSION: ${{ github.ref_name }}
+        run: |
+          VERSION="${VERSION#v}"
+          export VERSION
+          ./packaging/linux/build-deb.sh
+
+      - name: Attach the .deb to the release
+        uses: softprops/action-gh-release@v2
         with:
-          projectPath: shell
-          tagName: ${{ github.ref_name }}
-          releaseName: moLink ${{ github.ref_name }}
-          releaseBody: 'See assets for platform installers.'
-          releaseDraft: false
-          prerelease: false
-          args: ${{ matrix.args }}
+          name: moLink ${{ github.ref_name }}
+          body: |
+            Linux package (.deb). Windows and macOS shells are not built yet.
+          files: build/package/*.deb

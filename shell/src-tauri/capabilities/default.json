@@ -1,7 +1,0 @@
-{
-  "$schema": "../gen/schemas/desktop-schema.json",
-  "identifier": "default",
-  "description": "Core permissions for the moLink main window",
-  "windows": ["main"],
-  "permissions": ["core:default"]
-}

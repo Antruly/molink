@@ -1,42 +1,64 @@
-# moLink 壳层
+# moLink 桌面壳层（Linux）
 
-Tauri 2 桌面壳。启动时：
+C++20 + GTK 3 + WebKitGTK 4.1。启动 `molink-core`，读取它的 ready 行，然后把核心
+在 `/` 托管的前端加载进系统 WebView。不打包浏览器引擎，也不需要 Rust。
 
-1. 按顺序查找 `molink-core`：`MOLINK_CORE` 环境变量 → 安装包的 resource 目录 →
-   可执行文件同目录 → 开发期的 `backend/build/`。
-2. 以 `--print-ready --parent-pid <shell pid>` 启动核心。
-3. 读取核心的 ready JSON，得到端口与令牌。
-4. 创建主窗口，加载 `index.html?host=127.0.0.1&port=…&token=…`，前端据此自动连接。
-5. 退出时结束子进程；壳层被强杀时由核心的父进程监视兜底。
-
-## 开发
-
-需要 Rust stable 与 Tauri 2 工具链，以及完成构建的 `backend/build/molink-core`。
+## 构建
 
 ```bash
-cd shell/src-tauri && cargo tauri dev
+sudo apt install -y libgtk-3-dev libwebkit2gtk-4.1-dev
+cmake -S shell/native -B shell/native/build -DCMAKE_BUILD_TYPE=Release
+cmake --build shell/native/build --parallel
 ```
 
-前端 dev server 由 `beforeDevCommand` 自动启动（固定 1420 端口）。
+运行前需要有已经构建好的：
+
+- `backend/build/molink-core`
+- `frontend/dist`（`cd frontend && pnpm build`）
+
+查找顺序（可用环境变量覆盖）：
+
+| 对象 | 顺序 |
+|---|---|
+| 核心 | `MOLINK_CORE` → 可执行文件同目录 → `../lib/molink/` → 源码树 `backend/build/` → 当前目录 |
+| 前端 | `MOLINK_WEB_ROOT` → 可执行文件同目录 `/web` → `../web` → `../share/molink/web` → 源码树 `frontend/dist/` |
+
+## 运行
+
+```bash
+./shell/native/build/moLink
+```
+
+- 核心以 `--port 0` 启动（系统分配端口），壳层从 ready 行取得端口与令牌。
+- 壳层把 `--parent-pid <shell pid>` 传给核心；壳层被杀时核心会自行退出。
+- 快捷键：`F11` 全屏，`Ctrl+Shift+Q` 退出。
+- `--smoke-test`：启动、等待页面加载完成、打印 `SHELL_SMOKE_OK title=...` 后退出，
+  用于 CI 或无头验证。
 
 ## 打包
 
 ```bash
-pnpm --dir frontend build
-# 先把 molink-core（Linux 还要带上 libuvcpp.so、libllhttp.so 等）放进
-# shell/src-tauri/binaries/
-cd shell/src-tauri && cargo tauri build
+./packaging/linux/build-deb.sh
+# build/package/molink_0.1.0_amd64.deb
 ```
 
-`binaries/*` 作为资源随包安装。Linux 下核心以 `$ORIGIN` 为 RPATH，因此共享库与
-核心放在同一目录即可被找到。
+安装布局：
 
-## 图标
+```
+/opt/molink/bin/moLink
+/opt/molink/bin/molink-core
+/opt/molink/web/...            # frontend/dist
+/opt/molink/lib/libuvcpp.so
+/opt/molink/lib/libllhttp.so*
+/usr/bin/moLink -> /opt/molink/bin/moLink
+/usr/share/applications/molink.desktop
+```
 
-`src-tauri/icons/` 由仓库内的几何图形生成（深色圆角底 + 青绿显示器），包含 PNG、
-ICO 与 ICNS。重新生成时需要保持同一套尺寸。
+核心的 RPATH 是 `$ORIGIN:$ORIGIN/../lib`，因此随包的 libuvcpp/libllhttp 会被优先
+找到。系统依赖（GTK、WebKitGTK、X11、XTEST、XFixes、XDamage）写在 deb 的
+`Depends` 里。
 
-## 状态
+## 平台范围
 
-源码与配置完整，但本机没有 Rust 工具链，尚未编译验证；首次构建请关注 Tauri 2
-API 与 `tauri.conf.json` 的版本兼容性。
+当前壳层只支持 Linux。Windows 需要基于 WebView2 的原生壳，macOS 需要
+WKWebView 壳；两者尚未实现。

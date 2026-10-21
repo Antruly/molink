@@ -1,6 +1,7 @@
 # 发布检查清单
 
-当前状态：**Linux / X11 功能面达到候选发布（RC）水平；三平台安装包尚不可生成。**
+当前状态：**Linux / X11 功能面达到候选发布（RC）水平；已有可安装的 `.deb`。
+Windows / macOS 壳与 AppImage 尚未完成。**
 
 ## 已验证
 
@@ -16,17 +17,20 @@
 | 剪贴板 | X11 探针双向 set/get | 通过 |
 | 压缩 | 画布中心像素与源窗口 `#002244` 一致 | 通过 |
 | 带宽/CPU | 2880×1920 活跃会话 | ~7.4 Mbps / ~24% 单核 |
+| 桌面壳 | Xephyr 内 `moLink --smoke-test` | `SHELL_SMOKE_OK title=moLink` |
+| .deb | 解包后从暂存目录启动壳层 | 冒烟测试通过 |
 
 ## 发布前仍需完成
 
 1. **构建环境**
-   - Rust stable + Tauri 2 CLI
-   - `libwebkit2gtk-4.1-dev`、`libappindicator3-dev`、`librsvg2-dev`、`patchelf`
+   - `libgtk-3-dev`、`libwebkit2gtk-4.1-dev`（壳层）
    - libuvcpp 源码（CI 使用 `UVCPP_REPO` 仓库变量）
-2. **平台后端**
-   - Windows：DXGI Desktop Duplication 抓屏、SendInput 注入、光标/剪贴板
-   - macOS：ScreenCaptureKit、CGEvent 注入、辅助功能权限
+   - `dpkg-deb`（`.deb`）；AppImage 需要 `appimagetool` 与 `patchelf`
+2. **平台与后端**
+   - Windows：WebView2 壳 + DXGI Desktop Duplication、SendInput、光标/剪贴板
+   - macOS：WKWebView 壳 + ScreenCaptureKit、CGEvent、辅助功能权限
    - Wayland：PipeWire + xdg-desktop-portal ScreenCast（需 `libpipewire-0.3-dev` 与 D-Bus 开发库）
+   - AppImage 产物（当前只有 `.deb`）
 3. **发布产物**
    - Windows `.exe` / `.msi`
    - Linux `.AppImage` / `.deb`（含 libuvcpp、libllhttp 等共享库；核心使用 `$ORIGIN` RPATH）
@@ -45,10 +49,11 @@
 
 ## 当前阻塞
 
-- 本机没有 Rust/Tauri 与 webkit2gtk 开发包：无法编译壳层或生成安装包。
-- 没有 Windows/macOS 机器或交叉工具链：平台后端无法实现与验证。
+- 本机通过临时解包的 WebKitGTK 开发包编译了 Linux 壳层；正式构建环境仍需
+  `libgtk-3-dev` 与 `libwebkit2gtk-4.1-dev`。
+- 没有 Windows/macOS 机器或工具链：两个平台的壳与后端无法实现与验证。
 - 没有 PipeWire/D-Bus 开发头文件：Wayland 路径无法在本机构建。
 - 代码仓库没有配置远端：无法创建 tag 或上传 Release。
 
-在上述条件具备前，可交付的是 **Linux/X11 源码构建**（`molink-core` + `frontend/dist`），
-不是文档中定义的三平台安装包。
+当前可交付：**Linux/X11 源码构建与 `.deb`**。三平台安装包（Windows/macOS）
+仍需对应平台的原生壳。

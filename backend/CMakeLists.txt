@@ -116,8 +116,11 @@ if(MOLINK_BUILD_CORE)
   # is inherited) for the build tree. Release packaging still bundles the shared
   # libraries explicitly.
   if(UNIX AND NOT APPLE)
+    # $ORIGIN covers a core packaged beside its libraries; ../lib is the
+    # /opt/molink/bin + /opt/molink/lib layout used by the .deb.
     target_link_options(molink-core PRIVATE "LINKER:--disable-new-dtags"
-                                          "LINKER:-rpath,$ORIGIN")
+                                          "LINKER:-rpath,$ORIGIN"
+                                          "LINKER:-rpath,$ORIGIN/../lib")
   elseif(APPLE)
     target_link_options(molink-core PRIVATE "LINKER:-rpath,@loader_path")
   endif()

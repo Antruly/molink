@@ -50,7 +50,8 @@ bool parse_args(int argc, char** argv, core_config& cfg, std::string& err) {
     if (arg == "--port") {
       std::string v;
       if (!value(v)) return false;
-      if (!parse_int(v, 1, 65535, cfg.port)) {
+      // 0 asks the OS for an ephemeral port; the shell relies on that.
+      if (!parse_int(v, 0, 65535, cfg.port)) {
         err = "invalid --port: " + v;
         return false;
       }
@@ -103,6 +104,10 @@ bool parse_args(int argc, char** argv, core_config& cfg, std::string& err) {
     }
     if (arg == "--no-clipboard") {
       cfg.no_clipboard = true;
+      continue;
+    }
+    if (arg == "--web-root") {
+      if (!value(cfg.web_root)) return false;
       continue;
     }
     err = "unknown argument: " + arg;

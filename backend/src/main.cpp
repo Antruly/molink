@@ -1,5 +1,6 @@
 #include <atomic>
 #include <chrono>
+#include <filesystem>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
@@ -54,6 +55,32 @@ bool process_alive(long pid) {
 #endif
 }
 
+/// Find the built frontend. Explicit configuration wins, then the environment,
+/// then the layouts used by the development tree and installed bundles.
+std::string resolve_web_root(const molink::core_config& cfg) {
+  namespace fs = std::filesystem;
+  if (!cfg.web_root.empty()) return cfg.web_root;
+  if (const char* env = std::getenv("MOLINK_WEB_ROOT")) return env;
+
+  std::vector<fs::path> candidates;
+  candidates.push_back("frontend/dist");
+  candidates.push_back("../frontend/dist");
+  std::error_code ec;
+  const fs::path exe = fs::read_symlink("/proc/self/exe", ec);
+  if (!ec) {
+    const fs::path dir = exe.parent_path();
+    candidates.push_back(dir / "web");
+    candidates.push_back(dir / "../share/molink/web");
+    candidates.push_back(dir / "../../frontend/dist");
+  }
+  for (const fs::path& candidate : candidates) {
+    if (fs::exists(candidate / "index.html", ec)) {
+      return candidate.lexically_normal().string();
+    }
+  }
+  return std::string();
+}
+
 void print_usage() {
   std::cout
       << "molink-core " MOLINK_VERSION "\n\n"
@@ -68,6 +95,7 @@ void print_usage() {
       << "  --no-input           disable pointer and keyboard injection\n"
       << "  --no-compress        send raw BGRA tiles instead of zlib-compressed\n"
       << "  --no-clipboard       disable clipboard synchronization\n"
+      << "  --web-root <dir>     serve a built frontend at / (default: auto)\n"
       << "  --print-ready        print one JSON line on stdout when ready\n"
       << "  --version            print version and exit\n"
       << "  --help               show this help\n";
@@ -166,7 +194,9 @@ int main(int argc, char** argv) {
       .set_access_log(false)
       .set_max_body_size(1024u * 1024u);
 
+  const std::string web_root = resolve_web_root(cfg);
   api_deps deps;
+  deps.serve_web = !web_root.empty();
   deps.registry = registry;
   deps.capture = capture;
   deps.input = input;
@@ -175,6 +205,15 @@ int main(int argc, char** argv) {
   deps.started_ms = started_ms;
   register_http_routes(app, deps);
   app.websocket("/ws/session", make_ws_handler(registry, wsopt));
+
+  if (!web_root.empty()) {
+    uvcpp::uvcpp_web_static_options static_options;
+    static_options.index_files = {"index.html"};
+    // Asset names are content-hashed, but index.html still needs a
+    // revalidation on every launch.
+    static_options.cache_control = "no-cache";
+    app.serve_static("/", web_root, static_options);
+  }
 
   std::signal(SIGINT, on_signal);
   std::signal(SIGTERM, on_signal);
@@ -223,6 +262,8 @@ int main(int argc, char** argv) {
               << "  capture: " << capture_note << "\n"
               << "  input:   " << (input ? input->backend() : "disabled")
               << "\n"
+              << "  web:     "
+              << (web_root.empty() ? "(none)" : web_root) << "\n"
               << "  token:   " << cfg.token << "\n";
   }
 
