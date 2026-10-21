@@ -1,4 +1,5 @@
 import {
+  FrameFlag,
   PacketType,
   ProtocolError,
   decodePacket,
@@ -46,6 +47,7 @@ export class MolinkClient {
   private pendingFrame = false
   private pingTimer: number | null = null
   private closedByUser = false
+  private hasImage = false
 
   setHandlers(handlers: Partial<ClientHandlers>): void {
     this.handlers = handlers
@@ -54,6 +56,8 @@ export class MolinkClient {
   connect(host: string, port: number, token: string): void {
     this.disconnect()
     this.closedByUser = false
+    this.hasImage = false
+    this.pendingFrame = false
 
     const url = `ws://${host}:${port}/ws/session`
     this.handlers.onPhase?.('connecting')
@@ -169,6 +173,18 @@ export class MolinkClient {
       if (packet.type !== PacketType.frame) return
       this.pendingFrame = false
       const frame = parseFramePayload(packet.payload)
+
+      if ((frame.flags & FrameFlag.keyframe) !== 0) {
+        this.hasImage = true
+      } else if (!this.hasImage) {
+        // A delta cannot be drawn over an image that does not exist yet. The
+        // server requests a keyframe on our behalf; the next frames will carry
+        // it.
+        return
+      }
+      // A keyframe with no tiles would mean an empty screen; nothing to draw.
+      if (frame.tiles.length === 0) return
+
       this.handlers.onFrame?.(frame, buffer.byteLength)
     } catch (error) {
       this.pendingFrame = false

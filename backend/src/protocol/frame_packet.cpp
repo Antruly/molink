@@ -48,28 +48,35 @@ bool ensure_room(std::size_t have, std::size_t need, const char* what,
 }  // namespace
 
 bool encode_packet(const packet& p, std::vector<uint8_t>& out, std::string& err) {
-  if (p.version != kProtocolVersion) {
-    err = "unsupported protocol version " + std::to_string(p.version);
-    return false;
-  }
-  if (p.payload.size() > kMaxPayloadBytes) {
+  return encode_packet_into(out, p.type, p.flags, p.session, p.seq, p.ts_us,
+                            p.payload.data(), p.payload.size(), err);
+}
+
+bool encode_packet_into(std::vector<uint8_t>& out, uint8_t type, uint16_t flags,
+                        uint32_t session, uint32_t seq, uint64_t ts_us,
+                        const uint8_t* payload, std::size_t payload_len,
+                        std::string& err) {
+  if (payload_len > kMaxPayloadBytes) {
     err = "payload exceeds " + std::to_string(kMaxPayloadBytes) + " bytes";
     return false;
   }
+  if (payload_len != 0 && payload == nullptr) {
+    err = "payload is null";
+    return false;
+  }
 
-  out.resize(kPacketHeaderSize + p.payload.size());
+  out.resize(kPacketHeaderSize + payload_len);
   std::memcpy(out.data(), kMagic, sizeof(kMagic));
-  out[4] = p.version;
-  out[5] = p.type;
-  put16(out.data() + 6, p.flags);
-  put32(out.data() + 8, p.session);
-  put32(out.data() + 12, p.seq);
-  put64(out.data() + 16, p.ts_us);
-  put32(out.data() + 24, static_cast<uint32_t>(p.payload.size()));
+  out[4] = kProtocolVersion;
+  out[5] = type;
+  put16(out.data() + 6, flags);
+  put32(out.data() + 8, session);
+  put32(out.data() + 12, seq);
+  put64(out.data() + 16, ts_us);
+  put32(out.data() + 24, static_cast<uint32_t>(payload_len));
   put32(out.data() + 28, 0);
-  if (!p.payload.empty()) {
-    std::memcpy(out.data() + kPacketHeaderSize, p.payload.data(),
-                p.payload.size());
+  if (payload_len != 0) {
+    std::memcpy(out.data() + kPacketHeaderSize, payload, payload_len);
   }
   return true;
 }

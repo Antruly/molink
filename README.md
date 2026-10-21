@@ -7,9 +7,11 @@
 ![连接页](docs/screenshots/connect.png)
 ![会话页](docs/screenshots/session.png)
 
+> 会话页截图为合成测试帧演示；接入真实屏幕后画面即为本机桌面。
+
 ## 当前状态
 
-一阶段（桌面直连）的骨架已经可运行。屏幕内容目前由**合成测试帧**提供，真实抓屏与输入注入尚未接入——这两项是下一阶段的主体工作。
+一阶段（桌面直连）的骨架已经可运行。Linux（X11）已接入真实屏幕捕获；Windows / macOS 的捕获后端与输入注入尚未实现。
 
 | 能力 | 状态 |
 |---|---|
@@ -18,8 +20,9 @@
 | MOLK 瓦片帧包编解码（C++ + TS 双实现） | ✅ 36 项协议测试通过 |
 | WebSocket 会话通道、心跳、空闲回收 | ✅ |
 | React 前端（连接页 / 会话页 / 中英双语） | ✅ |
-| 合成测试帧 → Canvas 渲染 | ✅ 端到端验证 |
-| 真实屏幕捕获（Windows / PipeWire / ScreenCaptureKit） | ⏳ 未实现 |
+| **Linux 真实抓屏（X11 + XShm）** | ✅ 增量瓦片、XDamage、无会话时暂停 |
+| Linux Wayland / PipeWire 门户抓屏 | ⏳ 未实现（接口已抽象） |
+| Windows / macOS 捕获 | ⏳ 未实现 |
 | 输入注入 | ⏳ 未实现（协议占位，明确回 `not_implemented`） |
 | UDP 直连、WebRTC、P2P、服务端 | ⏳ 二阶段 |
 | Tauri 壳层 | 🧩 源码与配置就绪，本机无 Rust 工具链，未编译验证 |
@@ -67,6 +70,16 @@ MOLINK_TOKEN=dev-token ./backend/build/molink-core --print-ready
 # 前端（另一个终端）
 cd frontend && pnpm install && pnpm dev
 ```
+
+Linux 默认使用 X11/XShm 抓取当前屏幕；在 Wayland 会话或没有显示器的环境里会自动回退到合成测试帧。可显式控制：
+
+```bash
+./backend/build/molink-core --capture-fps 15      # 抓屏帧率上限
+./backend/build/molink-core --no-capture          # 强制合成测试帧
+MOLINK_DISPLAY=:1 ./backend/build/molink-core     # 指定 X display
+```
+
+抓屏只在有已鉴权会话时运行；没有客户端时进程空闲占用接近 0%。
 
 打开 <http://localhost:1420>，填入令牌连接。也可以直接带参数自动连接：
 

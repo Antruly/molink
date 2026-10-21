@@ -9,7 +9,7 @@ export const PACKET_HEADER_BYTES = 32
 export const FRAME_HEADER_BYTES = 16
 export const TILE_ENTRY_BYTES = 16
 export const PROTOCOL_VERSION = 1
-export const MAX_PAYLOAD_BYTES = 16 * 1024 * 1024
+export const MAX_PAYLOAD_BYTES = 64 * 1024 * 1024
 
 export const PacketType = {
   hello: 0x01,

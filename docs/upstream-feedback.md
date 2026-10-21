@@ -119,7 +119,26 @@ registers GET /healthz, which the websocket-echo template already serves
 
 ---
 
-## 5. libuvcpp：WS 升级没有 pre-upgrade 鉴权钩子（设计讨论，不是缺陷）
+## 5. libuvcpp：监听 socket 未设置 SO_REUSEADDR
+
+**现象**
+
+进程退出后立刻重启同一端口，`uv_listen` / bind 返回 `EADDRINUSE`（libuv 错误码
+-98），而此时 `ss -lptn` 已看不到监听者（处于 TIME_WAIT）：
+
+```
+[ERROR] 启动失败，libuv 错误码 -98（address already in use）
+molink-core: failed to listen on 127.0.0.1:21118 (libuv error -98)
+```
+
+开发期频繁重启、壳层崩溃后自动拉起都会踩到。建议 `uvcpp_web_app` 在 bind 之前对
+socket 设置 `SO_REUSEADDR`（Linux/macOS；Windows 上 libuv 已默认处理）。
+
+本项目未绕过，只在文档里注明“需等待 TIME_WAIT 或换端口”。
+
+---
+
+## 6. libuvcpp：WS 升级没有 pre-upgrade 鉴权钩子（设计讨论，不是缺陷）
 
 `uvcpp_web_app::websocket()` 在 101 写完之后才调用用户处理器，因此无法在升级阶段拒
 绝未授权连接。本项目改为应用层 `hello` + 5 秒超时 + `1008` 关闭，工作正常；如果未
@@ -146,3 +165,8 @@ registers GET /healthz, which the websocket-echo template already serves
 > **uvp_verify should accept `run.env`.** `uvp_run` has it; `uvp_verify` does not,
 > so a service that takes a secret from the environment cannot be verified with
 > an authenticated request.
+>
+> **libuvcpp's listening socket has no SO_REUSEADDR.** Restarting the service on
+> the same port immediately after exit fails with `EADDRINUSE` (libuv -98) while
+> `ss` shows no listener (TIME_WAIT). Set `SO_REUSEADDR` before bind on
+> Linux/macOS.

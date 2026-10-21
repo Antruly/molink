@@ -67,8 +67,9 @@ inline constexpr std::size_t kTileEntrySize = 16;
 inline constexpr uint8_t kProtocolVersion = 1;
 
 /// Upper bound for one packet payload. Keeps a malformed or hostile length
-/// field from asking the receiver to allocate the world.
-inline constexpr uint32_t kMaxPayloadBytes = 16u * 1024u * 1024u;
+/// field from asking the receiver to allocate the world. A 4K BGRA keyframe is
+/// about 33 MiB, so this must stay above that.
+inline constexpr uint32_t kMaxPayloadBytes = 64u * 1024u * 1024u;
 inline constexpr uint16_t kMaxTilesPerFrame = 4096;
 
 enum class packet_type : uint8_t {
@@ -117,6 +118,14 @@ struct packet {
 
 /// Serialize one packet. Returns false and fills @p err on invalid input.
 bool encode_packet(const packet& p, std::vector<uint8_t>& out, std::string& err);
+
+/// Serialize a packet without first copying the payload into a packet object.
+/// Used on the frame hot path, where the payload is already a contiguous
+/// buffer produced by the capture thread.
+bool encode_packet_into(std::vector<uint8_t>& out, uint8_t type, uint16_t flags,
+                        uint32_t session, uint32_t seq, uint64_t ts_us,
+                        const uint8_t* payload, std::size_t payload_len,
+                        std::string& err);
 
 /// Parse exactly one packet from [data, data + len). The buffer must contain
 /// one whole packet and nothing after it. Returns false and fills @p err on

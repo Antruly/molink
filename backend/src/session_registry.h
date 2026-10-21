@@ -22,6 +22,12 @@ struct session_info {
   uint64_t last_seen_ms = 0;
   uint64_t last_ping_ms = 0;
   uint64_t frames_sent = 0;
+  /// Sequence on the wire (one per frame sent to this session).
+  uint32_t out_seq = 0;
+  /// Capture sequence this session has been brought up to. -1 means it has no
+  /// usable base image yet.
+  int64_t last_capture_seq = -1;
+  bool has_image = false;
   uvcpp::uvcpp_ws_connection* conn = nullptr;
 };
 
@@ -38,6 +44,7 @@ class session_registry {
   std::shared_ptr<session_info> find_by_public_id(const std::string& public_id);
   std::vector<session_info> snapshot() const;
   std::size_t size() const;
+  bool has_authenticated() const;
   void touch(session_info& s);
 
  private:

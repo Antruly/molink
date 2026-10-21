@@ -48,6 +48,9 @@ endif()
 set(MOLINK_CORE_SOURCES
   src/main.cpp
   src/api.cpp
+  src/capture/capture.cpp
+  src/capture/synthetic_capture.cpp
+  src/capture/x11_capture.cpp
   src/config.cpp
   src/session_registry.cpp
   src/test_pattern.cpp
@@ -59,6 +62,25 @@ set(MOLINK_CORE_SOURCES
 if(MOLINK_BUILD_CORE)
   add_executable(molink-core ${MOLINK_CORE_SOURCES})
   target_include_directories(molink-core PRIVATE src)
+
+  # Linux screen capture. X11/XShm is the first backend; a PipeWire portal
+  # backend can be added behind the same capture_source interface.
+  set(MOLINK_HAVE_X11 0)
+  if(UNIX AND NOT APPLE)
+    find_package(X11 QUIET)
+    if(X11_FOUND AND TARGET X11::Xext)
+      set(MOLINK_HAVE_X11 1)
+    endif()
+  endif()
+
+  if(MOLINK_HAVE_X11)
+    target_compile_definitions(molink-core PRIVATE MOLINK_HAVE_X11=1)
+    target_link_libraries(molink-core PRIVATE X11::X11 X11::Xext)
+    message(STATUS "molink: X11 screen capture enabled")
+  else()
+    target_compile_definitions(molink-core PRIVATE MOLINK_HAVE_X11=0)
+    message(STATUS "molink: X11 screen capture unavailable; synthetic frames only")
+  endif()
 
   # The manifest names the executable, and uvp resolves it as build/<name>.
   # Multi-configuration generators (Visual Studio, Xcode) would otherwise append a
@@ -72,7 +94,7 @@ if(MOLINK_BUILD_CORE)
       "RUNTIME_OUTPUT_DIRECTORY_${uvp_config_upper}" "${CMAKE_BINARY_DIR}")
   endforeach()
 
-  target_link_libraries(molink-core PRIVATE ${UVP_UVCPP_TARGET})
+  target_link_libraries(molink-core PRIVATE ${UVP_UVCPP_TARGET} ${CMAKE_DL_LIBS})
 
   # libuvcpp's installed libuvcpp.so depends on libllhttp.so in its own directory
   # but carries no RUNPATH of its own. The executable's default RUNPATH is not

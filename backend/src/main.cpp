@@ -11,6 +11,7 @@
 #include <webapp/uvcpp_web_json.h>
 
 #include "api.h"
+#include "capture/capture.h"
 #include "config.h"
 #include "session_registry.h"
 #include "util.h"
@@ -60,13 +61,15 @@ void print_usage() {
       << "  --token <secret>     shared token; generated if omitted\n"
       << "  --allow-remote       permit a non-loopback --host\n"
       << "  --parent-pid <pid>   exit when that process disappears\n"
+      << "  --capture-fps <n>    screen capture frames per second (default 15)\n"
+      << "  --no-capture         use synthetic test frames instead of the screen\n"
       << "  --print-ready        print one JSON line on stdout when ready\n"
       << "  --version            print version and exit\n"
       << "  --help               show this help\n";
 }
 
 void print_ready(const molink::core_config& cfg, int port,
-                 const std::string& token) {
+                 const std::string& token, const std::string& capture_backend) {
   uvcpp::uvcpp_json j;
   j["event"] = "ready";
   j["service"] = MOLINK_CORE_SERVICE;
@@ -77,7 +80,8 @@ void print_ready(const molink::core_config& cfg, int port,
   j["port"] = port;
   j["token"] = token;
   j["session_endpoint"] = "/ws/session";
-  j["synthetic_frames"] = true;
+  j["capture"] = capture_backend;
+  j["synthetic_frames"] = capture_backend == "synthetic";
   std::cout << uvcpp::uvcpp_json_dump(j) << std::endl;
 }
 
@@ -106,9 +110,20 @@ int main(int argc, char** argv) {
   auto registry = std::make_shared<session_registry>();
   const uint64_t started_ms = now_ms();
 
+  capture_options capture_opts;
+  capture_opts.fps = cfg.capture_fps;
+  std::string capture_note;
+  std::shared_ptr<capture_source> capture =
+      start_capture(capture_opts, !cfg.no_capture, capture_note);
+  if (!capture) {
+    std::cerr << "molink-core: " << capture_note << "\n";
+    return 1;
+  }
+
   ws_options wsopt;
   wsopt.token = cfg.token;
   wsopt.version = MOLINK_VERSION;
+  wsopt.capture = capture;
 
   uvcpp::uvcpp_web_app app;
   app.set_host(cfg.host)
@@ -119,6 +134,7 @@ int main(int argc, char** argv) {
 
   api_deps deps;
   deps.registry = registry;
+  deps.capture = capture;
   deps.config = cfg;
   deps.started_ms = started_ms;
   register_http_routes(app, deps);
@@ -129,6 +145,9 @@ int main(int argc, char** argv) {
 
   const int rc = app.start();
   if (rc != 0) {
+    // Stop capture before returning: its thread owns a joinable std::thread,
+    // and unwinding past it would call std::terminate.
+    capture->stop();
     std::cerr << "molink-core: failed to listen on " << cfg.host << ":"
               << cfg.port << " (libuv error " << rc << ")\n";
     return 1;
@@ -156,7 +175,7 @@ int main(int argc, char** argv) {
   }
 
   if (cfg.print_ready_json) {
-    print_ready(cfg, port, cfg.token);
+    print_ready(cfg, port, cfg.token, capture->backend());
   } else {
     std::cerr << MOLINK_CORE_SERVICE << " " MOLINK_VERSION << " listening on "
               << cfg.host << ":" << port << "\n"
@@ -164,6 +183,7 @@ int main(int argc, char** argv) {
               << "/ws/session\n"
               << "  health:  http://" << cfg.host << ":" << port
               << "/healthz\n"
+              << "  capture: " << capture_note << "\n"
               << "  token:   " << cfg.token << "\n";
   }
 
@@ -173,6 +193,7 @@ int main(int argc, char** argv) {
 
   if (parent_watch.joinable()) parent_watch.join();
   supervisor.stop();
+  capture->stop();
   app.stop();
   app.join();
   return 0;

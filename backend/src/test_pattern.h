@@ -6,10 +6,9 @@
 
 namespace molink {
 
-/// Synthetic BGRA frame used until real screen capture lands. It exercises the
-/// whole path (tile grid -> FRAME payload -> MOLK packet -> WebSocket binary ->
-/// browser decode) so the protocol can be verified before any platform capture
-/// backend exists.
+/// Animated BGRA test pattern. Used as the synthetic capture source, and as
+/// the fallback when no display is reachable, so the protocol and renderer can
+/// be exercised without a screen.
 struct test_pattern_options {
   uint16_t width = 640;
   uint16_t height = 360;
@@ -19,8 +18,11 @@ struct test_pattern_options {
   static constexpr std::size_t kMaxBytes = 4u * 1024u * 1024u;
 };
 
-bool build_test_frame_packet(uint32_t session, uint32_t seq, uint64_t ts_us,
-                             const test_pattern_options& opts,
-                             std::vector<uint8_t>& out, std::string& err);
+/// Builds a FRAME payload for frame @p frame_seq. Every 60th frame is marked
+/// as a keyframe, so both the keyframe and delta paths get exercised.
+bool build_test_frame_payload(uint32_t frame_seq,
+                              const test_pattern_options& opts,
+                              std::vector<uint8_t>& out, bool& keyframe,
+                              std::string& err);
 
 }  // namespace molink

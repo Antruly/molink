@@ -80,6 +80,19 @@ bool parse_args(int argc, char** argv, core_config& cfg, std::string& err) {
       cfg.parent_pid = pid;
       continue;
     }
+    if (arg == "--capture-fps") {
+      std::string v;
+      if (!value(v)) return false;
+      if (!parse_int(v, 1, 60, cfg.capture_fps)) {
+        err = "invalid --capture-fps: " + v;
+        return false;
+      }
+      continue;
+    }
+    if (arg == "--no-capture") {
+      cfg.no_capture = true;
+      continue;
+    }
     err = "unknown argument: " + arg;
     return false;
   }

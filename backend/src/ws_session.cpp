@@ -28,6 +28,10 @@ uint64_t epoch_us() {
           .count());
 }
 
+/// Replaying more than this means the client is hopelessly behind; a keyframe
+/// is cheaper than shipping dozens of deltas it will render in one go.
+constexpr uint32_t kMaxReplayFrames = 60;
+
 std::string string_field(const uvcpp_json& j, const char* key) {
   const auto it = j.find(key);
   if (it == j.end() || !it->is_string()) return std::string();
@@ -49,25 +53,6 @@ void send_error(uvcpp_ws_connection* conn, const char* code,
   send_json(conn, j);
 }
 
-void send_welcome(uvcpp_ws_connection* conn, const session_info& session,
-                  const ws_options& opt) {
-  uvcpp_json j;
-  j["type"] = "welcome";
-  j["session"] = session.public_id;
-  j["session_id"] = session.id;
-  j["protocol"] = protocol::kProtocolVersion;
-  j["service"] = MOLINK_CORE_SERVICE;
-  j["version"] = opt.version;
-  j["transport"] = "websocket";
-  j["tiles"]["codec"] = "bgra";
-  j["tiles"]["screen_w"] = opt.test_pattern.width;
-  j["tiles"]["screen_h"] = opt.test_pattern.height;
-  j["tiles"]["tile_w"] = opt.test_pattern.tile;
-  j["tiles"]["tile_h"] = opt.test_pattern.tile;
-  j["tiles"]["synthetic"] = true;
-  send_json(conn, j);
-}
-
 void send_pong(uvcpp_ws_connection* conn, const uvcpp_json& request) {
   uvcpp_json j;
   j["type"] = "pong";
@@ -77,14 +62,16 @@ void send_pong(uvcpp_ws_connection* conn, const uvcpp_json& request) {
   send_json(conn, j);
 }
 
-bool send_test_frame(uvcpp_ws_connection* conn,
-                     const std::shared_ptr<session_info>& session,
-                     const ws_options& opt) {
+bool send_frame_payload(uvcpp_ws_connection* conn,
+                        const std::shared_ptr<session_info>& session,
+                        uint16_t flags, uint64_t ts_us,
+                        const std::vector<uint8_t>& payload) {
   std::vector<uint8_t> bytes;
   std::string err;
-  const uint32_t seq = static_cast<uint32_t>(session->frames_sent);
-  if (!build_test_frame_packet(session->id, seq, epoch_us(), opt.test_pattern,
-                               bytes, err)) {
+  const uint32_t seq = session->out_seq++;
+  if (!protocol::encode_packet_into(
+          bytes, static_cast<uint8_t>(protocol::packet_type::frame), flags,
+          session->id, seq, ts_us, payload.data(), payload.size(), err)) {
     send_error(conn, "frame_build_failed", err);
     return false;
   }
@@ -95,6 +82,126 @@ bool send_test_frame(uvcpp_ws_connection* conn,
   }
   ++session->frames_sent;
   return true;
+}
+
+/// A frame with no tiles. It still advances the wire sequence, which tells the
+/// client "nothing changed" without leaving its request in flight forever.
+void send_empty_frame(uvcpp_ws_connection* conn,
+                      const std::shared_ptr<session_info>& session,
+                      uint16_t width, uint16_t height, bool keyframe) {
+  protocol::frame_header header;
+  // The capture sequence this session is up to, not the wire sequence: an
+  // empty frame says "state unchanged at capture N".
+  header.frame_seq =
+      session->last_capture_seq >= 0
+          ? static_cast<uint32_t>(session->last_capture_seq)
+          : 0;
+  header.codec = static_cast<uint8_t>(protocol::codec::bgra);
+  header.flags = keyframe ? protocol::kFrameFlagKeyframe
+                          : protocol::kFrameFlagPartial;
+  header.screen_w = width;
+  header.screen_h = height;
+  header.tile_w = 0;
+  header.tile_h = 0;
+
+  std::vector<uint8_t> payload;
+  std::string err;
+  if (!protocol::build_frame_payload(header, {}, payload, err)) {
+    send_error(conn, "frame_build_failed", err);
+    return;
+  }
+  send_frame_payload(conn, session,
+                     keyframe ? protocol::kPacketFlagKeyframe : 0, epoch_us(),
+                     payload);
+}
+
+void send_capture_frame(uvcpp_ws_connection* conn,
+                        const std::shared_ptr<session_info>& session,
+                        const ws_options& opt) {
+  if (!opt.capture) {
+    send_empty_frame(conn, session, 0, 0, false);
+    return;
+  }
+
+  const std::shared_ptr<const captured_frame> latest = opt.capture->latest();
+  if (!latest) {
+    // Capture has not produced anything yet; let the client keep polling.
+    send_empty_frame(conn, session, 0, 0, false);
+    return;
+  }
+
+  if (!session->has_image) {
+    if (latest->keyframe) {
+      session->has_image = true;
+      session->last_capture_seq = latest->seq;
+      send_frame_payload(conn, session, protocol::kPacketFlagKeyframe,
+                         latest->ts_us, latest->payload);
+      return;
+    }
+    opt.capture->request_keyframe();
+    send_empty_frame(conn, session, latest->width, latest->height, false);
+    return;
+  }
+
+  const int64_t last = session->last_capture_seq;
+  if (last < 0 || static_cast<uint32_t>(last) >= latest->seq) {
+    // Nothing new since the last response. Answer anyway so the client's
+    // request does not stay in flight.
+    send_empty_frame(conn, session, latest->width, latest->height, false);
+    return;
+  }
+
+  // Replay every frame the session has not seen. Capture keeps a bounded
+  // history precisely so a poll that arrived late does not need a keyframe.
+  const uint32_t missing = latest->seq - static_cast<uint32_t>(last);
+  if (missing > kMaxReplayFrames) {
+    session->has_image = false;
+    session->last_capture_seq = -1;
+    opt.capture->request_keyframe();
+    send_empty_frame(conn, session, latest->width, latest->height, false);
+    return;
+  }
+
+  for (uint32_t seq = static_cast<uint32_t>(last) + 1; seq <= latest->seq;
+       ++seq) {
+    const std::shared_ptr<const captured_frame> frame = opt.capture->find(seq);
+    if (!frame) {
+      // Evicted from history. Resynchronize from a fresh keyframe.
+      session->has_image = false;
+      session->last_capture_seq = -1;
+      opt.capture->request_keyframe();
+      send_empty_frame(conn, session, latest->width, latest->height, false);
+      return;
+    }
+    session->last_capture_seq = seq;
+    if (frame->keyframe) session->has_image = true;
+    send_frame_payload(conn, session,
+                       frame->keyframe ? protocol::kPacketFlagKeyframe : 0,
+                       frame->ts_us, frame->payload);
+  }
+}
+
+void send_welcome(uvcpp_ws_connection* conn, const session_info& session,
+                  const ws_options& opt) {
+  const std::shared_ptr<const captured_frame> frame =
+      opt.capture ? opt.capture->latest() : nullptr;
+
+  uvcpp_json j;
+  j["type"] = "welcome";
+  j["session"] = session.public_id;
+  j["session_id"] = session.id;
+  j["protocol"] = protocol::kProtocolVersion;
+  j["service"] = MOLINK_CORE_SERVICE;
+  j["version"] = opt.version;
+  j["transport"] = "websocket";
+  j["tiles"]["codec"] = "bgra";
+  j["tiles"]["screen_w"] = frame ? frame->width : 0;
+  j["tiles"]["screen_h"] = frame ? frame->height : 0;
+  j["tiles"]["tile_w"] = frame ? frame->tile_w : 0;
+  j["tiles"]["tile_h"] = frame ? frame->tile_h : 0;
+  j["tiles"]["backend"] = opt.capture ? opt.capture->backend() : "none";
+  j["tiles"]["synthetic"] = opt.capture ? !opt.capture->is_real() : true;
+  send_json(conn, j);
 }
 
 }  // namespace
@@ -114,6 +221,9 @@ uvcpp::uvcpp_web_ws_handler make_ws_handler(
 
     if (const std::string* token = ws.query("token")) {
       session->authenticated = constant_time_equals(*token, options.token);
+    }
+    if (session->authenticated && options.capture) {
+      options.capture->set_active(true);
     }
 
     if (session->authenticated) {
@@ -152,6 +262,7 @@ uvcpp::uvcpp_web_ws_handler make_ws_handler(
           return;
         }
         session->authenticated = true;
+        if (options.capture) options.capture->set_active(true);
         send_welcome(conn, *session, options);
         return;
       }
@@ -167,7 +278,12 @@ uvcpp::uvcpp_web_ws_handler make_ws_handler(
       }
 
       if (type == "request-frame") {
-        send_test_frame(conn, session, options);
+        send_capture_frame(conn, session, options);
+        return;
+      }
+
+      if (type == "request-keyframe") {
+        if (options.capture) options.capture->request_keyframe();
         return;
       }
 
@@ -222,9 +338,13 @@ uvcpp::uvcpp_web_ws_handler make_ws_handler(
       }
     });
 
-    conn->on_close([registry, session](ws_close_code code,
-                                       const std::string& reason) {
+    conn->on_close([registry, session, options](ws_close_code code,
+                                                const std::string& reason) {
       registry->remove(session->id);
+      // Stop grabbing the screen once nobody is watching.
+      if (options.capture && !registry->has_authenticated()) {
+        options.capture->set_active(false);
+      }
       (void)code;
       (void)reason;
     });
@@ -258,6 +378,10 @@ void session_supervisor::run() {
     if (!running_.load()) break;
 
     const uint64_t now = now_ms();
+    if (options_.capture) {
+      // Safety net in case a close callback was missed during shutdown.
+      options_.capture->set_active(registry_->has_authenticated());
+    }
     const std::vector<session_info> sessions = registry_->snapshot();
     for (const session_info& s : sessions) {
       if (!s.authenticated) {

@@ -39,7 +39,34 @@ cmake --build build && ctest --test-dir build --output-on-failure
 | `--token` | 访问令牌；缺省随机生成（也可用 `MOLINK_TOKEN`） |
 | `--allow-remote` | 允许绑定非回环地址 |
 | `--parent-pid` | 监视父进程，父进程消失时退出 |
+| `--capture-fps <n>` | 抓屏帧率上限，默认 15 |
+| `--no-capture` | 强制使用合成测试帧 |
 | `--print-ready` | 就绪后向 stdout 输出一行 JSON |
+
+`MOLINK_DISPLAY` 可指定 X display（默认沿用 `DISPLAY`）。
+
+## 屏幕捕获
+
+```
+src/capture/
+├── capture.h              capture_source 接口 + 有界帧历史
+├── capture.cpp            历史/replay、启动时选择后端
+├── x11_capture.cpp        Linux X11 / XShm / XDamage
+└── synthetic_capture.cpp  合成测试帧（回退）
+```
+
+- **X11 + XShm**：整屏抓取走 `XShmGetImage`，共享内存避免一次拷贝。
+- **XDamage**：优先按受损矩形抓取；Cinnamon 等合成器通常把整屏标记为受损，
+  此时退化为整屏抓取，但仍只发送变化瓦片。
+- **兜底节奏**：即使没有 damage 事件，也每 500 ms 抓一次，保证画面不会冻结。
+- **无会话暂停**：没有已鉴权会话时抓屏线程休眠，CPU 接近 0%。
+- **有界历史**：保留最近 120 帧 / 128 MiB，客户端落后时按序补发，避免反复
+  请求 22 MB 关键帧。
+- **周期全量刷新**：每 30 秒一次，修正可能漏掉的 damage。
+- 仅处理 32 位 BGRA 最快路径；其它像素格式走通用掩码转换。
+
+性能参考（本机 2880×1920、X11、depth 24）：无客户端 0%，活跃会话约 35% 单核、
+约 90 Mbps（原始 BGRA，未压缩）。编码器接入后会显著下降。
 
 ## 结构
 
@@ -49,8 +76,9 @@ src/
 ├── config.*              命令行解析、令牌生成、恒定时间比较
 ├── api.*                 CORS、Bearer 鉴权、/healthz 与 /api/*
 ├── session_registry.*    会话记录（shared_ptr，跨回调安全）
-├── ws_session.*          /ws/session 处理器、心跳与回收线程
-├── test_pattern.*        合成测试帧（真实抓屏接入前的临时源）
+├── ws_session.*          /ws/session 处理器、心跳、帧回放与回收线程
+├── capture/              屏幕捕获（X11/XShm/XDamage、合成回退）
+├── test_pattern.*        合成测试帧
 ├── protocol/frame_packet.*  MOLK 编解码（无 libuvcpp 依赖）
 └── util.*                会话号、时间
 tests/frame_packet_test.cpp   协议测试（36 项断言）
@@ -61,4 +89,7 @@ tests/frame_packet_test.cpp   协议测试（36 项断言）
 - 安装的 `libuvcpp.so` 依赖同目录 `libllhttp.so` 但没有 `RUNPATH`。本工程用
   旧式 `RPATH`（`--disable-new-dtags`）让构建树可运行；发布包必须把共享库
   一并打包。
-- 真实屏幕捕获与输入注入尚未实现；`/api/info` 的 `capabilities` 会如实报告。
+- libuvcpp 的监听 socket 未设置 `SO_REUSEADDR`，进程退出后立即重启可能得到
+  `EADDRINUSE`，需要等待 TIME_WAIT 结束或换端口。
+- 输入注入尚未实现；`/api/info` 的 `capabilities` 会如实报告。
+- 编码器尚未接入，帧数据为原始 BGRA，带宽与 CPU 都偏高。

@@ -66,6 +66,14 @@ std::size_t session_registry::size() const {
   return sessions_.size();
 }
 
+bool session_registry::has_authenticated() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  for (const auto& s : sessions_) {
+    if (s->authenticated) return true;
+  }
+  return false;
+}
+
 void session_registry::touch(session_info& s) { s.last_seen_ms = now_ms(); }
 
 }  // namespace molink

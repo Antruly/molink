@@ -17,6 +17,10 @@ struct core_config {
   /// When the shell supervises this process, it passes its own pid so the core
   /// can exit if the shell dies without cleaning up. 0 disables the watch.
   long parent_pid = 0;
+  /// Screen capture rate. Dirty tiles are computed per captured frame.
+  int capture_fps = 15;
+  /// Force the synthetic source even when a display is available.
+  bool no_capture = false;
 };
 
 /// Parse command-line arguments. Unknown arguments are reported through

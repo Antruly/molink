@@ -49,6 +49,7 @@ export function SessionView() {
   const welcome = useSessionStore((state) => state.welcome)
   const frame = useSessionStore((state) => state.frame)
   const stats = useSessionStore((state) => state.stats)
+  const error = useSessionStore((state) => state.error)
   const disconnect = useSessionStore((state) => state.disconnect)
 
   // Request the next frame only when the previous one has arrived, so a slow
@@ -92,6 +93,12 @@ export function SessionView() {
           </button>
         </div>
       </div>
+
+      {error ? (
+        <div className="border-b border-alert/30 bg-alert/10 px-5 py-2 text-xs text-alert sm:px-8">
+          {error}
+        </div>
+      ) : null}
 
       <div className="flex min-h-0 flex-1 items-center justify-center p-3 sm:p-5">
         <div className="relative flex h-full w-full items-center justify-center overflow-hidden rounded-xl border border-line bg-black/60">

@@ -4,6 +4,7 @@
 #include <memory>
 #include <string>
 
+#include "capture/capture.h"
 #include "config.h"
 #include "session_registry.h"
 
@@ -15,6 +16,7 @@ namespace molink {
 
 struct api_deps {
   std::shared_ptr<session_registry> registry;
+  std::shared_ptr<capture_source> capture;
   core_config config;
   uint64_t started_ms = 0;
 };

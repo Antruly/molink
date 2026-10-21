@@ -11,7 +11,6 @@
 #include "config.h"
 #include "util.h"
 #include "version.h"
-
 #ifdef _WIN32
 #include <process.h>
 #define MOLINK_GETPID _getpid
@@ -132,10 +131,29 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
             j["uptime_ms"] = uptime_ms(deps.started_ms);
             j["bind"]["host"] = deps.config.host;
             j["bind"]["port"] = deps.config.port;
-            j["capabilities"]["screen_capture"] = false;  // not implemented yet
+            j["capabilities"]["screen_capture"] =
+                deps.capture != nullptr && deps.capture->is_real();
             j["capabilities"]["input_injection"] = false;
-            j["capabilities"]["synthetic_frames"] = true;
+            j["capabilities"]["synthetic_frames"] =
+                deps.capture != nullptr && !deps.capture->is_real();
             j["capabilities"]["websocket"] = true;
+            if (deps.capture) {
+              j["capture"]["backend"] = deps.capture->backend();
+              j["capture"]["running"] = deps.capture->running();
+              const auto latest = deps.capture->latest();
+              if (latest) {
+                j["capture"]["screen_w"] = latest->width;
+                j["capture"]["screen_h"] = latest->height;
+              }
+              const capture_stats stats = deps.capture->stats();
+              j["capture"]["frames"] = stats.frames;
+              j["capture"]["keyframes"] = stats.keyframes;
+              j["capture"]["full_grabs"] = stats.full_grabs;
+              j["capture"]["rect_grabs"] = stats.rect_grabs;
+              j["capture"]["bytes"] = stats.bytes;
+              j["capture"]["last_dirty_w"] = stats.last_dirty_w;
+              j["capture"]["last_dirty_h"] = stats.last_dirty_h;
+            }
             j["sessions"] = deps.registry->size();
             resp.set_header("Cache-Control", "no-store").json(j);
             resp.end();
@@ -156,6 +174,9 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
               item["connected_ms"] = s.connected_ms;
               item["idle_ms"] = now > s.last_seen_ms ? now - s.last_seen_ms : 0;
               item["frames_sent"] = s.frames_sent;
+              item["has_image"] = s.has_image;
+              item["last_capture_seq"] = s.last_capture_seq;
+              item["out_seq"] = s.out_seq;
               list.push_back(std::move(item));
             }
             uvcpp_json j;
