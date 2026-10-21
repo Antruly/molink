@@ -32,7 +32,8 @@
     "controlOn": "INPUT LIVE",
     "controlOnHint": "Keyboard and pointer events go to the remote machine",
     "controlHint": "Start control to send keyboard and pointer input",
-    "inputUnavailable": "Input injection is unavailable on this host"
+    "inputUnavailable": "Input injection is unavailable on this host",
+    "controlSynthetic": "Control is unavailable while showing the test pattern"
   },
   "stats": {
     "fps": "FPS",

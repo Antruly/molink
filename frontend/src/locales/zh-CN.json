@@ -32,7 +32,8 @@
     "controlOn": "控制中",
     "controlOnHint": "键盘与指针事件已发送到远端",
     "controlHint": "点击「开始控制」后操作远端",
-    "inputUnavailable": "本机输入注入不可用"
+    "inputUnavailable": "本机输入注入不可用",
+    "controlSynthetic": "合成测试帧模式下不提供控制"
   },
   "stats": {
     "fps": "帧率",

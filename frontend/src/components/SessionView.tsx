@@ -54,7 +54,10 @@ export function SessionView() {
   const setControlEnabled = useSessionStore((state) => state.setControlEnabled)
   const disconnect = useSessionStore((state) => state.disconnect)
 
-  const inputAvailable = welcome?.input === true
+  const synthetic = welcome?.tiles.synthetic === true
+  // Blind input into a real desktop is not useful and can be destructive:
+  // control stays off whenever the picture is a test pattern.
+  const inputAvailable = welcome?.input === true && !synthetic
   const surfaceRef = useRef<HTMLDivElement>(null)
   const pendingMove = useRef<{ x: number; y: number } | null>(null)
   const moveScheduled = useRef(false)
@@ -292,7 +295,9 @@ export function SessionView() {
             ? t('session.controlOnHint')
             : inputAvailable
               ? t('session.controlHint')
-              : t('session.inputUnavailable')}
+              : synthetic
+                ? t('session.controlSynthetic')
+                : t('session.inputUnavailable')}
         </span>
       </div>
     </div>
