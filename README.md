@@ -6,6 +6,7 @@
 
 ![主页（亮色）](docs/screenshots/home-light.png)
 ![会话页（合成测试帧）](docs/screenshots/session-light.png)
+![空闲锁定](docs/screenshots/auth-locked.png)
 
 > 会话页截图为合成测试帧演示；接入真实屏幕后画面即为对端桌面。暗色主题见
 > [home-dark.png](docs/screenshots/home-dark.png)。
