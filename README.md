@@ -129,6 +129,12 @@ cd frontend && pnpm lint && pnpm typecheck && pnpm build
 
 推送 `v*` 标签触发 GitHub Actions。一阶段只发布桌面三平台安装包（`.exe`/`.msi`、`.AppImage`/`.deb`、`.dmg`），**不上传任何 zip**。服务端与移动端资产属于二阶段。
 
+## 发布状态
+
+版本记录见 [CHANGELOG.md](CHANGELOG.md)，发布前检查项与当前阻塞见
+[docs/release-checklist.md](docs/release-checklist.md)。目前可交付的是
+**Linux / X11 源码构建**；三平台安装包需要 Rust/Tauri 工具链与 Windows/macOS 后端。
+
 ## 许可证
 
 MIT。
