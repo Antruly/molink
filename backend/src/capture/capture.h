@@ -8,7 +8,32 @@
 #include <string>
 #include <vector>
 
+#include "capture/frame_encode.h"
+
 namespace molink {
+
+/// User-facing quality preset. The client resolves "auto" locally and sends
+/// one of these three concrete modes; keeping auto out of the wire protocol
+/// means a new heuristic does not need a core update.
+enum class quality_mode : uint8_t {
+  smooth,    ///< lossy 16-bit colour, fast zlib, higher frame rate
+  balanced,  ///< lossless BGRA with the adaptive zlib policy
+  quality,   ///< lossless BGRA, best zlib effort
+};
+
+struct quality_profile {
+  tile_format format = tile_format::bgra;
+  compression_effort effort = compression_effort::balanced;
+  /// Raise the configured change threshold to at least this value (0 = leave).
+  int minimum_change_threshold = 0;
+  /// Lower a non-zero change threshold to at most this value (0 = leave).
+  int maximum_change_threshold = 0;
+};
+
+const char* quality_mode_name(quality_mode mode);
+bool quality_mode_from_name(const std::string& name, quality_mode& out);
+const char* tile_format_name(tile_format format);
+quality_profile quality_profile_for(quality_mode mode);
 
 /// One captured screen update, already encoded as a FRAME payload.
 ///
@@ -118,6 +143,12 @@ class capture_source {
   /// that cannot pace themselves may ignore this.
   virtual void set_target_fps(int fps) { (void)fps; }
 
+  /// Select the encoding preset. Global to the host, like the capture rate:
+  /// the next frame for every session uses it. Sources that build their own
+  /// payloads (the synthetic pattern) may ignore this.
+  virtual void set_quality(quality_mode mode) { (void)mode; }
+  virtual quality_mode quality() const { return quality_mode::balanced; }
+
   /// Monitors this source can capture. Empty means the source is not ready or
   /// does not support selection (clients fall back to the whole screen).
   virtual std::vector<display_info> displays() const { return {}; }
@@ -152,6 +183,20 @@ class capture_base : public capture_source {
   void set_active(bool active) override { active_.store(active); }
   void set_target_fps(int fps) override { target_fps_.store(clamp_fps(fps)); }
   int target_fps() const { return target_fps_.load(); }
+  void set_quality(quality_mode mode) override { quality_.store(mode); }
+  quality_mode quality() const override { return quality_.load(); }
+
+  /// Encoding knobs for the active preset. Backends read these on the capture
+  /// thread, which is why the preset is an atomic.
+  tile_format quality_format() const {
+    return quality_profile_for(quality_.load()).format;
+  }
+  compression_effort quality_effort() const {
+    return quality_profile_for(quality_.load()).effort;
+  }
+  /// Apply the preset's bounds to the configured change threshold.
+  int quality_change_threshold(int configured) const;
+
   bool running() const override { return running_.load(); }
   virtual capture_stats stats() const override;
 
@@ -181,6 +226,7 @@ class capture_base : public capture_source {
   std::atomic<bool> active_{false};
   std::atomic<bool> running_{false};
   std::atomic<int> target_fps_{15};
+  std::atomic<quality_mode> quality_{quality_mode::balanced};
   std::atomic<uint64_t> stat_frames_{0};
   std::atomic<uint64_t> stat_keyframes_{0};
   std::atomic<uint64_t> stat_full_grabs_{0};

@@ -1,9 +1,89 @@
 #include "capture/capture.h"
 
+#include <algorithm>
 #include <thread>
 #include <utility>
 
 namespace molink {
+
+const char* quality_mode_name(quality_mode mode) {
+  switch (mode) {
+    case quality_mode::smooth:
+      return "smooth";
+    case quality_mode::quality:
+      return "quality";
+    case quality_mode::balanced:
+    default:
+      return "balanced";
+  }
+}
+
+bool quality_mode_from_name(const std::string& name, quality_mode& out) {
+  if (name == "smooth") {
+    out = quality_mode::smooth;
+    return true;
+  }
+  if (name == "balanced") {
+    out = quality_mode::balanced;
+    return true;
+  }
+  if (name == "quality") {
+    out = quality_mode::quality;
+    return true;
+  }
+  return false;
+}
+
+const char* tile_format_name(tile_format format) {
+  switch (format) {
+    case tile_format::rgb24:
+      return "rgb24";
+    case tile_format::rgb565:
+      return "rgb565";
+    case tile_format::bgra:
+    default:
+      return "bgra";
+  }
+}
+
+quality_profile quality_profile_for(quality_mode mode) {
+  quality_profile profile;
+  switch (mode) {
+    case quality_mode::smooth:
+      // 16-bit colour cuts the bytes that must be deflated, inflated and
+      // painted; a coarser change threshold drops fine noise as well. The
+      // client compensates with a higher capture/pull rate.
+      profile.format = tile_format::rgb565;
+      profile.effort = compression_effort::fast;
+      profile.minimum_change_threshold = 16;
+      break;
+    case quality_mode::quality:
+      // Keep every colour bit, spend more CPU on zlib, and never ignore a
+      // visual change that the default threshold would have skipped.
+      profile.format = tile_format::bgra;
+      profile.effort = compression_effort::best;
+      profile.maximum_change_threshold = 1;
+      break;
+    case quality_mode::balanced:
+    default:
+      profile.format = tile_format::bgra;
+      profile.effort = compression_effort::balanced;
+      break;
+  }
+  return profile;
+}
+
+int capture_base::quality_change_threshold(int configured) const {
+  const quality_profile profile = quality_profile_for(quality_.load());
+  int value = configured;
+  if (profile.minimum_change_threshold > 0) {
+    value = std::max(value, profile.minimum_change_threshold);
+  }
+  if (profile.maximum_change_threshold > 0 && value > 0) {
+    value = std::min(value, profile.maximum_change_threshold);
+  }
+  return value;
+}
 
 uint16_t choose_tile_size() {
   const unsigned cores = std::thread::hardware_concurrency();

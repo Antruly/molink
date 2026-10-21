@@ -1,9 +1,18 @@
-import { Check, Languages, Moon, Network, Sun, Timer, Waves } from 'lucide-react'
+import {
+  Check,
+  Gauge,
+  Languages,
+  Moon,
+  Network,
+  Sun,
+  Timer,
+  Waves,
+} from 'lucide-react'
 import { useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { setLanguage } from '../i18n'
 import type { ServerState } from '../lib/api'
-import { useAppStore, type Theme } from '../store/app'
+import { useAppStore, type QualityMode, type Theme } from '../store/app'
 
 function Segment<T extends string>({
   value,
@@ -156,6 +165,8 @@ export function PreferencesControls() {
   const setTheme = useAppStore((state) => state.setTheme)
   const quality = useAppStore((state) => state.qualityWatermark)
   const setQuality = useAppStore((state) => state.setQualityWatermark)
+  const qualityMode = useAppStore((state) => state.qualityMode)
+  const setQualityMode = useAppStore((state) => state.setQualityMode)
   const lockTimeout = useAppStore((state) => state.lockTimeout)
   const setLockTimeout = useAppStore((state) => state.setLockTimeout)
   const server = useAppStore((state) => state.server)
@@ -202,6 +213,28 @@ export function PreferencesControls() {
           onChange={setQuality}
           label={t('settings.watermark')}
         />
+      </div>
+
+      <div className="space-y-2">
+        <div className="flex items-center gap-2 text-[12px] font-medium text-ink">
+          <Gauge size={14} className="text-accent" />
+          {t('settings.defaultQuality')}
+        </div>
+        <p className="text-[11px] leading-relaxed text-muted">
+          {t('settings.qualityHint')}
+        </p>
+        <select
+          value={qualityMode}
+          onChange={(event) =>
+            setQualityMode(event.target.value as QualityMode)
+          }
+          className="field"
+        >
+          <option value="smooth">{t('session.qualitySmooth')}</option>
+          <option value="balanced">{t('session.qualityBalanced')}</option>
+          <option value="quality">{t('session.qualityHigh')}</option>
+          <option value="auto">{t('session.qualityAuto')}</option>
+        </select>
       </div>
 
       <div className="space-y-2">

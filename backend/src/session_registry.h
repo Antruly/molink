@@ -55,6 +55,10 @@ class session_registry {
   std::vector<session_info> snapshot() const;
   std::size_t size() const;
   bool has_authenticated() const;
+  /// Authentication is written by the session thread and read by the
+  /// supervisor thread through snapshot(); take the registry lock so the
+  /// flag is actually visible before the 5 s hello timeout is evaluated.
+  void set_authenticated(const std::shared_ptr<session_info>& s);
   void touch(session_info& s);
 
  private:

@@ -3,12 +3,16 @@ import {
   ClipboardCopy,
   ClipboardPaste,
   ExternalLink,
+  Gauge,
   Hand,
   Keyboard,
   LogOut,
+  Maximize2,
+  Minimize2,
   Monitor,
   MousePointer2,
   Radio,
+  Settings2,
   X,
 } from 'lucide-react'
 import {
@@ -19,14 +23,17 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from 'react'
 import { useTranslation } from 'react-i18next'
+import { codecName } from '../lib/protocol'
+import { shellInfo, windowAction } from '../lib/shell'
 import { openSessionWindow } from '../lib/windows'
 import {
   sessionConnection,
   useAppStore,
+  type QualityMode,
   type SessionTab,
 } from '../store/app'
 import { RemoteCursor } from './RemoteCursor'
-import { TileCanvas } from './TileCanvas'
+import { TileCanvas, type DisplayMode } from './TileCanvas'
 
 function formatBandwidth(bytesPerSecond: number): string {
   if (bytesPerSecond >= 1024 * 1024) {
@@ -102,6 +109,31 @@ function Stat({ label, value }: { label: string; value: string }) {
   )
 }
 
+type ResolvedQuality = Exclude<QualityMode, 'auto'>
+
+/// Capture rate and pull interval per preset. The pull interval is the real
+/// ceiling: the client asks for the next frame only after the previous one
+/// arrived, so a shorter interval is what makes "smooth" actually smoother.
+const QUALITY_PROFILES: Record<
+  ResolvedQuality,
+  { fps: number; pullMs: number }
+> = {
+  smooth: { fps: 30, pullMs: 33 },
+  balanced: { fps: 20, pullMs: 50 },
+  quality: { fps: 15, pullMs: 66 },
+}
+
+/// Auto may drop to the lossy preset without also raising the frame rate:
+/// when the link is already struggling, more frames would make it worse.
+const AUTO_PROFILES: Record<
+  ResolvedQuality,
+  { fps: number; pullMs: number }
+> = {
+  smooth: { fps: 15, pullMs: 60 },
+  balanced: { fps: 20, pullMs: 50 },
+  quality: { fps: 15, pullMs: 66 },
+}
+
 export function SessionView({
   tab,
   popout = false,
@@ -113,6 +145,8 @@ export function SessionView({
   const localMode = useAppStore((state) => state.localMode)
   const qualityWatermark = useAppStore((state) => state.qualityWatermark)
   const setQualityWatermark = useAppStore((state) => state.setQualityWatermark)
+  const qualityMode = useAppStore((state) => state.qualityMode)
+  const setQualityMode = useAppStore((state) => state.setQualityMode)
   const setControlEnabled = useAppStore((state) => state.setControlEnabled)
   const closeTab = useAppStore((state) => state.closeTab)
 
@@ -130,6 +164,19 @@ export function SessionView({
   const [actionError, setActionError] = useState<string | null>(null)
   const touchDevice = touchPrimary()
   const [virtualMouse, setVirtualMouse] = useState(false)
+  const [displayMode, setDisplayMode] = useState<DisplayMode>('fit')
+  const [isFullscreen, setIsFullscreen] = useState(false)
+  const [quickOpen, setQuickOpen] = useState(false)
+  const [autoTier, setAutoTier] = useState<ResolvedQuality>('balanced')
+  const sessionRootRef = useRef<HTMLDivElement>(null)
+  const panPointer = useRef<{ x: number; y: number } | null>(null)
+  const statsRef = useRef(tab.stats)
+  const autoModeRef = useRef<QualityMode>('balanced')
+  const autoRef = useRef<{
+    candidate: ResolvedQuality | null
+    streak: number
+    lastChange: number
+  }>({ candidate: null, streak: 0, lastChange: 0 })
   const keyboardRef = useRef<HTMLTextAreaElement>(null)
   const virtualPos = useRef({ x: 0.5, y: 0.5 })
   const touchPoints = useRef(new Map<number, { x: number; y: number }>())
@@ -144,6 +191,14 @@ export function SessionView({
   const scrollAccum = useRef({ x: 0, y: 0 })
   const lastCentroid = useRef<{ x: number; y: number } | null>(null)
   const composingRef = useRef(false)
+
+  const resolvedMode: ResolvedQuality =
+    qualityMode === 'auto' ? autoTier : qualityMode
+  const activeProfile =
+    qualityMode === 'auto'
+      ? AUTO_PROFILES[resolvedMode]
+      : QUALITY_PROFILES[resolvedMode]
+  const pullMs = activeProfile.pullMs
 
   const connection = useCallback(
     () => sessionConnection(tab.id),
@@ -168,47 +223,124 @@ export function SessionView({
     const timer = window.setInterval(() => {
       if (document.visibilityState === 'hidden') return
       connection()?.requestFrame()
-    }, 60)
+    }, pullMs)
     return () => window.clearInterval(timer)
-  }, [tab.phase, tab.id, connection])
+  }, [tab.phase, tab.id, connection, pullMs])
 
-  // Adaptive capture rate. The core captures at the requested rate and the
-  // client pulls the newest deltas; lowering it is the safe lever when RTT or
-  // throughput says the link is struggling. Hysteresis avoids oscillation.
-  const adaptiveFps = useRef(15)
-  const adaptiveTimer = useRef<number | null>(null)
+  useEffect(() => {
+    const update = () => setIsFullscreen(document.fullscreenElement !== null)
+    document.addEventListener('fullscreenchange', update)
+    return () => document.removeEventListener('fullscreenchange', update)
+  }, [])
+
+  // In 1:1 mode the image can be larger than the window. Keep scrolling while
+  // the pointer rests near an edge, so panning follows the mouse.
+  useEffect(() => {
+    if (displayMode !== 'actual') {
+      panPointer.current = null
+      return
+    }
+    const timer = window.setInterval(() => {
+      const element = surfaceRef.current
+      const point = panPointer.current
+      if (!element || !point || virtualMouse) return
+      const rect = element.getBoundingClientRect()
+      const margin = 48
+      const step = 16
+      let dx = 0
+      let dy = 0
+      if (point.x < rect.left + margin) dx = -step
+      else if (point.x > rect.right - margin) dx = step
+      if (point.y < rect.top + margin) dy = -step
+      else if (point.y > rect.bottom - margin) dy = step
+      if (dx !== 0 || dy !== 0) element.scrollBy(dx, dy)
+    }, 16)
+    return () => window.clearInterval(timer)
+  }, [displayMode, virtualMouse])
+
+  // Keep the auto controller's view of the link fresh without restarting its
+  // interval on every stats patch.
+  useEffect(() => {
+    statsRef.current = tab.stats
+  }, [tab.stats])
+
+  // Push the active preset after a short settle delay. Both the encoding mode
+  // and the capture rate are host-global, like the old capture-fps message.
   useEffect(() => {
     if (tab.phase !== 'live') return
-    const latency = tab.stats.latencyMs
-    const bandwidth = tab.stats.bytesPerSec
-    let target = 15
-    if ((latency !== null && latency > 250) || bandwidth > 40 * 1024 * 1024) {
-      target = 5
-    } else if (
-      (latency !== null && latency > 120) ||
-      bandwidth > 20 * 1024 * 1024
-    ) {
-      target = 10
-    }
-    if (target === adaptiveFps.current) return
-    adaptiveFps.current = target
-    if (adaptiveTimer.current !== null) {
-      window.clearTimeout(adaptiveTimer.current)
-    }
-    adaptiveTimer.current = window.setTimeout(() => {
-      adaptiveTimer.current = null
-      connection()?.setCaptureFps(target)
-    }, 800)
-  }, [tab.phase, tab.stats.latencyMs, tab.stats.bytesPerSec, connection, tab.id])
+    const timer = window.setTimeout(() => {
+      connection()?.setQuality(resolvedMode, activeProfile.fps)
+    }, 400)
+    return () => window.clearTimeout(timer)
+  }, [
+    tab.phase,
+    tab.id,
+    connection,
+    resolvedMode,
+    activeProfile.fps,
+  ])
 
-  useEffect(
-    () => () => {
-      if (adaptiveTimer.current !== null) {
-        window.clearTimeout(adaptiveTimer.current)
+  // Auto: pick a preset from RTT, the completed pull rate and throughput. Two
+  // consecutive agreeing samples and a 3 s dwell keep it from oscillating.
+  useEffect(() => {
+    if (tab.phase !== 'live' || qualityMode !== 'auto') {
+      // Remember the preset we left so re-entering auto starts fresh.
+      autoModeRef.current = qualityMode
+      return
+    }
+    if (autoModeRef.current !== qualityMode) {
+      autoModeRef.current = qualityMode
+      autoRef.current = { candidate: null, streak: 0, lastChange: 0 }
+    }
+    const timer = window.setInterval(() => {
+      // A hidden window does not pull frames, so it must not drive the
+      // host-global preset from a stale picture of the link.
+      if (document.visibilityState === 'hidden') return
+      const stats = statsRef.current
+      const latency = stats.latencyMs
+      const wireFps = stats.wireFps
+      const bandwidth = stats.bytesPerSec
+
+      // Throughput on its own is not a problem: a busy screen on a healthy
+      // link can move a lot of bytes. Latency and the rate at which pull
+      // requests complete are the signals that say the link is falling behind.
+      let candidate: ResolvedQuality = 'balanced'
+      if (
+        (latency !== null && latency > 220) ||
+        (wireFps > 0 && wireFps < 7)
+      ) {
+        candidate = 'smooth'
+      } else if (
+        latency !== null &&
+        latency < 90 &&
+        wireFps >= 12 &&
+        bandwidth < 16 * 1024 * 1024
+      ) {
+        candidate = 'quality'
       }
-    },
-    [],
-  )
+
+      const state = autoRef.current
+      if (candidate === resolvedMode) {
+        state.candidate = null
+        state.streak = 0
+        return
+      }
+      if (state.candidate === candidate) {
+        state.streak += 1
+      } else {
+        state.candidate = candidate
+        state.streak = 1
+      }
+      const now = performance.now()
+      if (state.streak >= 2 && now - state.lastChange >= 3000) {
+        state.lastChange = now
+        state.candidate = null
+        state.streak = 0
+        setAutoTier(candidate)
+      }
+    }, 1000)
+    return () => window.clearInterval(timer)
+  }, [tab.phase, tab.id, qualityMode, resolvedMode])
 
   useEffect(() => {
     const element = surfaceRef.current
@@ -230,14 +362,27 @@ export function SessionView({
     const screenW = welcome.tiles.screen_w
     const screenH = welcome.tiles.screen_h
     if (screenW <= 0 || screenH <= 0) return null
-    const rect = element.getBoundingClientRect()
-    const scale = Math.min(rect.width / screenW, rect.height / screenH)
-    const drawnWidth = screenW * scale
-    const drawnHeight = screenH * scale
-    const offsetX = (rect.width - drawnWidth) / 2
-    const offsetY = (rect.height - drawnHeight) / 2
-    const nx = (clientX - rect.left - offsetX) / drawnWidth
-    const ny = (clientY - rect.top - offsetY) / drawnHeight
+
+    let nx = 0
+    let ny = 0
+    if (displayMode === 'actual' || displayMode === 'fill') {
+      // Actual size scrolls and fill stretches, so the canvas rect itself is
+      // the image; the scroll offset is already included in that rect.
+      const canvas = element.querySelector('canvas')
+      const rect = canvas?.getBoundingClientRect()
+      if (!rect || rect.width <= 0 || rect.height <= 0) return null
+      nx = (clientX - rect.left) / rect.width
+      ny = (clientY - rect.top) / rect.height
+    } else {
+      const rect = element.getBoundingClientRect()
+      const scale = Math.min(rect.width / screenW, rect.height / screenH)
+      const drawnWidth = screenW * scale
+      const drawnHeight = screenH * scale
+      const offsetX = (rect.width - drawnWidth) / 2
+      const offsetY = (rect.height - drawnHeight) / 2
+      nx = (clientX - rect.left - offsetX) / drawnWidth
+      ny = (clientY - rect.top - offsetY) / drawnHeight
+    }
     if (nx < 0 || nx > 1 || ny < 0 || ny > 1) return null
     return { x: Number(nx.toFixed(5)), y: Number(ny.toFixed(5)) }
   }
@@ -296,6 +441,24 @@ export function SessionView({
   const openKeyboard = () => {
     if (!tab.controlEnabled) setControlEnabled(tab.id, true)
     keyboardRef.current?.focus()
+  }
+
+  const toggleFullscreen = () => {
+    if (shellInfo.enabled) {
+      windowAction('fullscreen')
+      setIsFullscreen((value) => !value)
+      return
+    }
+    if (document.fullscreenElement) {
+      void document.exitFullscreen()
+    } else {
+      void sessionRootRef.current?.requestFullscreen()
+    }
+  }
+
+  const changeDisplayMode = (mode: DisplayMode) => {
+    setDisplayMode(mode)
+    setQuickOpen(false)
   }
 
   const onTouchpadDown = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -485,6 +648,9 @@ export function SessionView({
       onTouchpadMove(event)
       return
     }
+    if (displayMode === 'actual') {
+      panPointer.current = { x: event.clientX, y: event.clientY }
+    }
     const point = normalize(event.clientX, event.clientY)
     if (!point) return
     pendingMove.current = point
@@ -501,6 +667,9 @@ export function SessionView({
     const element = surfaceRef.current
     if (!element || !tab.controlEnabled || !inputAvailable) return
     const onWheel = (event: WheelEvent) => {
+      // In 1:1 mode the wheel scrolls the local oversized image; sending it to
+      // the remote as well would defeat the purpose of that mode.
+      if (displayMode === 'actual') return
       event.preventDefault()
       const dy = event.deltaY === 0 ? 0 : event.deltaY > 0 ? 1 : -1
       const dx = event.deltaX === 0 ? 0 : event.deltaX > 0 ? 1 : -1
@@ -508,7 +677,7 @@ export function SessionView({
     }
     element.addEventListener('wheel', onWheel, { passive: false })
     return () => element.removeEventListener('wheel', onWheel)
-  }, [tab.controlEnabled, inputAvailable, tab.id, connection])
+  }, [tab.controlEnabled, inputAvailable, tab.id, connection, displayMode])
 
   useEffect(() => {
     if (!tab.controlEnabled) return
@@ -583,9 +752,19 @@ export function SessionView({
   const latency =
     tab.stats.latencyMs === null ? '—' : `${Math.round(tab.stats.latencyMs)} ms`
   const syntheticLabel = synthetic ? t('session.syntheticShort') : null
+  const displays = tab.welcome?.displays ?? []
+  const transportLabel =
+    tab.welcome?.transport === 'websocket'
+      ? 'WS'
+      : (tab.welcome?.transport ?? '—')
+  // Follow the frame actually on screen; the welcome codec is only a snapshot
+  // from connect time and goes stale when the preset changes.
+  const codecLabel = tab.frame
+    ? codecName(tab.frame.codec)
+    : (tab.welcome?.tiles.codec ?? '')
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <div ref={sessionRootRef} className="flex min-h-0 flex-1 flex-col">
       <div className="flex flex-wrap items-center gap-2 border-b border-line-soft px-4 py-2.5">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
@@ -608,28 +787,6 @@ export function SessionView({
         </div>
 
         <div className="ml-auto flex items-center gap-1.5">
-          {(tab.welcome?.displays?.length ?? 0) > 1 ? (
-            <label
-              className="flex items-center gap-1 rounded-md border border-line bg-panel px-1.5 text-muted"
-              title={t('session.display')}
-            >
-              <Monitor size={13} />
-              <select
-                value={tab.displayIndex}
-                onChange={(event) =>
-                  connection()?.setDisplay(Number(event.target.value))
-                }
-                aria-label={t('session.display')}
-                className="h-8 max-w-[9rem] bg-transparent pr-1 text-[11px] text-ink outline-none"
-              >
-                {tab.welcome?.displays?.map((display) => (
-                  <option key={display.index} value={display.index}>
-                    {display.name || `Display ${display.index + 1}`}
-                  </option>
-                ))}
-              </select>
-            </label>
-          ) : null}
           <div className="flex items-center gap-1.5">
             <Stat label={t('stats.fps')} value={String(tab.stats.fps)} />
             <Stat label={t('stats.latency')} value={latency} />
@@ -752,18 +909,52 @@ export function SessionView({
           onPointerUp={onPointerUp}
           onPointerMove={onPointerMove}
           onPointerCancel={onTouchpadCancel}
+          onPointerLeave={() => {
+            panPointer.current = null
+          }}
           onContextMenu={(event) => {
             if (tab.controlEnabled) event.preventDefault()
           }}
           className={
-            'relative flex h-full w-full touch-none select-none items-center justify-center overflow-hidden rounded-xl border bg-black/70 outline-none transition ' +
+            'relative h-full w-full touch-none select-none rounded-xl border bg-black/70 outline-none transition ' +
+            (displayMode === 'actual'
+              ? 'overflow-auto '
+              : 'flex items-center justify-center overflow-hidden ') +
             (tab.controlEnabled ? 'border-accent/45' : 'border-line')
           }
         >
           {tab.frame ? (
-            <TileCanvas frame={tab.frame} />
+            <div
+              className={
+                displayMode === 'actual'
+                  ? 'relative'
+                  : 'relative h-full w-full'
+              }
+              style={
+                displayMode === 'actual'
+                  ? {
+                      width: tab.frame.screenW,
+                      height: tab.frame.screenH,
+                    }
+                  : undefined
+              }
+            >
+              <TileCanvas frame={tab.frame} mode={displayMode} />
+              {(!tab.controlEnabled || virtualMouse) && !synthetic ? (
+                <RemoteCursor
+                  shape={tab.cursorShape}
+                  position={tab.cursorPosition}
+                  welcome={welcome}
+                  viewWidth={surfaceSize.width}
+                  viewHeight={surfaceSize.height}
+                  screenWidth={tab.frame?.screenW}
+                  screenHeight={tab.frame?.screenH}
+                  mode={displayMode}
+                />
+              ) : null}
+            </div>
           ) : (
-            <div className="flex items-center gap-2 text-sm text-muted">
+            <div className="absolute inset-0 flex items-center justify-center gap-2 text-sm text-muted">
               <Radio size={15} className="animate-pulse text-accent" />
               {tab.phase === 'connecting'
                 ? t('session.connecting')
@@ -771,17 +962,125 @@ export function SessionView({
             </div>
           )}
 
-          {(!tab.controlEnabled || virtualMouse) && !synthetic ? (
-            <RemoteCursor
-              shape={tab.cursorShape}
-              position={tab.cursorPosition}
-              welcome={welcome}
-              viewWidth={surfaceSize.width}
-              viewHeight={surfaceSize.height}
-              screenWidth={tab.frame?.screenW}
-              screenHeight={tab.frame?.screenH}
-            />
-          ) : null}
+          <div
+            className="pointer-events-none absolute left-1/2 top-3 z-30 -translate-x-1/2"
+            onPointerDown={(event) => event.stopPropagation()}
+            onPointerUp={(event) => event.stopPropagation()}
+          >
+            <div
+              className={
+                'group pointer-events-auto flex items-center gap-1 overflow-hidden rounded-full border border-line bg-surface/90 p-1 shadow-lg backdrop-blur transition-all duration-200 ' +
+                (quickOpen
+                  ? 'max-w-[92vw]'
+                  : 'max-w-[2.5rem] hover:max-w-[92vw]')
+              }
+              onMouseLeave={() => setQuickOpen(false)}
+            >
+              <button
+                type="button"
+                onClick={() => setQuickOpen((value) => !value)}
+                className="btn btn-quiet h-7 w-7 shrink-0 !px-0"
+                title={t('session.quickActions')}
+                aria-label={t('session.quickActions')}
+                aria-expanded={quickOpen}
+              >
+                <Settings2 size={14} />
+              </button>
+              <div
+                className={
+                  'flex items-center gap-1 transition-opacity duration-150 ' +
+                  (quickOpen
+                    ? 'opacity-100'
+                    : 'opacity-0 group-hover:opacity-100')
+                }
+              >
+                <button
+                  type="button"
+                  onClick={toggleFullscreen}
+                  className="btn btn-quiet h-7 gap-1 px-2 text-[11px]"
+                  title={
+                    isFullscreen
+                      ? t('session.exitFullscreen')
+                      : t('session.fullscreen')
+                  }
+                >
+                  {isFullscreen ? (
+                    <Minimize2 size={13} />
+                  ) : (
+                    <Maximize2 size={13} />
+                  )}
+                  <span className="hidden sm:inline">
+                    {isFullscreen
+                      ? t('session.exitFullscreen')
+                      : t('session.fullscreen')}
+                  </span>
+                </button>
+                <span className="mx-0.5 h-4 w-px bg-line" />
+                {(['fit', 'actual', 'fill'] as DisplayMode[]).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => changeDisplayMode(mode)}
+                    className={
+                      'btn h-7 px-2 text-[11px] ' +
+                      (displayMode === mode ? 'btn-primary' : 'btn-quiet')
+                    }
+                  >
+                    {t(`session.${mode}`)}
+                  </button>
+                ))}
+                <span className="mx-0.5 h-4 w-px bg-line" />
+                <label
+                  className="flex items-center gap-1 rounded-md border border-line bg-panel px-1.5 text-muted"
+                  title={t('session.quality')}
+                >
+                  <Gauge size={12} />
+                  <select
+                    value={qualityMode}
+                    onChange={(event) =>
+                      setQualityMode(event.target.value as QualityMode)
+                    }
+                    aria-label={t('session.quality')}
+                    className="h-7 bg-transparent text-[11px] text-ink outline-none"
+                  >
+                    <option value="smooth">{t('session.qualitySmooth')}</option>
+                    <option value="balanced">
+                      {t('session.qualityBalanced')}
+                    </option>
+                    <option value="quality">
+                      {t('session.qualityHigh')}
+                    </option>
+                    <option value="auto">{t('session.qualityAuto')}</option>
+                  </select>
+                </label>
+                {displays.length > 1 ? (
+                  <label
+                    className="flex items-center gap-1 rounded-md border border-line bg-panel px-1.5 text-muted"
+                    title={t('session.display')}
+                  >
+                    <Monitor size={12} />
+                    <select
+                      value={tab.displayIndex}
+                      onChange={(event) =>
+                        connection()?.setDisplay(Number(event.target.value))
+                      }
+                      aria-label={t('session.display')}
+                      className="h-7 max-w-[8rem] bg-transparent text-[11px] text-ink outline-none"
+                    >
+                      {displays.map((display) => (
+                        <option key={display.index} value={display.index}>
+                          {display.name || `Display ${display.index + 1}`}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : null}
+                <span className="chip" title={t('session.transport')}>
+                  {transportLabel}
+                </span>
+              </div>
+            </div>
+          </div>
 
           <div className="pointer-events-none absolute left-3 top-3 flex flex-wrap gap-1.5">
             {welcome ? (
@@ -791,7 +1090,7 @@ export function SessionView({
             ) : null}
             {welcome ? (
               <span className="rounded-md border border-line bg-surface/80 px-2 py-1 font-mono text-[10px] uppercase text-muted backdrop-blur">
-                {welcome.tiles.codec}
+                {codecLabel}
               </span>
             ) : null}
             {syntheticLabel ? (
@@ -811,7 +1110,7 @@ export function SessionView({
               <span className="text-accent">{tab.stats.fps} fps</span>
               <span>{latency}</span>
               <span>{formatBandwidth(tab.stats.bytesPerSec)}</span>
-              <span className="text-muted/60">{welcome?.tiles.codec ?? ''}</span>
+              <span className="text-muted/60">{codecLabel}</span>
             </div>
           ) : null}
 

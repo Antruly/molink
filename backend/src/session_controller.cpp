@@ -31,6 +31,30 @@ uint64_t epoch_us() {
 /// is cheaper than shipping dozens of deltas it will render in one go.
 constexpr uint32_t kMaxReplayFrames = 60;
 
+const char* codec_name(uint8_t codec) {
+  switch (static_cast<protocol::codec>(codec)) {
+    case protocol::codec::deflate_bgra:
+      return "deflate-bgra";
+    case protocol::codec::rgb24:
+      return "rgb24";
+    case protocol::codec::rgb565:
+      return "rgb565";
+    case protocol::codec::deflate_rgb24:
+      return "deflate-rgb24";
+    case protocol::codec::deflate_rgb565:
+      return "deflate-rgb565";
+    case protocol::codec::png:
+      return "png";
+    case protocol::codec::h264:
+      return "h264";
+    case protocol::codec::av1:
+      return "av1";
+    case protocol::codec::bgra:
+    default:
+      return "bgra";
+  }
+}
+
 std::string string_field(const uvcpp_json& j, const char* key) {
   const auto it = j.find(key);
   if (it == j.end() || !it->is_string()) return std::string();
@@ -345,10 +369,9 @@ void send_welcome(session_transport* transport, const session_info& session,
       }
     }
   }
-  j["tiles"]["codec"] =
-      (frame && frame->codec == static_cast<uint8_t>(protocol::codec::deflate_bgra))
-          ? "deflate-bgra"
-          : "bgra";
+  j["tiles"]["codec"] = frame ? codec_name(frame->codec) : "bgra";
+  j["tiles"]["quality"] =
+      opt.capture ? quality_mode_name(opt.capture->quality()) : "balanced";
   j["tiles"]["screen_w"] = frame ? frame->width : 0;
   j["tiles"]["screen_h"] = frame ? frame->height : 0;
   j["tiles"]["tile_w"] = frame ? frame->tile_w : 0;
@@ -416,7 +439,7 @@ bool session_controller::start(const std::string* initial_token) {
     const bool locked = options_.lock && options_.lock->locked();
     if (!locked && options_.auth && options_.auth->authenticate(
                                          *initial_token, /*consume=*/true)) {
-      session->authenticated = true;
+      registry_->set_authenticated(session);
       if (options_.lock) options_.lock->record_success(peer_ip);
     } else if (!locked) {
       if (options_.lock) {
@@ -512,10 +535,15 @@ void session_controller::on_text(const std::string& text) {
       transport->close(transport_close::policy, "invalid token");
       return;
     }
-    session->authenticated = true;
+    registry_->set_authenticated(session);
     if (options_.lock) options_.lock->record_success(peer_ip);
     if (options_.capture) options_.capture->set_active(true);
     send_welcome_message();
+    return;
+  }
+
+  if (type == "pong") {
+    // Reply to the supervisor's heartbeat. There is nothing to answer.
     return;
   }
 
@@ -529,7 +557,14 @@ void session_controller::on_text(const std::string& text) {
     return;
   }
 
-  if (type == "capture-fps" || type == "quality") {
+  auto apply_fps = [&](int fps) {
+    if (fps < 1) fps = 1;
+    if (fps > 30) fps = 30;
+    options_.capture->set_target_fps(fps);
+    return fps;
+  };
+
+  if (type == "capture-fps") {
     if (!options_.capture) {
       send_error(transport.get(), "not_implemented", "capture is unavailable");
       return;
@@ -539,13 +574,46 @@ void session_controller::on_text(const std::string& text) {
       send_error(transport.get(), "bad_fps", "fps must be a number");
       return;
     }
-    int fps = static_cast<int>(fps_it->get<double>());
-    if (fps < 1) fps = 1;
-    if (fps > 30) fps = 30;
-    options_.capture->set_target_fps(fps);
+    const int fps = apply_fps(static_cast<int>(fps_it->get<double>()));
     uvcpp_json ack;
     ack["type"] = "capture-fps";
     ack["fps"] = fps;
+    ack["scope"] = "global";
+    send_json(transport.get(), ack);
+    return;
+  }
+
+  // Quality preset plus an optional capture rate. The client resolves "auto"
+  // into a concrete preset, so the core only has to apply encoding knobs.
+  // Both are global to the host, like the capture rate.
+  if (type == "quality") {
+    if (!options_.capture) {
+      send_error(transport.get(), "not_implemented", "capture is unavailable");
+      return;
+    }
+    const std::string mode_name = string_field(j, "mode");
+    quality_mode mode = options_.capture->quality();
+    if (!mode_name.empty() && !quality_mode_from_name(mode_name, mode)) {
+      send_error(transport.get(), "bad_quality",
+                 "mode must be smooth, balanced or quality");
+      return;
+    }
+    const auto fps_it = j.find("fps");
+    if (fps_it != j.end() && !fps_it->is_number()) {
+      send_error(transport.get(), "bad_fps", "fps must be a number");
+      return;
+    }
+    if (!mode_name.empty()) options_.capture->set_quality(mode);
+    int fps = 0;
+    if (fps_it != j.end()) {
+      fps = apply_fps(static_cast<int>(fps_it->get<double>()));
+    }
+    uvcpp_json ack;
+    ack["type"] = "quality";
+    ack["mode"] = quality_mode_name(options_.capture->quality());
+    ack["format"] = tile_format_name(
+        quality_profile_for(options_.capture->quality()).format);
+    if (fps != 0) ack["fps"] = fps;
     ack["scope"] = "global";
     send_json(transport.get(), ack);
     return;

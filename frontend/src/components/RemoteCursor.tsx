@@ -1,5 +1,6 @@
 import { useMemo } from 'react'
 import type { CursorPosition, CursorShape, Welcome } from '../lib/client'
+import type { DisplayMode } from './TileCanvas'
 
 interface Props {
   shape: CursorShape | null
@@ -9,6 +10,7 @@ interface Props {
   viewHeight: number
   screenWidth?: number
   screenHeight?: number
+  mode?: DisplayMode
 }
 
 /// Draws the remote pointer. X11 screen grabs do not include the cursor, so
@@ -23,6 +25,7 @@ export function RemoteCursor({
   viewHeight,
   screenWidth,
   screenHeight,
+  mode = 'fit',
 }: Props) {
   const src = useMemo(() => {
     if (!shape) return null
@@ -55,14 +58,38 @@ export function RemoteCursor({
     screenHeight && screenHeight > 0 ? screenHeight : welcome.tiles.screen_h
   if (screenW <= 0 || screenH <= 0) return null
 
-  const scale = Math.min(viewWidth / screenW, viewHeight / screenH)
-  const drawnWidth = screenW * scale
-  const drawnHeight = screenH * scale
-  const offsetX = (viewWidth - drawnWidth) / 2
-  const offsetY = (viewHeight - drawnHeight) / 2
+  if (mode === 'actual') {
+    return (
+      <img
+        data-remote-cursor
+        src={src}
+        alt=""
+        draggable={false}
+        className="pointer-events-none absolute z-10 select-none"
+        style={{
+          left: position.x - shape.hotspotX,
+          top: position.y - shape.hotspotY,
+          width: shape.w,
+          height: shape.h,
+          imageRendering: 'pixelated',
+        }}
+      />
+    )
+  }
 
-  const left = offsetX + (position.x - shape.hotspotX) * scale
-  const top = offsetY + (position.y - shape.hotspotY) * scale
+  const scale =
+    mode === 'fill'
+      ? 1
+      : Math.min(viewWidth / screenW, viewHeight / screenH)
+  const scaleX = mode === 'fill' ? viewWidth / screenW : scale
+  const scaleY = mode === 'fill' ? viewHeight / screenH : scale
+  const offsetX =
+    mode === 'fill' ? 0 : (viewWidth - screenW * scaleX) / 2
+  const offsetY =
+    mode === 'fill' ? 0 : (viewHeight - screenH * scaleY) / 2
+
+  const left = offsetX + (position.x - shape.hotspotX) * scaleX
+  const top = offsetY + (position.y - shape.hotspotY) * scaleY
 
   return (
     <img
@@ -74,8 +101,8 @@ export function RemoteCursor({
       style={{
         left,
         top,
-        width: shape.w * scale,
-        height: shape.h * scale,
+        width: shape.w * scaleX,
+        height: shape.h * scaleY,
         imageRendering: 'pixelated',
       }}
     />

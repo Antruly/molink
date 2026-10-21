@@ -643,11 +643,14 @@ class x11_capture final : public capture_base {
     return damaged;
   }
 
-  void teardown_damage() {
+  void destroy_damage_object() {
     if (damage_ != 0 && damage_destroy_ != nullptr && display_ != nullptr) {
       damage_destroy_(display_, damage_);
     }
     damage_ = 0;
+  }
+
+  void unload_damage_library() {
     if (damage_lib_ != nullptr) {
       dlclose(damage_lib_);
       damage_lib_ = nullptr;
@@ -728,17 +731,22 @@ class x11_capture final : public capture_base {
 
   void teardown() {
     teardown_image();
-    teardown_damage();
+    // Xlib keeps extension close-down hooks inside the dlopen'd libraries.
+    // Destroy the damage object and close the display before unloading any of
+    // them; doing it the other way round makes XCloseDisplay jump into an
+    // unmapped module at exit.
+    destroy_damage_object();
+    if (display_ != nullptr) {
+      XCloseDisplay(display_);
+      display_ = nullptr;
+    }
+    unload_damage_library();
     teardown_cursor();
     if (xrandr_lib_ != nullptr) {
       dlclose(xrandr_lib_);
       xrandr_lib_ = nullptr;
       get_monitors_ = nullptr;
       free_monitors_ = nullptr;
-    }
-    if (display_ != nullptr) {
-      XCloseDisplay(display_);
-      display_ = nullptr;
     }
   }
 
@@ -899,10 +907,16 @@ class x11_capture final : public capture_base {
                         previous_.data(), keyframe,
                         dirty_rect.valid ? &dirty_rect : nullptr,
                         /*force_opaque=*/false,
-                        options_.change_threshold, tiles);
+                        quality_change_threshold(options_.change_threshold),
+                        tiles);
+
+    encode_options encoding;
+    encoding.compress = options_.compress;
+    encoding.format = quality_format();
+    encoding.effort = quality_effort();
 
     std::vector<uint8_t> payload;
-    if (!encode_capture_frame(header, tiles, options_.compress, payload, err)) {
+    if (!encode_capture_frame(header, tiles, encoding, payload, err)) {
       return false;
     }
 

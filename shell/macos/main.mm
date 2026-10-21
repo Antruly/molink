@@ -369,6 +369,8 @@ static AppDelegate* g_app_delegate = nil;
     [self.window miniaturize:nil];
   } else if ([action isEqualToString:@"maximize"]) {
     [self.window zoom:nil];
+  } else if ([action isEqualToString:@"fullscreen"]) {
+    [self.window toggleFullScreen:nil];
   } else if ([action isEqualToString:@"close"]) {
     [self.window performClose:nil];
   } else if ([action isEqualToString:@"quit"]) {

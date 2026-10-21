@@ -1,24 +1,36 @@
 import { useEffect, useRef } from 'react'
-import { Codec, FrameFlag, type Frame } from '../lib/protocol'
+import { FrameFlag, type Frame } from '../lib/protocol'
+import { expandTile, tilePixelKind } from '../lib/tiles'
 
 /**
- * Paints one frame. Raw tiles are BGRA; ImageData wants RGBA, so the red and
- * blue channels are swapped while copying. Any other codec is left to a later
- * WebCodecs path, which is why the canvas simply keeps the previous image.
+ * Paints one frame. Tiles arrive as BGRA, RGB24 or RGB565 (raw or already
+ * inflated); ImageData wants RGBA, so the channels are expanded while copying.
+ * Any other codec is left to a later WebCodecs path, which is why the canvas
+ * simply keeps the previous image.
  *
  * Tiles are painted into an off-screen back buffer and the completed buffer is
  * blitted in one drawImage. A delta can never leave the visible canvas half
  * updated, and a size change waits for the keyframe the core sends instead of
  * showing a cleared (black) canvas.
  */
-export function TileCanvas({ frame }: { frame: Frame | null }) {
+export type DisplayMode = 'fit' | 'actual' | 'fill'
+
+export function TileCanvas({
+  frame,
+  mode = 'fit',
+}: {
+  frame: Frame | null
+  mode?: DisplayMode
+}) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const backRef = useRef<HTMLCanvasElement | null>(null)
 
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas || !frame) return
-    if (frame.codec !== Codec.bgra && frame.codec !== Codec.deflateBgra) return
+    // Unknown codecs (PNG/H.264/AV1) wait for a WebCodecs path; keep showing
+    // the previous image instead of blanking the back buffer.
+    if (tilePixelKind(frame.codec) === null) return
 
     const keyframe = (frame.flags & FrameFlag.keyframe) !== 0
     let back = backRef.current
@@ -40,18 +52,13 @@ export function TileCanvas({ frame }: { frame: Frame | null }) {
     context.imageSmoothingEnabled = false
 
     for (const tile of frame.tiles) {
-      const pixels = tile.w * tile.h
-      if (tile.data.byteLength < pixels * 4) continue
-      const image = backContext.createImageData(tile.w, tile.h)
-      const dst = image.data
-      const src = tile.data
-      for (let i = 0; i < pixels * 4; i += 4) {
-        dst[i] = src[i + 2]
-        dst[i + 1] = src[i + 1]
-        dst[i + 2] = src[i]
-        dst[i + 3] = src[i + 3]
-      }
-      backContext.putImageData(image, tile.x, tile.y)
+      const rgba = expandTile(frame.codec, tile.data, tile.w, tile.h)
+      if (rgba === null) continue
+      backContext.putImageData(
+        new ImageData(rgba, tile.w, tile.h),
+        tile.x,
+        tile.y,
+      )
     }
 
     if (canvas.width !== frame.screenW) canvas.width = frame.screenW
@@ -62,7 +69,17 @@ export function TileCanvas({ frame }: { frame: Frame | null }) {
   return (
     <canvas
       ref={canvasRef}
-      className="h-full w-full object-contain"
+      className={
+        mode === 'actual'
+          ? 'block max-w-none'
+          : 'h-full w-full ' +
+            (mode === 'fill' ? 'object-fill' : 'object-contain')
+      }
+      style={
+        mode === 'actual' && frame
+          ? { width: frame.screenW, height: frame.screenH }
+          : undefined
+      }
       aria-label="Remote screen"
     />
   )

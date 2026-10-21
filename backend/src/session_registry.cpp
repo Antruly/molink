@@ -72,6 +72,13 @@ bool session_registry::has_authenticated() const {
   return false;
 }
 
+void session_registry::set_authenticated(
+    const std::shared_ptr<session_info>& s) {
+  if (!s) return;
+  std::lock_guard<std::mutex> lock(mu_);
+  s->authenticated = true;
+}
+
 void session_registry::touch(session_info& s) { s.last_seen_ms = now_ms(); }
 
 }  // namespace molink

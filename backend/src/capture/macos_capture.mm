@@ -284,11 +284,17 @@ class macos_capture final : public capture_base {
     build_changed_tiles(pixels.data(), stride, width_, height_, tile,
                         previous_.data(), keyframe, nullptr,
                         /*force_opaque=*/true,
-                        options_.change_threshold, tiles);
+                        quality_change_threshold(options_.change_threshold),
+                        tiles);
+
+    encode_options encoding;
+    encoding.compress = options_.compress;
+    encoding.format = quality_format();
+    encoding.effort = quality_effort();
 
     std::vector<uint8_t> payload;
     std::string err;
-    if (!encode_capture_frame(header, tiles, options_.compress, payload, err)) {
+    if (!encode_capture_frame(header, tiles, encoding, payload, err)) {
       return;
     }
 

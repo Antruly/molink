@@ -1,5 +1,32 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- 画质预设：流畅 / 平衡 / 清晰 / 自适应，默认平衡；会话快捷工具条与偏好设置均可切换并持久化
+- 流畅档使用有损瓦片：RGB565（16 位色）在压缩前就把每像素 4 字节降到 2 字节，并固定 zlib level 1；实测 2880×1920 桌面关键帧约 599 KB → 312 KB
+- 新增协议 codec 6–9：`rgb24`、`rgb565`、`deflate_rgb24`、`deflate_rgb565`；浏览器解压后按位扩展，不引入 JPEG/WebP 的异步解码路径
+- 清晰档使用 zlib 3/6/9 并把变化阈值收紧到最多 1；平衡档保持原有无损行为
+- 自适应档根据 RTT、含空帧的拉帧完成率和吞吐量切换预设，带两次采样确认与 3 秒迟滞
+- 画质预设同时调整采集帧率与拉帧间隔（流畅 30 fps/33 ms、平衡 20 fps/50 ms、清晰 15 fps/66 ms）
+- 会话画面显示模式（适应 / 1:1 / 拉伸）、快捷操作条与全屏切换
+- `welcome.tiles.quality` 与 `quality` 控制消息回执，报告当前生效的预设与瓦片格式
+- 关键帧瓦片并行压缩（最多 8 线程），2880×1920 关键帧编码从约 50 ms 降到约 18 ms；`MOLINK_SERIAL_KEYFRAME=1` 可退回单线程
+- 前端瓦片扩展改为 32 位整像素写入 + RGB565 查表，关键帧解码扩展耗时约减半
+- `tools/bench_quality.py`：对运行中的核心测量三档预设的关键帧大小、吞吐、FPS 和帧间隔，并给出 PASS/FAIL
+
+### Changed
+
+- `quality` 控制消息改为接受 `mode`（`smooth`/`balanced`/`quality`），`fps` 变为可选；只带 `fps` 的旧客户端行为保持不变
+- 有损格式压缩不划算时回退为原始 RGB24/RGB565，而不是 BGRA
+
+### Fixed
+
+- 客户端回应服务端心跳的 `pong` 被当成未知控制消息，导致会话里周期性出现 `unsupported control type: pong` 错误
+- `authenticated` 标志在会话线程写、supervisor 线程读时缺少同步，偶发把已认证会话误判为未认证并在 5 秒后以 `hello timeout` 关闭
+- X11 采集退出时先 `dlclose` 扩展库再 `XCloseDisplay`，Xlib 的清理钩子跳进已卸载模块，导致每次 SIGTERM 退出都段错误；现在先销毁 damage 对象并关闭 display，再卸载库
+
 ## [0.4.2] — 2026-10-22
 
 ### Fixed

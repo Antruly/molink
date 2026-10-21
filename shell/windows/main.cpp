@@ -59,6 +59,7 @@ HICON g_app_icon = nullptr;
 HANDLE g_instance_mutex = nullptr;
 
 void spawn_self(const std::wstring& uri);
+void toggle_fullscreen(HWND window);
 
 void fail_box(const wchar_t* message) {
   MessageBoxW(g_window, message, L"moLink", MB_ICONERROR | MB_OK);
@@ -291,6 +292,8 @@ class WebMessageHandler final
     } else if (action == L"maximize") {
       if (IsZoomed(g_window)) ShowWindow(g_window, SW_RESTORE);
       else ShowWindow(g_window, SW_MAXIMIZE);
+    } else if (action == L"fullscreen") {
+      toggle_fullscreen(g_window);
     } else if (action == L"drag") {
       ReleaseCapture();
       SendMessageW(g_window, WM_NCLBUTTONDOWN, HTCAPTION, 0);

@@ -15,6 +15,7 @@ export const shellInfo: ShellInfo = {
 export type WindowAction =
   | 'minimize'
   | 'maximize'
+  | 'fullscreen'
   | 'close'
   | 'drag'
   | 'quit'

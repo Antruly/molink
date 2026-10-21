@@ -1,9 +1,10 @@
 import {
-  Codec,
   FrameFlag,
   PacketType,
   ProtocolError,
+  codecBytesPerPixel,
   decodePacket,
+  isDeflatedCodec,
   parseFramePayload,
   type Frame,
 } from './protocol'
@@ -31,6 +32,8 @@ export interface Welcome {
   display_index?: number
   tiles: {
     codec: string
+    /** Active quality preset: smooth | balanced | quality. */
+    quality?: string
     screen_w: number
     screen_h: number
     tile_w: number
@@ -70,6 +73,8 @@ export interface ClientHandlers {
   onCursorPosition: (position: CursorPosition) => void
   onClipboard: (text: string) => void
   onDisplay?: (index: number) => void
+  /** Every FRAME packet, including empty "nothing changed" responses. */
+  onWireFrame?: () => void
 }
 
 interface ControlMessage {
@@ -203,10 +208,24 @@ export class MolinkClient {
     this.sendJson({ type: 'input', ...payload })
   }
 
+  /** Asks for the next capture to be a full keyframe (resync after a loss). */
+  requestKeyframe(): void {
+    this.sendJson({ type: 'request-keyframe' })
+  }
+
   /** Asks the core to change its capture rate (global for this host). */
   setCaptureFps(fps: number): void {
     if (!this.isLive()) return
     this.sendJson({ type: 'capture-fps', fps })
+  }
+
+  /**
+   * Applies an encoding preset. "auto" is resolved client-side, so only the
+   * three concrete modes are ever sent.
+   */
+  setQuality(mode: string, fps?: number): void {
+    if (!this.isLive()) return
+    this.sendJson({ type: 'quality', mode, ...(fps ? { fps } : {}) })
   }
 
   /** Switches the remote capture to another monitor. */
@@ -302,8 +321,11 @@ export class MolinkClient {
       if (packet.type !== PacketType.frame) return
       this.pendingFrame = false
       const frame = parseFramePayload(packet.payload)
+      // Count pulls that completed, even when the screen did not change. The
+      // auto quality controller uses this as a congestion signal.
+      this.handlers.onWireFrame?.()
 
-      if (frame.codec === Codec.deflateBgra) {
+      if (isDeflatedCodec(frame.codec)) {
         this.frameQueue = this.frameQueue
           .then(() => this.deliverCompressed(frame, buffer.byteLength))
           .catch((error: unknown) => {
@@ -329,10 +351,12 @@ export class MolinkClient {
     frame: Frame,
     byteLength: number,
   ): Promise<void> {
+    const bytesPerPixel = codecBytesPerPixel(frame.codec)
+    if (bytesPerPixel === 0) throw new Error('unsupported deflate codec')
     const tiles = await Promise.all(
       frame.tiles.map(async (tile) => {
         const data = await inflateTile(tile.data)
-        if (data.byteLength !== tile.w * tile.h * 4) {
+        if (data.byteLength !== tile.w * tile.h * bytesPerPixel) {
           throw new Error('tile size mismatch after decompression')
         }
         return { ...tile, data }

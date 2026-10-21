@@ -400,6 +400,10 @@ gboolean on_window_state(GtkWidget* widget, GdkEventWindowState* event,
   if ((event->changed_mask &
        (GDK_WINDOW_STATE_MAXIMIZED | GDK_WINDOW_STATE_FULLSCREEN)) != 0) {
     apply_window_shape(widget);
+    // Maximize/fullscreen can race the WebView's allocation; ask GTK to lay
+    // the child out again so the remote canvas fills the new window.
+    GtkWidget* child = gtk_bin_get_child(GTK_BIN(widget));
+    if (child != nullptr) gtk_widget_queue_resize(child);
   }
   return FALSE;
 }
@@ -564,6 +568,16 @@ void on_script_message(WebKitUserContentManager*, WebKitJavascriptResult* result
       gtk_window_unmaximize(GTK_WINDOW(window));
     } else {
       gtk_window_maximize(GTK_WINDOW(window));
+    }
+  } else if (action == "fullscreen") {
+    GdkWindow* gdk_window = gtk_widget_get_window(window);
+    const bool fullscreen =
+        gdk_window != nullptr &&
+        (gdk_window_get_state(gdk_window) & GDK_WINDOW_STATE_FULLSCREEN) != 0;
+    if (fullscreen) {
+      gtk_window_unfullscreen(GTK_WINDOW(window));
+    } else {
+      gtk_window_fullscreen(GTK_WINDOW(window));
     }
   } else if (action == "close") {
     if (g_url_mode) {

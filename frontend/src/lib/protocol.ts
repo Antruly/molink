@@ -28,7 +28,60 @@ export const Codec = {
   h264: 3,
   av1: 4,
   deflateBgra: 5,
+  rgb24: 6,
+  rgb565: 7,
+  deflateRgb24: 8,
+  deflateRgb565: 9,
 } as const
+
+/** Bytes per pixel after decompression; 0 when the codec is not pixel-based. */
+export function codecBytesPerPixel(codec: number): number {
+  switch (codec) {
+    case Codec.bgra:
+    case Codec.deflateBgra:
+      return 4
+    case Codec.rgb24:
+    case Codec.deflateRgb24:
+      return 3
+    case Codec.rgb565:
+    case Codec.deflateRgb565:
+      return 2
+    default:
+      return 0
+  }
+}
+
+export function codecName(codec: number): string {
+  switch (codec) {
+    case Codec.png:
+      return 'png'
+    case Codec.h264:
+      return 'h264'
+    case Codec.av1:
+      return 'av1'
+    case Codec.deflateBgra:
+      return 'deflate-bgra'
+    case Codec.rgb24:
+      return 'rgb24'
+    case Codec.rgb565:
+      return 'rgb565'
+    case Codec.deflateRgb24:
+      return 'deflate-rgb24'
+    case Codec.deflateRgb565:
+      return 'deflate-rgb565'
+    case Codec.bgra:
+    default:
+      return 'bgra'
+  }
+}
+
+export function isDeflatedCodec(codec: number): boolean {
+  return (
+    codec === Codec.deflateBgra ||
+    codec === Codec.deflateRgb24 ||
+    codec === Codec.deflateRgb565
+  )
+}
 
 export const FrameFlag = {
   keyframe: 1 << 0,

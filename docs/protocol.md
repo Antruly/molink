@@ -116,17 +116,42 @@
 | 3 | `h264` | Annex-B 码流（规划中） |
 | 4 | `av1` | OBU（规划中） |
 | 5 | `deflate_bgra` | zlib(deflate) 压缩的 BGRA 瓦片 |
+| 6 | `rgb24` | 原始 24 位 RGB（R、G、B），丢弃 alpha |
+| 7 | `rgb565` | 原始 16 位 RGB565，小端 |
+| 8 | `deflate_rgb24` | zlib(deflate) 压缩的 RGB24 瓦片 |
+| 9 | `deflate_rgb565` | zlib(deflate) 压缩的 RGB565 瓦片 |
 
 `bgra` 的通道顺序是 **B、G、R、A**。Canvas `ImageData` 需要 R、G、B、A，渲染时必须换位。
+`rgb24` 的顺序是 **R、G、B**；`rgb565` 每像素 2 字节、小端，位布局为
+`RRRRRGGG GGGBBBBB`（5/6/5），解码时用位复制扩展回 8 位。
 
-### 3.4 瓦片压缩（codec 5）
+### 3.4 瓦片压缩（codec 5 / 8 / 9）
 
-- `codec = 5` 时，每个瓦片的 `byte_length` 是 zlib 流（带 zlib 头，浏览器
+- `codec = 5/8/9` 时，每个瓦片的 `byte_length` 是 zlib 流（带 zlib 头，浏览器
   `DecompressionStream("deflate")` 可直接解压）的长度。
-- 解压后必须恰好是 `w * h * 4` 字节的 BGRA。
-- 服务端自适应选择 zlib 级别：关键帧/大突发用级别 1 保低延迟，少量小瓦片用 3 或 6 换更高压缩比；如果整帧压缩后不小于原始大小，整帧回退为 `codec = 1`。
+- 解压后的长度必须按 codec 精确匹配：`bgra` 为 `w*h*4`，`rgb24` 为 `w*h*3`，
+  `rgb565` 为 `w*h*2`。
+- 服务端按画质预设选择 zlib 级别：关键帧/大突发在“流畅”档固定级别 1，
+  “平衡”档沿用自适应（1/3/6），“清晰”档提高到 3/6/9。
+- 如果整帧压缩后不小于该格式的原始大小，服务端回退为对应的原始格式
+  （`1/6/7`）。有损格式**不会**因为有损而回退到 BGRA：打包后的 2/3 字节
+  仍然比 4 字节小。
 - 浏览器原生只支持 `DecompressionStream("deflate")`，所以服务端不直接发 Brotli；桌面客户端如需要 Brotli，应在传输协商中单独约定 codec，而不是复用 codec 5。
 - 帧内所有瓦片使用同一种 codec，不混合。
+
+### 3.5 画质预设与有损格式
+
+`quality` 控制消息（见 §4.2）把主机编码切换到以下预设之一：
+
+| 预设 | 格式 | zlib | 变化阈值 | 用途 |
+|---|---|---|---|---|
+| `smooth`（流畅） | `rgb565` | 固定 1 | 至少 16 | 优先帧率与包体积；16 位色，丢弃细小的颜色差异 |
+| `balanced`（平衡，默认） | `bgra` | 自适应 | 使用配置值（默认 4） | 无损，和旧版本行为一致 |
+| `quality`（清晰） | `bgra` | 3/6/9 | 最多 1 | 优先画质，加大压缩力度 |
+
+预设是**主机全局**的，与采集帧率相同：一个会话切换会影响同一主机上的所有会话。
+`auto` 不是 wire 协议的一部分，由客户端根据 RTT、拉帧完成率和吞吐量在三个具体
+预设之间切换，并带迟滞。
 
 ---
 
@@ -194,8 +219,10 @@
 ```
 
 `backend` 取值：`x11-shm`、`x11`、`synthetic`。`synthetic: true` 表示当前是合成测试帧，
-不是真实屏幕。`codec` 反映当前帧实际使用的编码（`bgra` 或 `deflate-bgra`）；
-`input` 表示本机是否支持输入注入；`clipboard` 表示本机是否支持剪贴板同步。
+不是真实屏幕。`codec` 反映当前帧实际使用的编码（`bgra`、`deflate-bgra`、`rgb24`、
+`rgb565`、`deflate-rgb24` 或 `deflate-rgb565`）；`quality` 是当前画质预设
+（`smooth`/`balanced`/`quality`）；`input` 表示本机是否支持输入注入；
+`clipboard` 表示本机是否支持剪贴板同步。
 
 **客户端 → 服务端**
 
@@ -206,7 +233,8 @@
 | `pong` | `t` | 回应服务端心跳 |
 | `request-frame` | — | 请求一帧。服务端返回自上次以来所有未送达的帧；无变化时返回 0 瓦片帧 |
 | `request-keyframe` | — | 请求下一个捕获帧标记为关键帧（客户端丢失基准时使用） |
-| `capture-fps` / `quality` | `fps` (1..30) | 调整主机的采集帧率（全局）；用于高延迟/带宽不足时的自适应降帧，服务端回 `capture-fps` |
+| `capture-fps` | `fps` (1..30) | 调整主机的采集帧率（全局）；服务端回 `capture-fps` |
+| `quality` | `mode`（`smooth`/`balanced`/`quality`），可选 `fps` | 切换主机的编码预设（全局）；`fps` 同时调整采集帧率（为兼容旧客户端保留）。服务端回 `quality`，带实际生效的 `mode` 与 `format` |
 | `display` | `index` | 切换被控端显示器（全局）；服务端回 `display` 并发送新关键帧 |
 | `input` | `events[]` | 指针/键盘事件；需要已鉴权，见 §4.3 |
 | `bye` | — | 正常关闭 |

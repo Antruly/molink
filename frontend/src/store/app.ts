@@ -35,6 +35,8 @@ import {
 
 export type Theme = 'light' | 'dark'
 export type AuthPhase = 'booting' | 'login' | 'locked' | 'ready'
+/// "auto" is resolved in the client into one of the three concrete presets.
+export type QualityMode = 'smooth' | 'balanced' | 'quality' | 'auto'
 
 export interface SessionTab {
   id: string
@@ -65,6 +67,7 @@ export interface RecentConnection {
 interface AppState {
   theme: Theme
   qualityWatermark: boolean
+  qualityMode: QualityMode
   settingsOpen: boolean
   authPhase: AuthPhase
   localMode: boolean
@@ -83,6 +86,7 @@ interface AppState {
   setTheme: (theme: Theme) => void
   toggleTheme: () => void
   setQualityWatermark: (enabled: boolean) => void
+  setQualityMode: (mode: QualityMode) => void
   setSettingsOpen: (open: boolean) => void
   boot: () => Promise<void>
   refreshState: () => Promise<void>
@@ -128,9 +132,11 @@ interface AppState {
 
 const THEME_KEY = 'molink.theme'
 const QUALITY_KEY = 'molink.quality'
+const QUALITY_MODE_KEY = 'molink.qualityMode'
 const RECENT_KEY = 'molink.recents'
 const EMPTY_STATS: Stats = {
   fps: 0,
+  wireFps: 0,
   latencyMs: null,
   bytesPerSec: 0,
   frames: 0,
@@ -160,6 +166,19 @@ function initialTheme(): Theme {
   return window.matchMedia?.('(prefers-color-scheme: light)').matches
     ? 'light'
     : 'dark'
+}
+
+function initialQualityMode(): QualityMode {
+  const saved = readStorage(QUALITY_MODE_KEY)
+  if (
+    saved === 'smooth' ||
+    saved === 'balanced' ||
+    saved === 'quality' ||
+    saved === 'auto'
+  ) {
+    return saved
+  }
+  return 'balanced'
 }
 
 function initialRecents(): RecentConnection[] {
@@ -225,6 +244,7 @@ export const useAppStore = create<AppState>((set, get) => {
   return {
     theme: initialTheme(),
     qualityWatermark: readStorage(QUALITY_KEY) === '1',
+    qualityMode: initialQualityMode(),
     settingsOpen: false,
     authPhase: 'booting',
     localMode: false,
@@ -254,6 +274,11 @@ export const useAppStore = create<AppState>((set, get) => {
     setQualityWatermark: (enabled) => {
       writeStorage(QUALITY_KEY, enabled ? '1' : '0')
       set({ qualityWatermark: enabled })
+    },
+
+    setQualityMode: (mode) => {
+      writeStorage(QUALITY_MODE_KEY, mode)
+      set({ qualityMode: mode })
     },
 
     setSettingsOpen: (open) => set({ settingsOpen: open }),
