@@ -36,7 +36,7 @@ cmake --build build && ctest --test-dir build --output-on-failure
 |---|---|
 | `--host` | 绑定地址，默认 `127.0.0.1` |
 | `--port` | 端口，默认 `21118` |
-| `--token` | 访问令牌；缺省随机生成（也可用 `MOLINK_TOKEN`） |
+| `--token` | 访问令牌；缺省生成并持久化到配置目录（也可用 `MOLINK_TOKEN`） |
 | `--allow-remote` | 允许绑定非回环地址 |
 | `--parent-pid` | 监视父进程，父进程消失时退出 |
 | `--capture-fps <n>` | 抓屏帧率上限，默认 15 |
@@ -45,6 +45,7 @@ cmake --build build && ctest --test-dir build --output-on-failure
 | `--no-compress` | 关闭 zlib 瓦片压缩，发送原始 BGRA |
 | `--no-clipboard` | 关闭剪贴板同步 |
 | `--web-root <dir>` | 在 `/` 托管构建好的前端（默认自动查找 `frontend/dist`） |
+| `--lock-timeout <s>` | 空闲锁定秒数，默认 60；0 = 从不（也可由界面修改并持久化） |
 | `--print-ready` | 就绪后向 stdout 输出一行 JSON |
 
 `MOLINK_DISPLAY` 可指定 X display（默认沿用 `DISPLAY`）。
@@ -68,6 +69,15 @@ cmake --build build && ctest --test-dir build --output-on-failure
 
 抓屏不可用时统一回退到合成测试帧。macOS 首次抓屏需要“屏幕录制”权限，
 输入注入需要“辅助功能”权限；未授权时 `capabilities` 会如实为 false 或画面为测试帧。
+
+## 访问与锁定
+
+- 回环地址访问免验证；`/api/device` 只向回环返回设备 ID 与验证码。
+- 非回环访问必须 `POST /api/login` 验证验证码；通过后才能访问 `/api/*` 与 WebSocket。
+- 空闲锁定在 `session_supervisor` 中判定：没有已鉴权 WS、所有 UI 窗口上报的
+  会话数为 0、且无操作超过 `lock_timeout` 时锁定。锁定时 `/api/*` 返回 423，
+  WS 握手以 `1008 locked` 拒绝。
+- 登录失败 5 次后暂停 30 秒；锁定时间通过 `/api/lock-timeout` 修改并写入配置目录。
 
 ## 屏幕捕获
 
@@ -144,6 +154,8 @@ src/
 ├── api.*                 CORS、Bearer 鉴权、/healthz 与 /api/*
 ├── session_registry.*    会话记录（shared_ptr，跨回调安全）
 ├── ws_session.*          /ws/session 处理器、心跳、帧回放与回收线程
+├── identity.*            设备 ID、令牌与锁定设置的持久化
+├── lock_state.*          本机免验证、远程登录与空闲锁定状态
 ├── capture/              屏幕捕获（X11/XShm/XDamage、合成回退、帧编码）
 ├── input/                指针/键盘注入（XTEST）
 ├── clipboard/            文本剪贴板（X11 selection）
