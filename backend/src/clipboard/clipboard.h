@@ -32,4 +32,10 @@ class clipboard_service {
 /// nullptr when the build has no X11 support or no display is reachable.
 std::unique_ptr<clipboard_service> make_x11_clipboard(std::string& err);
 
+/// Windows clipboard backend. Returns nullptr on other platforms.
+std::unique_ptr<clipboard_service> make_windows_clipboard(std::string& err);
+
+/// macOS NSPasteboard backend. Returns nullptr on other platforms.
+std::unique_ptr<clipboard_service> make_macos_clipboard(std::string& err);
+
 }  // namespace molink

@@ -11,7 +11,7 @@
 
 ## 当前状态
 
-一阶段（桌面直连）的骨架已经可运行。Linux（X11）已接入真实屏幕捕获；Windows / macOS 的捕获后端与输入注入尚未实现。
+一阶段（桌面直连）已经完整实现：Linux（X11）、Windows（DXGI）与 macOS（CoreGraphics）都有各自的抓屏、输入注入、光标与剪贴板后端，三个平台使用系统 WebView 的独立壳层。
 
 | 能力 | 状态 |
 |---|---|
@@ -28,8 +28,9 @@
 | Linux Wayland / PipeWire 门户抓屏 | ⏳ 未实现（接口已抽象） |
 | Windows / macOS 捕获与注入 | ⏳ 未实现 |
 | UDP 直连、WebRTC、P2P、服务端 | ⏳ 二阶段 |
-| **Linux 桌面壳（C++/WebKitGTK）** | ✅ 冒烟测试通过，可生成 `.deb` |
-| Windows / macOS 壳 | ⏳ 未实现（WebView2 / WKWebView） |
+| **Linux 桌面壳（C++/WebKitGTK）** | ✅ 冒烟通过，`.deb` + `.AppImage` |
+| **Windows 桌面壳 + 后端** | 🧩 WebView2 壳与 DXGI/SendInput 后端已实现，MinGW 编译通过 |
+| **macOS 桌面壳 + 后端** | 🧩 WKWebView 壳与 CoreGraphics/CGEvent 后端已实现，待 macOS CI 验证 |
 
 ## 架构
 
@@ -43,7 +44,7 @@
 
 - **molink-core**：C++20 + libuvcpp 后台。负责 HTTP/WS 接口、瓦片帧编码、会话管理；捕获与注入待接入。
 - **frontend/**：React 19 + TypeScript + Vite + Tailwind 4 + Zustand + react-i18next。
-- **shell/native/**：C++ + GTK3 + WebKitGTK 壳层，启动并监管 `molink-core`，加载核心托管的前端。
+- **shell/**：三个平台各自的原生壳层（Linux GTK/WebKitGTK、Windows WebView2、macOS WKWebView），启动并监管 `molink-core`，加载核心托管的前端。
 - **server/**、移动端：二阶段。
 
 ## 目录
@@ -53,8 +54,10 @@ molink/
 ├── .github/workflows/   ci.yml · release-desktop.yml · release-mobile.yml（占位）
 ├── backend/             molink-core（CMake，libuvcpp）
 ├── frontend/            React 前端
-├── shell/native/        C++ WebKitGTK 壳层
-├── packaging/linux/     .deb 打包脚本
+├── shell/native/        Linux 壳层（GTK3 + WebKitGTK）
+├── shell/windows/       Windows 壳层（Win32 + WebView2）
+├── shell/macos/         macOS 壳层（Cocoa + WKWebView）
+├── packaging/           linux(.deb/.AppImage) · windows(NSIS) · macos(.dmg)
 ├── docs/
 │   ├── dev.md           架构基线与发布策略（需求文档）
 │   └── protocol.md      MOLK 线协议与 HTTP/WS 契约
@@ -105,11 +108,15 @@ cmake --build shell/native/build --parallel
 ./shell/native/build/moLink
 ```
 
-生成 `.deb`：
+生成 Linux 安装包：
 
 ```bash
-./packaging/linux/build-deb.sh   # build/package/molink_0.1.0_amd64.deb
+./packaging/linux/build-deb.sh       # build/package/molink_0.1.0_amd64.deb
+./packaging/linux/build-appimage.sh  # build/package/moLink-0.1.0-x86_64.AppImage
 ```
+
+Windows（需 WebView2 SDK 与 NSIS）与 macOS（`.app` + `.dmg`）的构建步骤见
+`packaging/windows/` 与 `packaging/macos/`，发布工作流会在对应 runner 上自动完成。
 
 > 本机若出现 `libllhttp.so.9.2: cannot open shared object file`，说明安装的
 > `libuvcpp.so` 缺少 `RUNPATH`。本项目的 CMake 已用旧式 `RPATH` 让间接依赖可解析；
@@ -142,8 +149,16 @@ cd frontend && pnpm lint && pnpm typecheck && pnpm build
 ## 发布状态
 
 版本记录见 [CHANGELOG.md](CHANGELOG.md)，发布前检查项与当前阻塞见
-[docs/release-checklist.md](docs/release-checklist.md)。目前可交付的是
-**Linux / X11 源码构建与 `.deb`**；Windows/macOS 需要各自的原生 WebView 壳。
+[docs/release-checklist.md](docs/release-checklist.md)。
+
+| 平台 | 产物 | 状态 |
+|---|---|---|
+| Linux | `.deb`、`.AppImage` | 本机构建并冒烟通过 |
+| Windows | NSIS `.exe` | 壳层交叉编译通过，安装器由 CI 构建 |
+| macOS | `.dmg` | 壳层源码就绪，由 macOS CI 构建 |
+
+推送 `v*` 标签会触发 `.github/workflows/release-desktop.yml`，三个平台并行构建并把
+产物附加到同一个 Release；需要仓库变量 `UVCPP_REPO`（libuvcpp 源码地址）。
 
 ## 许可证
 

@@ -35,4 +35,10 @@ class input_injector {
 /// XTEST. Never throws.
 std::unique_ptr<input_injector> make_x11_input(std::string& err);
 
+/// Windows SendInput backend. Returns nullptr on other platforms.
+std::unique_ptr<input_injector> make_windows_input(std::string& err);
+
+/// macOS CGEvent backend. Returns nullptr on other platforms.
+std::unique_ptr<input_injector> make_macos_input(std::string& err);
+
 }  // namespace molink

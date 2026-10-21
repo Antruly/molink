@@ -3,6 +3,8 @@ project(molink-core LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_OBJCXX_STANDARD 20)
+set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # libuvcpp has to have been built with the WebSocket modules on. If you are
@@ -51,10 +53,14 @@ set(MOLINK_CORE_SOURCES
   src/capture/capture.cpp
   src/capture/synthetic_capture.cpp
   src/capture/x11_capture.cpp
+  src/capture/windows_capture.cpp
   src/capture/frame_encode.cpp
   src/clipboard/x11_clipboard.cpp
+  src/clipboard/windows_clipboard.cpp
   src/compression.cpp
   src/input/x11_input.cpp
+  src/input/windows_input.cpp
+  src/input/macos_input.cpp
   src/config.cpp
   src/session_registry.cpp
   src/test_pattern.cpp
@@ -62,6 +68,13 @@ set(MOLINK_CORE_SOURCES
   src/ws_session.cpp
   src/protocol/frame_packet.cpp
 )
+
+if(APPLE)
+  enable_language(OBJCXX)
+  list(APPEND MOLINK_CORE_SOURCES
+    src/capture/macos_capture.mm
+    src/clipboard/macos_clipboard.mm)
+endif()
 
 if(MOLINK_BUILD_CORE)
   add_executable(molink-core ${MOLINK_CORE_SOURCES})
@@ -75,6 +88,14 @@ if(MOLINK_BUILD_CORE)
     if(X11_FOUND AND TARGET X11::Xext)
       set(MOLINK_HAVE_X11 1)
     endif()
+  endif()
+
+  if(WIN32)
+    target_link_libraries(molink-core PRIVATE d3d11 dxgi gdi32 user32 ole32)
+  endif()
+  if(APPLE)
+    target_link_libraries(molink-core PRIVATE
+      "-framework ApplicationServices" "-framework AppKit" "-framework Foundation")
   endif()
 
   if(MOLINK_HAVE_X11)

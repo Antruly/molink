@@ -143,6 +143,14 @@ class capture_base : public capture_source {
 
 /// Returns nullptr when the build has no X11 support.
 std::unique_ptr<capture_source> make_x11_capture(const capture_options& options);
+
+/// Returns nullptr when the build does not target Windows.
+std::unique_ptr<capture_source> make_windows_capture(
+    const capture_options& options);
+
+/// Returns nullptr when the build does not target macOS.
+std::unique_ptr<capture_source> make_macos_capture(
+    const capture_options& options);
 std::unique_ptr<capture_source> make_synthetic_capture(const capture_options& options);
 
 /// Starts a real display source when possible, otherwise the synthetic one.

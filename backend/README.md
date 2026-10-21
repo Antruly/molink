@@ -58,6 +58,17 @@ cmake --build build && ctest --test-dir build --output-on-failure
 桌面壳就是靠这条路径把 UI 加载进 WebKitGTK；不装壳时浏览器直接访问
 `http://127.0.0.1:21118/?token=...` 即可。
 
+## 平台后端
+
+| 平台 | 抓屏 | 输入 | 剪贴板 |
+|---|---|---|---|
+| Linux | X11 + XShm + XDamage（`capture/x11_capture.cpp`） | XTEST（`input/x11_input.cpp`） | X11 selection（`clipboard/x11_clipboard.cpp`） |
+| Windows | DXGI Desktop Duplication（`capture/windows_capture.cpp`） | SendInput（`input/windows_input.cpp`） | `CF_UNICODETEXT`（`clipboard/windows_clipboard.cpp`） |
+| macOS | CoreGraphics（`capture/macos_capture.mm`） | CGEvent（`input/macos_input.cpp`） | NSPasteboard（`clipboard/macos_clipboard.mm`） |
+
+抓屏不可用时统一回退到合成测试帧。macOS 首次抓屏需要“屏幕录制”权限，
+输入注入需要“辅助功能”权限；未授权时 `capabilities` 会如实为 false 或画面为测试帧。
+
 ## 屏幕捕获
 
 ```

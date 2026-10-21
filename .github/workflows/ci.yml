@@ -64,3 +64,33 @@ jobs:
 
       - name: Build
         run: cmake --build shell/native/build --parallel
+
+  windows-shell:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch WebView2 SDK
+        shell: pwsh
+        run: |
+          $version = '1.0.4258.31'
+          $url = "https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/$version/microsoft.web.webview2.$version.nupkg"
+          Invoke-WebRequest -Uri $url -OutFile wv2.zip
+          Expand-Archive wv2.zip -DestinationPath wv2
+
+      - name: Configure
+        run: cmake -S shell/windows -B shell/windows/build -DWEBVIEW2_SDK=${{ github.workspace }}/wv2
+
+      - name: Build
+        run: cmake --build shell/windows/build --config Release
+
+  macos-shell:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S shell/macos -B shell/macos/build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build shell/macos/build --parallel

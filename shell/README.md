@@ -1,64 +1,74 @@
-# moLink 桌面壳层（Linux）
+# moLink 桌面壳层
 
-C++20 + GTK 3 + WebKitGTK 4.1。启动 `molink-core`，读取它的 ready 行，然后把核心
-在 `/` 托管的前端加载进系统 WebView。不打包浏览器引擎，也不需要 Rust。
+三个平台各自使用系统 WebView，不打包浏览器引擎，也不需要 Rust。
 
-## 构建
+| 平台 | 技术 | 目录 | 产物 |
+|---|---|---|---|
+| Linux | GTK 3 + WebKitGTK 4.1 | `native/` | `.deb`、`.AppImage` |
+| Windows | Win32 + WebView2 | `windows/` | NSIS `.exe` |
+| macOS | Cocoa + WKWebView | `macos/` | `.app`、`.dmg` |
+
+三者行为一致：定位并启动 `molink-core`，读取 `--print-ready` 行，把核心在 `/`
+托管的前端加载进 WebView，退出时回收子进程，并支持 `--smoke-test`。
+
+## 查找顺序
+
+| 对象 | 顺序 |
+|---|---|
+| 核心 | `MOLINK_CORE` → 可执行文件同目录 → 平台资源目录 → 源码树 `backend/build/` |
+| 前端 | `MOLINK_WEB_ROOT` → 可执行文件旁的 `web/` → `../Resources/web`（macOS）→ `../share/molink/web` → 源码树 `frontend/dist/` |
+
+## Linux
 
 ```bash
 sudo apt install -y libgtk-3-dev libwebkit2gtk-4.1-dev
 cmake -S shell/native -B shell/native/build -DCMAKE_BUILD_TYPE=Release
 cmake --build shell/native/build --parallel
-```
-
-运行前需要有已经构建好的：
-
-- `backend/build/molink-core`
-- `frontend/dist`（`cd frontend && pnpm build`）
-
-查找顺序（可用环境变量覆盖）：
-
-| 对象 | 顺序 |
-|---|---|
-| 核心 | `MOLINK_CORE` → 可执行文件同目录 → `../lib/molink/` → 源码树 `backend/build/` → 当前目录 |
-| 前端 | `MOLINK_WEB_ROOT` → 可执行文件同目录 `/web` → `../web` → `../share/molink/web` → 源码树 `frontend/dist/` |
-
-## 运行
-
-```bash
 ./shell/native/build/moLink
 ```
 
-- 核心以 `--port 0` 启动（系统分配端口），壳层从 ready 行取得端口与令牌。
-- 壳层把 `--parent-pid <shell pid>` 传给核心；壳层被杀时核心会自行退出。
-- 快捷键：`F11` 全屏，`Ctrl+Shift+Q` 退出。
-- `--smoke-test`：启动、等待页面加载完成、打印 `SHELL_SMOKE_OK title=...` 后退出，
-  用于 CI 或无头验证。
+快捷键：`F11` 全屏，`Ctrl+Shift+Q` 退出。
+
+## Windows
+
+需要 Visual Studio（CI）或 MinGW-w64，以及 WebView2 SDK（NuGet 包
+`Microsoft.Web.WebView2`）：
+
+```powershell
+cmake -S shell/windows -B shell/windows/build -DWEBVIEW2_SDK=C:\path\to\wv2
+cmake --build shell/windows/build --config Release
+```
+
+`WebView2Loader.dll` 会在构建后复制到可执行文件旁，安装器把它一起打包。
+Windows 10/11 通常已经带有 WebView2 Runtime。
+
+## macOS
+
+```bash
+cmake -S shell/macos -B shell/macos/build -DCMAKE_BUILD_TYPE=Release
+cmake --build shell/macos/build --parallel
+```
+
+`.app` 布局由 `packaging/macos/build-dmg.sh` 组装：
+
+```
+moLink.app/Contents/MacOS/moLink
+moLink.app/Contents/MacOS/molink-core
+moLink.app/Contents/MacOS/*.dylib
+moLink.app/Contents/Resources/web/...
+```
 
 ## 打包
 
-```bash
-./packaging/linux/build-deb.sh
-# build/package/molink_0.1.0_amd64.deb
-```
+- Linux：`packaging/linux/build-deb.sh`、`build-appimage.sh`
+- Windows：`packaging/windows/stage.sh` + `installer.nsi`（NSIS）
+- macOS：`packaging/macos/build-dmg.sh`
 
-安装布局：
+发布工作流在三个平台的 runner 上分别执行这些脚本。
 
-```
-/opt/molink/bin/moLink
-/opt/molink/bin/molink-core
-/opt/molink/web/...            # frontend/dist
-/opt/molink/lib/libuvcpp.so
-/opt/molink/lib/libllhttp.so*
-/usr/bin/moLink -> /opt/molink/bin/moLink
-/usr/share/applications/molink.desktop
-```
+## 已知限制
 
-核心的 RPATH 是 `$ORIGIN:$ORIGIN/../lib`，因此随包的 libuvcpp/libllhttp 会被优先
-找到。系统依赖（GTK、WebKitGTK、X11、XTEST、XFixes、XDamage）写在 deb 的
-`Depends` 里。
-
-## 平台范围
-
-当前壳层只支持 Linux。Windows 需要基于 WebView2 的原生壳，macOS 需要
-WKWebView 壳；两者尚未实现。
+- 只有 Linux 壳在真实环境运行验证过；Windows 壳通过 MinGW 交叉编译，macOS 壳
+  等待 CI 验证。
+- 屏幕捕获与输入注入目前只有 Linux/X11 后端；Windows/macOS 后端尚未实现。
+- macOS 包为 ad-hoc 签名，正式分发需要 Developer ID 与公证。

@@ -74,7 +74,27 @@ std::shared_ptr<capture_source> start_capture(const capture_options& options,
                                               bool allow_display,
                                               std::string& note) {
   if (allow_display) {
-#if MOLINK_HAVE_X11
+#if defined(_WIN32)
+    std::unique_ptr<capture_source> windows = make_windows_capture(options);
+    if (windows) {
+      std::string err;
+      if (windows->start(err)) {
+        note = "capture: " + windows->backend();
+        return windows;
+      }
+      note = "windows capture unavailable: " + err + "; using synthetic frames";
+    }
+#elif defined(__APPLE__)
+    std::unique_ptr<capture_source> macos = make_macos_capture(options);
+    if (macos) {
+      std::string err;
+      if (macos->start(err)) {
+        note = "capture: " + macos->backend();
+        return macos;
+      }
+      note = "macos capture unavailable: " + err + "; using synthetic frames";
+    }
+#elif MOLINK_HAVE_X11
     std::unique_ptr<capture_source> x11 = make_x11_capture(options);
     if (x11) {
       std::string err;

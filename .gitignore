@@ -5,7 +5,7 @@ frontend/dist/
 
 # C++ 构建
 backend/build/
-shell/native/build/
+shell/*/build/
 build/
 
 backend/cmake-build-*/

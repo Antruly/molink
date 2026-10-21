@@ -66,8 +66,17 @@ std::string resolve_web_root(const molink::core_config& cfg) {
   candidates.push_back("frontend/dist");
   candidates.push_back("../frontend/dist");
   std::error_code ec;
+#if defined(_WIN32)
+  wchar_t module_path[32768] = {};
+  const DWORD length =
+      GetModuleFileNameW(nullptr, module_path,
+                         static_cast<DWORD>(std::size(module_path)));
+  const fs::path exe =
+      length > 0 ? fs::path(module_path) : fs::path();
+#else
   const fs::path exe = fs::read_symlink("/proc/self/exe", ec);
-  if (!ec) {
+#endif
+  if (!exe.empty()) {
     const fs::path dir = exe.parent_path();
     candidates.push_back(dir / "web");
     candidates.push_back(dir / "../share/molink/web");
@@ -164,7 +173,13 @@ int main(int argc, char** argv) {
   std::shared_ptr<input_injector> input;
   if (!cfg.no_input) {
     std::string input_error;
+#if defined(_WIN32)
+    std::unique_ptr<input_injector> created = make_windows_input(input_error);
+#elif defined(__APPLE__)
+    std::unique_ptr<input_injector> created = make_macos_input(input_error);
+#else
     std::unique_ptr<input_injector> created = make_x11_input(input_error);
+#endif
     if (created) {
       input = std::move(created);
     } else {
@@ -176,8 +191,16 @@ int main(int argc, char** argv) {
   std::shared_ptr<clipboard_service> clipboard;
   if (!cfg.no_clipboard) {
     std::string clipboard_error;
+#if defined(_WIN32)
+    std::unique_ptr<clipboard_service> created =
+        make_windows_clipboard(clipboard_error);
+#elif defined(__APPLE__)
+    std::unique_ptr<clipboard_service> created =
+        make_macos_clipboard(clipboard_error);
+#else
     std::unique_ptr<clipboard_service> created =
         make_x11_clipboard(clipboard_error);
+#endif
     if (created) {
       clipboard = std::move(created);
     } else {
