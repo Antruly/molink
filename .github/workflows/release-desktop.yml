@@ -150,6 +150,11 @@ jobs:
             /DPKG_DIR="$(cygpath -w "$GITHUB_WORKSPACE/build/windows/pkg")" \
             /DOUT_DIR="$(cygpath -w "$GITHUB_WORKSPACE/build/package")" \
             packaging/windows/installer.nsi
+          MSYS2_ARG_CONV_EXCL='*' MSYS_NO_PATHCONV=1 \
+            "/c/Program Files (x86)/NSIS/makensis.exe" /DVERSION="$VERSION" \
+            /DPKG_DIR="$(cygpath -w "$GITHUB_WORKSPACE/build/windows/pkg")" \
+            /DOUT_DIR="$(cygpath -w "$GITHUB_WORKSPACE/build/package")" \
+            packaging/windows/portable.nsi
 
       - uses: softprops/action-gh-release@v2
         with:
