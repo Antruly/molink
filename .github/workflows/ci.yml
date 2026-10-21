@@ -114,6 +114,18 @@ jobs:
           cmake --build "$RUNNER_TEMP/libuvcpp/build" --config Release --parallel
           cmake --install "$RUNNER_TEMP/libuvcpp/build" --config Release
 
+      - name: Install libuv and zlib into the prefix
+        shell: bash
+        run: |
+          git clone --depth 1 https://github.com/libuv/libuv.git "$RUNNER_TEMP/libuv"
+          cmake -S "$RUNNER_TEMP/libuv" -B "$RUNNER_TEMP/libuv/build" \
+            -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/uvcpp" -DBUILD_TESTING=OFF
+          cmake --build "$RUNNER_TEMP/libuv/build" --config Release --target install
+          git clone --depth 1 https://github.com/madler/zlib.git "$RUNNER_TEMP/zlib"
+          cmake -S "$RUNNER_TEMP/zlib" -B "$RUNNER_TEMP/zlib/build" \
+            -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/uvcpp"
+          cmake --build "$RUNNER_TEMP/zlib/build" --config Release --target install
+
       - name: Build core
         shell: bash
         run: |
@@ -137,6 +149,14 @@ jobs:
             -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/uvcpp"
           cmake --build "$RUNNER_TEMP/libuvcpp/build" --parallel
           cmake --install "$RUNNER_TEMP/libuvcpp/build"
+
+      - name: Install libuv into the prefix
+        shell: bash
+        run: |
+          git clone --depth 1 https://github.com/libuv/libuv.git "$RUNNER_TEMP/libuv"
+          cmake -S "$RUNNER_TEMP/libuv" -B "$RUNNER_TEMP/libuv/build" \
+            -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/uvcpp" -DBUILD_TESTING=OFF
+          cmake --build "$RUNNER_TEMP/libuv/build" --target install
 
       - name: Build core
         shell: bash

@@ -3,6 +3,7 @@
 #if defined(__APPLE__)
 
 #include <CoreGraphics/CoreGraphics.h>
+#include <dlfcn.h>
 
 #include <algorithm>
 #include <chrono>
@@ -114,9 +115,19 @@ class macos_capture final : public capture_base {
   }
 
   bool grab(std::vector<uint8_t>& pixels, std::string& err) {
-    CGImageRef image = CGDisplayCreateImage(CGMainDisplayID());
+    // macOS 15 marks CGDisplayCreateImage unavailable in the SDK while the
+    // symbol still exists. Resolve it at runtime so the build is not tied to a
+    // deployment target and a future removal degrades to synthetic frames.
+    using CreateImageFn = CGImageRef (*)(CGDirectDisplayID);
+    static CreateImageFn create_image = reinterpret_cast<CreateImageFn>(
+        dlsym(RTLD_DEFAULT, "CGDisplayCreateImage"));
+    if (create_image == nullptr) {
+      err = "CGDisplayCreateImage is unavailable on this system";
+      return false;
+    }
+    CGImageRef image = create_image(CGMainDisplayID());
     if (image == nullptr) {
-      err = "CGDisplayCreateImage returned null (permission revoked?)";
+      err = "screen capture returned null (permission revoked?)";
       return false;
     }
     const std::size_t width = CGImageGetWidth(image);

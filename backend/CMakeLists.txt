@@ -37,6 +37,28 @@ if(MOLINK_BUILD_CORE)
   if(uvcpp_FOUND)
     set(UVP_UVCPP_TARGET uvcpp::uvcpp)
     set(UVP_UVCPP_ROUTE "CMake package (${uvcpp_DIR})")
+
+    # The installed uvcpp package advertises <prefix>/include/libuv even when
+    # libuv was not installed there. CMake treats a missing imported include
+    # directory as a hard error at generate time, so drop those entries and add
+    # the prefix include/lib paths that actually exist.
+    get_target_property(_uvp_include_dirs uvcpp::uvcpp INTERFACE_INCLUDE_DIRECTORIES)
+    if(_uvp_include_dirs)
+      set(_uvp_clean_includes "")
+      foreach(_dir ${_uvp_include_dirs})
+        if(EXISTS "${_dir}")
+          list(APPEND _uvp_clean_includes "${_dir}")
+        endif()
+      endforeach()
+      # uvcpp_DIR is <prefix>/lib/cmake/uvcpp
+      get_filename_component(_uvp_prefix "${uvcpp_DIR}/../../.." ABSOLUTE)
+      if(EXISTS "${_uvp_prefix}/include")
+        list(APPEND _uvp_clean_includes "${_uvp_prefix}/include")
+      endif()
+      set_target_properties(uvcpp::uvcpp PROPERTIES
+        INTERFACE_INCLUDE_DIRECTORIES "${_uvp_clean_includes}")
+      set(UVP_UVCPP_PREFIX "${_uvp_prefix}")
+    endif()
   else()
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(UVCPP REQUIRED IMPORTED_TARGET "uvcpp>=1.7.0")
@@ -127,6 +149,19 @@ if(MOLINK_BUILD_CORE)
   else()
     target_compile_definitions(molink-core PRIVATE MOLINK_HAVE_ZLIB=0)
     message(STATUS "molink: zlib not found; tile compression disabled")
+  endif()
+
+  # Plain `uv` in uvcpp's interface needs a search path on platforms where
+  # libuv is not a system library (Windows, macOS).
+  if(UVP_UVCPP_PREFIX)
+    target_include_directories(molink-core PRIVATE "${UVP_UVCPP_PREFIX}/include")
+    target_link_directories(molink-core PRIVATE
+      "${UVP_UVCPP_PREFIX}/lib" "${UVP_UVCPP_PREFIX}/bin")
+    foreach(_uvinc "${UVP_UVCPP_PREFIX}/include" "${UVP_UVCPP_PREFIX}/include/libuv")
+      if(EXISTS "${_uvinc}/uv.h")
+        target_include_directories(molink-core PRIVATE "${_uvinc}")
+      endif()
+    endforeach()
   endif()
 
   target_link_libraries(molink-core PRIVATE ${UVP_UVCPP_TARGET} ${CMAKE_DL_LIBS})

@@ -25,7 +25,7 @@ cp -r "$ROOT/frontend/dist/." "$APP/Contents/Resources/web/"
 UVCPP_LIB_DIR=${UVCPP_LIB_DIR:-$(pkg-config --variable=libdir uvcpp 2>/dev/null || true)}
 if [ -z "$UVCPP_LIB_DIR" ] && [ -n "${UVCPP_ROOT:-}" ]; then UVCPP_LIB_DIR="$UVCPP_ROOT/lib"; fi
 if [ -n "$UVCPP_LIB_DIR" ] && [ -d "$UVCPP_LIB_DIR" ]; then
-  for pattern in 'libuvcpp*.dylib' 'libllhttp*.dylib'; do
+  for pattern in 'libuvcpp*.dylib' 'libllhttp*.dylib' 'libuv*.dylib'; do
     cp "$UVCPP_LIB_DIR"/$pattern "$APP/Contents/MacOS/" 2>/dev/null || true
   done
 fi
