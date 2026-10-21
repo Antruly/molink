@@ -39,7 +39,7 @@ jobs:
             exit 1
           fi
           REF="${{ vars.UVCPP_REF }}"; REF="${REF:-main}"
-          git clone --depth 1 --branch "$REF" "${{ vars.UVCPP_REPO }}" "$RUNNER_TEMP/libuvcpp"
+          ./packaging/clone-retry.sh --depth 1 --branch "$REF" "${{ vars.UVCPP_REPO }}" "$RUNNER_TEMP/libuvcpp"
           cmake -S "$RUNNER_TEMP/libuvcpp" -B "$RUNNER_TEMP/libuvcpp/build" \
             -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
             -DCMAKE_BUILD_TYPE=Release \
@@ -88,7 +88,7 @@ jobs:
             exit 1
           fi
           REF="${{ vars.UVCPP_REF }}"; REF="${REF:-main}"
-          git clone --depth 1 --branch "$REF" "${{ vars.UVCPP_REPO }}" "$RUNNER_TEMP/libuvcpp"
+          ./packaging/clone-retry.sh --depth 1 --branch "$REF" "${{ vars.UVCPP_REPO }}" "$RUNNER_TEMP/libuvcpp"
           cmake -S "$RUNNER_TEMP/libuvcpp" -B "$RUNNER_TEMP/libuvcpp/build" \
             -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
             -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/uvcpp"
@@ -98,11 +98,11 @@ jobs:
       - name: Install libuv and zlib into the prefix
         shell: bash
         run: |
-          git clone --depth 1 https://github.com/libuv/libuv.git "$RUNNER_TEMP/libuv"
+          ./packaging/clone-retry.sh --depth 1 https://github.com/libuv/libuv.git "$RUNNER_TEMP/libuv"
           cmake -S "$RUNNER_TEMP/libuv" -B "$RUNNER_TEMP/libuv/build" \
             -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/uvcpp" -DBUILD_TESTING=OFF
           cmake --build "$RUNNER_TEMP/libuv/build" --config Release --target install
-          git clone --depth 1 https://github.com/madler/zlib.git "$RUNNER_TEMP/zlib"
+          ./packaging/clone-retry.sh --depth 1 https://github.com/madler/zlib.git "$RUNNER_TEMP/zlib"
           cmake -S "$RUNNER_TEMP/zlib" -B "$RUNNER_TEMP/zlib/build" \
             -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/uvcpp"
           cmake --build "$RUNNER_TEMP/zlib/build" --config Release --target install
@@ -186,7 +186,7 @@ jobs:
             exit 1
           fi
           REF="${{ vars.UVCPP_REF }}"; REF="${REF:-main}"
-          git clone --depth 1 --branch "$REF" "${{ vars.UVCPP_REPO }}" "$RUNNER_TEMP/libuvcpp"
+          ./packaging/clone-retry.sh --depth 1 --branch "$REF" "${{ vars.UVCPP_REPO }}" "$RUNNER_TEMP/libuvcpp"
           cmake -S "$RUNNER_TEMP/libuvcpp" -B "$RUNNER_TEMP/libuvcpp/build" \
             -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
             -DCMAKE_BUILD_TYPE=Release \
@@ -197,7 +197,7 @@ jobs:
       - name: Install libuv into the prefix
         shell: bash
         run: |
-          git clone --depth 1 https://github.com/libuv/libuv.git "$RUNNER_TEMP/libuv"
+          ./packaging/clone-retry.sh --depth 1 https://github.com/libuv/libuv.git "$RUNNER_TEMP/libuv"
           cmake -S "$RUNNER_TEMP/libuv" -B "$RUNNER_TEMP/libuv/build" \
             -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/uvcpp" -DBUILD_TESTING=OFF
           cmake --build "$RUNNER_TEMP/libuv/build" --target install

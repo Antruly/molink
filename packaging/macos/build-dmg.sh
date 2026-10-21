@@ -57,14 +57,18 @@ for lib in "$APP/Contents/MacOS/"*.dylib; do
   install_name_tool -id "@loader_path/$(basename "$lib")" "$lib" 2>/dev/null || true
 done
 if command -v otool >/dev/null 2>&1; then
-  while read -r dep; do
-    case "$dep" in
-      *uvcpp*|*llhttp*|*libuv*)
-        install_name_tool -change "$dep" "@loader_path/$(basename "$dep")" \
-          "$APP/Contents/MacOS/molink-core" 2>/dev/null || true
-        ;;
-    esac
-  done < <(otool -L "$APP/Contents/MacOS/molink-core" | awk 'NR>1 {print $1}')
+  # Rewrite both the core's references and the dylibs' own dependencies.
+  for binary in "$APP/Contents/MacOS/molink-core" "$APP/Contents/MacOS/"*.dylib; do
+    [ -f "$binary" ] || continue
+    while read -r dep; do
+      case "$dep" in
+        *uvcpp*|*llhttp*|*libuv*)
+          install_name_tool -change "$dep" "@loader_path/$(basename "$dep")" \
+            "$binary" 2>/dev/null || true
+          ;;
+      esac
+    done < <(otool -L "$binary" | awk 'NR>1 {print $1}')
+  done
 fi
 
 # Ad-hoc signature: enough for local use; a real release needs a Developer ID.
