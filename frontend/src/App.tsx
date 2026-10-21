@@ -67,6 +67,21 @@ export default function App() {
 
   useEffect(() => {
     if (authPhase !== 'ready') return
+    const timer = window.setInterval(() => {
+      const state = useAppStore.getState()
+      if (
+        state.tabs.some(
+          (tab) => tab.phase === 'live' || tab.phase === 'connecting',
+        )
+      ) {
+        state.syncUiState()
+      }
+    }, 20000)
+    return () => window.clearInterval(timer)
+  }, [authPhase])
+
+  useEffect(() => {
+    if (authPhase !== 'ready') return
     let last = 0
     const onActivity = () => {
       const now = Date.now()

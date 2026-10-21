@@ -165,6 +165,7 @@ export const useAppStore = create<AppState>((set, get) => {
         tab.id === id ? { ...tab, ...patch } : tab,
       ),
     }))
+    if (patch.phase !== undefined) get().syncUiState()
   }
 
   const remember = (host: string, port: number, label: string): void => {
@@ -375,9 +376,10 @@ export const useAppStore = create<AppState>((set, get) => {
     syncUiState: () => {
       const token = get().token
       if (!token) return
-      void postUiState(token, UI_CLIENT_ID, get().tabs.length).catch(
-        () => undefined,
-      )
+      const active = get().tabs.filter(
+        (tab) => tab.phase === 'live' || tab.phase === 'connecting',
+      ).length
+      void postUiState(token, UI_CLIENT_ID, active).catch(() => undefined)
     },
 
     createSession: (host, port, token, label) => {
