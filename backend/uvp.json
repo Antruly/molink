@@ -1,0 +1,13 @@
+{
+  "uvp": 1,
+  "name": "molink-core",
+  "template": "websocket-echo",
+  "binary": "molink-core",
+  "port": 21118,
+  "features": [
+    "websocket"
+  ],
+  "requirements": {
+    "libuvcpp": ">=1.7.0"
+  }
+}

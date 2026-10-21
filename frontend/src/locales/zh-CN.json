@@ -1,0 +1,45 @@
+{
+  "app": {
+    "tagline": "Web 优先的远程桌面",
+    "version": "v0.1.0"
+  },
+  "connect": {
+    "title": "连接到 moLink 后台",
+    "subtitle": "后台运行在你要控制的那台机器上，只监听回环地址，并在启动时打印访问令牌。",
+    "host": "主机",
+    "port": "端口",
+    "token": "访问令牌",
+    "tokenHint": "由 molink-core 启动时输出，或通过 MOLINK_TOKEN 设置。",
+    "showToken": "显示令牌",
+    "hideToken": "隐藏令牌",
+    "submit": "连接",
+    "connecting": "连接中…",
+    "hint": "启动后台：molink-core --print-ready",
+    "loopback": "仅回环地址"
+  },
+  "session": {
+    "live": "已连接",
+    "connecting": "连接中",
+    "waiting": "等待第一帧…",
+    "disconnect": "断开",
+    "resolution": "分辨率",
+    "codec": "编码",
+    "frames": "帧数",
+    "synthetic": "合成测试帧 —— 当前构建尚未启用真实抓屏。",
+    "previewOnly": "仅预览 · 输入注入尚未实现",
+    "service": "服务"
+  },
+  "stats": {
+    "fps": "帧率",
+    "latency": "延迟",
+    "bandwidth": "带宽",
+    "session": "会话"
+  },
+  "error": {
+    "title": "出错了",
+    "dismiss": "关闭",
+    "no_token": "必须填写访问令牌。",
+    "invalid_port": "端口必须是 1–65535 之间的整数。",
+    "connection failed": "连接失败。"
+  }
+}

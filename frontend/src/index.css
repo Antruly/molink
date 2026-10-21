@@ -1,0 +1,63 @@
+@import "tailwindcss";
+
+@theme {
+  --color-ink: #050d0b;
+  --color-shell: #081512;
+  --color-panel: #0b1c17;
+  --color-panel-2: #0f2620;
+  --color-line: #1c3b31;
+  --color-line-soft: #142c25;
+  --color-fog: #8fb3a8;
+  --color-mist: #e7f5ef;
+  --color-signal: #2ee6a8;
+  --color-signal-deep: #0fa968;
+  --color-alert: #ff7a70;
+  --color-amber: #ffcf70;
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, Consolas,
+    monospace;
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    min-height: 100%;
+  }
+
+  body {
+    margin: 0;
+    background-color: var(--color-ink);
+    color: var(--color-mist);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    background-image:
+      radial-gradient(
+        60rem 40rem at 15% -10%,
+        rgba(46, 230, 168, 0.1),
+        transparent 60%
+      ),
+      radial-gradient(
+        50rem 30rem at 100% 100%,
+        rgba(15, 169, 104, 0.08),
+        transparent 55%
+      ),
+      linear-gradient(rgba(255, 255, 255, 0.015) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255, 255, 255, 0.015) 1px, transparent 1px);
+    background-size:
+      auto,
+      auto,
+      48px 48px,
+      48px 48px;
+  }
+
+  ::selection {
+    background: rgba(46, 230, 168, 0.3);
+  }
+
+  input::-ms-reveal {
+    display: none;
+  }
+}

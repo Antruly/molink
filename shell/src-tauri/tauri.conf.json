@@ -1,0 +1,38 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "moLink",
+  "version": "0.1.0",
+  "identifier": "com.molink.desktop",
+  "build": {
+    "beforeDevCommand": "pnpm --dir ../frontend dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "pnpm --dir ../frontend build",
+    "frontendDist": "../../frontend/dist"
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' ws://127.0.0.1:* http://127.0.0.1:*; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "Utility",
+    "shortDescription": "Web-first remote desktop",
+    "longDescription": "moLink is a web-first remote desktop: one core process captures, encodes and transmits the screen, and a Tauri shell renders it.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": ["binaries/*"],
+    "linux": {
+      "deb": {
+        "depends": []
+      }
+    }
+  }
+}

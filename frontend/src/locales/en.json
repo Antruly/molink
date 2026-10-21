@@ -1,0 +1,45 @@
+{
+  "app": {
+    "tagline": "Remote desktop, web-first",
+    "version": "v0.1.0"
+  },
+  "connect": {
+    "title": "Connect to a moLink core",
+    "subtitle": "The core runs on the machine you want to control. It listens on loopback only and prints its access token at startup.",
+    "host": "Host",
+    "port": "Port",
+    "token": "Access token",
+    "tokenHint": "Shown by molink-core at startup, or set with MOLINK_TOKEN.",
+    "showToken": "Show token",
+    "hideToken": "Hide token",
+    "submit": "Connect",
+    "connecting": "Connecting…",
+    "hint": "Start the core with: molink-core --print-ready",
+    "loopback": "Loopback only"
+  },
+  "session": {
+    "live": "live",
+    "connecting": "connecting",
+    "waiting": "Waiting for the first frame…",
+    "disconnect": "Disconnect",
+    "resolution": "Resolution",
+    "codec": "Codec",
+    "frames": "Frames",
+    "synthetic": "Synthetic test pattern — real screen capture is not enabled in this build.",
+    "previewOnly": "Preview only · input injection not implemented",
+    "service": "Service"
+  },
+  "stats": {
+    "fps": "FPS",
+    "latency": "Latency",
+    "bandwidth": "Bandwidth",
+    "session": "Session"
+  },
+  "error": {
+    "title": "Something went wrong",
+    "dismiss": "Dismiss",
+    "no_token": "An access token is required.",
+    "invalid_port": "Port must be a whole number between 1 and 65535.",
+    "connection failed": "The connection failed."
+  }
+}
