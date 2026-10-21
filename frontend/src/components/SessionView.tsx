@@ -1,20 +1,28 @@
 import {
+  Activity,
   ClipboardCopy,
   ClipboardPaste,
+  ExternalLink,
   Hand,
   LogOut,
   MousePointer2,
   Radio,
+  X,
 } from 'lucide-react'
 import {
+  useCallback,
   useEffect,
   useRef,
   useState,
   type PointerEvent as ReactPointerEvent,
 } from 'react'
 import { useTranslation } from 'react-i18next'
-import type { Stats } from '../store/session'
-import { client, useSessionStore } from '../store/session'
+import { openSessionWindow } from '../lib/windows'
+import {
+  sessionConnection,
+  useAppStore,
+  type SessionTab,
+} from '../store/app'
 import { RemoteCursor } from './RemoteCursor'
 import { TileCanvas } from './TileCanvas'
 
@@ -30,90 +38,67 @@ function formatBandwidth(bytesPerSecond: number): string {
 
 function Stat({ label, value }: { label: string; value: string }) {
   return (
-    <div className="hidden min-w-[68px] rounded-md border border-line-soft bg-panel px-2.5 py-1.5 text-center sm:block">
-      <div className="text-[10px] uppercase tracking-[0.14em] text-fog/70">
+    <div className="hidden min-w-[62px] rounded-lg border border-line-soft bg-panel px-2 py-1 text-center sm:block">
+      <div className="text-[9px] uppercase tracking-[0.14em] text-muted/80">
         {label}
       </div>
-      <div className="font-mono text-xs text-mist">{value}</div>
+      <div className="font-mono text-[11px] text-ink">{value}</div>
     </div>
   )
 }
 
-function StatsRow({ stats }: { stats: Stats }) {
+export function SessionView({
+  tab,
+  popout = false,
+}: {
+  tab: SessionTab
+  popout?: boolean
+}) {
   const { t } = useTranslation()
-  return (
-    <>
-      <Stat label={t('stats.fps')} value={String(stats.fps)} />
-      <Stat
-        label={t('stats.latency')}
-        value={stats.latencyMs === null ? '—' : `${Math.round(stats.latencyMs)} ms`}
-      />
-      <Stat
-        label={t('stats.bandwidth')}
-        value={formatBandwidth(stats.bytesPerSec)}
-      />
-    </>
-  )
-}
+  const qualityWatermark = useAppStore((state) => state.qualityWatermark)
+  const setQualityWatermark = useAppStore((state) => state.setQualityWatermark)
+  const setControlEnabled = useAppStore((state) => state.setControlEnabled)
+  const closeTab = useAppStore((state) => state.closeTab)
 
-export function SessionView() {
-  const { t } = useTranslation()
-  const phase = useSessionStore((state) => state.phase)
-  const welcome = useSessionStore((state) => state.welcome)
-  const frame = useSessionStore((state) => state.frame)
-  const cursorShape = useSessionStore((state) => state.cursorShape)
-  const cursorPosition = useSessionStore((state) => state.cursorPosition)
-  const stats = useSessionStore((state) => state.stats)
-  const error = useSessionStore((state) => state.error)
-  const controlEnabled = useSessionStore((state) => state.controlEnabled)
-  const setControlEnabled = useSessionStore((state) => state.setControlEnabled)
-  const disconnect = useSessionStore((state) => state.disconnect)
-
+  const welcome = tab.welcome
   const synthetic = welcome?.tiles.synthetic === true
-  // Blind input into a real desktop is not useful and can be destructive:
-  // control stays off whenever the picture is a test pattern.
   const inputAvailable = welcome?.input === true && !synthetic
   const clipboardAvailable = welcome?.clipboard === true
+
   const surfaceRef = useRef<HTMLDivElement>(null)
   const pendingMove = useRef<{ x: number; y: number } | null>(null)
   const moveScheduled = useRef(false)
   const pressedKeys = useRef<Set<string>>(new Set())
   const pressedButtons = useRef<Set<number>>(new Set())
   const [surfaceSize, setSurfaceSize] = useState({ width: 0, height: 0 })
+  const [actionError, setActionError] = useState<string | null>(null)
 
-  // The cursor overlay must line up with the letterboxed canvas, so track the
-  // surface size rather than assuming it fills the viewport.
+  const connection = useCallback(
+    () => sessionConnection(tab.id),
+    [tab.id],
+  )
+
+  useEffect(() => {
+    if (tab.phase !== 'live') return
+    const timer = window.setInterval(() => {
+      connection()?.requestFrame()
+    }, 60)
+    return () => window.clearInterval(timer)
+  }, [tab.phase, tab.id, connection])
+
   useEffect(() => {
     const element = surfaceRef.current
     if (!element) return
     const update = () =>
-      setSurfaceSize({ width: element.clientWidth, height: element.clientHeight })
+      setSurfaceSize({
+        width: element.clientWidth,
+        height: element.clientHeight,
+      })
     update()
     const observer = new ResizeObserver(update)
     observer.observe(element)
     return () => observer.disconnect()
   }, [])
-
-  // Request the next frame only when the previous one has arrived, so a slow
-  // link degrades to a lower frame rate instead of a growing request queue.
-  useEffect(() => {
-    if (phase !== 'live') return
-    const timer = window.setInterval(() => {
-      client.requestFrame()
-    }, 60)
-    return () => window.clearInterval(timer)
-  }, [phase])
-
-  const sendClipboard = () => {
-    if (!navigator.clipboard?.readText) {
-      useSessionStore.setState({ error: 'clipboard_unavailable' })
-      return
-    }
-    navigator.clipboard
-      .readText()
-      .then((text) => client.setClipboard(text))
-      .catch(() => useSessionStore.setState({ error: 'clipboard_read_failed' }))
-  }
 
   const normalize = (clientX: number, clientY: number) => {
     const element = surfaceRef.current
@@ -121,15 +106,12 @@ export function SessionView() {
     const screenW = welcome.tiles.screen_w
     const screenH = welcome.tiles.screen_h
     if (screenW <= 0 || screenH <= 0) return null
-
     const rect = element.getBoundingClientRect()
-    // The canvas uses object-fit: contain, so the image may be letterboxed.
     const scale = Math.min(rect.width / screenW, rect.height / screenH)
     const drawnWidth = screenW * scale
     const drawnHeight = screenH * scale
     const offsetX = (rect.width - drawnWidth) / 2
     const offsetY = (rect.height - drawnHeight) / 2
-
     const nx = (clientX - rect.left - offsetX) / drawnWidth
     const ny = (clientY - rect.top - offsetY) / drawnHeight
     if (nx < 0 || nx > 1 || ny < 0 || ny > 1) return null
@@ -137,34 +119,34 @@ export function SessionView() {
   }
 
   const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (!controlEnabled || !inputAvailable) return
+    if (!tab.controlEnabled || !inputAvailable) return
     const point = normalize(event.clientX, event.clientY)
     if (!point) return
     event.preventDefault()
     event.currentTarget.focus()
     event.currentTarget.setPointerCapture(event.pointerId)
-    client.sendInput({ k: 'move', ...point })
+    connection()?.sendInput({ k: 'move', ...point })
     if (event.button <= 2) {
       const button = event.button + 1
       pressedButtons.current.add(button)
-      client.sendInput({ k: 'button', button, down: true })
+      connection()?.sendInput({ k: 'button', button, down: true })
     }
   }
 
   const onPointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (!controlEnabled || !inputAvailable) return
+    if (!inputAvailable) return
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId)
     }
     if (event.button <= 2) {
       const button = event.button + 1
       pressedButtons.current.delete(button)
-      client.sendInput({ k: 'button', button, down: false })
+      connection()?.sendInput({ k: 'button', button, down: false })
     }
   }
 
   const onPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (!controlEnabled || !inputAvailable) return
+    if (!tab.controlEnabled || !inputAvailable) return
     const point = normalize(event.clientX, event.clientY)
     if (!point) return
     pendingMove.current = point
@@ -173,41 +155,37 @@ export function SessionView() {
     window.requestAnimationFrame(() => {
       moveScheduled.current = false
       const next = pendingMove.current
-      if (next) client.sendInput({ k: 'move', ...next })
+      if (next) connection()?.sendInput({ k: 'move', ...next })
     })
   }
 
-  // A native non-passive wheel listener: React's synthetic one cannot
-  // preventDefault, and the page should not scroll while controlling.
   useEffect(() => {
     const element = surfaceRef.current
-    if (!element || !controlEnabled || !inputAvailable) return
+    if (!element || !tab.controlEnabled || !inputAvailable) return
     const onWheel = (event: WheelEvent) => {
       event.preventDefault()
       const dy = event.deltaY === 0 ? 0 : event.deltaY > 0 ? 1 : -1
       const dx = event.deltaX === 0 ? 0 : event.deltaX > 0 ? 1 : -1
-      if (dx !== 0 || dy !== 0) client.sendInput({ k: 'wheel', dx, dy })
+      if (dx !== 0 || dy !== 0) connection()?.sendInput({ k: 'wheel', dx, dy })
     }
     element.addEventListener('wheel', onWheel, { passive: false })
     return () => element.removeEventListener('wheel', onWheel)
-  }, [controlEnabled, inputAvailable])
+  }, [tab.controlEnabled, inputAvailable, tab.id, connection])
 
-  // Keyboard capture lives at the window level, including the cleanup that
-  // releases held keys when control is switched off.
   useEffect(() => {
-    if (!controlEnabled) return
+    if (!tab.controlEnabled) return
     const keys = pressedKeys.current
     const buttons = pressedButtons.current
     const down = (event: KeyboardEvent) => {
       if (event.repeat) return
       event.preventDefault()
       keys.add(event.code)
-      client.sendInput({ k: 'key', code: event.code, down: true })
+      connection()?.sendInput({ k: 'key', code: event.code, down: true })
     }
     const up = (event: KeyboardEvent) => {
       event.preventDefault()
       keys.delete(event.code)
-      client.sendInput({ k: 'key', code: event.code, down: false })
+      connection()?.sendInput({ k: 'key', code: event.code, down: false })
     }
     window.addEventListener('keydown', down)
     window.addEventListener('keyup', up)
@@ -215,93 +193,185 @@ export function SessionView() {
       window.removeEventListener('keydown', down)
       window.removeEventListener('keyup', up)
       for (const code of keys) {
-        client.sendInput({ k: 'key', code, down: false })
+        connection()?.sendInput({ k: 'key', code, down: false })
       }
       keys.clear()
       for (const button of buttons) {
-        client.sendInput({ k: 'button', button, down: false })
+        connection()?.sendInput({ k: 'button', button, down: false })
       }
       buttons.clear()
+      setControlEnabled(tab.id, false)
     }
-  }, [controlEnabled])
+  }, [tab.controlEnabled, tab.id, setControlEnabled, connection])
+
+  const copyFromRemote = () => {
+    setActionError(null)
+    connection()?.requestClipboard()
+  }
+
+  const sendToRemote = () => {
+    if (!navigator.clipboard?.readText) {
+      setActionError(String(t('error.clipboard_unavailable')))
+      return
+    }
+    navigator.clipboard
+      .readText()
+      .then((text) => connection()?.setClipboard(text))
+      .catch(() => setActionError(String(t('error.clipboard_read_failed'))))
+  }
+
+  const openPopout = () => {
+    if (
+      openSessionWindow({
+        host: tab.host,
+        port: tab.port,
+        token: tab.token,
+        label: tab.label,
+      })
+    ) {
+      closeTab(tab.id)
+    }
+  }
+
+  const latency =
+    tab.stats.latencyMs === null ? '—' : `${Math.round(tab.stats.latencyMs)} ms`
+  const syntheticLabel = synthetic ? t('session.syntheticShort') : null
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line-soft px-5 py-3 sm:px-8">
-        <div className="flex items-center gap-3">
-          <span className="relative flex h-2 w-2">
-            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-signal opacity-60" />
-            <span className="relative inline-flex h-2 w-2 rounded-full bg-signal" />
-          </span>
-          <div>
-            <div className="font-mono text-sm tracking-[0.18em] text-mist">
-              {welcome?.session ?? '—'}
-            </div>
-            <div className="text-[11px] text-fog">
-              {welcome?.service ?? 'moLink Core'}
-              {welcome?.version ? ` · v${welcome.version}` : ''}
-            </div>
+      <div className="flex flex-wrap items-center gap-2 border-b border-line-soft px-4 py-2.5">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <span
+              className={
+                'h-1.5 w-1.5 rounded-full ' +
+                (tab.phase === 'live'
+                  ? 'bg-accent'
+                  : tab.phase === 'connecting'
+                    ? 'animate-pulse bg-warn'
+                    : 'bg-danger')
+              }
+            />
+            <div className="truncate text-sm font-medium">{tab.label}</div>
+          </div>
+          <div className="mt-0.5 truncate font-mono text-[11px] text-muted">
+            {tab.host}:{tab.port}
+            {welcome?.device_id ? ` · ${welcome.device_id}` : ''}
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
-          <StatsRow stats={stats} />
+        <div className="ml-auto flex items-center gap-1.5">
+          <div className="flex items-center gap-1.5">
+            <Stat label={t('stats.fps')} value={String(tab.stats.fps)} />
+            <Stat label={t('stats.latency')} value={latency} />
+            <Stat
+              label={t('stats.bandwidth')}
+              value={formatBandwidth(tab.stats.bytesPerSec)}
+            />
+          </div>
+
           {clipboardAvailable ? (
             <>
               <button
                 type="button"
-                onClick={() => client.requestClipboard()}
+                onClick={copyFromRemote}
+                className="btn btn-quiet h-8 w-8 !px-0"
                 title={t('session.clipboardGet')}
-                className="flex items-center gap-1.5 rounded-md border border-line bg-panel px-2.5 py-1.5 text-[11px] text-fog transition hover:border-signal/50 hover:text-mist"
+                aria-label={t('session.clipboardGet')}
               >
-                <ClipboardCopy size={13} />
-                <span className="hidden lg:inline">{t('session.clipboardGet')}</span>
+                <ClipboardCopy size={14} />
               </button>
               <button
                 type="button"
-                onClick={sendClipboard}
+                onClick={sendToRemote}
+                className="btn btn-quiet h-8 w-8 !px-0"
                 title={t('session.clipboardSet')}
-                className="flex items-center gap-1.5 rounded-md border border-line bg-panel px-2.5 py-1.5 text-[11px] text-fog transition hover:border-signal/50 hover:text-mist"
+                aria-label={t('session.clipboardSet')}
               >
-                <ClipboardPaste size={13} />
-                <span className="hidden lg:inline">{t('session.clipboardSet')}</span>
+                <ClipboardPaste size={14} />
               </button>
             </>
           ) : null}
+
+          <button
+            type="button"
+            onClick={() => setQualityWatermark(!qualityWatermark)}
+            className={
+              'btn h-8 w-8 !px-0 ' +
+              (qualityWatermark ? 'text-accent' : 'btn-quiet')
+            }
+            title={t('settings.watermark')}
+            aria-label={t('settings.watermark')}
+          >
+            <Activity size={14} />
+          </button>
+
+          {!popout ? (
+            <button
+              type="button"
+              onClick={openPopout}
+              className="btn btn-quiet h-8 w-8 !px-0"
+              title={t('session.popOut')}
+              aria-label={t('session.popOut')}
+            >
+              <ExternalLink size={14} />
+            </button>
+          ) : null}
+
           {inputAvailable ? (
             <button
               type="button"
-              onClick={() => setControlEnabled(!controlEnabled)}
+              onClick={() => setControlEnabled(tab.id, !tab.controlEnabled)}
               className={
-                controlEnabled
-                  ? 'flex items-center gap-1.5 rounded-md border border-signal/60 bg-signal/15 px-2.5 py-1.5 text-[11px] text-signal transition'
-                  : 'flex items-center gap-1.5 rounded-md border border-line bg-panel px-2.5 py-1.5 text-[11px] text-fog transition hover:border-signal/50 hover:text-mist'
+                tab.controlEnabled
+                  ? 'btn border-accent/50 bg-accent-soft text-accent'
+                  : 'btn'
               }
             >
-              {controlEnabled ? <Hand size={13} /> : <MousePointer2 size={13} />}
-              {controlEnabled
-                ? t('session.stopControl')
-                : t('session.startControl')}
+              {tab.controlEnabled ? <Hand size={14} /> : <MousePointer2 size={14} />}
+              <span className="hidden md:inline">
+                {tab.controlEnabled
+                  ? t('session.stopControl')
+                  : t('session.startControl')}
+              </span>
             </button>
-          ) : null}
-          <button
-            type="button"
-            onClick={disconnect}
-            className="flex items-center gap-1.5 rounded-md border border-line bg-panel px-2.5 py-1.5 text-[11px] text-fog transition hover:border-alert/50 hover:text-alert"
-          >
-            <LogOut size={13} />
-            {t('session.disconnect')}
-          </button>
+          ) : (
+            <span className="chip">{t('session.inputUnavailable')}</span>
+          )}
+
+          {popout ? (
+            <button
+              type="button"
+              onClick={() => window.close()}
+              className="btn btn-quiet h-8 w-8 !px-0"
+              title={t('session.closeWindow')}
+              aria-label={t('session.closeWindow')}
+            >
+              <X size={15} />
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => closeTab(tab.id)}
+              className="btn btn-quiet h-8 w-8 !px-0 hover:!border-danger/50 hover:!text-danger"
+              title={t('session.disconnect')}
+              aria-label={t('session.disconnect')}
+            >
+              <LogOut size={14} />
+            </button>
+          )}
         </div>
       </div>
 
-      {error ? (
-        <div className="border-b border-alert/30 bg-alert/10 px-5 py-2 text-xs text-alert sm:px-8">
-          {String(t(`error.${error}`, { defaultValue: error }))}
+      {tab.error || actionError ? (
+        <div className="border-b border-danger/30 bg-danger/10 px-4 py-2 text-[12px] text-danger">
+          {tab.error
+            ? String(t(`error.${tab.error}`, { defaultValue: tab.error }))
+            : actionError}
         </div>
       ) : null}
 
-      <div className="flex min-h-0 flex-1 items-center justify-center p-3 sm:p-5">
+      <div className="flex min-h-0 flex-1 items-center justify-center p-3 sm:p-4">
         <div
           ref={surfaceRef}
           tabIndex={-1}
@@ -309,68 +379,76 @@ export function SessionView() {
           onPointerUp={onPointerUp}
           onPointerMove={onPointerMove}
           onContextMenu={(event) => {
-            if (controlEnabled) event.preventDefault()
+            if (tab.controlEnabled) event.preventDefault()
           }}
           className={
-            'relative flex h-full w-full touch-none select-none items-center justify-center overflow-hidden rounded-xl border bg-black/60 outline-none ' +
-            (controlEnabled ? 'border-signal/40' : 'border-line')
+            'relative flex h-full w-full touch-none select-none items-center justify-center overflow-hidden rounded-xl border bg-black/70 outline-none transition ' +
+            (tab.controlEnabled ? 'border-accent/45' : 'border-line')
           }
         >
-          {frame ? (
-            <TileCanvas frame={frame} />
+          {tab.frame ? (
+            <TileCanvas frame={tab.frame} />
           ) : (
-            <div className="flex items-center gap-2 text-sm text-fog">
-              <Radio size={15} className="animate-pulse text-signal" />
-              {t('session.waiting')}
+            <div className="flex items-center gap-2 text-sm text-muted">
+              <Radio size={15} className="animate-pulse text-accent" />
+              {tab.phase === 'connecting'
+                ? t('session.connecting')
+                : t('session.waiting')}
             </div>
           )}
 
-          {!controlEnabled && !synthetic ? (
+          {!tab.controlEnabled && !synthetic ? (
             <RemoteCursor
-              shape={cursorShape}
-              position={cursorPosition}
+              shape={tab.cursorShape}
+              position={tab.cursorPosition}
               welcome={welcome}
               viewWidth={surfaceSize.width}
               viewHeight={surfaceSize.height}
             />
           ) : null}
 
-          <div className="pointer-events-none absolute left-3 top-3 flex flex-wrap gap-2">
+          <div className="pointer-events-none absolute left-3 top-3 flex flex-wrap gap-1.5">
             {welcome ? (
-              <span className="rounded border border-line bg-ink/80 px-2 py-1 font-mono text-[10px] text-fog">
+              <span className="rounded-md border border-line bg-surface/80 px-2 py-1 font-mono text-[10px] text-muted backdrop-blur">
                 {welcome.tiles.screen_w}×{welcome.tiles.screen_h}
               </span>
             ) : null}
             {welcome ? (
-              <span className="rounded border border-line bg-ink/80 px-2 py-1 font-mono text-[10px] uppercase text-fog">
+              <span className="rounded-md border border-line bg-surface/80 px-2 py-1 font-mono text-[10px] uppercase text-muted backdrop-blur">
                 {welcome.tiles.codec}
               </span>
             ) : null}
-            <span className="rounded border border-line bg-ink/80 px-2 py-1 font-mono text-[10px] text-fog">
-              {t('session.frames')} {stats.frames}
-            </span>
-            {controlEnabled ? (
-              <span className="rounded border border-signal/50 bg-signal/15 px-2 py-1 font-mono text-[10px] text-signal">
+            {syntheticLabel ? (
+              <span className="rounded-md border border-warn/40 bg-warn/10 px-2 py-1 font-mono text-[10px] text-warn backdrop-blur">
+                {syntheticLabel}
+              </span>
+            ) : null}
+            {tab.controlEnabled ? (
+              <span className="rounded-md border border-accent/50 bg-accent-soft px-2 py-1 font-mono text-[10px] text-accent backdrop-blur">
                 {t('session.controlOn')}
               </span>
             ) : null}
           </div>
+
+          {qualityWatermark ? (
+            <div className="pointer-events-none absolute bottom-3 right-3 flex items-center gap-2 rounded-md border border-line bg-surface/75 px-2.5 py-1 font-mono text-[10px] text-muted backdrop-blur">
+              <span className="text-accent">{tab.stats.fps} fps</span>
+              <span>{latency}</span>
+              <span>{formatBandwidth(tab.stats.bytesPerSec)}</span>
+              <span className="text-muted/60">{welcome?.tiles.codec ?? ''}</span>
+            </div>
+          ) : null}
         </div>
       </div>
 
-      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-line-soft px-5 py-2.5 text-[11px] text-fog/80 sm:px-8">
-        <span className="flex items-center gap-1.5 text-amber/90">
-          <span className="h-1 w-1 rounded-full bg-amber" />
-          {welcome?.tiles.synthetic ? t('session.synthetic') : null}
-        </span>
+      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-line-soft px-4 py-2 text-[11px] text-muted/85">
+        <span>{synthetic ? t('session.synthetic') : t('session.direct')}</span>
         <span>
-          {controlEnabled
+          {tab.controlEnabled
             ? t('session.controlOnHint')
             : inputAvailable
               ? t('session.controlHint')
-              : synthetic
-                ? t('session.controlSynthetic')
-                : t('session.inputUnavailable')}
+              : t('session.inputUnavailable')}
         </span>
       </div>
     </div>

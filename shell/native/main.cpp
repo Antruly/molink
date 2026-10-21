@@ -6,6 +6,8 @@
 #include <gtk/gtk.h>
 #include <gdk/gdkkeysyms.h>
 #include <webkit2/webkit2.h>
+#include <cairo.h>
+#include <jsc/jsc.h>
 
 #include <poll.h>
 #include <signal.h>
@@ -280,71 +282,324 @@ gboolean smoke_timeout(gpointer) {
 
 }  // namespace
 
+
+GtkStatusIcon* g_tray_icon = nullptr;
+GtkWidget* g_tray_menu = nullptr;
+bool g_url_mode = false;
+std::string g_url_override;
+
+std::string exe_path() {
+  char buffer[4096];
+  const ssize_t length = ::readlink("/proc/self/exe", buffer, sizeof(buffer) - 1);
+  if (length <= 0) return std::string();
+  buffer[length] = '\0';
+  return std::string(buffer);
+}
+
+GtkWidget* on_create_web_view(WebKitWebView*, WebKitNavigationAction* action,
+                              gpointer) {
+  WebKitURIRequest* request = webkit_navigation_action_get_request(action);
+  if (request == nullptr) return nullptr;
+  const char* uri = webkit_uri_request_get_uri(request);
+  if (uri == nullptr || !g_str_has_prefix(uri, "http://127.0.0.1:")) {
+    return nullptr;
+  }
+  const std::string executable = exe_path();
+  if (executable.empty()) return nullptr;
+  char* args[] = {const_cast<char*>(executable.c_str()),
+                  const_cast<char*>("--url"),
+                  const_cast<char*>(uri), nullptr};
+  g_spawn_async(nullptr, args, nullptr,
+                static_cast<GSpawnFlags>(G_SPAWN_SEARCH_PATH), nullptr, nullptr,
+                nullptr, nullptr);
+  return nullptr;
+}
+
+std::string find_icon() {
+  if (const char* env = std::getenv("MOLINK_ICON")) {
+    if (fs::is_regular_file(env)) return env;
+  }
+  const std::string dir = exe_dir();
+  std::vector<fs::path> candidates;
+  if (!dir.empty()) {
+    candidates.push_back(fs::path(dir) / "molink.png");
+    candidates.push_back(fs::path(dir) / "../share/icons/hicolor/256x256/apps/molink.png");
+    candidates.push_back(fs::path(dir) / "../share/molink/molink.png");
+    candidates.push_back("/usr/share/icons/hicolor/256x256/apps/molink.png");
+    candidates.push_back(fs::path(dir) / "../../../shell/assets/icons/icon.png");
+  }
+  candidates.push_back("shell/assets/icons/icon.png");
+  for (const fs::path& candidate : candidates) {
+    std::error_code ec;
+    if (fs::is_regular_file(candidate, ec)) return candidate.string();
+  }
+  return std::string();
+}
+
+void rounded_rect_path(cairo_t* cr, double x, double y, double w, double h,
+                       double r) {
+  cairo_new_sub_path(cr);
+  cairo_arc(cr, x + w - r, y + r, r, -G_PI / 2.0, 0);
+  cairo_arc(cr, x + w - r, y + h - r, r, 0, G_PI / 2.0);
+  cairo_arc(cr, x + r, y + h - r, r, G_PI / 2.0, G_PI);
+  cairo_arc(cr, x + r, y + r, r, G_PI, 3.0 * G_PI / 2.0);
+  cairo_close_path(cr);
+}
+
+void apply_window_shape(GtkWidget* widget) {
+  if (!gtk_widget_get_realized(widget)) return;
+  if (gtk_window_is_maximized(GTK_WINDOW(widget))) {
+    gtk_widget_shape_combine_region(widget, nullptr);
+    return;
+  }
+  GtkAllocation allocation;
+  gtk_widget_get_allocation(widget, &allocation);
+  if (allocation.width <= 0 || allocation.height <= 0) return;
+  cairo_surface_t* surface = cairo_image_surface_create(
+      CAIRO_FORMAT_A1, allocation.width, allocation.height);
+  cairo_t* cr = cairo_create(surface);
+  rounded_rect_path(cr, 0, 0, allocation.width, allocation.height, 14.0);
+  cairo_fill(cr);
+  cairo_destroy(cr);
+  cairo_region_t* region = gdk_cairo_region_create_from_surface(surface);
+  cairo_surface_destroy(surface);
+  if (region != nullptr) {
+    gtk_widget_shape_combine_region(widget, region);
+    cairo_region_destroy(region);
+  }
+}
+
+gboolean on_size_allocate(GtkWidget* widget, GdkRectangle*, gpointer) {
+  apply_window_shape(widget);
+  return FALSE;
+}
+
+gboolean on_window_state(GtkWidget* widget, GdkEventWindowState* event,
+                         gpointer) {
+  if ((event->changed_mask &
+       (GDK_WINDOW_STATE_MAXIMIZED | GDK_WINDOW_STATE_FULLSCREEN)) != 0) {
+    apply_window_shape(widget);
+  }
+  return FALSE;
+}
+
+void show_window(GtkWidget* window) {
+  gtk_widget_show(window);
+  gtk_window_deiconify(GTK_WINDOW(window));
+  gtk_window_present(GTK_WINDOW(window));
+}
+
+void hide_to_tray(GtkWidget* window) {
+  gtk_widget_hide(window);
+  if (g_tray_icon != nullptr) gtk_status_icon_set_visible(g_tray_icon, TRUE);
+}
+
+void on_tray_activate(GtkStatusIcon*, gpointer data) {
+  show_window(GTK_WIDGET(data));
+}
+
+void on_tray_popup(GtkStatusIcon* icon, guint button, guint time, gpointer) {
+  if (g_tray_menu == nullptr) return;
+  gtk_menu_popup(GTK_MENU(g_tray_menu), nullptr, nullptr,
+                 gtk_status_icon_position_menu, icon, button, time);
+}
+
+void on_menu_show(GtkMenuItem*, gpointer data) { show_window(GTK_WIDGET(data)); }
+
+void on_menu_quit(GtkMenuItem*, gpointer) { gtk_main_quit(); }
+
+gboolean on_delete_event(GtkWidget* window, GdkEvent*, gpointer) {
+  if (g_url_mode) return FALSE;
+  hide_to_tray(window);
+  return TRUE;
+}
+
+void setup_tray(GtkWidget* window) {
+  const std::string icon = find_icon();
+  if (!icon.empty()) {
+    g_tray_icon = gtk_status_icon_new_from_file(icon.c_str());
+  } else {
+    g_tray_icon = gtk_status_icon_new_from_stock(GTK_STOCK_NETWORK);
+  }
+  gtk_status_icon_set_tooltip_text(g_tray_icon, "moLink");
+  gtk_status_icon_set_title(g_tray_icon, "moLink");
+  gtk_status_icon_set_visible(g_tray_icon, TRUE);
+
+  g_tray_menu = gtk_menu_new();
+  GtkWidget* show_item = gtk_menu_item_new_with_label("Show moLink");
+  GtkWidget* quit_item = gtk_menu_item_new_with_label("Quit");
+  gtk_menu_shell_append(GTK_MENU_SHELL(g_tray_menu), show_item);
+  gtk_menu_shell_append(GTK_MENU_SHELL(g_tray_menu), quit_item);
+  g_signal_connect(show_item, "activate", G_CALLBACK(on_menu_show), window);
+  g_signal_connect(quit_item, "activate", G_CALLBACK(on_menu_quit), nullptr);
+  gtk_widget_show_all(g_tray_menu);
+
+  g_signal_connect(g_tray_icon, "activate", G_CALLBACK(on_tray_activate), window);
+  g_signal_connect(g_tray_icon, "popup-menu", G_CALLBACK(on_tray_popup), window);
+}
+
+void on_script_message(WebKitUserContentManager*, WebKitJavascriptResult* result,
+                       gpointer data) {
+  GtkWidget* window = GTK_WIDGET(data);
+  JSCValue* value = webkit_javascript_result_get_js_value(result);
+  if (value == nullptr || !jsc_value_is_string(value)) return;
+  char* raw = jsc_value_to_string(value);
+  const std::string action = raw != nullptr ? raw : "";
+  g_free(raw);
+  if (action == "minimize") {
+    gtk_window_iconify(GTK_WINDOW(window));
+  } else if (action == "maximize") {
+    if (gtk_window_is_maximized(GTK_WINDOW(window))) {
+      gtk_window_unmaximize(GTK_WINDOW(window));
+    } else {
+      gtk_window_maximize(GTK_WINDOW(window));
+    }
+  } else if (action == "close") {
+    if (g_url_mode) {
+      gtk_widget_destroy(window);
+    } else {
+      hide_to_tray(window);
+    }
+  } else if (action == "drag") {
+    GdkDisplay* display = gtk_widget_get_display(window);
+    GdkSeat* seat = gdk_display_get_default_seat(display);
+    GdkDevice* pointer = gdk_seat_get_pointer(seat);
+    gint x = 0;
+    gint y = 0;
+    gdk_device_get_position(pointer, nullptr, &x, &y);
+    gtk_window_begin_move_drag(GTK_WINDOW(window), 1, x, y, GDK_CURRENT_TIME);
+  } else if (action == "resize-top" || action == "resize-bottom" ||
+             action == "resize-left" || action == "resize-right" ||
+             action == "resize-tl" || action == "resize-tr" ||
+             action == "resize-bl" || action == "resize-br") {
+    GdkWindowEdge edge = GDK_WINDOW_EDGE_NORTH_WEST;
+    if (action == "resize-top") edge = GDK_WINDOW_EDGE_NORTH;
+    else if (action == "resize-bottom") edge = GDK_WINDOW_EDGE_SOUTH;
+    else if (action == "resize-left") edge = GDK_WINDOW_EDGE_WEST;
+    else if (action == "resize-right") edge = GDK_WINDOW_EDGE_EAST;
+    else if (action == "resize-tr") edge = GDK_WINDOW_EDGE_NORTH_EAST;
+    else if (action == "resize-bl") edge = GDK_WINDOW_EDGE_SOUTH_WEST;
+    else if (action == "resize-br") edge = GDK_WINDOW_EDGE_SOUTH_EAST;
+    GdkDisplay* display = gtk_widget_get_display(window);
+    GdkSeat* seat = gdk_display_get_default_seat(display);
+    GdkDevice* pointer = gdk_seat_get_pointer(seat);
+    gint x = 0;
+    gint y = 0;
+    gdk_device_get_position(pointer, nullptr, &x, &y);
+    gtk_window_begin_resize_drag(GTK_WINDOW(window), edge, 1, x, y,
+                                 GDK_CURRENT_TIME);
+  } else if (action == "quit") {
+    gtk_main_quit();
+  }
+}
+
 int main(int argc, char** argv) {
   for (int i = 1; i < argc; ++i) {
-    if (std::strcmp(argv[i], "--smoke-test") == 0) g_smoke = true;
+    if (std::strcmp(argv[i], "--smoke-test") == 0) {
+      g_smoke = true;
+    } else if (std::strcmp(argv[i], "--url") == 0 && i + 1 < argc) {
+      g_url_override = argv[++i];
+    }
   }
+  g_url_mode = !g_url_override.empty();
 
   gtk_init(&argc, &argv);
 
-  const std::string core = find_core();
-  if (core.empty()) {
-    std::fprintf(stderr,
-                 "moLink shell: molink-core not found; set MOLINK_CORE or build "
-                 "backend/\n");
-    return 1;
-  }
-  const std::string web_root = find_web_root();
-  if (web_root.empty()) {
-    std::fprintf(stderr,
-                 "moLink shell: frontend/dist not found; run pnpm build in "
-                 "frontend/\n");
-    return 1;
-  }
+  std::string url;
+  if (g_url_mode) {
+    url = g_url_override;
+  } else {
+    const std::string core = find_core();
+    if (core.empty()) {
+      std::fprintf(stderr,
+                   "moLink shell: molink-core not found; set MOLINK_CORE or "
+                   "build backend/\n");
+      return 1;
+    }
+    const std::string web_root = find_web_root();
+    if (web_root.empty()) {
+      std::fprintf(stderr,
+                   "moLink shell: frontend/dist not found; run pnpm build in "
+                   "frontend/\n");
+      return 1;
+    }
 
-  int port = 0;
-  std::string token;
-  std::string error;
-  if (!start_core(core, web_root, port, token, error)) {
-    std::fprintf(stderr, "moLink shell: %s\n", error.c_str());
-    stop_core();
-    return 1;
-  }
+    int port = 0;
+    std::string token;
+    std::string error;
+    if (!start_core(core, web_root, port, token, error)) {
+      std::fprintf(stderr, "moLink shell: %s\n", error.c_str());
+      stop_core();
+      return 1;
+    }
 
-  std::string url = "http://127.0.0.1:" + std::to_string(port) + "/?host=";
-  url += "127.0.0.1&port=" + std::to_string(port) + "&token=" + token;
+    url = "http://127.0.0.1:" + std::to_string(port) + "/?host=";
+    url += "127.0.0.1&port=" + std::to_string(port) + "&token=" + token;
+    url += "&shell=1&platform=linux";
+  }
 
   GtkWidget* window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
   gtk_window_set_title(GTK_WINDOW(window), "moLink");
-  gtk_window_set_default_size(GTK_WINDOW(window), 1280, 800);
-  gtk_window_set_icon_name(GTK_WINDOW(window), "moLink");
+  gtk_window_set_default_size(GTK_WINDOW(window), 1280, 820);
+  gtk_window_set_resizable(GTK_WINDOW(window), TRUE);
+  gtk_window_set_decorated(GTK_WINDOW(window), FALSE);
+  gtk_widget_set_app_paintable(window, TRUE);
+
+  GdkScreen* screen = gtk_widget_get_screen(window);
+  GdkVisual* rgba_visual = gdk_screen_get_rgba_visual(screen);
+  if (rgba_visual != nullptr && gdk_screen_is_composited(screen)) {
+    gtk_widget_set_visual(window, rgba_visual);
+  }
+  const std::string icon_path = find_icon();
+  if (!icon_path.empty()) {
+    gtk_window_set_icon_from_file(GTK_WINDOW(window), icon_path.c_str(), nullptr);
+  }
 
   GtkWidget* view = webkit_web_view_new();
   WebKitSettings* settings = webkit_web_view_get_settings(WEBKIT_WEB_VIEW(view));
   webkit_settings_set_enable_developer_extras(settings, TRUE);
   webkit_settings_set_javascript_can_access_clipboard(settings, TRUE);
+  webkit_settings_set_javascript_can_open_windows_automatically(settings, TRUE);
   gtk_container_add(GTK_CONTAINER(window), view);
 
-  const std::string origin = "http://127.0.0.1:" + std::to_string(port);
+  static const char kOrigin[] = "http://127.0.0.1:";
   g_signal_connect(view, "permission-request",
                    G_CALLBACK(on_permission_request),
-                   const_cast<char*>(origin.c_str()));
+                   const_cast<char*>(kOrigin));
+  g_signal_connect(view, "create", G_CALLBACK(on_create_web_view), nullptr);
   g_signal_connect(view, "load-changed", G_CALLBACK(on_load_changed), nullptr);
   g_signal_connect(view, "load-failed", G_CALLBACK(on_load_failed), nullptr);
   g_signal_connect(window, "key-press-event", G_CALLBACK(on_key_press), nullptr);
   g_signal_connect(window, "destroy", G_CALLBACK(on_destroy), nullptr);
+  g_signal_connect(window, "delete-event", G_CALLBACK(on_delete_event), nullptr);
+  g_signal_connect(window, "size-allocate", G_CALLBACK(on_size_allocate), nullptr);
+  g_signal_connect(window, "window-state-event", G_CALLBACK(on_window_state),
+                   nullptr);
+
+  WebKitUserContentManager* content_manager =
+      webkit_web_view_get_user_content_manager(WEBKIT_WEB_VIEW(view));
+  webkit_user_content_manager_register_script_message_handler(content_manager,
+                                                              "molink");
+  g_signal_connect(content_manager, "script-message-received::molink",
+                   G_CALLBACK(on_script_message), window);
+
+  if (!g_url_mode) setup_tray(window);
 
   GtkCssProvider* css = gtk_css_provider_new();
   gtk_css_provider_load_from_data(
-      css, "window, webkitwebview { background-color: #050d0b; }", -1, nullptr);
+      css,
+      "window, .background { background-color: transparent; }"
+      "webkitwebview { background-color: #0f1719; }",
+      -1, nullptr);
   gtk_style_context_add_provider_for_screen(
       gdk_screen_get_default(), GTK_STYLE_PROVIDER(css),
       GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
 
   webkit_web_view_load_uri(WEBKIT_WEB_VIEW(view), url.c_str());
   gtk_widget_show_all(window);
+  apply_window_shape(window);
 
-  g_timeout_add_seconds(1, check_core, nullptr);
+  if (!g_url_mode) g_timeout_add_seconds(1, check_core, nullptr);
   if (g_smoke) g_timeout_add_seconds(15, smoke_timeout, nullptr);
 
   gtk_main();

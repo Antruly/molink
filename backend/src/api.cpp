@@ -50,6 +50,14 @@ std::string bearer_token(const uvcpp_web_request& req) {
 
 long current_pid() { return static_cast<long>(MOLINK_GETPID()); }
 
+int effective_port(const api_deps& deps) {
+  if (deps.bound_port) {
+    const int port = deps.bound_port->load();
+    if (port > 0) return port;
+  }
+  return deps.config.port;
+}
+
 uint64_t uptime_ms(uint64_t started) {
   const uint64_t now = now_ms();
   return now > started ? now - started : 0;
@@ -87,7 +95,8 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
                   uvcpp_web_next next) {
     const std::string& path = req.path();
     const bool is_api = path.compare(0, 5, "/api/") == 0;
-    if (!is_api || path == "/api/health") {
+    // /api/device is loopback-only and self-checks the peer address.
+    if (!is_api || path == "/api/health" || path == "/api/device") {
       next();
       return;
     }
@@ -119,18 +128,53 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
   app.get("/healthz", health);
   app.get("/api/health", health);
 
+  app.get("/api/device",
+          [deps](uvcpp_web_request& req, uvcpp_web_response& resp,
+                 uvcpp_web_next) {
+            const std::string peer = req.peer_ip();
+            const bool loopback = peer == "127.0.0.1" || peer == "::1" ||
+                                  peer == "::ffff:127.0.0.1";
+            if (!loopback) {
+              uvcpp_json body;
+              body["type"] = "error";
+              body["code"] = "loopback_only";
+              body["message"] = "device credentials are only served to loopback";
+              resp.status(403).json(body);
+              resp.end();
+              return;
+            }
+            uvcpp_json j;
+            j["device_id"] = deps.device_id;
+            j["service"] = MOLINK_CORE_SERVICE;
+            j["product"] = MOLINK_PRODUCT_NAME;
+            j["version"] = MOLINK_VERSION;
+            j["protocol"] = 1;
+            j["token"] = deps.config.token;
+            j["host"] = deps.config.host;
+            j["port"] = effective_port(deps);
+            j["capabilities"]["screen_capture"] =
+                deps.capture != nullptr && deps.capture->is_real();
+            j["capabilities"]["input_injection"] =
+                deps.input != nullptr && deps.input->available();
+            j["capabilities"]["clipboard"] =
+                deps.clipboard != nullptr && deps.clipboard->available();
+            resp.set_header("Cache-Control", "no-store").json(j);
+            resp.end();
+          });
+
   app.get("/api/info",
           [deps](uvcpp_web_request&, uvcpp_web_response& resp,
                  uvcpp_web_next) {
             uvcpp_json j;
             j["service"] = MOLINK_CORE_SERVICE;
             j["product"] = MOLINK_PRODUCT_NAME;
+            j["device_id"] = deps.device_id;
             j["version"] = MOLINK_VERSION;
             j["protocol"] = 1;
             j["pid"] = current_pid();
             j["uptime_ms"] = uptime_ms(deps.started_ms);
             j["bind"]["host"] = deps.config.host;
-            j["bind"]["port"] = deps.config.port;
+            j["bind"]["port"] = effective_port(deps);
             j["capabilities"]["screen_capture"] =
                 deps.capture != nullptr && deps.capture->is_real();
             j["capabilities"]["input_injection"] =

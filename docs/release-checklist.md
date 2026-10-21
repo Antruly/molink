@@ -1,7 +1,7 @@
 # 发布检查清单
 
-当前状态：**Linux / X11 功能面达到候选发布（RC）水平；`.deb` 与 `.AppImage` 已验证。
-Windows / macOS 壳已实现，但只能在对应 CI runner 或真机上验证。**
+当前状态：**0.2.0 发布候选。Linux 的 `.deb`/`.AppImage` 已验证，RPM 与 Windows 免安装版
+由发布工作流构建；Windows/macOS 的运行时行为仍需真机回归。**
 
 ## 已验证
 
@@ -20,6 +20,10 @@ Windows / macOS 壳已实现，但只能在对应 CI runner 或真机上验证�
 | 桌面壳 | Xephyr 内 `moLink --smoke-test` | `SHELL_SMOKE_OK title=moLink` |
 | .deb | 解包后从暂存目录启动壳层 | 冒烟测试通过 |
 | AppImage | `--appimage-extract-and-run --smoke-test` | 冒烟测试通过 |
+| 设备页 | 设备 ID/验证码、隐藏/复制、能力状态 | 截图验证 |
+| 多会话 | 首次独立窗口、后续 Tab、标签拖出 | Linux 壳内实测 |
+| 主题 | 亮/暗切换与持久化 | 截图验证 |
+| 无边框窗口 | 圆角、自绘标题栏、拖拽/缩放、托盘 | Linux 运行；Windows 编译 |
 | Windows 壳 | MinGW-w64 交叉编译 | 链接通过 |
 
 ## 发布前仍需完成

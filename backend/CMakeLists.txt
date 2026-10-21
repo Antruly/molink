@@ -84,6 +84,7 @@ set(MOLINK_CORE_SOURCES
   src/input/windows_input.cpp
   src/input/macos_input.cpp
   src/config.cpp
+  src/identity.cpp
   src/session_registry.cpp
   src/test_pattern.cpp
   src/util.cpp

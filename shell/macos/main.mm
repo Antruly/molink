@@ -32,6 +32,8 @@ namespace fs = std::filesystem;
 pid_t g_core_pid = -1;
 bool g_smoke = false;
 bool g_smoke_done = false;
+bool g_url_mode = false;
+std::string g_url_override;
 
 std::string exe_dir() {
   char buffer[4096];
@@ -198,6 +200,17 @@ void stop_core() {
   g_core_pid = -1;
 }
 
+void spawn_self(const std::string& url) {
+  NSString* executable = [[NSBundle mainBundle] executablePath];
+  std::string path = executable != nil ? [executable UTF8String]
+                                       : exe_dir() + "/moLink";
+  NSTask* task = [[NSTask alloc] init];
+  task.executableURL = [NSURL fileURLWithPath:[NSString stringWithUTF8String:path.c_str()]];
+  task.arguments = @[ @"--url", [NSString stringWithUTF8String:url.c_str()] ];
+  NSError* error = nil;
+  [task launchAndReturnError:&error];
+}
+
 void fail(const char* message) {
   std::fprintf(stderr, "moLink shell: %s\n", message);
   if (g_smoke) {
@@ -211,7 +224,9 @@ void fail(const char* message) {
 
 }  // namespace
 
-@interface AppDelegate : NSObject <NSApplicationDelegate, WKNavigationDelegate>
+@interface AppDelegate
+    : NSObject <NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate,
+                WKScriptMessageHandler, NSWindowDelegate>
 @property(nonatomic, strong) NSWindow* window;
 @property(nonatomic, strong) WKWebView* webView;
 @property(nonatomic, copy) NSString* url;
@@ -231,17 +246,22 @@ void fail(const char* message) {
                   backing:NSBackingStoreBuffered
                     defer:NO];
   self.window.title = @"moLink";
-  self.window.backgroundColor =
-      [NSColor colorWithCalibratedRed:5.0 / 255.0
-                                green:13.0 / 255.0
-                                 blue:11.0 / 255.0
-                                alpha:1.0];
+  self.window.titleVisibility = NSWindowTitleHidden;
+  self.window.titlebarAppearsTransparent = YES;
+  self.window.backgroundColor = [NSColor windowBackgroundColor];
+  self.window.delegate = self;
 
   WKWebViewConfiguration* configuration =
       [[WKWebViewConfiguration alloc] init];
+  WKUserContentController* controller = [[WKUserContentController alloc] init];
+  [controller addScriptMessageHandler:self name:@"molink"];
+  configuration.userContentController = controller;
+  configuration.preferences.javaScriptCanOpenWindowsAutomatically = YES;
+
   self.webView = [[WKWebView alloc] initWithFrame:frame
                                     configuration:configuration];
   self.webView.navigationDelegate = self;
+  self.webView.UIDelegate = self;
   self.webView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
   [self.window.contentView addSubview:self.webView];
 
@@ -299,7 +319,53 @@ void fail(const char* message) {
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:
     (NSApplication*)sender {
   (void)sender;
+  return g_url_mode ? YES : NO;
+}
+
+- (BOOL)applicationShouldHandleReopen:(NSApplication*)sender
+                    hasVisibleWindows:(BOOL)flag {
+  (void)sender;
+  (void)flag;
+  [self.window makeKeyAndOrderFront:nil];
   return YES;
+}
+
+- (BOOL)windowShouldClose:(NSWindow*)sender {
+  if (g_url_mode) {
+    stop_core();
+    return YES;
+  }
+  [sender orderOut:nil];
+  return NO;
+}
+
+- (void)userContentController:(WKUserContentController*)controller
+      didReceiveScriptMessage:(WKScriptMessage*)message {
+  (void)controller;
+  NSString* action = message.body;
+  if (![action isKindOfClass:[NSString class]]) return;
+  if ([action isEqualToString:@"minimize"]) {
+    [self.window miniaturize:nil];
+  } else if ([action isEqualToString:@"maximize"]) {
+    [self.window zoom:nil];
+  } else if ([action isEqualToString:@"close"]) {
+    [self.window performClose:nil];
+  } else if ([action isEqualToString:@"quit"]) {
+    [NSApp terminate:nil];
+  }
+}
+
+- (WKWebView*)webView:(WKWebView*)webView
+    createWebViewWithConfiguration:(WKWebViewConfiguration*)configuration
+               forNavigationAction:(WKNavigationAction*)navigationAction
+                    windowFeatures:(WKWindowFeatures*)windowFeatures {
+  (void)webView;
+  (void)configuration;
+  (void)windowFeatures;
+  NSURL* url = navigationAction.request.URL;
+  if (url == nil || ![[url host] isEqualToString:@"127.0.0.1"]) return nil;
+  spawn_self([[url absoluteString] UTF8String]);
+  return nil;
 }
 
 - (void)applicationWillTerminate:(NSNotification*)notification {
@@ -312,7 +378,32 @@ void fail(const char* message) {
 int main(int argc, char** argv) {
   @autoreleasepool {
     for (int i = 1; i < argc; ++i) {
-      if (std::strcmp(argv[i], "--smoke-test") == 0) g_smoke = true;
+      if (std::strcmp(argv[i], "--smoke-test") == 0) {
+        g_smoke = true;
+      } else if (std::strcmp(argv[i], "--url") == 0 && i + 1 < argc) {
+        g_url_override = argv[++i];
+      }
+    }
+    g_url_mode = !g_url_override.empty();
+
+    if (g_url_mode) {
+      const std::string url = g_url_override;
+      [NSApplication sharedApplication];
+      [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+      NSMenu* menubar = [[NSMenu alloc] init];
+      NSMenuItem* app_item = [[NSMenuItem alloc] init];
+      [menubar addItem:app_item];
+      [NSApp setMainMenu:menubar];
+      NSMenu* app_menu = [[NSMenu alloc] init];
+      [app_menu addItemWithTitle:@"Quit moLink"
+                          action:@selector(terminate:)
+                   keyEquivalent:@"q"];
+      [app_item setSubmenu:app_menu];
+      AppDelegate* delegate = [[AppDelegate alloc] init];
+      delegate.url = [NSString stringWithUTF8String:url.c_str()];
+      [NSApp setDelegate:delegate];
+      [NSApp run];
+      return 0;
     }
 
     const std::string core = find_core();
@@ -340,7 +431,7 @@ int main(int argc, char** argv) {
 
     const std::string url = "http://127.0.0.1:" + std::to_string(port) +
                             "/?host=127.0.0.1&port=" + std::to_string(port) +
-                            "&token=" + token;
+                            "&token=" + token + "&shell=1&platform=macos";
 
     [NSApplication sharedApplication];
     [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];

@@ -5,8 +5,11 @@ frontend/dist/
 
 # C++ 构建
 backend/build/
+squashfs-root/
 shell/*/build/
+squashfs-root/
 build/
+squashfs-root/
 
 backend/cmake-build-*/
 *.o

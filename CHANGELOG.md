@@ -1,6 +1,46 @@
 # Changelog
 
-## [0.1.0] — Unreleased
+## [0.2.0] — 2026-10-21
+
+### Added
+
+**界面**
+- 设备页：本机设备 ID 与验证码（默认隐藏、可复制），能力状态，最近连接
+- 多会话：首次连接在独立窗口打开，后续连接进入 Tab；标签可拖出成独立窗口
+- 亮色 / 暗色主题，跟随系统初始值并记住选择
+- 连接质量水印，默认关闭，可在偏好设置或会话工具栏开启
+- 无边框圆角窗口 + 自绘标题栏（Linux/Windows），边缘拖拽缩放
+- 关闭窗口收进托盘（Linux GtkStatusIcon / Windows Shell_NotifyIcon）；macOS 保留在 Dock
+- 新应用图标：青绿→天蓝渐变 + 白色 “m”，同时用于窗口、托盘与安装包
+
+**后台**
+- 持久化设备身份：设备 ID 与验证码保存在配置目录，验证码不再每次启动变化
+- `/api/device`（仅回环地址）向本机界面提供设备信息
+- 修复系统分配端口时 `/api/device` 与 `/api/info` 报告 `port=0` 的问题
+
+**壳层**
+- 统一 `--url` 模式：独立会话窗口复用同一个壳层进程，无需再启动核心
+- Linux：WebKit `create` 信号派生新窗口；GTK 窗口消息处理
+- Windows：WebView2 `NewWindowRequested`、WebMessageReceived、托盘、圆角区域
+- macOS：`WKUIDelegate` 新窗口、脚本消息、关闭隐藏、`--url` 模式
+
+**打包**
+- Windows 免安装单文件 `.exe`（NSIS 静默解压到临时目录后运行）
+- Linux RPM（`rpmbuild`，与 `.deb` 相同布局）
+- macOS `.app` 使用 `icon.icns`，dmg 包含应用图标
+- AppImage 启动前检查缺失依赖并给出可读提示；补齐 `.DirIcon`
+
+### Fixed
+- 标签页弹窗重复、首次连接与后续连接的窗口/Tab 规则
+- 无边框窗口无法拖动/缩放（原生消息 + 边缘热区）
+
+### Known gaps
+- Wayland/PipeWire 尚未支持，会回退合成帧
+- H.264/AV1 未接入
+- Windows/macOS 后端由 CI 编译，真机回归仍待进行
+- Windows/macOS 安装包未签名；macOS 为 ad-hoc 签名
+
+## [0.1.0] — 2026-10-21
 
 ### Added
 

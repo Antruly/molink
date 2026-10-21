@@ -1,56 +1,90 @@
 {
   "app": {
-    "tagline": "Remote desktop, web-first",
-    "version": "v0.1.0"
+    "tagline": "Remote desktop"
   },
-  "connect": {
-    "title": "Connect to a moLink core",
-    "subtitle": "The core runs on the machine you want to control. It listens on loopback only and prints its access token at startup.",
-    "host": "Host",
+  "tabs": {
+    "home": "Home",
+    "new": "New connection",
+    "close": "Close session"
+  },
+  "home": {
+    "title": "Connect your devices",
+    "subtitle": "Share this screen with another device, or enter the address and verification code of the device you want to control.",
+    "thisDevice": "This device",
+    "online": "Ready",
+    "deviceId": "Device ID",
+    "verification": "Verification code",
+    "verificationHint": "keep it private",
+    "show": "Show",
+    "hide": "Hide",
+    "copy": "Copy",
+    "capCapture": "Screen capture",
+    "capInput": "Input",
+    "capClipboard": "Clipboard",
+    "connectLocal": "Connect to this device",
+    "refresh": "Refresh",
+    "noDevice": "The local core is not reachable",
+    "noDeviceHint": "Start molink-core, or open this page from the core.",
+    "retry": "Retry",
+    "connectTitle": "Connect to a device",
+    "connectSubtitle": "Use the address and verification code shown on the other device.",
+    "host": "Address",
     "port": "Port",
-    "token": "Access token",
-    "tokenHint": "Shown by molink-core at startup, or set with MOLINK_TOKEN.",
-    "showToken": "Show token",
-    "hideToken": "Hide token",
-    "submit": "Connect",
-    "connecting": "Connecting…",
-    "hint": "Start the core with: molink-core --print-ready",
-    "loopback": "Loopback only"
+    "code": "Verification code",
+    "connect": "Connect",
+    "useLocalCode": "Use this device's code",
+    "idNote": "Direct connections work on the same network. Connecting by device ID needs moLink Server (phase 2).",
+    "recent": "Recent connections",
+    "recentEmpty": "No connections yet.",
+    "forget": "Remove from history"
+  },
+  "settings": {
+    "title": "Preferences",
+    "close": "Close",
+    "theme": "Theme",
+    "themeLight": "Light",
+    "themeDark": "Dark",
+    "watermark": "Quality overlay",
+    "watermarkHint": "Show FPS, latency and bandwidth in the corner of a session.",
+    "language": "Language",
+    "version": "Core version",
+    "protocol": "Protocol",
+    "license": "License"
   },
   "session": {
-    "live": "live",
-    "connecting": "connecting",
+    "connecting": "Connecting…",
     "waiting": "Waiting for the first frame…",
-    "disconnect": "Disconnect",
-    "resolution": "Resolution",
-    "codec": "Codec",
-    "frames": "Frames",
-    "synthetic": "Synthetic test pattern — real screen capture is not enabled in this build.",
-    "service": "Service",
-    "startControl": "Start control",
+    "synthetic": "Synthetic test pattern — screen capture is unavailable.",
+    "syntheticShort": "TEST PATTERN",
+    "direct": "Direct connection",
+    "clipboardGet": "Copy remote clipboard",
+    "clipboardSet": "Send clipboard",
+    "startControl": "Control",
     "stopControl": "Stop control",
     "controlOn": "INPUT LIVE",
     "controlOnHint": "Keyboard and pointer events go to the remote machine",
-    "controlHint": "Start control to send keyboard and pointer input",
-    "inputUnavailable": "Input injection is unavailable on this host",
-    "controlSynthetic": "Control is unavailable while showing the test pattern",
-    "clipboardGet": "Copy remote clipboard",
-    "clipboardSet": "Send clipboard"
+    "controlHint": "Enable control to send keyboard and pointer input",
+    "inputUnavailable": "Input injection unavailable",
+    "disconnect": "Disconnect",
+    "popOut": "Open in a new window",
+    "closeWindow": "Close window"
   },
   "stats": {
     "fps": "FPS",
     "latency": "Latency",
-    "bandwidth": "Bandwidth",
-    "session": "Session"
+    "bandwidth": "Bandwidth"
   },
   "error": {
     "title": "Something went wrong",
     "dismiss": "Dismiss",
     "no_token": "An access token is required.",
+    "no_host": "Enter the address of the device.",
     "invalid_port": "Port must be a whole number between 1 and 65535.",
-    "connection failed": "The connection failed.",
     "clipboard_read_failed": "Could not read the local clipboard",
     "clipboard_write_failed": "Could not write to the local clipboard",
     "clipboard_unavailable": "The browser does not expose the clipboard here"
+  },
+  "popout": {
+    "noToken": "This window is missing the connection code."
   }
 }

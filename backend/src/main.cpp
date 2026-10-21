@@ -16,6 +16,7 @@
 #include "capture/capture.h"
 #include "clipboard/clipboard.h"
 #include "config.h"
+#include "identity.h"
 #include "input/input.h"
 #include "session_registry.h"
 #include "util.h"
@@ -113,7 +114,8 @@ void print_usage() {
 
 void print_ready(const molink::core_config& cfg, int port,
                  const std::string& token, const std::string& capture_backend,
-                 const std::string& input_backend) {
+                 const std::string& input_backend,
+                 const std::string& device_id) {
   uvcpp::uvcpp_json j;
   j["event"] = "ready";
   j["service"] = MOLINK_CORE_SERVICE;
@@ -124,6 +126,7 @@ void print_ready(const molink::core_config& cfg, int port,
   j["port"] = port;
   j["token"] = token;
   j["session_endpoint"] = "/ws/session";
+  j["device_id"] = device_id;
   j["capture"] = capture_backend;
   j["input"] = input_backend;
   j["synthetic_frames"] = capture_backend == "synthetic";
@@ -150,7 +153,12 @@ int main(int argc, char** argv) {
     return 0;
   }
 
-  if (cfg.token.empty()) cfg.token = generate_token();
+  std::string identity_error;
+  const device_identity identity = load_identity(cfg, identity_error);
+  cfg.token = identity.token;
+  if (!identity_error.empty()) {
+    std::fprintf(stderr, "molink identity: %s\n", identity_error.c_str());
+  }
 
   auto registry = std::make_shared<session_registry>();
   const uint64_t started_ms = now_ms();
@@ -209,6 +217,7 @@ int main(int argc, char** argv) {
     }
   }
   wsopt.clipboard = clipboard;
+  wsopt.device_id = identity.device_id;
 
   uvcpp::uvcpp_web_app app;
   wsopt.post = [&app](std::function<void()> fn) { app.post(std::move(fn)); };
@@ -219,12 +228,15 @@ int main(int argc, char** argv) {
       .set_max_body_size(1024u * 1024u);
 
   const std::string web_root = resolve_web_root(cfg);
+  auto bound_port = std::make_shared<std::atomic<int>>(cfg.port);
   api_deps deps;
+  deps.bound_port = bound_port;
   deps.serve_web = !web_root.empty();
   deps.registry = registry;
   deps.capture = capture;
   deps.input = input;
   deps.clipboard = clipboard;
+  deps.device_id = identity.device_id;
   deps.config = cfg;
   deps.started_ms = started_ms;
   register_http_routes(app, deps);
@@ -254,6 +266,7 @@ int main(int argc, char** argv) {
 
   const int port = app.bound_port();
   cfg.port = port;
+  bound_port->store(port);
 
   session_supervisor supervisor(app, registry, wsopt);
   supervisor.start();
@@ -275,7 +288,7 @@ int main(int argc, char** argv) {
 
   if (cfg.print_ready_json) {
     print_ready(cfg, port, cfg.token, capture->backend(),
-                input ? input->backend() : "none");
+                input ? input->backend() : "none", identity.device_id);
   } else {
     std::cerr << MOLINK_CORE_SERVICE << " " MOLINK_VERSION << " listening on "
               << cfg.host << ":" << port << "\n"
@@ -284,6 +297,7 @@ int main(int argc, char** argv) {
               << "  health:  http://" << cfg.host << ":" << port
               << "/healthz\n"
               << "  capture: " << capture_note << "\n"
+              << "  device:  " << identity.device_id << "\n"
               << "  input:   " << (input ? input->backend() : "disabled")
               << "\n"
               << "  web:     "

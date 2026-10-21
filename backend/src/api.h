@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -21,6 +22,8 @@ struct api_deps {
   std::shared_ptr<capture_source> capture;
   std::shared_ptr<input_injector> input;
   std::shared_ptr<clipboard_service> clipboard;
+  std::string device_id;
+  std::shared_ptr<std::atomic<int>> bound_port;
   core_config config;
   uint64_t started_ms = 0;
   /// True when a built frontend is mounted at "/", so the JSON index route is

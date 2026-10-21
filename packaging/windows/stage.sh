@@ -29,6 +29,7 @@ mkdir -p "$PKG/web"
 cp "$CORE" "$PKG/molink-core.exe"
 cp "$SHELL" "$PKG/moLink.exe"
 cp "$(dirname "$SHELL")/WebView2Loader.dll" "$PKG/"
+cp "$ROOT/shell/assets/icons/icon.ico" "$PKG/molink.ico"
 cp -r "$WEB/." "$PKG/web/"
 
 # Runtime DLLs, when libuvcpp was built shared.

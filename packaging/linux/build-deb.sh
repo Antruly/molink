@@ -6,7 +6,7 @@ set -euo pipefail
 trap 'rm -rf "${WORK:-}"' EXIT
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
-VERSION=${VERSION:-0.1.0}
+VERSION=${VERSION:-0.2.0}
 ARCH=${ARCH:-$(dpkg --print-architecture)}
 # Stage in a real POSIX filesystem: the source tree may live on a mount that
 # ignores chmod, and dpkg-deb requires DEBIAN to be exactly 0755.
@@ -46,6 +46,8 @@ fi
 ln -sf "$PREFIX/bin/moLink" "$STAGE/usr/bin/moLink"
 
 cp "$ROOT/shell/assets/icons/icon.png" "$STAGE/usr/share/icons/hicolor/256x256/apps/molink.png"
+mkdir -p "$STAGE$PREFIX/share/molink"
+cp "$ROOT/shell/assets/icons/icon.png" "$STAGE$PREFIX/share/molink/molink.png"
 cat > "$STAGE/usr/share/applications/molink.desktop" <<EOF
 [Desktop Entry]
 Name=moLink

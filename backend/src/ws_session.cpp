@@ -317,6 +317,7 @@ void send_welcome(uvcpp_ws_connection* conn, const session_info& session,
   j["input_backend"] = opt.input ? opt.input->backend() : "none";
   j["clipboard"] = opt.clipboard != nullptr && opt.clipboard->available();
   j["clipboard_backend"] = opt.clipboard ? opt.clipboard->backend() : "none";
+  j["device_id"] = opt.device_id;
   send_json(conn, j);
 }
 

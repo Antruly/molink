@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
-VERSION=${VERSION:-0.1.0}
+VERSION=${VERSION:-0.2.0}
 ARCH=${ARCH:-$(uname -m)}
 BUILD=${BUILD_DIR:-$ROOT/build/macos}
 APP="$BUILD/moLink.app"
@@ -21,6 +21,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/web"
 cp "$ROOT/shell/macos/build/moLink" "$APP/Contents/MacOS/moLink"
 cp "$ROOT/backend/build/molink-core" "$APP/Contents/MacOS/molink-core"
 cp -r "$ROOT/frontend/dist/." "$APP/Contents/Resources/web/"
+cp "$ROOT/shell/assets/icons/icon.icns" "$APP/Contents/Resources/molink.icns"
 
 UVCPP_LIB_DIR=${UVCPP_LIB_DIR:-$(pkg-config --variable=libdir uvcpp 2>/dev/null || true)}
 if [ -z "$UVCPP_LIB_DIR" ] && [ -n "${UVCPP_ROOT:-}" ]; then UVCPP_LIB_DIR="$UVCPP_ROOT/lib"; fi
@@ -39,6 +40,7 @@ cat > "$APP/Contents/Info.plist" <<EOF
   <key>CFBundleDisplayName</key><string>moLink</string>
   <key>CFBundleIdentifier</key><string>com.molink.desktop</string>
   <key>CFBundleExecutable</key><string>moLink</string>
+  <key>CFBundleIconFile</key><string>molink</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>${VERSION}</string>
   <key>CFBundleVersion</key><string>${VERSION}</string>

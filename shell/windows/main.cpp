@@ -11,9 +11,14 @@
 #define _UNICODE
 #endif
 
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0A00
+#endif
+
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#include <windowsx.h>
 #include <shellapi.h>
 #include <shlobj.h>
 
@@ -43,6 +48,15 @@ bool g_fullscreen = false;
 RECT g_restore_rect{};
 std::wstring g_url;
 std::wstring g_origin;
+std::wstring g_url_override;
+bool g_url_mode = false;
+bool g_quitting = false;
+bool g_tray_added = false;
+NOTIFYICONDATAW g_tray_data{};
+HMENU g_tray_menu = nullptr;
+HICON g_app_icon = nullptr;
+
+void spawn_self(const std::wstring& uri);
 
 void fail_box(const wchar_t* message) {
   MessageBoxW(g_window, message, L"moLink", MB_ICONERROR | MB_OK);
@@ -238,6 +252,106 @@ void fail_and_close(const wchar_t* message) {
 // WebView2 handlers
 // ---------------------------------------------------------------------------
 
+class WebMessageHandler final
+    : public ICoreWebView2WebMessageReceivedEventHandler {
+ public:
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override {
+    if (ppv == nullptr) return E_POINTER;
+    if (riid == IID_IUnknown ||
+        riid == IID_ICoreWebView2WebMessageReceivedEventHandler) {
+      *ppv = static_cast<ICoreWebView2WebMessageReceivedEventHandler*>(this);
+      AddRef();
+      return S_OK;
+    }
+    *ppv = nullptr;
+    return E_NOINTERFACE;
+  }
+  ULONG STDMETHODCALLTYPE AddRef() override { return ++refs_; }
+  ULONG STDMETHODCALLTYPE Release() override {
+    const ULONG refs = --refs_;
+    if (refs == 0) delete this;
+    return refs;
+  }
+  HRESULT STDMETHODCALLTYPE Invoke(
+      ICoreWebView2*, ICoreWebView2WebMessageReceivedEventArgs* arguments) override {
+    LPWSTR raw = nullptr;
+    if (arguments == nullptr ||
+        FAILED(arguments->TryGetWebMessageAsString(&raw)) || raw == nullptr) {
+      return S_OK;
+    }
+    const std::wstring action(raw);
+    CoTaskMemFree(raw);
+    if (action == L"minimize") {
+      ShowWindow(g_window, SW_MINIMIZE);
+    } else if (action == L"maximize") {
+      if (IsZoomed(g_window)) ShowWindow(g_window, SW_RESTORE);
+      else ShowWindow(g_window, SW_MAXIMIZE);
+    } else if (action == L"drag") {
+      ReleaseCapture();
+      SendMessageW(g_window, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+    } else if (action == L"resize-top" || action == L"resize-bottom" ||
+               action == L"resize-left" || action == L"resize-right" ||
+               action == L"resize-tl" || action == L"resize-tr" ||
+               action == L"resize-bl" || action == L"resize-br") {
+      WPARAM hit = HTLEFT;
+      if (action == L"resize-top") hit = HTTOP;
+      else if (action == L"resize-bottom") hit = HTBOTTOM;
+      else if (action == L"resize-left") hit = HTLEFT;
+      else if (action == L"resize-right") hit = HTRIGHT;
+      else if (action == L"resize-tl") hit = HTTOPLEFT;
+      else if (action == L"resize-tr") hit = HTTOPRIGHT;
+      else if (action == L"resize-bl") hit = HTBOTTOMLEFT;
+      else if (action == L"resize-br") hit = HTBOTTOMRIGHT;
+      ReleaseCapture();
+      SendMessageW(g_window, WM_NCLBUTTONDOWN, hit, 0);
+    } else if (action == L"close") {
+      PostMessageW(g_window, WM_CLOSE, 0, 0);
+    } else if (action == L"quit") {
+      PostQuitMessage(0);
+    }
+    return S_OK;
+  }
+
+ private:
+  std::atomic<ULONG> refs_{1};
+};
+
+class NewWindowHandler final
+    : public ICoreWebView2NewWindowRequestedEventHandler {
+ public:
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override {
+    if (ppv == nullptr) return E_POINTER;
+    if (riid == IID_IUnknown ||
+        riid == IID_ICoreWebView2NewWindowRequestedEventHandler) {
+      *ppv = static_cast<ICoreWebView2NewWindowRequestedEventHandler*>(this);
+      AddRef();
+      return S_OK;
+    }
+    *ppv = nullptr;
+    return E_NOINTERFACE;
+  }
+  ULONG STDMETHODCALLTYPE AddRef() override { return ++refs_; }
+  ULONG STDMETHODCALLTYPE Release() override {
+    const ULONG refs = --refs_;
+    if (refs == 0) delete this;
+    return refs;
+  }
+  HRESULT STDMETHODCALLTYPE Invoke(
+      ICoreWebView2*, ICoreWebView2NewWindowRequestedEventArgs* arguments) override {
+    if (arguments == nullptr) return S_OK;
+    LPWSTR uri = nullptr;
+    if (SUCCEEDED(arguments->get_Uri(&uri)) && uri != nullptr) {
+      arguments->put_Handled(TRUE);
+      spawn_self(std::wstring(uri));
+      CoTaskMemFree(uri);
+    }
+    return S_OK;
+  }
+
+ private:
+  std::atomic<ULONG> refs_{1};
+};
+
 class ControllerHandler;
 
 class NavigationHandler final
@@ -331,6 +445,8 @@ class ControllerHandler final
       }
       EventRegistrationToken token{};
       g_webview->add_NavigationCompleted(new NavigationHandler(), &token);
+      g_webview->add_WebMessageReceived(new WebMessageHandler(), &token);
+      g_webview->add_NewWindowRequested(new NewWindowHandler(), &token);
       g_webview->Navigate(g_url.c_str());
     }
     return S_OK;
@@ -405,14 +521,163 @@ void toggle_fullscreen(HWND window) {
   }
 }
 
+
+std::wstring exe_path() {
+  wchar_t buffer[32768];
+  const DWORD length =
+      GetModuleFileNameW(nullptr, buffer, static_cast<DWORD>(std::size(buffer)));
+  return length > 0 ? std::wstring(buffer, length) : std::wstring();
+}
+
+void spawn_self(const std::wstring& uri) {
+  std::wstring command = L"\"" + exe_path() + L"\" --url \"" + uri + L"\"";
+  STARTUPINFOW startup{};
+  startup.cb = sizeof(startup);
+  PROCESS_INFORMATION process{};
+  if (CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, 0,
+                     nullptr, nullptr, &startup, &process)) {
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+  }
+}
+
+HICON load_app_icon() {
+  const std::wstring path = exe_dir() + L"\\molink.ico";
+  HICON icon = static_cast<HICON>(LoadImageW(
+      nullptr, path.c_str(), IMAGE_ICON, 0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE));
+  if (icon == nullptr) icon = LoadIconW(nullptr, IDI_APPLICATION);
+  return icon;
+}
+
+void add_tray_icon() {
+  if (g_tray_added) return;
+  if (g_app_icon == nullptr) g_app_icon = load_app_icon();
+  ZeroMemory(&g_tray_data, sizeof(g_tray_data));
+  g_tray_data.cbSize = sizeof(g_tray_data);
+  g_tray_data.hWnd = g_window;
+  g_tray_data.uID = 1;
+  g_tray_data.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+  g_tray_data.uCallbackMessage = WM_APP + 1;
+  g_tray_data.hIcon = g_app_icon;
+  wcscpy_s(g_tray_data.szTip, L"moLink");
+  Shell_NotifyIconW(NIM_ADD, &g_tray_data);
+  g_tray_added = true;
+}
+
+void remove_tray_icon() {
+  if (!g_tray_added) return;
+  Shell_NotifyIconW(NIM_DELETE, &g_tray_data);
+  g_tray_added = false;
+}
+
+void show_main_window() {
+  ShowWindow(g_window, SW_SHOW);
+  SetForegroundWindow(g_window);
+}
+
+void show_tray_menu() {
+  if (g_tray_menu != nullptr) DestroyMenu(g_tray_menu);
+  g_tray_menu = CreatePopupMenu();
+  AppendMenuW(g_tray_menu, MF_STRING, 1, L"Show moLink");
+  AppendMenuW(g_tray_menu, MF_STRING, 2, L"Quit");
+  POINT point;
+  GetCursorPos(&point);
+  SetForegroundWindow(g_window);
+  TrackPopupMenu(g_tray_menu, TPM_RIGHTBUTTON, point.x, point.y, 0, g_window,
+                 nullptr);
+}
+
 LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
                              LPARAM lparam) {
   switch (message) {
-    case WM_SIZE:
+    case WM_NCCALCSIZE:
+      if (wparam == TRUE) {
+        if (IsZoomed(window)) {
+          auto* params = reinterpret_cast<NCCALCSIZE_PARAMS*>(lparam);
+          MONITORINFO info{};
+          info.cbSize = sizeof(info);
+          GetMonitorInfoW(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST),
+                          &info);
+          params->rgrc[0] = info.rcWork;
+        }
+        return 0;
+      }
+      break;
+    case WM_GETMINMAXINFO: {
+      auto* info = reinterpret_cast<MINMAXINFO*>(lparam);
+      MONITORINFO monitor{};
+      monitor.cbSize = sizeof(monitor);
+      GetMonitorInfoW(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST),
+                      &monitor);
+      info->ptMaxPosition.x = monitor.rcWork.left - monitor.rcMonitor.left;
+      info->ptMaxPosition.y = monitor.rcWork.top - monitor.rcMonitor.top;
+      info->ptMaxSize.x = monitor.rcWork.right - monitor.rcWork.left;
+      info->ptMaxSize.y = monitor.rcWork.bottom - monitor.rcWork.top;
+      return 0;
+    }
+    case WM_NCHITTEST: {
+      POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+      ScreenToClient(window, &point);
+      RECT client;
+      GetClientRect(window, &client);
+      const UINT dpi = GetDpiForWindow(window);
+      const int border = MulDiv(6, dpi, 96);
+      const int title = MulDiv(40, dpi, 96);
+      const int controls = MulDiv(110, dpi, 96);
+      if (point.y < border) {
+        if (point.x < border) return HTTOPLEFT;
+        if (point.x > client.right - border) return HTTOPRIGHT;
+        return HTTOP;
+      }
+      if (point.y > client.bottom - border) {
+        if (point.x < border) return HTBOTTOMLEFT;
+        if (point.x > client.right - border) return HTBOTTOMRIGHT;
+        return HTBOTTOM;
+      }
+      if (point.x < border) return HTLEFT;
+      if (point.x > client.right - border) return HTRIGHT;
+      if (point.y < title && point.x < client.right - controls) {
+        return HTCAPTION;
+      }
+      return HTCLIENT;
+    }
+    case WM_SIZE: {
       if (g_controller != nullptr) {
         RECT bounds;
         GetClientRect(window, &bounds);
         g_controller->put_Bounds(bounds);
+      }
+      if (IsZoomed(window) || IsIconic(window)) {
+        SetWindowRgn(window, nullptr, TRUE);
+      } else {
+        RECT client;
+        GetClientRect(window, &client);
+        if (client.right > 0 && client.bottom > 0) {
+          const int radius = MulDiv(28, GetDpiForWindow(window), 96);
+          HRGN region = CreateRoundRectRgn(0, 0, client.right + 1,
+                                           client.bottom + 1, radius, radius);
+          SetWindowRgn(window, region, TRUE);
+        }
+      }
+      return 0;
+    }
+    case WM_COMMAND:
+      if (LOWORD(wparam) == 1) show_main_window();
+      else if (LOWORD(wparam) == 2) {
+        g_quitting = true;
+        DestroyWindow(window);
+      }
+      return 0;
+    case WM_APP + 1:
+      if (lparam == WM_LBUTTONDBLCLK) show_main_window();
+      else if (lparam == WM_RBUTTONUP) show_tray_menu();
+      return 0;
+    case WM_CLOSE:
+      if (g_url_mode) {
+        DestroyWindow(window);
+      } else {
+        ShowWindow(window, SW_HIDE);
+        add_tray_icon();
       }
       return 0;
     case WM_TIMER:
@@ -437,6 +702,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
       }
       break;
     case WM_DESTROY:
+      remove_tray_icon();
       stop_core();
       PostQuitMessage(g_exit_code);
       return 0;
@@ -449,6 +715,10 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
 int run(HINSTANCE instance) {
   CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
+  if (g_url_mode) {
+    g_url = g_url_override;
+    g_origin = L"http://127.0.0.1:";
+  } else {
   const std::wstring core = find_core();
   if (core.empty()) {
     fail_box(L"molink-core.exe not found. Build backend/ or set MOLINK_CORE.");
@@ -471,8 +741,9 @@ int run(HINSTANCE instance) {
 
   g_url = L"http://127.0.0.1:" + std::to_wstring(port) +
           L"/?host=127.0.0.1&port=" + std::to_wstring(port) + L"&token=" +
-          widen(token);
+          widen(token) + L"&shell=1&platform=windows";
   g_origin = L"http://127.0.0.1:" + std::to_wstring(port);
+  }
 
   WNDCLASSEXW window_class{};
   window_class.cbSize = sizeof(window_class);
@@ -484,13 +755,18 @@ int run(HINSTANCE instance) {
   RegisterClassExW(&window_class);
 
   g_window = CreateWindowExW(0, L"MoLinkShell", L"moLink", WS_OVERLAPPEDWINDOW,
-                             CW_USEDEFAULT, CW_USEDEFAULT, 1280, 800, nullptr,
+                             CW_USEDEFAULT, CW_USEDEFAULT, 1280, 820, nullptr,
                              nullptr, instance, nullptr);
   if (g_window == nullptr) {
     fail_box(L"could not create the window");
     stop_core();
     return 1;
   }
+  g_app_icon = load_app_icon();
+  SendMessageW(g_window, WM_SETICON, ICON_BIG,
+               reinterpret_cast<LPARAM>(g_app_icon));
+  SendMessageW(g_window, WM_SETICON, ICON_SMALL,
+               reinterpret_cast<LPARAM>(g_app_icon));
 
   const std::wstring loader = exe_dir() + L"\\WebView2Loader.dll";
   HMODULE loader_module = LoadLibraryW(loader.c_str());
@@ -545,6 +821,7 @@ int run(HINSTANCE instance) {
     g_webview->Release();
     g_webview = nullptr;
   }
+  remove_tray_icon();
   if (g_controller != nullptr) {
     g_controller->Release();
     g_controller = nullptr;
@@ -561,10 +838,15 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int) {
   LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
   if (argv != nullptr) {
     for (int i = 1; i < argc; ++i) {
-      if (wcscmp(argv[i], L"--smoke-test") == 0) g_smoke = true;
+      if (wcscmp(argv[i], L"--smoke-test") == 0) {
+        g_smoke = true;
+      } else if (wcscmp(argv[i], L"--url") == 0 && i + 1 < argc) {
+        g_url_override = argv[++i];
+      }
     }
     LocalFree(argv);
   }
+  g_url_mode = !g_url_override.empty();
   g_instance = instance;
   return run(instance);
 }

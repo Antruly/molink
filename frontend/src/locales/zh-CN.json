@@ -1,56 +1,90 @@
 {
   "app": {
-    "tagline": "Web 优先的远程桌面",
-    "version": "v0.1.0"
+    "tagline": "远程桌面"
   },
-  "connect": {
-    "title": "连接到 moLink 后台",
-    "subtitle": "后台运行在你要控制的那台机器上，只监听回环地址，并在启动时打印访问令牌。",
-    "host": "主机",
+  "tabs": {
+    "home": "首页",
+    "new": "新连接",
+    "close": "关闭会话"
+  },
+  "home": {
+    "title": "连接你的设备",
+    "subtitle": "把这块屏幕共享给另一台设备，或输入对方设备显示的地址和验证码。",
+    "thisDevice": "本机设备",
+    "online": "就绪",
+    "deviceId": "设备 ID",
+    "verification": "验证码",
+    "verificationHint": "请勿外泄",
+    "show": "显示",
+    "hide": "隐藏",
+    "copy": "复制",
+    "capCapture": "屏幕捕获",
+    "capInput": "输入注入",
+    "capClipboard": "剪贴板",
+    "connectLocal": "连接本机",
+    "refresh": "刷新",
+    "noDevice": "无法连接本机后台",
+    "noDeviceHint": "请先启动 molink-core，或从核心托管的页面打开。",
+    "retry": "重试",
+    "connectTitle": "连接到设备",
+    "connectSubtitle": "输入对方设备上显示的地址和验证码。",
+    "host": "地址",
     "port": "端口",
-    "token": "访问令牌",
-    "tokenHint": "由 molink-core 启动时输出，或通过 MOLINK_TOKEN 设置。",
-    "showToken": "显示令牌",
-    "hideToken": "隐藏令牌",
-    "submit": "连接",
-    "connecting": "连接中…",
-    "hint": "启动后台：molink-core --print-ready",
-    "loopback": "仅回环地址"
+    "code": "验证码",
+    "connect": "连接",
+    "useLocalCode": "使用本机验证码",
+    "idNote": "同网络内可直接连接；通过设备 ID 连接需要 moLink Server（二阶段）。",
+    "recent": "最近连接",
+    "recentEmpty": "还没有连接记录。",
+    "forget": "从历史中移除"
+  },
+  "settings": {
+    "title": "偏好设置",
+    "close": "关闭",
+    "theme": "主题",
+    "themeLight": "亮色",
+    "themeDark": "暗色",
+    "watermark": "连接质量水印",
+    "watermarkHint": "在会话角落显示帧率、延迟和带宽，默认关闭。",
+    "language": "语言",
+    "version": "核心版本",
+    "protocol": "协议",
+    "license": "许可证"
   },
   "session": {
-    "live": "已连接",
-    "connecting": "连接中",
+    "connecting": "连接中…",
     "waiting": "等待第一帧…",
-    "disconnect": "断开",
-    "resolution": "分辨率",
-    "codec": "编码",
-    "frames": "帧数",
-    "synthetic": "合成测试帧 —— 当前构建尚未启用真实抓屏。",
-    "service": "服务",
-    "startControl": "开始控制",
+    "synthetic": "合成测试帧 —— 当前没有可用的屏幕捕获。",
+    "syntheticShort": "测试帧",
+    "direct": "直连",
+    "clipboardGet": "复制远端剪贴板",
+    "clipboardSet": "发送剪贴板",
+    "startControl": "控制",
     "stopControl": "停止控制",
     "controlOn": "控制中",
     "controlOnHint": "键盘与指针事件已发送到远端",
-    "controlHint": "点击「开始控制」后操作远端",
-    "inputUnavailable": "本机输入注入不可用",
-    "controlSynthetic": "合成测试帧模式下不提供控制",
-    "clipboardGet": "复制远端剪贴板",
-    "clipboardSet": "发送剪贴板"
+    "controlHint": "开启控制后可操作远端",
+    "inputUnavailable": "输入注入不可用",
+    "disconnect": "断开",
+    "popOut": "在新窗口打开",
+    "closeWindow": "关闭窗口"
   },
   "stats": {
     "fps": "帧率",
     "latency": "延迟",
-    "bandwidth": "带宽",
-    "session": "会话"
+    "bandwidth": "带宽"
   },
   "error": {
     "title": "出错了",
     "dismiss": "关闭",
-    "no_token": "必须填写访问令牌。",
+    "no_token": "必须填写验证码。",
+    "no_host": "请填写设备地址。",
     "invalid_port": "端口必须是 1–65535 之间的整数。",
-    "connection failed": "连接失败。",
     "clipboard_read_failed": "无法读取本机剪贴板",
     "clipboard_write_failed": "无法写入本机剪贴板",
     "clipboard_unavailable": "当前浏览器环境不提供剪贴板"
+  },
+  "popout": {
+    "noToken": "这个窗口缺少连接验证码。"
   }
 }

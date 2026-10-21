@@ -30,6 +30,7 @@ export interface Welcome {
   input_backend?: string
   clipboard?: boolean
   clipboard_backend?: string
+  device_id?: string
 }
 
 export interface CursorShape {

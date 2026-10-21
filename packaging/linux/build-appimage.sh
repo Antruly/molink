@@ -4,7 +4,7 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
-VERSION=${VERSION:-0.1.0}
+VERSION=${VERSION:-0.2.0}
 BUILD=${BUILD_DIR:-$ROOT/build/appimage}
 APPDIR="$BUILD/AppDir"
 TOOLS="$ROOT/build/tools"
@@ -18,7 +18,8 @@ cmake --build "$ROOT/shell/native/build" --parallel
 
 echo "== stage AppDir"
 rm -rf "$APPDIR"
-mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/lib" "$APPDIR/usr/share/molink/web"
+mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/lib" "$APPDIR/usr/share/molink/web" \
+         "$APPDIR/usr/share/icons/hicolor/256x256/apps"
 cp "$ROOT/shell/native/build/moLink" "$APPDIR/usr/bin/"
 cp "$ROOT/backend/build/molink-core" "$APPDIR/usr/bin/"
 cp -r "$ROOT/frontend/dist/." "$APPDIR/usr/share/molink/web/"
@@ -31,6 +32,9 @@ if [ -n "$UVCPP_LIB_DIR" ] && [ -d "$UVCPP_LIB_DIR" ]; then
   done
 fi
 cp "$ROOT/shell/assets/icons/icon.png" "$APPDIR/molink.png"
+cp "$ROOT/shell/assets/icons/icon.png" "$APPDIR/usr/share/molink/molink.png"
+cp "$ROOT/shell/assets/icons/icon.png" "$APPDIR/usr/share/icons/hicolor/256x256/apps/molink.png"
+ln -sf usr/share/icons/hicolor/256x256/apps/molink.png "$APPDIR/.DirIcon"
 cat > "$APPDIR/moLink.desktop" <<EOF
 [Desktop Entry]
 Name=moLink
@@ -44,6 +48,21 @@ EOF
 cat > "$APPDIR/AppRun" <<'EOF'
 #!/bin/sh
 HERE="$(dirname "$(readlink -f "$0")")"
+MISSING=$(ldd "$HERE/usr/bin/moLink" 2>/dev/null | grep "not found" | head -3)
+if [ -n "$MISSING" ]; then
+  MESSAGE="moLink needs these system libraries:
+$MISSING
+
+Install GTK 3 and WebKitGTK 4.1 (for example libgtk-3-0 and libwebkit2gtk-4.1-0)."
+  if command -v zenity >/dev/null 2>&1; then
+    zenity --error --text="$MESSAGE"
+  elif command -v xmessage >/dev/null 2>&1; then
+    xmessage -center "$MESSAGE"
+  else
+    echo "$MESSAGE" >&2
+  fi
+  exit 1
+fi
 exec "$HERE/usr/bin/moLink" "$@"
 EOF
 chmod 0755 "$APPDIR/AppRun" "$APPDIR/usr/bin/moLink" "$APPDIR/usr/bin/molink-core"

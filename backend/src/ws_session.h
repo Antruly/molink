@@ -29,6 +29,7 @@ struct ws_options {
   std::shared_ptr<capture_source> capture;
   std::shared_ptr<input_injector> input;
   std::shared_ptr<clipboard_service> clipboard;
+  std::string device_id;
   /// Hop a callback onto the app loop (used for clipboard results, which are
   /// produced on the clipboard thread).
   std::function<void(std::function<void()>)> post;
