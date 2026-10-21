@@ -113,7 +113,7 @@ if(MOLINK_BUILD_CORE)
   endif()
 
   if(WIN32)
-    target_link_libraries(molink-core PRIVATE d3d11 dxgi gdi32 user32 ole32)
+    target_link_libraries(molink-core PRIVATE d3d11 dxgi dxguid gdi32 user32 ole32)
   endif()
   if(APPLE)
     target_link_libraries(molink-core PRIVATE
