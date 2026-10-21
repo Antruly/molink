@@ -7,8 +7,10 @@
 #import <Cocoa/Cocoa.h>
 #import <WebKit/WebKit.h>
 
+#include <dispatch/dispatch.h>
 #include <mach-o/dyld.h>
 #include <poll.h>
+#include <spawn.h>
 #include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
