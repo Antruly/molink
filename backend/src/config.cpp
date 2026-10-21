@@ -93,6 +93,14 @@ bool parse_args(int argc, char** argv, core_config& cfg, std::string& err) {
       cfg.no_capture = true;
       continue;
     }
+    if (arg == "--no-input") {
+      cfg.no_input = true;
+      continue;
+    }
+    if (arg == "--no-compress") {
+      cfg.no_compress = true;
+      continue;
+    }
     err = "unknown argument: " + arg;
     return false;
   }

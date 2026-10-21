@@ -41,6 +41,8 @@ cmake --build build && ctest --test-dir build --output-on-failure
 | `--parent-pid` | 监视父进程，父进程消失时退出 |
 | `--capture-fps <n>` | 抓屏帧率上限，默认 15 |
 | `--no-capture` | 强制使用合成测试帧 |
+| `--no-input` | 禁用指针与键盘注入 |
+| `--no-compress` | 关闭 zlib 瓦片压缩，发送原始 BGRA |
 | `--print-ready` | 就绪后向 stdout 输出一行 JSON |
 
 `MOLINK_DISPLAY` 可指定 X display（默认沿用 `DISPLAY`）。
@@ -63,10 +65,33 @@ src/capture/
 - **有界历史**：保留最近 120 帧 / 128 MiB，客户端落后时按序补发，避免反复
   请求 22 MB 关键帧。
 - **周期全量刷新**：每 30 秒一次，修正可能漏掉的 damage。
+- **瓦片压缩**：zlib 级别 1；压缩后不比原始小就保持 `bgra`，帧头 `codec`
+  如实标记 `deflate_bgra`(5)。
 - 仅处理 32 位 BGRA 最快路径；其它像素格式走通用掩码转换。
 
-性能参考（本机 2880×1920、X11、depth 24）：无客户端 0%，活跃会话约 35% 单核、
-约 90 Mbps（原始 BGRA，未压缩）。编码器接入后会显著下降。
+性能参考（本机 2880×1920、X11、depth 24、桌面持续有变化）：
+
+| 指标 | 原始 BGRA | zlib 瓦片 |
+|---|---:|---:|
+| 带宽 | 94 Mbps | **7.4 Mbps** |
+| 单核 CPU（活跃会话） | ~35% | ~24% |
+| 无会话空闲 | 0% | 0% |
+
+## 输入注入
+
+```
+src/input/
+├── input.h         input_injector 接口
+└── x11_input.cpp   XTEST（dlopen libXtst.so.6）
+```
+
+- 坐标由客户端归一化到 `[0,1]`，服务端按当前屏幕尺寸换算。
+- `KeyboardEvent.code` 映射到 X keysym（字母、数字、方向键、修饰键、标点、F1–F24）。
+- 组合键由客户端分别发送按下/抬起，X 服务器据此产生大写与符号。
+- 会话断开（且没有其它已鉴权会话）时释放所有按键与鼠标按钮，避免远端卡住修饰键。
+- 没有 X display 或服务端不支持 XTEST 时，`capabilities.input_injection` 为 false，
+  客户端隐藏控制按钮。
+- `--no-input` 可完全关闭注入。
 
 ## 结构
 
@@ -77,7 +102,9 @@ src/
 ├── api.*                 CORS、Bearer 鉴权、/healthz 与 /api/*
 ├── session_registry.*    会话记录（shared_ptr，跨回调安全）
 ├── ws_session.*          /ws/session 处理器、心跳、帧回放与回收线程
-├── capture/              屏幕捕获（X11/XShm/XDamage、合成回退）
+├── capture/              屏幕捕获（X11/XShm/XDamage、合成回退、帧编码）
+├── input/                指针/键盘注入（XTEST）
+├── compression.*         zlib 瓦片压缩
 ├── test_pattern.*        合成测试帧
 ├── protocol/frame_packet.*  MOLK 编解码（无 libuvcpp 依赖）
 └── util.*                会话号、时间

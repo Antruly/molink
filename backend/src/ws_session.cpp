@@ -62,6 +62,65 @@ void send_pong(uvcpp_ws_connection* conn, const uvcpp_json& request) {
   send_json(conn, j);
 }
 
+bool number_field(const uvcpp_json& j, const char* key, double& out) {
+  const auto it = j.find(key);
+  if (it == j.end() || !it->is_number()) return false;
+  out = it->get<double>();
+  return true;
+}
+
+bool bool_field(const uvcpp_json& j, const char* key, bool fallback) {
+  const auto it = j.find(key);
+  if (it == j.end() || !it->is_boolean()) return fallback;
+  return it->get<bool>();
+}
+
+input_injector::status inject_one(input_injector& input, const uvcpp_json& event,
+                                  std::string& err) {
+  if (!event.is_object()) {
+    err = "input event must be an object";
+    return input_injector::status::rejected;
+  }
+  const std::string kind = string_field(event, "k");
+
+  if (kind == "move") {
+    double x = 0;
+    double y = 0;
+    if (!number_field(event, "x", x) || !number_field(event, "y", y)) {
+      err = "move needs normalized x and y";
+      return input_injector::status::rejected;
+    }
+    return input.move(x, y);
+  }
+  if (kind == "button") {
+    double button = 1;
+    if (!number_field(event, "button", button)) {
+      err = "button needs a button number";
+      return input_injector::status::rejected;
+    }
+    return input.button(static_cast<int>(button),
+                        bool_field(event, "down", true));
+  }
+  if (kind == "wheel") {
+    double dx = 0;
+    double dy = 0;
+    number_field(event, "dx", dx);
+    number_field(event, "dy", dy);
+    return input.wheel(static_cast<int>(dx), static_cast<int>(dy));
+  }
+  if (kind == "key") {
+    const std::string code = string_field(event, "code");
+    if (code.empty()) {
+      err = "key needs a code";
+      return input_injector::status::rejected;
+    }
+    return input.key(code, bool_field(event, "down", true));
+  }
+
+  err = "unknown input event kind: " + kind;
+  return input_injector::status::rejected;
+}
+
 bool send_frame_payload(uvcpp_ws_connection* conn,
                         const std::shared_ptr<session_info>& session,
                         uint16_t flags, uint64_t ts_us,
@@ -194,13 +253,18 @@ void send_welcome(uvcpp_ws_connection* conn, const session_info& session,
   j["service"] = MOLINK_CORE_SERVICE;
   j["version"] = opt.version;
   j["transport"] = "websocket";
-  j["tiles"]["codec"] = "bgra";
+  j["tiles"]["codec"] =
+      (frame && frame->codec == static_cast<uint8_t>(protocol::codec::deflate_bgra))
+          ? "deflate-bgra"
+          : "bgra";
   j["tiles"]["screen_w"] = frame ? frame->width : 0;
   j["tiles"]["screen_h"] = frame ? frame->height : 0;
   j["tiles"]["tile_w"] = frame ? frame->tile_w : 0;
   j["tiles"]["tile_h"] = frame ? frame->tile_h : 0;
   j["tiles"]["backend"] = opt.capture ? opt.capture->backend() : "none";
   j["tiles"]["synthetic"] = opt.capture ? !opt.capture->is_real() : true;
+  j["input"] = opt.input != nullptr && opt.input->available();
+  j["input_backend"] = opt.input ? opt.input->backend() : "none";
   send_json(conn, j);
 }
 
@@ -293,14 +357,36 @@ uvcpp::uvcpp_web_ws_handler make_ws_handler(
       }
 
       if (type == "input") {
-        // Honest answer instead of a silent drop: input injection has no
-        // platform backend yet.
-        uvcpp_json e;
-        e["type"] = "error";
-        e["code"] = "not_implemented";
-        e["what"] = "input";
-        e["message"] = "input injection is not implemented in this build";
-        send_json(conn, e);
+        if (!options.input || !options.input->available()) {
+          uvcpp_json e;
+          e["type"] = "error";
+          e["code"] = "not_implemented";
+          e["what"] = "input";
+          e["message"] = "input injection is unavailable on this host";
+          send_json(conn, e);
+          return;
+        }
+
+        std::string input_error;
+        bool rejected = false;
+        const auto events = j.find("events");
+        if (events != j.end() && events->is_array()) {
+          if (events->size() > 64) {
+            send_error(conn, "bad_input", "at most 64 events per message");
+            return;
+          }
+          for (const auto& event : *events) {
+            if (inject_one(*options.input, event, input_error) ==
+                input_injector::status::rejected) {
+              rejected = true;
+              break;
+            }
+          }
+        } else if (inject_one(*options.input, j, input_error) ==
+                   input_injector::status::rejected) {
+          rejected = true;
+        }
+        if (rejected) send_error(conn, "bad_input", input_error);
         return;
       }
 
@@ -344,6 +430,11 @@ uvcpp::uvcpp_web_ws_handler make_ws_handler(
       // Stop grabbing the screen once nobody is watching.
       if (options.capture && !registry->has_authenticated()) {
         options.capture->set_active(false);
+      }
+      // A dropped connection must not leave a button or modifier held down on
+      // the remote machine.
+      if (options.input && !registry->has_authenticated()) {
+        options.input->release_all();
       }
       (void)code;
       (void)reason;

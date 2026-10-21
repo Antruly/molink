@@ -26,8 +26,13 @@
     "codec": "编码",
     "frames": "帧数",
     "synthetic": "合成测试帧 —— 当前构建尚未启用真实抓屏。",
-    "previewOnly": "仅预览 · 输入注入尚未实现",
-    "service": "服务"
+    "service": "服务",
+    "startControl": "开始控制",
+    "stopControl": "停止控制",
+    "controlOn": "控制中",
+    "controlOnHint": "键盘与指针事件已发送到远端",
+    "controlHint": "点击「开始控制」后操作远端",
+    "inputUnavailable": "本机输入注入不可用"
   },
   "stats": {
     "fps": "帧率",

@@ -16,7 +16,12 @@ export function TileCanvas({ frame }: { frame: Frame | null }) {
     if (canvas.height !== frame.screenH) canvas.height = frame.screenH
 
     const context = canvas.getContext('2d', { alpha: false })
-    if (!context || frame.codec !== Codec.bgra) return
+    if (
+      !context ||
+      (frame.codec !== Codec.bgra && frame.codec !== Codec.deflateBgra)
+    ) {
+      return
+    }
 
     for (const tile of frame.tiles) {
       const pixels = tile.w * tile.h

@@ -21,6 +21,7 @@
 #include <thread>
 #include <vector>
 
+#include "capture/frame_encode.h"
 #include "protocol/frame_packet.h"
 
 namespace molink {
@@ -669,7 +670,7 @@ class x11_capture final : public capture_base {
     }
 
     std::vector<uint8_t> payload;
-    if (!protocol::build_frame_payload(header, tiles, payload, err)) {
+    if (!encode_capture_frame(header, tiles, options_.compress, payload, err)) {
       return false;
     }
 
@@ -681,6 +682,7 @@ class x11_capture final : public capture_base {
     frame->height = height_;
     frame->tile_w = tile;
     frame->tile_h = tile;
+    frame->codec = header.codec;
     frame->payload = std::move(payload);
     publish(std::move(frame));
 

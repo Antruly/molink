@@ -8,6 +8,7 @@
 #include <webapp/uvcpp_web_ws.h>
 
 #include "capture/capture.h"
+#include "input/input.h"
 #include "session_registry.h"
 
 namespace uvcpp {
@@ -23,6 +24,7 @@ struct ws_options {
   int hello_timeout_ms = 5000;
   int idle_close_ms = 45000;
   std::shared_ptr<capture_source> capture;
+  std::shared_ptr<input_injector> input;
 };
 
 /// Handler for WS /ws/session. Authentication is part of the application

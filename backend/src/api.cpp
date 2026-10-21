@@ -133,10 +133,15 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
             j["bind"]["port"] = deps.config.port;
             j["capabilities"]["screen_capture"] =
                 deps.capture != nullptr && deps.capture->is_real();
-            j["capabilities"]["input_injection"] = false;
+            j["capabilities"]["input_injection"] =
+                deps.input != nullptr && deps.input->available();
             j["capabilities"]["synthetic_frames"] =
                 deps.capture != nullptr && !deps.capture->is_real();
             j["capabilities"]["websocket"] = true;
+            if (deps.input) {
+              j["input"]["backend"] = deps.input->backend();
+              j["input"]["available"] = deps.input->available();
+            }
             if (deps.capture) {
               j["capture"]["backend"] = deps.capture->backend();
               j["capture"]["running"] = deps.capture->running();

@@ -44,6 +44,8 @@ src/
 
 ## 已知限制
 
-- 只渲染 `codec: bgra` 的原始瓦片；H.264/AV1 的 WebCodecs 路径尚未接入。
-- 输入注入未实现，页面明确标注“仅预览”。
-- 帧率与带宽取决于后台抓屏；Linux X11 下为原始 BGRA，未压缩。
+- 只渲染 `bgra` 与 `deflate_bgra` 瓦片；H.264/AV1 的 WebCodecs 路径尚未接入。
+- `deflate_bgra` 依赖浏览器的 `DecompressionStream("deflate")`（Chromium 80+、
+  WebKit 16.4+）。
+- 输入注入依赖后台的 XTEST 支持；控制模式需要在会话页手动开启，默认不接管输入。
+- 帧率与带宽取决于后台抓屏与 zlib 压缩，未使用视频编码器。

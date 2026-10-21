@@ -23,6 +23,7 @@ struct captured_frame {
   uint16_t height = 0;
   uint16_t tile_w = 0;
   uint16_t tile_h = 0;
+  uint8_t codec = 0;  ///< protocol::codec of the payload
   std::vector<uint8_t> payload;
 };
 
@@ -39,6 +40,8 @@ struct capture_stats {
 struct capture_options {
   int fps = 15;
   uint16_t tile_size = 256;
+  /// Compress tiles with zlib when the frame is compressible.
+  bool compress = true;
   // Synthetic source dimensions (also the fallback when no display is
   // reachable). The X11 source uses the real screen size instead.
   uint16_t synthetic_width = 640;

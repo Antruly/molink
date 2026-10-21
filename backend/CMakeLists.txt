@@ -51,6 +51,9 @@ set(MOLINK_CORE_SOURCES
   src/capture/capture.cpp
   src/capture/synthetic_capture.cpp
   src/capture/x11_capture.cpp
+  src/capture/frame_encode.cpp
+  src/compression.cpp
+  src/input/x11_input.cpp
   src/config.cpp
   src/session_registry.cpp
   src/test_pattern.cpp
@@ -93,6 +96,16 @@ if(MOLINK_BUILD_CORE)
     set_target_properties(molink-core PROPERTIES
       "RUNTIME_OUTPUT_DIRECTORY_${uvp_config_upper}" "${CMAKE_BINARY_DIR}")
   endforeach()
+
+  find_package(ZLIB QUIET)
+  if(ZLIB_FOUND)
+    target_compile_definitions(molink-core PRIVATE MOLINK_HAVE_ZLIB=1)
+    target_link_libraries(molink-core PRIVATE ZLIB::ZLIB)
+    message(STATUS "molink: zlib tile compression enabled")
+  else()
+    target_compile_definitions(molink-core PRIVATE MOLINK_HAVE_ZLIB=0)
+    message(STATUS "molink: zlib not found; tile compression disabled")
+  endif()
 
   target_link_libraries(molink-core PRIVATE ${UVP_UVCPP_TARGET} ${CMAKE_DL_LIBS})
 

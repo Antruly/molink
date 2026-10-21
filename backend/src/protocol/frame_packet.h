@@ -90,10 +90,11 @@ enum packet_flags : uint16_t {
 };
 
 enum class codec : uint8_t {
-  bgra = 1,  ///< raw 32-bit BGRA tiles, top-down
-  png = 2,   ///< PNG-encoded tile
-  h264 = 3,  ///< H.264 Annex-B tile
-  av1 = 4,   ///< AV1 OBU tile
+  bgra = 1,           ///< raw 32-bit BGRA tiles, top-down
+  png = 2,            ///< PNG-encoded tile
+  h264 = 3,           ///< H.264 Annex-B tile
+  av1 = 4,            ///< AV1 OBU tile
+  deflate_bgra = 5,   ///< zlib deflate of a raw BGRA tile
 };
 
 enum frame_flags : uint8_t {

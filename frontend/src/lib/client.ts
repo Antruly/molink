@@ -1,4 +1,5 @@
 import {
+  Codec,
   FrameFlag,
   PacketType,
   ProtocolError,
@@ -23,7 +24,10 @@ export interface Welcome {
     tile_w: number
     tile_h: number
     synthetic: boolean
+    backend?: string
   }
+  input?: boolean
+  input_backend?: string
 }
 
 export interface ClientHandlers {
@@ -41,6 +45,13 @@ interface ControlMessage {
   session?: string
 }
 
+async function inflateTile(data: Uint8Array): Promise<Uint8Array> {
+  const stream = new Blob([data as BlobPart])
+    .stream()
+    .pipeThrough(new DecompressionStream('deflate'))
+  return new Uint8Array(await new Response(stream).arrayBuffer())
+}
+
 export class MolinkClient {
   private ws: WebSocket | null = null
   private handlers: Partial<ClientHandlers> = {}
@@ -48,6 +59,8 @@ export class MolinkClient {
   private pingTimer: number | null = null
   private closedByUser = false
   private hasImage = false
+  // Decompression is asynchronous; chaining keeps frames applied in order.
+  private frameQueue: Promise<void> = Promise.resolve()
 
   setHandlers(handlers: Partial<ClientHandlers>): void {
     this.handlers = handlers
@@ -58,6 +71,7 @@ export class MolinkClient {
     this.closedByUser = false
     this.hasImage = false
     this.pendingFrame = false
+    this.frameQueue = Promise.resolve()
 
     const url = `ws://${host}:${port}/ws/session`
     this.handlers.onPhase?.('connecting')
@@ -174,24 +188,57 @@ export class MolinkClient {
       this.pendingFrame = false
       const frame = parseFramePayload(packet.payload)
 
-      if ((frame.flags & FrameFlag.keyframe) !== 0) {
-        this.hasImage = true
-      } else if (!this.hasImage) {
-        // A delta cannot be drawn over an image that does not exist yet. The
-        // server requests a keyframe on our behalf; the next frames will carry
-        // it.
+      if (frame.codec === Codec.deflateBgra) {
+        this.frameQueue = this.frameQueue
+          .then(() => this.deliverCompressed(frame, buffer.byteLength))
+          .catch((error: unknown) => {
+            this.handlers.onError?.(
+              error instanceof Error
+                ? error.message
+                : 'tile decompression failed',
+            )
+          })
         return
       }
-      // A keyframe with no tiles would mean an empty screen; nothing to draw.
-      if (frame.tiles.length === 0) return
 
-      this.handlers.onFrame?.(frame, buffer.byteLength)
+      this.deliver(frame, buffer.byteLength)
     } catch (error) {
       this.pendingFrame = false
       const message =
         error instanceof ProtocolError ? error.message : 'could not decode frame'
       this.handlers.onError?.(message)
     }
+  }
+
+  private async deliverCompressed(
+    frame: Frame,
+    byteLength: number,
+  ): Promise<void> {
+    const tiles = await Promise.all(
+      frame.tiles.map(async (tile) => {
+        const data = await inflateTile(tile.data)
+        if (data.byteLength !== tile.w * tile.h * 4) {
+          throw new Error('tile size mismatch after decompression')
+        }
+        return { ...tile, data }
+      }),
+    )
+    this.deliver({ ...frame, tiles }, byteLength)
+  }
+
+  private deliver(frame: Frame, byteLength: number): void {
+    if ((frame.flags & FrameFlag.keyframe) !== 0) {
+      this.hasImage = true
+    } else if (!this.hasImage) {
+      // A delta cannot be drawn over an image that does not exist yet. The
+      // server requests a keyframe on our behalf; the next frames will carry
+      // it.
+      return
+    }
+    // A keyframe with no tiles would mean an empty screen; nothing to draw.
+    if (frame.tiles.length === 0) return
+
+    this.handlers.onFrame?.(frame, byteLength)
   }
 
   private startPing(): void {

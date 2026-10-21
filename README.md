@@ -21,9 +21,10 @@
 | WebSocket 会话通道、心跳、空闲回收 | ✅ |
 | React 前端（连接页 / 会话页 / 中英双语） | ✅ |
 | **Linux 真实抓屏（X11 + XShm）** | ✅ 增量瓦片、XDamage、无会话时暂停 |
+| **Linux 输入注入（XTEST）** | ✅ 指针、按键、滚轮、组合键；控制模式需手动开启 |
+| **瓦片 zlib 压缩（codec 5）** | ✅ 真实桌面实测 94 → 7.4 Mbps |
 | Linux Wayland / PipeWire 门户抓屏 | ⏳ 未实现（接口已抽象） |
-| Windows / macOS 捕获 | ⏳ 未实现 |
-| 输入注入 | ⏳ 未实现（协议占位，明确回 `not_implemented`） |
+| Windows / macOS 捕获与注入 | ⏳ 未实现 |
 | UDP 直连、WebRTC、P2P、服务端 | ⏳ 二阶段 |
 | Tauri 壳层 | 🧩 源码与配置就绪，本机无 Rust 工具链，未编译验证 |
 
@@ -76,10 +77,14 @@ Linux 默认使用 X11/XShm 抓取当前屏幕；在 Wayland 会话或没有显�
 ```bash
 ./backend/build/molink-core --capture-fps 15      # 抓屏帧率上限
 ./backend/build/molink-core --no-capture          # 强制合成测试帧
+./backend/build/molink-core --no-input            # 禁止指针/键盘注入
+./backend/build/molink-core --no-compress         # 关闭 zlib 瓦片压缩
 MOLINK_DISPLAY=:1 ./backend/build/molink-core     # 指定 X display
 ```
 
 抓屏只在有已鉴权会话时运行；没有客户端时进程空闲占用接近 0%。
+
+会话页需要点击「开始控制」后才会把指针与键盘事件发送到远端，默认不接管输入。
 
 打开 <http://localhost:1420>，填入令牌连接。也可以直接带参数自动连接：
 

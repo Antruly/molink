@@ -114,8 +114,17 @@
 | 2 | `png` | 单瓦片 PNG |
 | 3 | `h264` | Annex-B 码流（规划中） |
 | 4 | `av1` | OBU（规划中） |
+| 5 | `deflate_bgra` | zlib(deflate) 压缩的 BGRA 瓦片 |
 
 `bgra` 的通道顺序是 **B、G、R、A**。Canvas `ImageData` 需要 R、G、B、A，渲染时必须换位。
+
+### 3.4 瓦片压缩（codec 5）
+
+- `codec = 5` 时，每个瓦片的 `byte_length` 是 zlib 流（带 zlib 头，浏览器
+  `DecompressionStream("deflate")` 可直接解压）的长度。
+- 解压后必须恰好是 `w * h * 4` 字节的 BGRA。
+- 服务端使用 zlib 级别 1；如果整帧压缩后不小于原始大小，整帧回退为 `codec = 1`。
+- 帧内所有瓦片使用同一种 codec，不混合。
 
 ---
 
@@ -154,22 +163,34 @@
 | `pong` | `t`, `server_ms` | 对客户端 ping 的回应 |
 | `error` | `code`, `message` | 错误 |
 
-`welcome.tiles` 示例（真实屏幕）：
+`welcome` 示例（真实屏幕）：
 
 ```json
 {
-  "codec": "bgra",
-  "screen_w": 2880,
-  "screen_h": 1920,
-  "tile_w": 256,
-  "tile_h": 256,
-  "backend": "x11-shm",
-  "synthetic": false
+  "type": "welcome",
+  "session": "A3F-9K2-X7Q",
+  "session_id": 1,
+  "protocol": 1,
+  "service": "moLink Core",
+  "version": "0.1.0",
+  "transport": "websocket",
+  "tiles": {
+    "codec": "deflate-bgra",
+    "screen_w": 2880,
+    "screen_h": 1920,
+    "tile_w": 256,
+    "tile_h": 256,
+    "backend": "x11-shm",
+    "synthetic": false
+  },
+  "input": true,
+  "input_backend": "xtest"
 }
 ```
 
 `backend` 取值：`x11-shm`、`x11`、`synthetic`。`synthetic: true` 表示当前是合成测试帧，
-不是真实屏幕。
+不是真实屏幕。`codec` 反映当前帧实际使用的编码（`bgra` 或 `deflate-bgra`）；
+`input` 表示本机是否支持输入注入。
 
 **客户端 → 服务端**
 
@@ -180,10 +201,41 @@
 | `pong` | `t` | 回应服务端心跳 |
 | `request-frame` | — | 请求一帧。服务端返回自上次以来所有未送达的帧；无变化时返回 0 瓦片帧 |
 | `request-keyframe` | — | 请求下一个捕获帧标记为关键帧（客户端丢失基准时使用） |
-| `input` | 事件字段 | 输入注入占位，当前回 `not_implemented` |
+| `input` | `events[]` | 指针/键盘事件；需要已鉴权，见 §4.3 |
 | `bye` | — | 正常关闭 |
 
-### 4.3 帧送达与关键帧
+### 4.3 输入事件
+
+```json
+{
+  "type": "input",
+  "events": [
+    {"k": "move", "x": 0.42, "y": 0.31},
+    {"k": "button", "button": 1, "down": true},
+    {"k": "button", "button": 1, "down": false},
+    {"k": "wheel", "dx": 0, "dy": 1},
+    {"k": "key", "code": "KeyA", "down": true},
+    {"k": "key", "code": "KeyA", "down": false}
+  ]
+}
+```
+
+| 字段 | 说明 |
+|---|---|
+| `k` | `move` / `button` / `wheel` / `key` |
+| `x`, `y` | 归一化到 `[0,1]` 的屏幕坐标；越界事件被拒绝 |
+| `button` | X11 按钮号：1 左、2 中、3 右（4–7 为滚轮，由服务端使用） |
+| `dx`, `dy` | 滚轮格数；`dy > 0` 向下滚动 |
+| `code` | 浏览器 `KeyboardEvent.code`，如 `KeyA`、`Digit1`、`ArrowLeft`、`ShiftLeft` |
+| `down` | 按下/抬起，默认 `true` |
+
+- 单条消息最多 64 个事件。
+- `events` 缺失时，消息顶层对象本身按一个事件解析。
+- 组合键由客户端分别发送修饰键与主键的按下/抬起，X 服务器负责产生大写与符号。
+- 会话断开且没有其它已鉴权会话时，服务端释放所有按下的键与按钮。
+- 输入不可用时返回 `not_implemented`。
+
+### 4.4 帧送达与关键帧
 
 - 帧包按会话独立编号（包头的 `seq`），每个响应至少包含一个帧包。
 - **0 瓦片帧**表示"当前没有变化"，仍推进包序号，客户端不应重绘。
@@ -193,20 +245,21 @@
   到达。抓屏侧每 30 秒也会主动产生一次关键帧。
 - 客户端在收到首个关键帧之前不应绘制任何增量帧。
 
-### 4.4 错误码
+### 4.5 错误码
 
 | code | 含义 |
 |---|---|
 | `unauthorized` | 令牌缺失或错误 |
 | `bad_json` | 控制消息不是 JSON 对象 |
 | `unknown_type` | 不支持的控制消息类型 |
-| `not_implemented` | 功能尚未实现（当前：输入注入） |
+| `not_implemented` | 功能不可用（本机没有输入注入能力） |
+| `bad_input` | 输入事件字段缺失或越界 |
 | `bad_packet` | 二进制消息不是合法 MOLK 包 |
 | `frame_build_failed` | 服务端构造帧失败 |
 | `send_failed` | 帧入队失败 |
 | `unexpected_packet` | 该方向不接受此包类型 |
 
-### 4.5 保活与回收
+### 4.6 保活与回收
 
 | 参数 | 值 | 行为 |
 |---|---:|---|

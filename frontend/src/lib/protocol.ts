@@ -27,6 +27,7 @@ export const Codec = {
   png: 2,
   h264: 3,
   av1: 4,
+  deflateBgra: 5,
 } as const
 
 export const FrameFlag = {

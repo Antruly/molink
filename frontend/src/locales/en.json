@@ -26,8 +26,13 @@
     "codec": "Codec",
     "frames": "Frames",
     "synthetic": "Synthetic test pattern — real screen capture is not enabled in this build.",
-    "previewOnly": "Preview only · input injection not implemented",
-    "service": "Service"
+    "service": "Service",
+    "startControl": "Start control",
+    "stopControl": "Stop control",
+    "controlOn": "INPUT LIVE",
+    "controlOnHint": "Keyboard and pointer events go to the remote machine",
+    "controlHint": "Start control to send keyboard and pointer input",
+    "inputUnavailable": "Input injection is unavailable on this host"
   },
   "stats": {
     "fps": "FPS",

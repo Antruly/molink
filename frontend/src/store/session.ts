@@ -41,7 +41,9 @@ export interface SessionState {
   welcome: Welcome | null
   frame: Frame | null
   stats: Stats
+  controlEnabled: boolean
   setField: (field: 'host' | 'port' | 'token', value: string) => void
+  setControlEnabled: (enabled: boolean) => void
   connect: () => void
   disconnect: () => void
 }
@@ -76,8 +78,11 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   welcome: null,
   frame: null,
   stats: emptyStats(),
+  controlEnabled: false,
 
   setField: (field, value) => set({ [field]: value } as Partial<SessionState>),
+
+  setControlEnabled: (enabled) => set({ controlEnabled: enabled }),
 
   connect: () => {
     const { host, port, token } = get()
@@ -97,6 +102,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       error: null,
       welcome: null,
       frame: null,
+      controlEnabled: false,
       stats: emptyStats(),
     })
     client.connect(host.trim(), portNumber, token.trim())
@@ -105,7 +111,13 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   disconnect: () => {
     client.disconnect()
     resetWindows()
-    set({ phase: 'idle', frame: null, welcome: null, stats: emptyStats() })
+    set({
+      phase: 'idle',
+      frame: null,
+      welcome: null,
+      controlEnabled: false,
+      stats: emptyStats(),
+    })
   },
 }))
 

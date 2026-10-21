@@ -21,6 +21,10 @@ struct core_config {
   int capture_fps = 15;
   /// Force the synthetic source even when a display is available.
   bool no_capture = false;
+  /// Disable pointer/keyboard injection into the local display.
+  bool no_input = false;
+  /// Disable zlib tile compression.
+  bool no_compress = false;
 };
 
 /// Parse command-line arguments. Unknown arguments are reported through

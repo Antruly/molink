@@ -85,6 +85,7 @@ class synthetic_capture : public capture_base {
         frame->height = pattern_.height;
         frame->tile_w = pattern_.tile;
         frame->tile_h = pattern_.tile;
+        frame->codec = static_cast<uint8_t>(protocol::codec::bgra);
         frame->payload = std::move(payload);
         publish(std::move(frame));
       }
@@ -109,6 +110,7 @@ class synthetic_capture : public capture_base {
     frame->height = pattern_.height;
     frame->tile_w = pattern_.tile;
     frame->tile_h = pattern_.tile;
+    frame->codec = static_cast<uint8_t>(protocol::codec::bgra);
     frame->payload = std::move(payload);
     publish(std::move(frame));
   }

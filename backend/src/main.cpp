@@ -13,6 +13,7 @@
 #include "api.h"
 #include "capture/capture.h"
 #include "config.h"
+#include "input/input.h"
 #include "session_registry.h"
 #include "util.h"
 #include "version.h"
@@ -63,13 +64,16 @@ void print_usage() {
       << "  --parent-pid <pid>   exit when that process disappears\n"
       << "  --capture-fps <n>    screen capture frames per second (default 15)\n"
       << "  --no-capture         use synthetic test frames instead of the screen\n"
+      << "  --no-input           disable pointer and keyboard injection\n"
+      << "  --no-compress        send raw BGRA tiles instead of zlib-compressed\n"
       << "  --print-ready        print one JSON line on stdout when ready\n"
       << "  --version            print version and exit\n"
       << "  --help               show this help\n";
 }
 
 void print_ready(const molink::core_config& cfg, int port,
-                 const std::string& token, const std::string& capture_backend) {
+                 const std::string& token, const std::string& capture_backend,
+                 const std::string& input_backend) {
   uvcpp::uvcpp_json j;
   j["event"] = "ready";
   j["service"] = MOLINK_CORE_SERVICE;
@@ -81,6 +85,7 @@ void print_ready(const molink::core_config& cfg, int port,
   j["token"] = token;
   j["session_endpoint"] = "/ws/session";
   j["capture"] = capture_backend;
+  j["input"] = input_backend;
   j["synthetic_frames"] = capture_backend == "synthetic";
   std::cout << uvcpp::uvcpp_json_dump(j) << std::endl;
 }
@@ -112,6 +117,7 @@ int main(int argc, char** argv) {
 
   capture_options capture_opts;
   capture_opts.fps = cfg.capture_fps;
+  capture_opts.compress = !cfg.no_compress;
   std::string capture_note;
   std::shared_ptr<capture_source> capture =
       start_capture(capture_opts, !cfg.no_capture, capture_note);
@@ -125,6 +131,18 @@ int main(int argc, char** argv) {
   wsopt.version = MOLINK_VERSION;
   wsopt.capture = capture;
 
+  std::shared_ptr<input_injector> input;
+  if (!cfg.no_input) {
+    std::string input_error;
+    std::unique_ptr<input_injector> created = make_x11_input(input_error);
+    if (created) {
+      input = std::move(created);
+    } else {
+      std::fprintf(stderr, "molink input: %s\n", input_error.c_str());
+    }
+  }
+  wsopt.input = input;
+
   uvcpp::uvcpp_web_app app;
   app.set_host(cfg.host)
       .set_port(cfg.port)
@@ -135,6 +153,7 @@ int main(int argc, char** argv) {
   api_deps deps;
   deps.registry = registry;
   deps.capture = capture;
+  deps.input = input;
   deps.config = cfg;
   deps.started_ms = started_ms;
   register_http_routes(app, deps);
@@ -175,7 +194,8 @@ int main(int argc, char** argv) {
   }
 
   if (cfg.print_ready_json) {
-    print_ready(cfg, port, cfg.token, capture->backend());
+    print_ready(cfg, port, cfg.token, capture->backend(),
+                input ? input->backend() : "none");
   } else {
     std::cerr << MOLINK_CORE_SERVICE << " " MOLINK_VERSION << " listening on "
               << cfg.host << ":" << port << "\n"
@@ -184,6 +204,8 @@ int main(int argc, char** argv) {
               << "  health:  http://" << cfg.host << ":" << port
               << "/healthz\n"
               << "  capture: " << capture_note << "\n"
+              << "  input:   " << (input ? input->backend() : "disabled")
+              << "\n"
               << "  token:   " << cfg.token << "\n";
   }
 
