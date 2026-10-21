@@ -147,6 +147,7 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           PKG_DIR="$(cygpath -w "$GITHUB_WORKSPACE/build/windows/pkg")"
           OUT_DIR="$(cygpath -w "$GITHUB_WORKSPACE/build/package")"
+          LANG_FILE="$(cygpath -w "$GITHUB_WORKSPACE/packaging/windows/ChineseSimplified.isl")"
 
           ISCC=$(command -v iscc || true)
           if [ -z "$ISCC" ] || [ ! -x "$ISCC" ]; then
@@ -162,7 +163,8 @@ jobs:
           # uses NSIS's silent-extract stub.
           MSYS2_ARG_CONV_EXCL='*' MSYS_NO_PATHCONV=1 \
             "$ISCC" /DAppVersion="$VERSION" /DPkgDir="$PKG_DIR" \
-            /DOutputDir="$OUT_DIR" packaging/windows/installer.iss
+            /DOutputDir="$OUT_DIR" /DLangFile="$LANG_FILE" \
+            packaging/windows/installer.iss
           MSYS2_ARG_CONV_EXCL='*' MSYS_NO_PATHCONV=1 \
             "/c/Program Files (x86)/NSIS/makensis.exe" /DVERSION="$VERSION" \
             /DPKG_DIR="$PKG_DIR" /DOUT_DIR="$OUT_DIR" \

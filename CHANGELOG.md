@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.4.2] — 2026-10-22
+
+### Fixed
+
+- Windows Inno Setup 安装包自带 `ChineseSimplified.isl`，不再依赖 Inno Setup 安装目录里的语言文件；修复 Windows Release 构建中 `Couldn't open include file ...ChineseSimplified.isl` 的失败
+
 ## [0.4.1] — 2026-10-22
 
 ### Added

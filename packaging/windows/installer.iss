@@ -1,7 +1,7 @@
 ; moLink Windows installer (Inno Setup 6).
 ;
 ; Build with:
-;   ISCC.exe /DAppVersion=0.4.1 \
+;   ISCC.exe /DAppVersion=0.4.2 \
 ;            /DPkgDir=C:\path\to\staged\pkg \
 ;            /DOutputDir=C:\path\to\build\package \
 ;            installer.iss
@@ -14,13 +14,16 @@
 ; add a rule; Windows prompts on first LAN listen instead.
 
 #ifndef AppVersion
-  #define AppVersion "0.4.1"
+  #define AppVersion "0.4.2"
 #endif
 #ifndef PkgDir
   #error PkgDir must point at the staged package directory
 #endif
 #ifndef OutputDir
   #define OutputDir "."
+#endif
+#ifndef LangFile
+  #define LangFile "ChineseSimplified.isl"
 #endif
 
 #define AppName "moLink"
@@ -54,7 +57,7 @@ RestartApplications=no
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
-Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
+Name: "chinesesimplified"; MessagesFile: "{#LangFile}"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
