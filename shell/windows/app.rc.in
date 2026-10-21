@@ -1,0 +1,3 @@
+// The executable's icon resource. Explorer, the taskbar and shortcuts read
+// this rather than the runtime WM_SETICON image.
+1 ICON "@MOLINK_ICON_PATH_NATIVE@"

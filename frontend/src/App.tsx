@@ -51,7 +51,7 @@ export default function App() {
     document.documentElement.dataset.theme = theme
     document
       .querySelector('meta[name="theme-color"]')
-      ?.setAttribute('content', theme === 'dark' ? '#0f1719' : '#f4f7f7')
+      ?.setAttribute('content', theme === 'dark' ? '#0b1012' : '#f4f7f7')
   }, [theme])
 
   useEffect(() => {
@@ -107,7 +107,7 @@ export default function App() {
     if (token === '') return
     createSession(
       params.get('host') ?? '127.0.0.1',
-      Number(params.get('port') ?? '21118'),
+      Number(params.get('port') ?? '28418'),
       token,
       params.get('label') ?? undefined,
     )

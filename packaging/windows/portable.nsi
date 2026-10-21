@@ -3,7 +3,7 @@
 !include "MUI2.nsh"
 
 !ifndef VERSION
-  !define VERSION "0.3.0"
+  !define VERSION "0.4.0"
 !endif
 !ifndef PKG_DIR
   !error "PKG_DIR must point at the staged package directory"
@@ -14,12 +14,18 @@
 
 Name "moLink Portable"
 OutFile "${OUT_DIR}\moLink-${VERSION}-portable-x64.exe"
+Icon "${PKG_DIR}\molink.ico"
 Unicode true
 RequestExecutionLevel user
 SilentInstall silent
 AutoCloseWindow true
 SetCompressor /SOLID lzma
 InstallDir "$TEMP\moLink-${VERSION}"
+VIProductVersion "${VERSION}.0"
+VIAddVersionKey "ProductName" "moLink Portable"
+VIAddVersionKey "ProductVersion" "${VERSION}"
+VIAddVersionKey "FileDescription" "moLink portable launcher"
+VIAddVersionKey "LegalCopyright" "MIT"
 
 Section
   SetOutPath "$INSTDIR"

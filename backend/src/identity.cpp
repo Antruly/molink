@@ -88,6 +88,55 @@ void save_lock_timeout_setting(int seconds) {
   write_file(fs::path(dir) / "lock_timeout", std::to_string(seconds));
 }
 
+int load_port_setting(const std::string& name, int fallback) {
+  const std::string dir = config_directory();
+  if (dir.empty()) return fallback;
+  std::string value;
+  if (!read_file(fs::path(dir) / name, value)) return fallback;
+  try {
+    const int port = std::stoi(value);
+    if (port < 1 || port > 65535) return fallback;
+    return port;
+  } catch (...) {
+    return fallback;
+  }
+}
+
+void save_port_setting(const std::string& name, int port) {
+  const std::string dir = config_directory();
+  if (dir.empty()) return;
+  write_file(fs::path(dir) / name, std::to_string(port));
+}
+
+std::vector<std::string> load_banned_ips() {
+  std::vector<std::string> ips;
+  const std::string dir = config_directory();
+  if (dir.empty()) return ips;
+  std::ifstream stream(fs::path(dir) / "banned_ips");
+  if (!stream) return ips;
+  std::string line;
+  while (std::getline(stream, line)) {
+    while (!line.empty() &&
+           (line.back() == '\r' || line.back() == ' ' || line.back() == '\t')) {
+      line.pop_back();
+    }
+    if (!line.empty()) ips.push_back(line);
+  }
+  return ips;
+}
+
+void save_banned_ips(const std::vector<std::string>& ips) {
+  const std::string dir = config_directory();
+  if (dir.empty()) return;
+  std::string content;
+  for (const std::string& ip : ips) {
+    if (ip.empty()) continue;
+    content += ip;
+    content.push_back('\n');
+  }
+  write_file(fs::path(dir) / "banned_ips", content);
+}
+
 std::string config_directory() {
   const std::string override_dir = env("MOLINK_CONFIG_DIR");
   if (!override_dir.empty()) return override_dir;

@@ -12,8 +12,13 @@
 #include <poll.h>
 #include <spawn.h>
 #include <signal.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
+
+#include <cerrno>
 
 #include <chrono>
 #include <cstdio>
@@ -21,6 +26,7 @@
 #include <cstring>
 #include <filesystem>
 #include <string>
+#include <thread>
 #include <vector>
 
 extern char** environ;
@@ -34,6 +40,11 @@ bool g_smoke = false;
 bool g_smoke_done = false;
 bool g_url_mode = false;
 std::string g_url_override;
+
+// Single-instance guard (normal launches only). The first shell listens on a
+// per-user Unix socket; later launches send "show" and exit.
+int g_instance_fd = -1;
+std::string g_instance_path;
 
 std::string exe_dir() {
   char buffer[4096];
@@ -120,7 +131,8 @@ bool json_string(const std::string& json, const char* key, std::string& out) {
 }
 
 bool start_core(const std::string& core, const std::string& web_root, int& port,
-                std::string& token, std::string& error) {
+                std::string& token, std::string& client_token,
+                std::string& error) {
   int fds[2];
   if (pipe(fds) != 0) {
     error = "pipe failed";
@@ -133,8 +145,8 @@ bool start_core(const std::string& core, const std::string& web_root, int& port,
   posix_spawn_file_actions_addclose(&actions, fds[0]);
   posix_spawn_file_actions_addclose(&actions, fds[1]);
 
-  std::vector<std::string> args = {core, "--port", "0", "--print-ready",
-                                   "--parent-pid", std::to_string(getpid())};
+  std::vector<std::string> args = {core, "--print-ready", "--parent-pid",
+                                   std::to_string(getpid())};
   if (!web_root.empty()) {
     args.push_back("--web-root");
     args.push_back(web_root);
@@ -175,8 +187,9 @@ bool start_core(const std::string& core, const std::string& web_root, int& port,
 
   long parsed_port = 0;
   if (!complete || !json_number(line, "port", parsed_port) ||
-      !json_string(line, "token", token) || parsed_port <= 0) {
-    error = "molink-core did not report a ready port and token";
+      !json_string(line, "token", token) ||
+      !json_string(line, "client_token", client_token) || parsed_port <= 0) {
+    error = "molink-core did not report a ready port and tokens";
     return false;
   }
   port = static_cast<int>(parsed_port);
@@ -230,7 +243,10 @@ void fail(const char* message) {
 @property(nonatomic, strong) NSWindow* window;
 @property(nonatomic, strong) WKWebView* webView;
 @property(nonatomic, copy) NSString* url;
+- (void)showWindow;
 @end
+
+static AppDelegate* g_app_delegate = nil;
 
 @implementation AppDelegate
 
@@ -322,11 +338,16 @@ void fail(const char* message) {
   return g_url_mode ? YES : NO;
 }
 
+- (void)showWindow {
+  [self.window makeKeyAndOrderFront:nil];
+  [NSApp activateIgnoringOtherApps:YES];
+}
+
 - (BOOL)applicationShouldHandleReopen:(NSApplication*)sender
                     hasVisibleWindows:(BOOL)flag {
   (void)sender;
   (void)flag;
-  [self.window makeKeyAndOrderFront:nil];
+  [self showWindow];
   return YES;
 }
 
@@ -375,6 +396,90 @@ void fail(const char* message) {
 
 @end
 
+namespace {
+
+std::string instance_socket_path() {
+  const char* tmp = std::getenv("TMPDIR");
+  std::string dir = tmp != nullptr && tmp[0] != '\0' ? tmp : "/tmp";
+  while (!dir.empty() && dir.back() == '/') dir.pop_back();
+  return dir + "/molink-shell-" + std::to_string(::getuid()) + ".sock";
+}
+
+int connect_instance(const std::string& path) {
+  const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+  if (fd < 0) return -1;
+  sockaddr_un addr{};
+  addr.sun_family = AF_UNIX;
+  std::strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
+  if (::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0) {
+    return fd;
+  }
+  ::close(fd);
+  return -1;
+}
+
+/// Returns true when this process owns the instance socket. Sets
+/// @p already_running when another shell accepted the "show" request.
+bool claim_instance_socket(const std::string& path, bool& already_running) {
+  already_running = false;
+  for (int attempt = 0; attempt < 2; ++attempt) {
+    const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) return false;
+    sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    std::strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
+    if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0) {
+      if (::listen(fd, 4) != 0) {
+        ::close(fd);
+        return false;
+      }
+      ::chmod(path.c_str(), 0600);
+      g_instance_fd = fd;
+      g_instance_path = path;
+      std::thread([fd] {
+        for (;;) {
+          const int client = ::accept(fd, nullptr, nullptr);
+          if (client < 0) break;
+          char buffer[32];
+          const ssize_t got = ::read(client, buffer, sizeof(buffer));
+          (void)got;
+          ::close(client);
+          dispatch_async(dispatch_get_main_queue(), ^{
+            if (g_app_delegate != nil) [g_app_delegate showWindow];
+          });
+        }
+      }).detach();
+      return true;
+    }
+
+    const int error = errno;
+    ::close(fd);
+    if (error != EADDRINUSE) return false;
+
+    const int client = connect_instance(path);
+    if (client >= 0) {
+      const ssize_t sent = ::write(client, "show\n", 5);
+      (void)sent;
+      ::close(client);
+      already_running = true;
+      return false;
+    }
+    // A previous shell may have been killed without unlinking the socket.
+    ::unlink(path.c_str());
+  }
+  return false;
+}
+
+void cleanup_instance_socket() {
+  if (g_instance_fd >= 0) {
+    ::close(g_instance_fd);
+    g_instance_fd = -1;
+  }
+  if (!g_instance_path.empty()) ::unlink(g_instance_path.c_str());
+}
+
+}  // namespace
+
 int main(int argc, char** argv) {
   @autoreleasepool {
     for (int i = 1; i < argc; ++i) {
@@ -406,6 +511,20 @@ int main(int argc, char** argv) {
       return 0;
     }
 
+    if (!g_smoke) {
+      const std::string instance_path = instance_socket_path();
+      bool already_running = false;
+      if (!claim_instance_socket(instance_path, already_running)) {
+        if (already_running) return 0;
+        std::fprintf(stderr,
+                     "moLink shell: could not create the single-instance "
+                     "socket at %s; starting anyway\n",
+                     instance_path.c_str());
+      } else {
+        std::atexit(cleanup_instance_socket);
+      }
+    }
+
     const std::string core = find_core();
     if (core.empty()) {
       std::fprintf(stderr,
@@ -422,16 +541,18 @@ int main(int argc, char** argv) {
 
     int port = 0;
     std::string token;
+    std::string client_token;
     std::string error;
-    if (!start_core(core, web_root, port, token, error)) {
+    if (!start_core(core, web_root, port, token, client_token, error)) {
       std::fprintf(stderr, "moLink shell: %s\n", error.c_str());
       stop_core();
       return 1;
     }
 
-    const std::string url = "http://127.0.0.1:" + std::to_string(port) +
-                            "/?host=127.0.0.1&port=" + std::to_string(port) +
-                            "&shell=1&platform=macos";
+    std::string url = "http://127.0.0.1:" + std::to_string(port) +
+                      "/?host=127.0.0.1&port=" + std::to_string(port) +
+                      "&shell=1&platform=macos";
+    if (!client_token.empty()) url += "&client=" + client_token;
 
     [NSApplication sharedApplication];
     [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
@@ -457,6 +578,7 @@ int main(int argc, char** argv) {
 
     AppDelegate* delegate = [[AppDelegate alloc] init];
     delegate.url = [NSString stringWithUTF8String:url.c_str()];
+    g_app_delegate = delegate;
     [NSApp setDelegate:delegate];
     [NSApp run];
   }

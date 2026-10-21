@@ -1,7 +1,8 @@
-import { Languages, Moon, Sun, Timer, Waves } from 'lucide-react'
-import type { ReactNode } from 'react'
+import { Check, Languages, Moon, Network, Sun, Timer, Waves } from 'lucide-react'
+import { useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { setLanguage } from '../i18n'
+import type { ServerState } from '../lib/api'
 import { useAppStore, type Theme } from '../store/app'
 
 function Segment<T extends string>({
@@ -69,6 +70,86 @@ function Toggle({
   )
 }
 
+function NetworkPortSettings({
+  server,
+  onSave,
+}: {
+  server: ServerState
+  onSave: (tcp: number, udp: number) => Promise<boolean>
+}) {
+  const { t } = useTranslation()
+  const [tcpPort, setTcpPort] = useState(String(server.tcp_port))
+  const [udpPort, setUdpPort] = useState(String(server.udp_port))
+  const [note, setNote] = useState<string | null>(null)
+
+  const save = async () => {
+    const tcp = Number(tcpPort)
+    const udp = Number(udpPort)
+    if (
+      !Number.isInteger(tcp) ||
+      tcp < 1 ||
+      tcp > 65535 ||
+      !Number.isInteger(udp) ||
+      udp < 1 ||
+      udp > 65535
+    ) {
+      setNote(t('error.invalid_port'))
+      return
+    }
+    const saved = await onSave(tcp, udp)
+    setNote(saved ? null : t('error.settings_failed'))
+  }
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-2 text-[12px] font-medium text-ink">
+        <Network size={14} className="text-accent" />
+        {t('settings.network')}
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        <label className="block">
+          <span className="mb-1 block text-[10px] uppercase tracking-[0.14em] text-muted">
+            {t('settings.tcpPort')}
+          </span>
+          <input
+            value={tcpPort}
+            onChange={(event) => setTcpPort(event.target.value)}
+            inputMode="numeric"
+            className="field font-mono"
+          />
+        </label>
+        <label className="block">
+          <span className="mb-1 block text-[10px] uppercase tracking-[0.14em] text-muted">
+            {t('settings.udpPort')}
+          </span>
+          <input
+            value={udpPort}
+            onChange={(event) => setUdpPort(event.target.value)}
+            inputMode="numeric"
+            className="field font-mono"
+          />
+        </label>
+      </div>
+      <div className="flex items-center gap-2">
+        <button type="button" onClick={() => void save()} className="btn">
+          <Check size={13} />
+          {t('settings.savePorts')}
+        </button>
+        {server.restart_required ? (
+          <span className="text-[11px] text-warn">
+            {t('settings.restartRequired')}
+          </span>
+        ) : note ? (
+          <span className="text-[11px] text-muted">{note}</span>
+        ) : null}
+      </div>
+      <p className="text-[11px] leading-relaxed text-muted">
+        {t('settings.networkHint')}
+      </p>
+    </div>
+  )
+}
+
 export function PreferencesControls() {
   const { t, i18n } = useTranslation()
   const theme = useAppStore((state) => state.theme)
@@ -77,6 +158,8 @@ export function PreferencesControls() {
   const setQuality = useAppStore((state) => state.setQualityWatermark)
   const lockTimeout = useAppStore((state) => state.lockTimeout)
   const setLockTimeout = useAppStore((state) => state.setLockTimeout)
+  const server = useAppStore((state) => state.server)
+  const setNetworkPorts = useAppStore((state) => state.setNetworkPorts)
   const language = i18n.language.startsWith('zh') ? 'zh-CN' : 'en'
 
   return (
@@ -151,6 +234,14 @@ export function PreferencesControls() {
           ))}
         </select>
       </div>
+
+      {server ? (
+        <NetworkPortSettings
+          key={`${server.tcp_port}:${server.udp_port}`}
+          server={server}
+          onSave={setNetworkPorts}
+        />
+      ) : null}
 
       <div className="space-y-2">
         <div className="flex items-center gap-2 text-[12px] font-medium text-ink">

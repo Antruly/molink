@@ -15,6 +15,8 @@ export function sessionWindowUrl(target: SessionWindowTarget): string {
     token: target.token,
   })
   if (target.label) params.set('label', target.label)
+  const client = new URLSearchParams(window.location.search).get('client')
+  if (client) params.set('client', client)
   if (shellInfo.enabled) {
     params.set('shell', '1')
     params.set('platform', shellInfo.platform)

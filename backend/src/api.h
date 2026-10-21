@@ -7,9 +7,11 @@
 
 #include "capture/capture.h"
 #include "clipboard/clipboard.h"
+#include "auth_state.h"
 #include "config.h"
 #include "input/input.h"
 #include "lock_state.h"
+#include "network_settings.h"
 #include "session_registry.h"
 
 namespace uvcpp {
@@ -18,14 +20,27 @@ class uvcpp_web_app;
 
 namespace molink {
 
+class discovery_service;
+
 struct api_deps {
   std::shared_ptr<session_registry> registry;
   std::shared_ptr<capture_source> capture;
   std::shared_ptr<input_injector> input;
   std::shared_ptr<clipboard_service> clipboard;
   std::shared_ptr<lock_state> lock;
+  std::shared_ptr<network_settings> network;
   std::string device_id;
+  /// Random token handed only to the desktop shell through the ready line. It
+  /// gates loopback web UI access when allow_web_client is off.
+  std::string client_token;
+  std::shared_ptr<auth_state> auth;
+  std::shared_ptr<discovery_service> discovery;
   std::shared_ptr<std::atomic<int>> bound_port;
+  /// True when this build can carry HTTP/2 (h2c) on the web port.
+  bool http2_available = false;
+  /// Resolved capture tile edge (0 when capture is unavailable).
+  int tile_size = 0;
+  int change_threshold = 0;
   core_config config;
   uint64_t started_ms = 0;
   /// True when a built frontend is mounted at "/", so the JSON index route is

@@ -1,27 +1,25 @@
 #include "session_registry.h"
 
 #include <algorithm>
-
-#include <web/uvcpp_ws_connection.h>
+#include <utility>
 
 #include "util.h"
 
 namespace molink {
 
 std::shared_ptr<session_info> session_registry::add(
-    uvcpp::uvcpp_ws_connection* conn, const std::string& peer_ip,
-    unsigned int peer_port) {
+    std::shared_ptr<session_transport> transport) {
   std::lock_guard<std::mutex> lock(mu_);
   auto s = std::make_shared<session_info>();
   s->id = next_id_++;
   if (next_id_ == 0) next_id_ = 1;
   s->public_id = make_session_public_id();
-  s->peer_ip = peer_ip;
-  s->peer_port = peer_port;
+  s->peer_ip = transport ? transport->peer_ip() : std::string();
+  s->peer_port = transport ? transport->peer_port() : 0;
   s->connected_ms = now_ms();
   s->last_seen_ms = s->connected_ms;
   s->last_ping_ms = s->connected_ms;
-  s->conn = conn;
+  s->transport = std::move(transport);
   sessions_.push_back(s);
   return s;
 }

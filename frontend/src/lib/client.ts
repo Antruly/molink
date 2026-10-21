@@ -10,6 +10,16 @@ import {
 
 export type ClientPhase = 'idle' | 'connecting' | 'live' | 'error'
 
+export interface DisplayInfo {
+  index: number
+  name: string
+  x: number
+  y: number
+  width: number
+  height: number
+  primary?: boolean
+}
+
 export interface Welcome {
   session: string
   session_id: number
@@ -17,6 +27,8 @@ export interface Welcome {
   service: string
   version: string
   transport: string
+  displays?: DisplayInfo[]
+  display_index?: number
   tiles: {
     codec: string
     screen_w: number
@@ -57,6 +69,7 @@ export interface ClientHandlers {
   onCursor: (shape: CursorShape) => void
   onCursorPosition: (position: CursorPosition) => void
   onClipboard: (text: string) => void
+  onDisplay?: (index: number) => void
 }
 
 interface ControlMessage {
@@ -74,6 +87,7 @@ interface ControlMessage {
   y?: number
   visible?: boolean
   text?: string
+  index?: number
 }
 
 function decodeBase64(text: string): Uint8Array | null {
@@ -189,6 +203,18 @@ export class MolinkClient {
     this.sendJson({ type: 'input', ...payload })
   }
 
+  /** Asks the core to change its capture rate (global for this host). */
+  setCaptureFps(fps: number): void {
+    if (!this.isLive()) return
+    this.sendJson({ type: 'capture-fps', fps })
+  }
+
+  /** Switches the remote capture to another monitor. */
+  setDisplay(index: number): void {
+    if (!this.isLive()) return
+    this.sendJson({ type: 'display', index })
+  }
+
   requestClipboard(): void {
     this.sendJson({ type: 'clipboard', action: 'get' })
   }
@@ -214,6 +240,11 @@ export class MolinkClient {
         break
       case 'hello_required':
         // Expected before our hello is processed; nothing to report.
+        break
+      case 'display':
+        if (typeof message.index === 'number') {
+          this.handlers.onDisplay?.(message.index)
+        }
         break
       case 'pong': {
         const sent = (message as { t?: number }).t

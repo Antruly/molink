@@ -3,7 +3,7 @@
   "name": "molink-core",
   "template": "websocket-echo",
   "binary": "molink-core",
-  "port": 21118,
+  "port": 28418,
   "features": [
     "websocket"
   ],

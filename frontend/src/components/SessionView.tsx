@@ -5,6 +5,7 @@ import {
   ExternalLink,
   Hand,
   LogOut,
+  Monitor,
   MousePointer2,
   Radio,
   X,
@@ -82,10 +83,49 @@ export function SessionView({
   useEffect(() => {
     if (tab.phase !== 'live') return
     const timer = window.setInterval(() => {
+      if (document.visibilityState === 'hidden') return
       connection()?.requestFrame()
     }, 60)
     return () => window.clearInterval(timer)
   }, [tab.phase, tab.id, connection])
+
+  // Adaptive capture rate. The core captures at the requested rate and the
+  // client pulls the newest deltas; lowering it is the safe lever when RTT or
+  // throughput says the link is struggling. Hysteresis avoids oscillation.
+  const adaptiveFps = useRef(15)
+  const adaptiveTimer = useRef<number | null>(null)
+  useEffect(() => {
+    if (tab.phase !== 'live') return
+    const latency = tab.stats.latencyMs
+    const bandwidth = tab.stats.bytesPerSec
+    let target = 15
+    if ((latency !== null && latency > 250) || bandwidth > 40 * 1024 * 1024) {
+      target = 5
+    } else if (
+      (latency !== null && latency > 120) ||
+      bandwidth > 20 * 1024 * 1024
+    ) {
+      target = 10
+    }
+    if (target === adaptiveFps.current) return
+    adaptiveFps.current = target
+    if (adaptiveTimer.current !== null) {
+      window.clearTimeout(adaptiveTimer.current)
+    }
+    adaptiveTimer.current = window.setTimeout(() => {
+      adaptiveTimer.current = null
+      connection()?.setCaptureFps(target)
+    }, 800)
+  }, [tab.phase, tab.stats.latencyMs, tab.stats.bytesPerSec, connection, tab.id])
+
+  useEffect(
+    () => () => {
+      if (adaptiveTimer.current !== null) {
+        window.clearTimeout(adaptiveTimer.current)
+      }
+    },
+    [],
+  )
 
   useEffect(() => {
     const element = surfaceRef.current
@@ -262,6 +302,28 @@ export function SessionView({
         </div>
 
         <div className="ml-auto flex items-center gap-1.5">
+          {(tab.welcome?.displays?.length ?? 0) > 1 ? (
+            <label
+              className="flex items-center gap-1 rounded-md border border-line bg-panel px-1.5 text-muted"
+              title={t('session.display')}
+            >
+              <Monitor size={13} />
+              <select
+                value={tab.displayIndex}
+                onChange={(event) =>
+                  connection()?.setDisplay(Number(event.target.value))
+                }
+                aria-label={t('session.display')}
+                className="h-8 max-w-[9rem] bg-transparent pr-1 text-[11px] text-ink outline-none"
+              >
+                {tab.welcome?.displays?.map((display) => (
+                  <option key={display.index} value={display.index}>
+                    {display.name || `Display ${display.index + 1}`}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
           <div className="flex items-center gap-1.5">
             <Stat label={t('stats.fps')} value={String(tab.stats.fps)} />
             <Stat label={t('stats.latency')} value={latency} />

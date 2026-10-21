@@ -23,19 +23,23 @@
 
 :root {
   color-scheme: dark;
-  --bg: #0f1719;
-  --surface: #162226;
-  --panel: #1b2b30;
-  --line: #2a3f44;
-  --line-soft: #213338;
-  --ink: #e8f1ef;
-  --muted: #93aaa5;
+  /* Neutral slate rather than the old green-tinted charcoal, so the teal
+     accent reads as an accent instead of tinting the whole window. */
+  --bg: #0b1012;
+  --surface: #12191b;
+  --panel: #182124;
+  --line: #29373b;
+  --line-soft: #1d292c;
+  --ink: #e9f1ef;
+  --muted: #95a7a4;
   --accent: #5eead4;
   --accent-strong: #2dd4bf;
-  --accent-soft: rgba(94, 234, 212, 0.14);
-  --on-accent: #06201c;
+  --accent-soft: rgba(94, 234, 212, 0.09);
+  --on-accent: #04211d;
   --danger: #ff8a80;
   --warn: #f6c177;
+  --glow-1: rgba(94, 234, 212, 0.05);
+  --glow-2: rgba(94, 234, 212, 0.03);
 }
 
 [data-theme="light"] {
@@ -53,6 +57,8 @@
   --on-accent: #ffffff;
   --danger: #c53030;
   --warn: #b7791f;
+  --glow-1: var(--accent-soft);
+  --glow-2: color-mix(in srgb, var(--accent) 8%, transparent);
 }
 
 @layer base {
@@ -69,16 +75,8 @@
     font-family: var(--font-sans);
     -webkit-font-smoothing: antialiased;
     background-image:
-      radial-gradient(
-        55rem 35rem at 8% -10%,
-        var(--accent-soft),
-        transparent 60%
-      ),
-      radial-gradient(
-        45rem 30rem at 100% 105%,
-        color-mix(in srgb, var(--accent) 10%, transparent),
-        transparent 55%
-      );
+      radial-gradient(55rem 35rem at 8% -10%, var(--glow-1), transparent 60%),
+      radial-gradient(45rem 30rem at 100% 105%, var(--glow-2), transparent 55%);
     background-attachment: fixed;
   }
 

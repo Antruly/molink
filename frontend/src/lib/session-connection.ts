@@ -24,6 +24,7 @@ export interface TabPatch {
   error?: string | null
   controlEnabled?: boolean
   label?: string
+  displayIndex?: number
 }
 
 export interface SessionSink {
@@ -66,9 +67,11 @@ export class SessionConnection {
       onWelcome: (welcome) => {
         this.sink.onPatch({
           welcome,
+          displayIndex: welcome.display_index ?? 0,
           ...(welcome.device_id ? { label: welcome.device_id } : {}),
         })
       },
+      onDisplay: (index) => this.sink.onPatch({ displayIndex: index }),
       onFrame: (frame, bytes) => {
         const now = performance.now()
         this.frames += 1
@@ -124,6 +127,14 @@ export class SessionConnection {
 
   sendInput(payload: Record<string, unknown>): void {
     this.client.sendInput(payload)
+  }
+
+  setCaptureFps(fps: number): void {
+    this.client.setCaptureFps(fps)
+  }
+
+  setDisplay(index: number): void {
+    this.client.setDisplay(index)
   }
 
   requestClipboard(): void {

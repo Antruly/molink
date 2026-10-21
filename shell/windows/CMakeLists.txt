@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(moLinkWindows LANGUAGES CXX)
+project(moLinkWindows LANGUAGES CXX RC)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -20,7 +20,14 @@ else()
   set(MOLINK_WEBVIEW2_ARCH x86)
 endif()
 
-add_executable(moLink WIN32 main.cpp)
+set(MOLINK_ICON_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../assets/icons/icon.ico")
+if(NOT EXISTS "${MOLINK_ICON_PATH}")
+  message(FATAL_ERROR "Application icon not found: ${MOLINK_ICON_PATH}")
+endif()
+file(TO_NATIVE_PATH "${MOLINK_ICON_PATH}" MOLINK_ICON_PATH_NATIVE)
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/app.rc.in"
+               "${CMAKE_CURRENT_BINARY_DIR}/app.rc" @ONLY)
+add_executable(moLink WIN32 main.cpp "${CMAKE_CURRENT_BINARY_DIR}/app.rc")
 target_include_directories(moLink PRIVATE "${WEBVIEW2_SDK}/build/native/include")
 if(MINGW)
   # MinGW-w64 omits EventToken.h; a minimal shim lives next to this file.

@@ -137,29 +137,41 @@ jobs:
             -DWEBVIEW2_SDK="$(cygpath -w "$GITHUB_WORKSPACE/wv2")"
           cmake --build shell/windows/build --config Release --parallel
 
-      - name: Stage and build installer
+      - name: Stage and build packages
         shell: bash
         run: |
           export UVCPP_LIB_DIR="$(cygpath -u "$RUNNER_TEMP/uvcpp/bin")"
           bash packaging/windows/stage.sh
-          choco install nsis -y --no-progress
+          choco install innosetup nsis -y --no-progress
           mkdir -p build/package
           VERSION="${GITHUB_REF_NAME#v}"
+          PKG_DIR="$(cygpath -w "$GITHUB_WORKSPACE/build/windows/pkg")"
+          OUT_DIR="$(cygpath -w "$GITHUB_WORKSPACE/build/package")"
+
+          ISCC=$(command -v iscc || true)
+          if [ -z "$ISCC" ] || [ ! -x "$ISCC" ]; then
+            ISCC=$(find "/c/Program Files (x86)" "/c/Program Files" \
+              -maxdepth 2 -iname ISCC.exe 2>/dev/null | head -n 1)
+          fi
+          if [ -z "$ISCC" ] || [ ! -x "$ISCC" ]; then
+            echo "Inno Setup compiler not found" >&2
+            exit 1
+          fi
+
+          # The installer uses Inno Setup; the portable single-file exe still
+          # uses NSIS's silent-extract stub.
+          MSYS2_ARG_CONV_EXCL='*' MSYS_NO_PATHCONV=1 \
+            "$ISCC" /DAppVersion="$VERSION" /DPkgDir="$PKG_DIR" \
+            /DOutputDir="$OUT_DIR" packaging/windows/installer.iss
           MSYS2_ARG_CONV_EXCL='*' MSYS_NO_PATHCONV=1 \
             "/c/Program Files (x86)/NSIS/makensis.exe" /DVERSION="$VERSION" \
-            /DPKG_DIR="$(cygpath -w "$GITHUB_WORKSPACE/build/windows/pkg")" \
-            /DOUT_DIR="$(cygpath -w "$GITHUB_WORKSPACE/build/package")" \
-            packaging/windows/installer.nsi
-          MSYS2_ARG_CONV_EXCL='*' MSYS_NO_PATHCONV=1 \
-            "/c/Program Files (x86)/NSIS/makensis.exe" /DVERSION="$VERSION" \
-            /DPKG_DIR="$(cygpath -w "$GITHUB_WORKSPACE/build/windows/pkg")" \
-            /DOUT_DIR="$(cygpath -w "$GITHUB_WORKSPACE/build/package")" \
+            /DPKG_DIR="$PKG_DIR" /DOUT_DIR="$OUT_DIR" \
             packaging/windows/portable.nsi
 
       - uses: softprops/action-gh-release@v2
         with:
           name: moLink ${{ github.ref_name }}
-          body: 'Windows installer and portable executable (x64).'
+          body: 'Windows installer (Inno Setup) and portable executable (x64).'
           files: build/package/*.exe
 
   macos:

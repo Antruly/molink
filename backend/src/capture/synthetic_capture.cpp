@@ -25,7 +25,7 @@ uint64_t epoch_us() {
 /// where frames came from.
 class synthetic_capture : public capture_base {
  public:
-  explicit synthetic_capture(const capture_options& options) : options_(options) {}
+  explicit synthetic_capture(const capture_options& options) : capture_base(options.fps), options_(options) {}
   ~synthetic_capture() override { stop(); }
 
   bool start(std::string& err) override {
@@ -55,10 +55,24 @@ class synthetic_capture : public capture_base {
   std::string backend() const override { return "synthetic"; }
   bool is_real() const override { return false; }
 
+  std::vector<display_info> displays() const override {
+    return {current_display_info()};
+  }
+  int current_display() const override { return 0; }
+  display_info current_display_info() const override {
+    display_info info;
+    info.name = "Synthetic";
+    info.width = pattern_.width;
+    info.height = pattern_.height;
+    info.input_width = pattern_.width;
+    info.input_height = pattern_.height;
+    info.primary = true;
+    return info;
+  }
+  bool select_display(int index) override { return index == 0; }
+
  private:
   void run() {
-    const auto interval =
-        std::chrono::milliseconds(1000 / std::max(1, options_.fps));
     auto next = std::chrono::steady_clock::now();
     uint32_t seq = 0;
 
@@ -90,7 +104,7 @@ class synthetic_capture : public capture_base {
         publish(std::move(frame));
       }
 
-      next += interval;
+      next += std::chrono::milliseconds(1000 / std::max(1, target_fps()));
       const auto now = std::chrono::steady_clock::now();
       if (next < now) next = now;
       std::this_thread::sleep_until(next);

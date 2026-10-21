@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <map>
 #include <mutex>
+#include <set>
 #include <string>
 
 namespace molink {
@@ -34,10 +35,21 @@ class lock_state {
   bool should_lock(uint64_t now, bool has_authenticated_sessions) const;
   void lock();
 
-  /// Validates the verification code and clears the lock. Failed attempts are
-  /// rate limited so the finite UI can not be brute forced through the lock
-  /// screen.
-  bool try_unlock(const std::string& supplied, const std::string& expected);
+  /// Clears the lock after the caller has verified a code or session token.
+  void unlock();
+
+  /// Per-IP authentication budget. Returns 0 when @p peer_ip may try now, a
+  /// positive number of seconds to wait while temporarily blocked, or -1 when
+  /// the address has been permanently banned. Loopback is always allowed.
+  int attempt_delay(const std::string& peer_ip) const;
+
+  /// Records one failed attempt and returns the same encoding as
+  /// attempt_delay(). The fifth failure starts a lockout; later lockouts grow
+  /// (30 s, 2 min, 10 min, 1 h, 6 h) and the sixth round bans the address.
+  int record_failure(const std::string& peer_ip);
+
+  /// Clears the failure/escalation state after a successful authentication.
+  void record_success(const std::string& peer_ip);
 
  private:
   mutable std::mutex mutex_;
@@ -49,8 +61,18 @@ class lock_state {
   };
   mutable std::map<std::string, ui_client> ui_clients_;
   uint64_t last_activity_ms_ = 0;
-  int failed_attempts_ = 0;
-  uint64_t blocked_until_ms_ = 0;
+
+  struct attempt_record {
+    int failures = 0;
+    int strikes = 0;
+    uint64_t last_failure_ms = 0;
+    uint64_t blocked_until_ms = 0;
+  };
+  std::map<std::string, attempt_record> attempts_;
+  std::set<std::string> banned_;
+
+  static std::string normalize_peer(const std::string& peer);
+  void save_bans() const;
 
   int total_sessions_locked(uint64_t now) const;
 };

@@ -29,7 +29,7 @@ Linux 本机流程已在真实浏览器与壳层中验证。**
 | 远程控制主机 | 主页点击“控制这台设备” | 通过 |
 | 空闲锁定 | `--lock-timeout 2`，锁定后 API 423 / WS 1008 | 通过 |
 | 会话抑制锁定 | `/api/ui-state` 报告会话后不锁定 | 通过 |
-| Windows 壳 | MinGW-w64 交叉编译 | 链接通过 |
+| Windows 壳 | MinGW-w64 交叉编译（含图标资源） | 链接通过 |
 
 ## 发布前仍需完成
 
@@ -37,6 +37,7 @@ Linux 本机流程已在真实浏览器与壳层中验证。**
    - `libgtk-3-dev`、`libwebkit2gtk-4.1-dev`（壳层）
    - libuvcpp 源码（CI 使用 `UVCPP_REPO` 仓库变量）
    - `dpkg-deb`（`.deb`）；AppImage 需要 `appimagetool` 与 `patchelf`
+   - Windows：Inno Setup 6（安装包）与 NSIS（免安装单文件），CI 自动安装
 2. **平台与后端**
    - Windows：DXGI 抓屏、SendInput、光标、剪贴板已实现，需真机回归
    - macOS：CoreGraphics 抓屏、CGEvent、NSPasteboard 已实现，需真机回归；权限与光标待补
@@ -44,17 +45,21 @@ Linux 本机流程已在真实浏览器与壳层中验证。**
    - AppImage 产物（当前只有 `.deb`）
 3. **发布产物**
    - Linux `.deb` / `.AppImage`：已生成并验证
-   - Windows NSIS `.exe`：脚本就绪，待 CI 验证
+   - Windows Inno Setup 安装包 `.exe` + 免安装单文件 `.exe`：脚本就绪，待 CI 验证
    - macOS `.dmg`：脚本就绪，待 CI 验证；ad-hoc 签名，正式分发需 Developer ID
    - 不发布桌面端 zip
 4. **人工回归**
    - 多显示器与分辨率切换
    - 长会话（>1 小时）内存与句柄稳定性
    - 断线重连、并发两个客户端
+   - 局域网访问：默认监听 `0.0.0.0`、Windows 防火墙规则生效、错误验证码触发阶梯锁定/封禁
+   - 单实例：重复启动聚焦已有窗口，不再启动第二个核心；托盘隐藏后再次启动也能聚焦
+   - 安全默认：仅回环、普通浏览器访问关闭、发现关闭；壳层 `client_token` 可正常打开 UI，普通浏览器无 token 时 403
+   - 授权码：长期码校验、单次码消费换新、多次码扣减/耗尽换新、自定义多次码
    - 高 DPI 与不同键盘布局
    - 中文输入法组合输入
 5. **安全**
-   - 令牌只出现在本地回环；检查日志不泄露令牌
+   - 验证码经局域网明文 HTTP 传输，仅应在可信网络使用；检查日志不泄露令牌
    - 剪贴板与输入注入均有能力开关，默认行为符合预期
    - MIT 许可与版权声明随包分发
 

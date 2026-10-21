@@ -65,9 +65,22 @@ class macos_input final : public input_injector {
   bool available() const override { return true; }
   std::string backend() const override { return "cgevent"; }
 
+  void set_display_rect(int x, int y, int width, int height) override {
+    if (width <= 0 || height <= 0) {
+      has_display_ = false;
+      return;
+    }
+    display_bounds_ = CGRectMake(static_cast<CGFloat>(x),
+                                 static_cast<CGFloat>(y),
+                                 static_cast<CGFloat>(width),
+                                 static_cast<CGFloat>(height));
+    has_display_ = true;
+  }
+
   status move(double nx, double ny) override {
     if (nx < 0.0 || nx > 1.0 || ny < 0.0 || ny > 1.0) return status::rejected;
-    const CGRect bounds = CGDisplayBounds(CGMainDisplayID());
+    const CGRect bounds =
+        has_display_ ? display_bounds_ : CGDisplayBounds(CGMainDisplayID());
     if (bounds.size.width <= 0 || bounds.size.height <= 0) {
       return status::unavailable;
     }
@@ -170,6 +183,8 @@ class macos_input final : public input_injector {
 
   std::set<int> held_buttons_;
   std::set<CGKeyCode> held_keys_;
+  CGRect display_bounds_{};
+  bool has_display_ = false;
 };
 
 }  // namespace

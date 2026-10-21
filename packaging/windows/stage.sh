@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Stage a Windows install tree for NSIS. Run from Git Bash (CI) or WSL.
+# Stage a Windows install tree for the Inno Setup installer and the NSIS
+# portable launcher. Run from Git Bash (CI) or WSL.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)

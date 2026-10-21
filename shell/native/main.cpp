@@ -5,15 +5,21 @@
 
 #include <gtk/gtk.h>
 #include <gdk/gdkkeysyms.h>
+#include <glib-unix.h>
 #include <webkit2/webkit2.h>
 #include <cairo.h>
 #include <jsc/jsc.h>
 
 #include <poll.h>
 #include <signal.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
+
+#include <cerrno>
 
 #include <chrono>
 #include <cstdio>
@@ -31,6 +37,13 @@ pid_t g_core_pid = -1;
 bool g_smoke = false;
 bool g_smoke_done = false;
 int g_exit_code = 0;
+
+// Single-instance guard: the first shell listens on a per-user Unix socket;
+// later launches send "show" and exit. Pop-outs (--url) and smoke tests are
+// deliberately exempt.
+int g_instance_fd = -1;
+std::string g_instance_path;
+GtkWidget* g_main_window = nullptr;
 
 std::string exe_dir() {
   std::error_code ec;
@@ -119,9 +132,11 @@ bool json_string(const std::string& json, const char* key, std::string& out) {
 }
 
 bool start_core(const std::string& core, const std::string& web_root, int& port,
-                std::string& token, std::string& err) {
-  std::vector<std::string> args = {core, "--port", "0", "--print-ready",
-                                   "--parent-pid", std::to_string(getpid())};
+                std::string& token, std::string& client_token,
+                std::string& err) {
+  // The core owns the port: it uses the persisted setting or 28418.
+  std::vector<std::string> args = {core, "--print-ready", "--parent-pid",
+                                   std::to_string(getpid())};
   if (!web_root.empty()) {
     args.push_back("--web-root");
     args.push_back(web_root);
@@ -169,8 +184,9 @@ bool start_core(const std::string& core, const std::string& web_root, int& port,
 
   long parsed_port = 0;
   if (!complete || !json_number(line, "port", parsed_port) ||
-      !json_string(line, "token", token) || parsed_port <= 0) {
-    err = "molink-core did not report a ready port and token";
+      !json_string(line, "token", token) ||
+      !json_string(line, "client_token", client_token) || parsed_port <= 0) {
+    err = "molink-core did not report a ready port and tokens";
     return false;
   }
   port = static_cast<int>(parsed_port);
@@ -212,6 +228,11 @@ gboolean check_core(gpointer) {
 }
 
 void on_destroy(GtkWidget*, gpointer) { gtk_main_quit(); }
+
+gboolean on_quit_signal(gpointer) {
+  gtk_main_quit();
+  return G_SOURCE_CONTINUE;
+}
 
 void on_load_changed(WebKitWebView* view, WebKitLoadEvent event, gpointer) {
   if (event != WEBKIT_LOAD_FINISHED) return;
@@ -389,6 +410,96 @@ void show_window(GtkWidget* window) {
   gtk_window_present(GTK_WINDOW(window));
 }
 
+std::string instance_socket_path() {
+  std::string path;
+  const char* runtime = std::getenv("XDG_RUNTIME_DIR");
+  if (runtime != nullptr && runtime[0] != '\0' &&
+      ::access(runtime, W_OK) == 0) {
+    path = std::string(runtime) + "/molink-shell.sock";
+  }
+  sockaddr_un limit{};
+  if (path.empty() || path.size() >= sizeof(limit.sun_path)) {
+    path = "/tmp/molink-shell-" + std::to_string(::getuid()) + ".sock";
+  }
+  return path;
+}
+
+int connect_instance(const std::string& path) {
+  const int fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  if (fd < 0) return -1;
+  sockaddr_un addr{};
+  addr.sun_family = AF_UNIX;
+  std::strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
+  if (::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0) {
+    return fd;
+  }
+  ::close(fd);
+  return -1;
+}
+
+gboolean on_instance_accept(GIOChannel*, GIOCondition, gpointer) {
+  const int fd = ::accept(g_instance_fd, nullptr, nullptr);
+  if (fd >= 0) {
+    char buffer[32];
+    const ssize_t got = ::read(fd, buffer, sizeof(buffer));
+    (void)got;
+    ::close(fd);
+  }
+  if (g_main_window != nullptr) show_window(g_main_window);
+  return G_SOURCE_CONTINUE;
+}
+
+/// Returns true when this process owns the instance socket. Sets
+/// @p already_running when another shell accepted the "show" request.
+bool claim_instance_socket(const std::string& path, bool& already_running) {
+  already_running = false;
+  for (int attempt = 0; attempt < 2; ++attempt) {
+    const int fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) return false;
+    sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    std::strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
+    if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0) {
+      if (::listen(fd, 4) != 0) {
+        ::close(fd);
+        return false;
+      }
+      ::chmod(path.c_str(), 0600);
+      g_instance_fd = fd;
+      g_instance_path = path;
+      GIOChannel* channel = g_io_channel_unix_new(fd);
+      g_io_add_watch(channel, G_IO_IN, on_instance_accept, nullptr);
+      g_io_channel_unref(channel);
+      return true;
+    }
+
+    const int error = errno;
+    ::close(fd);
+    if (error != EADDRINUSE) return false;
+
+    const int client = connect_instance(path);
+    if (client >= 0) {
+      const ssize_t sent = ::write(client, "show\n", 5);
+      (void)sent;
+      ::close(client);
+      already_running = true;
+      return false;
+    }
+    // A killed shell can leave the socket file behind; it is not in use, so
+    // remove it and retry the bind once.
+    ::unlink(path.c_str());
+  }
+  return false;
+}
+
+void cleanup_instance_socket() {
+  if (g_instance_fd >= 0) {
+    ::close(g_instance_fd);
+    g_instance_fd = -1;
+  }
+  if (!g_instance_path.empty()) ::unlink(g_instance_path.c_str());
+}
+
 void hide_to_tray(GtkWidget* window) {
   gtk_widget_hide(window);
   if (g_tray_icon != nullptr) gtk_status_icon_set_visible(g_tray_icon, TRUE);
@@ -503,6 +614,20 @@ int main(int argc, char** argv) {
   }
   g_url_mode = !g_url_override.empty();
 
+  if (!g_url_mode && !g_smoke) {
+    const std::string instance_path = instance_socket_path();
+    bool already_running = false;
+    if (!claim_instance_socket(instance_path, already_running)) {
+      if (already_running) return 0;
+      std::fprintf(stderr,
+                   "moLink shell: could not create the single-instance socket "
+                   "at %s; starting anyway\n",
+                   instance_path.c_str());
+    } else {
+      std::atexit(cleanup_instance_socket);
+    }
+  }
+
   gtk_init(&argc, &argv);
 
   std::string url;
@@ -526,8 +651,9 @@ int main(int argc, char** argv) {
 
     int port = 0;
     std::string token;
+    std::string client_token;
     std::string error;
-    if (!start_core(core, web_root, port, token, error)) {
+    if (!start_core(core, web_root, port, token, client_token, error)) {
       std::fprintf(stderr, "moLink shell: %s\n", error.c_str());
       stop_core();
       return 1;
@@ -536,9 +662,11 @@ int main(int argc, char** argv) {
     url = "http://127.0.0.1:" + std::to_string(port) + "/?host=";
     url += "127.0.0.1&port=" + std::to_string(port);
     url += "&shell=1&platform=linux";
+    if (!client_token.empty()) url += "&client=" + client_token;
   }
 
   GtkWidget* window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+  g_main_window = window;
   gtk_window_set_title(GTK_WINDOW(window), "moLink");
   gtk_window_set_default_size(GTK_WINDOW(window), 1280, 820);
   gtk_window_set_resizable(GTK_WINDOW(window), TRUE);
@@ -601,6 +729,8 @@ int main(int argc, char** argv) {
 
   if (!g_url_mode) g_timeout_add_seconds(1, check_core, nullptr);
   if (g_smoke) g_timeout_add_seconds(15, smoke_timeout, nullptr);
+  g_unix_signal_add(SIGTERM, on_quit_signal, nullptr);
+  g_unix_signal_add(SIGINT, on_quit_signal, nullptr);
 
   gtk_main();
   stop_core();

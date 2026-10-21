@@ -18,6 +18,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <future>
+#include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -54,6 +56,23 @@ struct xfixes_cursor_image {
   unsigned long* pixels;
   unsigned long atom_name;
   unsigned long cursor_name;
+};
+
+/// XRRMonitorInfo from <X11/extensions/Xrandr.h>. The runtime library is
+/// ubiquitous but the development headers are not always installed, so the
+/// two entry points are resolved dynamically and the layout is declared here.
+struct xrr_monitor_info {
+  Atom name;
+  Bool primary;
+  Bool automatic;
+  int noutput;
+  int x;
+  int y;
+  int width;
+  int height;
+  int mwidth;
+  int mheight;
+  unsigned long* outputs;  // RROutput*
 };
 
 uint8_t extract_channel(uint32_t pixel, unsigned long mask) {
@@ -180,7 +199,7 @@ void union_rect(XRectangle& into, const XRectangle& r) {
 
 class x11_capture final : public capture_base {
  public:
-  explicit x11_capture(const capture_options& options) : options_(options) {}
+  explicit x11_capture(const capture_options& options) : capture_base(options.fps), options_(options) {}
   ~x11_capture() override { stop(); }
 
   bool start(std::string& err) override {
@@ -213,6 +232,29 @@ class x11_capture final : public capture_base {
   }
   bool is_real() const override { return true; }
 
+  std::vector<display_info> displays() const override {
+    std::lock_guard<std::mutex> lock(displays_mutex_);
+    return displays_;
+  }
+
+  int current_display() const override { return display_index_.load(); }
+
+  display_info current_display_info() const override {
+    std::lock_guard<std::mutex> lock(displays_mutex_);
+    const int index = display_index_.load();
+    if (index >= 0 && index < static_cast<int>(displays_.size())) {
+      return displays_[index];
+    }
+    return display_info{};
+  }
+
+  bool select_display(int index) override {
+    std::lock_guard<std::mutex> lock(displays_mutex_);
+    if (index < 0 || index >= static_cast<int>(displays_.size())) return false;
+    requested_display_.store(index);
+    return true;
+  }
+
  private:
   void thread_main(std::promise<std::string>& ready) {
     std::string err;
@@ -224,8 +266,6 @@ class x11_capture final : public capture_base {
     }
     ready.set_value(std::string());
 
-    const int fps = std::max(1, options_.fps);
-    const auto interval = std::chrono::milliseconds(1000 / fps);
     // Damage gives prompt updates; this tick keeps the stream alive if the
     // extension is silent (a static screen, or a server that never reports).
     const auto safety_interval = std::chrono::milliseconds(500);
@@ -238,7 +278,8 @@ class x11_capture final : public capture_base {
     // /api/info a real screen size before any client asks for pixels.
     keyframe_requested_.store(true);
     capture_full(true, last_error);
-    next_allowed = std::chrono::steady_clock::now() + interval;
+    next_allowed = std::chrono::steady_clock::now() +
+                   std::chrono::milliseconds(1000 / std::max(1, target_fps()));
     auto last_full = std::chrono::steady_clock::now();
     auto last_capture = std::chrono::steady_clock::now();
 
@@ -248,6 +289,25 @@ class x11_capture final : public capture_base {
         next_allowed = std::chrono::steady_clock::now();
         last_capture = next_allowed;
         continue;
+      }
+
+      const int requested_display = requested_display_.exchange(-1);
+      if (requested_display >= 0 &&
+          requested_display != display_index_.load()) {
+        std::string switch_error;
+        if (apply_display(requested_display, switch_error)) {
+          if (damage_ != 0 && damage_subtract_ != nullptr) {
+            damage_subtract_(display_, damage_, 0, 0);
+          }
+          keyframe_requested_.store(true);
+          last_full = std::chrono::steady_clock::now();
+          last_capture = last_full;
+          capture_full(true, switch_error);
+          if (!switch_error.empty()) {
+            std::fprintf(stderr, "molink capture: display switch: %s\n",
+                         switch_error.c_str());
+          }
+        }
       }
 
       XRectangle dirty{};
@@ -315,7 +375,9 @@ class x11_capture final : public capture_base {
         last_error = grab_error;
       }
 
-      next_allowed = std::chrono::steady_clock::now() + interval;
+      next_allowed = std::chrono::steady_clock::now() +
+                     std::chrono::milliseconds(1000 /
+                                               std::max(1, target_fps()));
       last_capture = std::chrono::steady_clock::now();
     }
 
@@ -338,11 +400,117 @@ class x11_capture final : public capture_base {
     visual_ = DefaultVisual(display_, screen_);
     depth_ = DefaultDepth(display_, screen_);
     use_shm_.store(XShmQueryExtension(display_) != 0);
-    width_ = static_cast<uint16_t>(DisplayWidth(display_, screen_));
-    height_ = static_cast<uint16_t>(DisplayHeight(display_, screen_));
+    root_width_ = DisplayWidth(display_, screen_);
+    root_height_ = DisplayHeight(display_, screen_);
+    width_ = static_cast<uint16_t>(root_width_);
+    height_ = static_cast<uint16_t>(root_height_);
+    load_xrandr();
+    enumerate_displays();
+    const int wanted =
+        options_.display_index >= 0 &&
+                options_.display_index < static_cast<int>(displays_.size())
+            ? options_.display_index
+            : 0;
+    std::string apply_error;
+    apply_display(wanted, apply_error);
     setup_damage();  // best effort; fixed-rate capture works without it
     setup_cursor();
     return width_ > 0 && height_ > 0;
+  }
+
+  void load_xrandr() {
+    xrandr_lib_ = dlopen("libXrandr.so.2", RTLD_NOW | RTLD_LOCAL);
+    if (xrandr_lib_ == nullptr) {
+      xrandr_lib_ = dlopen("libXrandr.so", RTLD_NOW | RTLD_LOCAL);
+    }
+    if (xrandr_lib_ == nullptr) return;
+    get_monitors_ = reinterpret_cast<decltype(get_monitors_)>(
+        dlsym(xrandr_lib_, "XRRGetMonitors"));
+    free_monitors_ = reinterpret_cast<decltype(free_monitors_)>(
+        dlsym(xrandr_lib_, "XRRFreeMonitors"));
+    if (get_monitors_ == nullptr || free_monitors_ == nullptr) {
+      dlclose(xrandr_lib_);
+      xrandr_lib_ = nullptr;
+      get_monitors_ = nullptr;
+      free_monitors_ = nullptr;
+    }
+  }
+
+  void enumerate_displays() {
+    std::vector<display_info> list;
+    if (get_monitors_ != nullptr && display_ != nullptr && root_ != 0) {
+      int count = 0;
+      xrr_monitor_info* monitors =
+          get_monitors_(display_, root_, True, &count);
+      if (monitors != nullptr) {
+        for (int i = 0; i < count; ++i) {
+          const xrr_monitor_info& source = monitors[i];
+          if (source.width <= 0 || source.height <= 0 ||
+              source.width > 65535 || source.height > 65535) {
+            continue;
+          }
+          display_info info;
+          info.index = static_cast<int>(list.size());
+          info.x = source.x;
+          info.y = source.y;
+          info.width = static_cast<uint16_t>(source.width);
+          info.height = static_cast<uint16_t>(source.height);
+          info.input_width = source.width;
+          info.input_height = source.height;
+          info.primary = source.primary != 0;
+          char* atom = XGetAtomName(display_, source.name);
+          if (atom != nullptr) {
+            info.name = atom;
+            XFree(atom);
+          }
+          if (info.name.empty()) {
+            info.name = "Display " + std::to_string(info.index);
+          }
+          list.push_back(std::move(info));
+        }
+        free_monitors_(monitors);
+      }
+    }
+
+    if (list.empty()) {
+      display_info info;
+      info.name = "Display 0";
+      info.width = static_cast<uint16_t>(root_width_);
+      info.height = static_cast<uint16_t>(root_height_);
+      info.input_width = root_width_;
+      info.input_height = root_height_;
+      info.primary = true;
+      list.push_back(std::move(info));
+    }
+
+    // Default index 0 is the primary monitor, then left-to-right/top-to-bottom.
+    std::stable_sort(list.begin(), list.end(),
+                     [](const display_info& a, const display_info& b) {
+                       if (a.primary != b.primary) return a.primary;
+                       if (a.y != b.y) return a.y < b.y;
+                       return a.x < b.x;
+                     });
+    for (std::size_t i = 0; i < list.size(); ++i) {
+      list[i].index = static_cast<int>(i);
+    }
+
+    std::lock_guard<std::mutex> lock(displays_mutex_);
+    displays_ = std::move(list);
+  }
+
+  bool apply_display(int index, std::string& err) {
+    std::lock_guard<std::mutex> lock(displays_mutex_);
+    if (index < 0 || index >= static_cast<int>(displays_.size())) return false;
+    const display_info& info = displays_[index];
+    display_index_.store(index);
+    display_x_ = info.x;
+    display_y_ = info.y;
+    width_ = info.width;
+    height_ = info.height;
+    frame_.clear();
+    previous_.clear();
+    have_previous_ = false;
+    return setup_image(err);
   }
 
   /// libXdamage ships as a runtime library on most desktops but its headers
@@ -427,14 +595,15 @@ class x11_capture final : public capture_base {
     if (image == nullptr) return;
 
     cursor_snapshot snapshot;
-    snapshot.valid = true;
     snapshot.serial = static_cast<uint32_t>(image->cursor_serial);
     snapshot.width = image->width;
     snapshot.height = image->height;
     snapshot.hotspot_x = image->xhot;
     snapshot.hotspot_y = image->yhot;
-    snapshot.x = image->x;
-    snapshot.y = image->y;
+    snapshot.x = image->x - display_x_;
+    snapshot.y = image->y - display_y_;
+    snapshot.valid = snapshot.x >= 0 && snapshot.y >= 0 &&
+                     snapshot.x < width_ && snapshot.y < height_;
     snapshot.rgba.resize(static_cast<std::size_t>(image->width) * image->height * 4);
     for (std::size_t i = 0; i < static_cast<std::size_t>(image->width) * image->height; ++i) {
       const unsigned long pixel = image->pixels[i];  // ARGB
@@ -462,13 +631,13 @@ class x11_capture final : public capture_base {
       // A rectangle outside the screen means the layout changed under us;
       // fall back to a full grab for this round.
       if (dirty.x < 0 || dirty.y < 0 ||
-          static_cast<int>(dirty.x) + dirty.width > width_ ||
-          static_cast<int>(dirty.y) + dirty.height > height_ ||
+          static_cast<int>(dirty.x) + dirty.width > root_width_ ||
+          static_cast<int>(dirty.y) + dirty.height > root_height_ ||
           dirty.width == 0 || dirty.height == 0) {
         dirty.x = 0;
         dirty.y = 0;
-        dirty.width = width_;
-        dirty.height = height_;
+        dirty.width = static_cast<unsigned short>(root_width_);
+        dirty.height = static_cast<unsigned short>(root_height_);
       }
     }
     return damaged;
@@ -561,6 +730,12 @@ class x11_capture final : public capture_base {
     teardown_image();
     teardown_damage();
     teardown_cursor();
+    if (xrandr_lib_ != nullptr) {
+      dlclose(xrandr_lib_);
+      xrandr_lib_ = nullptr;
+      get_monitors_ = nullptr;
+      free_monitors_ = nullptr;
+    }
     if (display_ != nullptr) {
       XCloseDisplay(display_);
       display_ = nullptr;
@@ -577,17 +752,22 @@ class x11_capture final : public capture_base {
       err = "root window has no area";
       return false;
     }
-    if (attrs.width != width_ || attrs.height != height_) {
-      width_ = static_cast<uint16_t>(attrs.width);
-      height_ = static_cast<uint16_t>(attrs.height);
-      setup_image(err);
+    if (attrs.width != root_width_ || attrs.height != root_height_) {
+      root_width_ = attrs.width;
+      root_height_ = attrs.height;
+      enumerate_displays();
+      const int wanted = display_index_.load();
+      if (!apply_display(wanted, err) && !apply_display(0, err)) {
+        return false;
+      }
     }
     return true;
   }
 
   bool grab_full(std::vector<uint8_t>& out, std::string& err) {
     if (use_shm_.load() && image_ != nullptr &&
-        XShmGetImage(display_, root_, image_, 0, 0, AllPlanes)) {
+        XShmGetImage(display_, root_, image_, display_x_, display_y_,
+                     AllPlanes)) {
       return convert_to_bgra(image_, out, err);
     }
 
@@ -598,8 +778,8 @@ class x11_capture final : public capture_base {
       teardown_image();
     }
 
-    XImage* image =
-        XGetImage(display_, root_, 0, 0, width_, height_, AllPlanes, ZPixmap);
+    XImage* image = XGetImage(display_, root_, display_x_, display_y_, width_,
+                              height_, AllPlanes, ZPixmap);
     if (image == nullptr) {
       err = "XGetImage failed";
       return false;
@@ -615,8 +795,9 @@ class x11_capture final : public capture_base {
       err = "empty damage rectangle";
       return false;
     }
-    XImage* image = XGetImage(display_, root_, rect.x, rect.y, rect.width,
-                              rect.height, AllPlanes, ZPixmap);
+    XImage* image = XGetImage(display_, root_, display_x_ + rect.x,
+                              display_y_ + rect.y, rect.width, rect.height,
+                              AllPlanes, ZPixmap);
     if (image == nullptr) {
       err = "XGetImage(rect) failed";
       return false;
@@ -653,21 +834,35 @@ class x11_capture final : public capture_base {
       return capture_full(true, err);
     }
 
+    // Damage rectangles are in root coordinates; translate them into the
+    // selected monitor and drop anything that falls outside it.
+    const int left = std::max<int>(rect.x, display_x_);
+    const int top = std::max<int>(rect.y, display_y_);
+    const int right =
+        std::min<int>(rect.x + rect.width, display_x_ + width_);
+    const int bottom =
+        std::min<int>(rect.y + rect.height, display_y_ + height_);
+    if (right <= left || bottom <= top) return true;
+    const XRectangle local{static_cast<short>(left - display_x_),
+                           static_cast<short>(top - display_y_),
+                           static_cast<unsigned short>(right - left),
+                           static_cast<unsigned short>(bottom - top)};
+
     std::vector<uint8_t> pixels;
-    if (!grab_rect(rect, pixels, err)) return false;
-    note_grab(false, rect.width, rect.height);
+    if (!grab_rect(local, pixels, err)) return false;
+    note_grab(false, local.width, local.height);
 
     const std::size_t stride = static_cast<std::size_t>(width_) * 4;
-    for (uint16_t row = 0; row < rect.height; ++row) {
+    for (uint16_t row = 0; row < local.height; ++row) {
       const std::size_t dst =
-          static_cast<std::size_t>(rect.y + row) * stride +
-          static_cast<std::size_t>(rect.x) * 4;
+          static_cast<std::size_t>(local.y + row) * stride +
+          static_cast<std::size_t>(local.x) * 4;
       std::memcpy(frame_.data() + dst,
                   pixels.data() + static_cast<std::size_t>(row) *
-                                      rect.width * 4,
-                  static_cast<std::size_t>(rect.width) * 4);
+                                      local.width * 4,
+                  static_cast<std::size_t>(local.width) * 4);
     }
-    return publish_frame(false, &rect, err);
+    return publish_frame(false, &local, err);
   }
 
   bool publish_frame(bool keyframe, const XRectangle* dirty, std::string& err) {
@@ -690,61 +885,21 @@ class x11_capture final : public capture_base {
     header.tile_w = tile;
     header.tile_h = tile;
 
-    std::vector<protocol::tile_blob> tiles;
-    for (uint32_t ty = 0; ty < height_; ty += tile) {
-      for (uint32_t tx = 0; tx < width_; tx += tile) {
-        const uint16_t tw =
-            static_cast<uint16_t>(std::min<uint32_t>(tile, width_ - tx));
-        const uint16_t th =
-            static_cast<uint16_t>(std::min<uint32_t>(tile, height_ - ty));
-
-        if (!keyframe && dirty != nullptr) {
-          const bool overlaps =
-              static_cast<int>(tx) < static_cast<int>(dirty->x) + static_cast<int>(dirty->width) &&
-              static_cast<int>(dirty->x) < static_cast<int>(tx) + static_cast<int>(tw) &&
-              static_cast<int>(ty) < static_cast<int>(dirty->y) + static_cast<int>(dirty->height) &&
-              static_cast<int>(dirty->y) < static_cast<int>(ty) + static_cast<int>(th);
-          if (!overlaps) continue;
-        }
-
-        const std::size_t offset =
-            static_cast<std::size_t>(ty) * stride +
-            static_cast<std::size_t>(tx) * 4;
-
-        bool changed = keyframe;
-        if (!changed) {
-          for (uint16_t row = 0; row < th; ++row) {
-            const std::size_t at =
-                offset + static_cast<std::size_t>(row) * stride;
-            if (std::memcmp(frame_.data() + at, previous_.data() + at,
-                            static_cast<std::size_t>(tw) * 4) != 0) {
-              changed = true;
-              break;
-            }
-          }
-        }
-        if (!changed) continue;
-
-        protocol::tile_blob blob;
-        blob.x = static_cast<uint16_t>(tx);
-        blob.y = static_cast<uint16_t>(ty);
-        blob.w = tw;
-        blob.h = th;
-        blob.flags = protocol::kTileFlagChanged |
-                     (keyframe ? protocol::kTileFlagKeyframe : 0);
-        blob.data.resize(static_cast<std::size_t>(tw) * th * 4);
-        for (uint16_t row = 0; row < th; ++row) {
-          const std::size_t at =
-              offset + static_cast<std::size_t>(row) * stride;
-          std::memcpy(blob.data.data() + static_cast<std::size_t>(row) * tw * 4,
-                      frame_.data() + at, static_cast<std::size_t>(tw) * 4);
-          // Keep the baseline in step with what this frame claims to be.
-          std::memcpy(previous_.data() + at, frame_.data() + at,
-                      static_cast<std::size_t>(tw) * 4);
-        }
-        tiles.push_back(std::move(blob));
-      }
+    tile_dirty_rect dirty_rect;
+    if (!keyframe && dirty != nullptr) {
+      dirty_rect.x = dirty->x;
+      dirty_rect.y = dirty->y;
+      dirty_rect.width = dirty->width;
+      dirty_rect.height = dirty->height;
+      dirty_rect.valid = true;
     }
+
+    std::vector<protocol::tile_blob> tiles;
+    build_changed_tiles(frame_.data(), stride, width_, height_, tile,
+                        previous_.data(), keyframe,
+                        dirty_rect.valid ? &dirty_rect : nullptr,
+                        /*force_opaque=*/false,
+                        options_.change_threshold, tiles);
 
     std::vector<uint8_t> payload;
     if (!encode_capture_frame(header, tiles, options_.compress, payload, err)) {
@@ -776,6 +931,18 @@ class x11_capture final : public capture_base {
   int depth_ = 24;
   uint16_t width_ = 0;
   uint16_t height_ = 0;
+  int root_width_ = 0;
+  int root_height_ = 0;
+  int display_x_ = 0;
+  int display_y_ = 0;
+
+  void* xrandr_lib_ = nullptr;
+  xrr_monitor_info* (*get_monitors_)(Display*, Window, Bool, int*) = nullptr;
+  void (*free_monitors_)(xrr_monitor_info*) = nullptr;
+  mutable std::mutex displays_mutex_;
+  std::vector<display_info> displays_;
+  std::atomic<int> display_index_{0};
+  std::atomic<int> requested_display_{-1};
 
   XImage* image_ = nullptr;
   XShmSegmentInfo shminfo_{};

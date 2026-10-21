@@ -5,10 +5,14 @@
 
 namespace molink {
 
-/// Loopback is the only default binding; the core must not be reachable from
-/// the LAN unless the operator asked for it. Exposed here so the ready line and
-/// the HTTP handlers describe the same thing.
+/// Bind addresses that only accept local connections. The core listens on all
+/// interfaces by default (0.0.0.0); pass a loopback host to keep it local.
+/// Exposed here so the ready line and the HTTP handlers describe the same thing.
 bool is_loopback_host(const std::string& host);
+
+/// Peer addresses that count as the local machine. Covers IPv4, IPv6 and the
+/// IPv4-mapped IPv6 form libuv reports on dual-stack sockets.
+bool is_loopback_peer(const std::string& peer);
 
 /// Uppercase base32-ish alphabet without I/L/O/0/1, so a session id can be read
 /// aloud or typed from a screenshot without ambiguity.

@@ -18,6 +18,7 @@
 #include <cstdio>
 #include <cstring>
 #include <future>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <utility>
@@ -52,7 +53,7 @@ bool is_bgra(DXGI_FORMAT format) {
 class windows_capture final : public capture_base {
  public:
   explicit windows_capture(const capture_options& options)
-      : options_(options) {}
+      : capture_base(options.fps), options_(options) {}
   ~windows_capture() override { stop(); }
 
   bool start(std::string& err) override {
@@ -79,6 +80,26 @@ class windows_capture final : public capture_base {
   std::string backend() const override { return "dxgi-duplication"; }
   bool is_real() const override { return true; }
 
+  std::vector<display_info> displays() const override {
+    std::lock_guard<std::mutex> lock(displays_mutex_);
+    return displays_;
+  }
+  int current_display() const override { return output_index_.load(); }
+  display_info current_display_info() const override {
+    std::lock_guard<std::mutex> lock(displays_mutex_);
+    const int index = output_index_.load();
+    if (index >= 0 && index < static_cast<int>(displays_.size())) {
+      return displays_[index];
+    }
+    return display_info{};
+  }
+  bool select_display(int index) override {
+    std::lock_guard<std::mutex> lock(displays_mutex_);
+    if (index < 0 || index >= static_cast<int>(displays_.size())) return false;
+    requested_output_.store(index);
+    return true;
+  }
+
  private:
   void thread_main(std::promise<std::string>& ready) {
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
@@ -104,6 +125,27 @@ class windows_capture final : public capture_base {
         continue;
       }
 
+      const int requested_output = requested_output_.exchange(-1);
+      if (requested_output >= 0 &&
+          requested_output != output_index_.load()) {
+        std::string switch_error;
+        if (switch_output(requested_output, switch_error) &&
+            create_staging(switch_error)) {
+          output_index_.store(requested_output);
+          keyframe_requested_.store(true);
+          last_full = std::chrono::steady_clock::now();
+        } else {
+          std::fprintf(stderr, "molink capture: display switch: %s\n",
+                       switch_error.c_str());
+          std::string recover_error;
+          if (!switch_output(output_index_.load(), recover_error) ||
+              !create_staging(recover_error)) {
+            std::fprintf(stderr, "molink capture: display recovery: %s\n",
+                         recover_error.c_str());
+          }
+        }
+      }
+
       std::string grab_error;
       const bool got = grab(pixels, grab_error);
       update_cursor();
@@ -125,7 +167,7 @@ class windows_capture final : public capture_base {
         }
       }
 
-      const int fps = options_.fps > 0 ? options_.fps : 15;
+      const int fps = target_fps();
       next_allowed += std::chrono::milliseconds(1000 / fps);
       const auto now = std::chrono::steady_clock::now();
       if (next_allowed > now) std::this_thread::sleep_until(next_allowed);
@@ -158,6 +200,7 @@ class windows_capture final : public capture_base {
     safe_release(dup_);
     safe_release(output1_);
     safe_release(output_);
+    safe_release(staging_);
     safe_release(adapter_);
     safe_release(dxgi_device_);
 
@@ -170,8 +213,86 @@ class windows_capture final : public capture_base {
       err = "GetAdapter failed";
       return false;
     }
-    if (FAILED(adapter_->EnumOutputs(0, &output_)) || output_ == nullptr) {
-      err = "no display output (EnumOutputs)";
+    if (!enumerate_outputs(err)) return false;
+
+    int wanted = requested_output_.exchange(-1);
+    if (wanted < 0 || wanted >= static_cast<int>(display_dxgi_indices_.size())) {
+      wanted = options_.display_index;
+    }
+    if (wanted < 0 ||
+        wanted >= static_cast<int>(display_dxgi_indices_.size())) {
+      wanted = 0;
+    }
+    if (!switch_output(wanted, err)) {
+      if (wanted == 0 || !switch_output(0, err)) return false;
+      wanted = 0;
+    }
+    output_index_.store(wanted);
+    have_previous_ = false;
+    return true;
+  }
+
+  bool enumerate_outputs(std::string& err) {
+    std::vector<display_info> displays;
+    std::vector<UINT> indices;
+    for (UINT i = 0;; ++i) {
+      IDXGIOutput* output = nullptr;
+      const HRESULT result = adapter_->EnumOutputs(i, &output);
+      if (result == DXGI_ERROR_NOT_FOUND) break;
+      if (FAILED(result) || output == nullptr) break;
+      DXGI_OUTPUT_DESC desc{};
+      if (SUCCEEDED(output->GetDesc(&desc)) && desc.AttachedToDesktop) {
+        const int width =
+            desc.DesktopCoordinates.right - desc.DesktopCoordinates.left;
+        const int height =
+            desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top;
+        if (width > 0 && height > 0 && width <= 65535 && height <= 65535) {
+          display_info info;
+          info.index = static_cast<int>(displays.size());
+          info.x = desc.DesktopCoordinates.left;
+          info.y = desc.DesktopCoordinates.top;
+          info.width = static_cast<uint16_t>(width);
+          info.height = static_cast<uint16_t>(height);
+          info.input_width = width;
+          info.input_height = height;
+          info.primary = displays.empty();
+          char name[128] = {};
+          WideCharToMultiByte(CP_UTF8, 0, desc.DeviceName, -1, name,
+                              sizeof(name), nullptr, nullptr);
+          info.name = name;
+          if (info.name.empty()) {
+            info.name = "Display " + std::to_string(info.index);
+          }
+          displays.push_back(std::move(info));
+          indices.push_back(i);
+        }
+      }
+      output->Release();
+    }
+    if (displays.empty()) {
+      err = "no attached display output";
+      return false;
+    }
+    std::lock_guard<std::mutex> lock(displays_mutex_);
+    displays_ = std::move(displays);
+    display_dxgi_indices_ = std::move(indices);
+    return true;
+  }
+
+  bool switch_output(int index, std::string& err) {
+    safe_release(dup_);
+    safe_release(output1_);
+    safe_release(output_);
+    safe_release(staging_);
+    if (index < 0 ||
+        index >= static_cast<int>(display_dxgi_indices_.size())) {
+      err = "display index out of range";
+      return false;
+    }
+    const UINT dxgi_index = display_dxgi_indices_[index];
+    if (FAILED(adapter_->EnumOutputs(dxgi_index, &output_)) ||
+        output_ == nullptr) {
+      err = "EnumOutputs failed";
       return false;
     }
     if (FAILED(output_->QueryInterface(IID_IDXGIOutput1,
@@ -186,8 +307,10 @@ class windows_capture final : public capture_base {
 
     DXGI_OUTPUT_DESC desc{};
     output_->GetDesc(&desc);
-    const int width = desc.DesktopCoordinates.right - desc.DesktopCoordinates.left;
-    const int height = desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top;
+    const int width =
+        desc.DesktopCoordinates.right - desc.DesktopCoordinates.left;
+    const int height =
+        desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top;
     if (width <= 0 || height <= 0 || width > 65535 || height > 65535) {
       err = "unexpected output size";
       return false;
@@ -195,6 +318,7 @@ class windows_capture final : public capture_base {
     width_ = static_cast<uint16_t>(width);
     height_ = static_cast<uint16_t>(height);
     have_previous_ = false;
+    previous_.clear();
     return true;
   }
 
@@ -318,49 +442,10 @@ class windows_capture final : public capture_base {
     header.tile_h = tile;
 
     std::vector<protocol::tile_blob> tiles;
-    for (uint32_t ty = 0; ty < height_; ty += tile) {
-      for (uint32_t tx = 0; tx < width_; tx += tile) {
-        const uint16_t tw =
-            static_cast<uint16_t>(std::min<uint32_t>(tile, width_ - tx));
-        const uint16_t th =
-            static_cast<uint16_t>(std::min<uint32_t>(tile, height_ - ty));
-        const std::size_t offset =
-            static_cast<std::size_t>(ty) * stride +
-            static_cast<std::size_t>(tx) * 4;
-
-        bool changed = keyframe;
-        if (!changed) {
-          for (uint16_t row = 0; row < th; ++row) {
-            const std::size_t at =
-                offset + static_cast<std::size_t>(row) * stride;
-            if (std::memcmp(pixels.data() + at, previous_.data() + at,
-                            static_cast<std::size_t>(tw) * 4) != 0) {
-              changed = true;
-              break;
-            }
-          }
-        }
-        if (!changed) continue;
-
-        protocol::tile_blob blob;
-        blob.x = static_cast<uint16_t>(tx);
-        blob.y = static_cast<uint16_t>(ty);
-        blob.w = tw;
-        blob.h = th;
-        blob.flags = protocol::kTileFlagChanged |
-                     (keyframe ? protocol::kTileFlagKeyframe : 0);
-        blob.data.resize(static_cast<std::size_t>(tw) * th * 4);
-        for (uint16_t row = 0; row < th; ++row) {
-          const std::size_t at =
-              offset + static_cast<std::size_t>(row) * stride;
-          std::memcpy(blob.data.data() + static_cast<std::size_t>(row) * tw * 4,
-                      pixels.data() + at, static_cast<std::size_t>(tw) * 4);
-          std::memcpy(previous_.data() + at, pixels.data() + at,
-                      static_cast<std::size_t>(tw) * 4);
-        }
-        tiles.push_back(std::move(blob));
-      }
-    }
+    build_changed_tiles(pixels.data(), stride, width_, height_, tile,
+                        previous_.data(), keyframe, nullptr,
+                        /*force_opaque=*/false,
+                        options_.change_threshold, tiles);
 
     std::vector<uint8_t> payload;
     std::string err;
@@ -490,6 +575,12 @@ class windows_capture final : public capture_base {
   bool have_previous_ = false;
   uint32_t seq_ = 0;
   std::thread thread_;
+
+  std::vector<display_info> displays_;
+  std::vector<UINT> display_dxgi_indices_;
+  mutable std::mutex displays_mutex_;
+  std::atomic<int> output_index_{0};
+  std::atomic<int> requested_output_{-1};
 };
 
 }  // namespace

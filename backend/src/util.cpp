@@ -9,6 +9,11 @@ bool is_loopback_host(const std::string& host) {
   return host == "127.0.0.1" || host == "::1" || host == "localhost";
 }
 
+bool is_loopback_peer(const std::string& peer) {
+  return peer == "127.0.0.1" || peer == "::1" ||
+         peer == "::ffff:127.0.0.1" || peer == "localhost";
+}
+
 std::string make_session_public_id() {
   static const char kAlphabet[] = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
   static constexpr std::size_t kAlphabetSize = sizeof(kAlphabet) - 1;

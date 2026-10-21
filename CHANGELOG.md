@@ -1,5 +1,46 @@
 # Changelog
 
+## [0.4.0] — 2026-10-22
+
+### Added
+
+- 自有端口段，避开 RustDesk 的 21115–21119 与 TeamViewer 的 5938：`28418` 网页/API/WS、`28419` HTTP/3、`28420` QUIC 数据、`28421` TCP 数据、`28422` UDP 数据；全部可通过命令行或配置文件修改并持久化
+- `--http3-port` / `--quic-port` / `--tcp-data-port` / `--udp-port` 命令行参数；`/api/network` 接口与 `/api/state` 中的端口 / `restart_required` 字段
+- `GET /api/transports` 传输协商表，以及 `ready` / WebSocket `welcome` 中的 `transports` 与 `transport_ports`；客户端按 `preferred` 顺序选择第一个可用传输
+- Web 端保持 WebSocket 基线；HTTP/3、QUIC、TCP/UDP 直连数据已预留端口与协商字段，数据面接入前统一报 `available=false`
+- 瓦片按行合并成水平条带，关键帧从每行 N 个瓦片降为 1 个；减少表项与 zlib 流数量
+- zlib 压缩级别自适应：关键帧/大突发 level 1，少量小瓦片 level 3/6，兼顾延迟与压缩率
+- 前端离屏 canvas 双缓冲，整帧完成后一次上屏；分辨率变化等待关键帧，避免半帧/黑块
+- `capture-fps` 控制消息与客户端自适应帧率：RTT/带宽过高时降到 10/5 fps，恢复后回到 15 fps；隐藏标签页停止拉帧
+- 按 CPU 线程数自动选择瓦片粒度（128/256/512 px），`--tile-size` 可覆盖
+- 模糊变化阈值（默认 4/255，`--change-threshold 0` 可关闭）：忽略抗锯齿与噪声，只重传真正可见的变化
+- `--tile-size` / `--change-threshold` / `--capture-fps` 作为质量与速度的底层调节项；界面预设与有损瓦片 codec 留待后续
+- 新增 `session_transport` 抽象层与 `ws_transport` 实现；`session_controller`（原 `ws_session`）不再直接持有 WebSocket 连接，会话注册表和回收线程只依赖传输接口，为 TCP/QUIC 数据通道铺路
+- 桌面壳单实例：同一用户会话重复启动会聚焦已有窗口，不再启动第二个核心；Linux/macOS 使用 Unix socket，Windows 使用命名互斥量，macOS 另设 `LSMultipleInstancesProhibited`
+- 安全设置与默认收紧：「允许局域网 / IP 访问」「允许浏览器客户端」「局域网发现」三个开关默认关闭，保存在 0600 配置文件；核心监听 `0.0.0.0`，但关闭时非回环 TCP 在 HTTP 解析前立即关闭
+- 局域网访问开关热生效，无需重启；关闭时立即断开已有远程 WebSocket 会话（显式 `--host 127.0.0.1` 仍为真正仅本机）
+- 暗色主题改为中性深灰底 + 青色强调，去掉原来的墨绿色泛光；亮色主题保持不变
+- 授权码分层：长期码（设置页配置，8+ 位且含字母和数字）、单次码、多次码（支持自定义值和次数，用完自动换新）；登录返回会话 token，后续 API 不再接受授权码作为 Bearer
+- UDP `28423` 组播发现（组 `239.255.42.99`），beacon 只含设备 ID/名称/端口；主页新增“附近设备”，点击填入地址和端口
+- 设备 ID 输入自动补横杠（`ABC-DEF-GHJ`）
+- 主页移除右下角重复的语言/皮肤设置，安全设置集中到右上角设置面板
+- 壳层身份 token：`--print-ready` 输出 `client_token`，默认关闭普通浏览器访问；壳层通过 `client=` / `X-MoLink-Client` 打开 UI，WebSocket 不受影响
+- 连接表单支持“记住授权码”（仅本机浏览器存储）；附近设备双击时若已有保存的授权码会自动连接
+- 被控端多显示器选择：默认 index 0（主显示器），会话工具栏可切换；X11 用 XRandR、Windows 用 DXGI 输出枚举、macOS 用 CGGetActiveDisplayList；输入坐标按所选显示器映射
+- Windows 桌面图标与任务栏图标：图标资源编译进 `moLink.exe`，窗口类、`WM_SETICON`、托盘和快捷键共用；设置 `AppUserModelID` 避免任务栏分组使用默认图标
+- 远程验证按 IP 阶梯封禁：每轮 5 次失败锁定 30 秒 / 2 分钟 / 10 分钟 / 1 小时 / 6 小时，第 6 轮永久封禁；`/api/login`、其他 `/api/*` 的错误 Bearer 令牌与 WebSocket `hello` 共用额度，封禁名单持久化到 `banned_ips`
+- Windows 安装器（默认勾选）添加专用/域网络防火墙规则，放行 `molink-core.exe`
+
+### Changed
+
+- 默认监听 `0.0.0.0`，其他设备可直接访问登录页；`--host 127.0.0.1` 可恢复仅本机监听。显式指定其他非回环地址仍需 `--allow-remote`
+- Windows 安装包从 NSIS 换成 Inno Setup 6：现代向导、桌面/开始菜单快捷键显式使用应用图标；为添加防火墙规则而请求管理员权限。Release 继续提供免安装单文件 `.exe`
+- 桌面壳不再以 `--port 0` 启动核心，改为使用固定端口或用户保存的端口；Windows 重复启动会聚焦已运行的窗口
+
+### Fixed
+
+- Windows 安装后的桌面快捷方式、安装包自身和任务栏按钮显示白图标/默认图标的问题
+
 ## [0.3.0] — 2026-10-21
 
 ### Added

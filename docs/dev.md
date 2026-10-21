@@ -17,7 +17,7 @@
 | 仓库根目录 | `molink/` |
 | 本地后台健康检查 `service` 字段 | `moLink Core` |
 | 自定义 URI scheme | `molink://` |
-| 深链接示例 | `molink://session/A3F-9K2-X7Q`、`molink://connect?host=192.168.1.10&port=21118` |
+| 深链接示例 | `molink://session/A3F-9K2-X7Q`、`molink://connect?host=192.168.1.10&port=28418` |
 | 托盘/菜单显示名 | `moLink` |
 | 服务端产品名（二阶段） | `moLink Server` |
 | 服务端 Web 品牌名 | `moLink Web` |
@@ -94,7 +94,7 @@ text
 | **一阶段** | 桌面三平台直连 + 局域网 Web 预览 | Windows `.exe`/`.msi`，Linux `.AppImage`/`.deb`，macOS `.dmg`；**不发布 zip** |
 | **二阶段** | 服务端 + 移动端 | 追加服务端安装包（`.deb`/`.AppImage`/`.exe`）与服务端 zip；Android `.apk`/`.aab`，iOS `.ipa` |
 
-**“不发布 zip”的含义**：Release 资产中不上传任何 `.zip` 格式的桌面客户端包。Windows 使用 NSIS `.exe` 或 `.msi` 安装包，Linux 使用 AppImage（可执行单文件）和 `.deb`，macOS 使用 `.dmg`。二阶段服务端例外，允许 zip 作为便捷分发形态。
+**“不发布 zip”的含义**：Release 资产中不上传任何 `.zip` 格式的桌面客户端包。Windows 使用 Inno Setup `.exe` 安装包与免安装单文件 `.exe`，Linux 使用 AppImage（可执行单文件）和 `.deb`，macOS 使用 `.dmg`。二阶段服务端例外，允许 zip 作为便捷分发形态。
 
 ---
 
@@ -372,7 +372,7 @@ yaml
   use_arm_runner: true
 对应步骤中在 tauri-action 之前插入 pguyot/arm-runner-action 的 Arm 环境准备。如果一阶段追求简化，可以暂不发布 Linux Arm64，待 CI 稳定后追加。
 
-“不上传 zip”的落实：tauri-action 只会扫描并上传平台特定的 bundle（.dmg、.msi/.exe、.AppImage/.deb），不会自动生成 zip。Windows 侧确保 NSIS 或 WiX bundle 已配置，不要额外添加 zip 打包步骤。
+“不上传 zip”的落实：tauri-action 只会扫描并上传平台特定的 bundle（.dmg、.msi/.exe、.AppImage/.deb），不会自动生成 zip。Windows 侧确保 Inno Setup 安装包（以及 NSIS 免安装单文件）已配置，不要额外添加 zip 打包步骤。
 
 6.3 移动端发布（release-mobile.yml，二阶段启用）
 Android
@@ -426,7 +426,7 @@ iOS 构建需要 macOS runner、Apple 开发者证书和 provisioning profile。
 
 7. 发布矩阵总结
 平台	架构	格式	阶段	CI Runner
-Windows	x64	.exe（NSIS）/ .msi	一阶段	windows-latest
+Windows	x64	.exe（Inno Setup）/ 免安装 .exe	一阶段	windows-latest
 Linux	x64	.AppImage + .deb	一阶段	ubuntu-22.04
 Linux	Arm64	.AppImage + .deb	一阶段（实验性）/ 后续	ubuntu-22.04 + Arm runner
 macOS	x64	.dmg	一阶段	macos-latest

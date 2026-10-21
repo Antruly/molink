@@ -1,8 +1,16 @@
 #include "capture/capture.h"
 
+#include <thread>
 #include <utility>
 
 namespace molink {
+
+uint16_t choose_tile_size() {
+  const unsigned cores = std::thread::hardware_concurrency();
+  if (cores >= 8) return 128;
+  if (cores >= 4) return 256;
+  return 512;
+}
 
 std::shared_ptr<const captured_frame> capture_base::latest() const {
   std::lock_guard<std::mutex> lock(mutex_);

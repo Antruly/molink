@@ -90,17 +90,55 @@ class windows_input final : public input_injector {
   bool available() const override { return true; }
   std::string backend() const override { return "sendinput"; }
 
+  void set_display_rect(int x, int y, int width, int height) override {
+    if (width <= 0 || height <= 0) {
+      has_display_ = false;
+      return;
+    }
+    display_.left = x;
+    display_.top = y;
+    display_.right = x + width;
+    display_.bottom = y + height;
+    has_display_ = true;
+  }
+
   status move(double nx, double ny) override {
     if (nx < 0.0 || nx > 1.0 || ny < 0.0 || ny > 1.0) return status::rejected;
-    const int width = GetSystemMetrics(SM_CXSCREEN);
-    const int height = GetSystemMetrics(SM_CYSCREEN);
+    const int virtual_x = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    const int virtual_y = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    const int virtual_w = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    const int virtual_h = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    if (virtual_w <= 1 || virtual_h <= 1) return status::unavailable;
+
+    int left = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    int top = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    int width = GetSystemMetrics(SM_CXSCREEN);
+    int height = GetSystemMetrics(SM_CYSCREEN);
+    if (has_display_) {
+      left = display_.left;
+      top = display_.top;
+      width = display_.right - display_.left;
+      height = display_.bottom - display_.top;
+    }
     if (width <= 0 || height <= 0) return status::unavailable;
+
+    const int x = left + static_cast<int>(std::lround(nx * (width - 1)));
+    const int y = top + static_cast<int>(std::lround(ny * (height - 1)));
+    const long screen_x = std::clamp(
+        static_cast<long>(std::lround((x - virtual_x) * 65535.0 /
+                                      (virtual_w - 1))),
+        0L, 65535L);
+    const long screen_y = std::clamp(
+        static_cast<long>(std::lround((y - virtual_y) * 65535.0 /
+                                      (virtual_h - 1))),
+        0L, 65535L);
 
     INPUT input{};
     input.type = INPUT_MOUSE;
-    input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
-    input.mi.dx = static_cast<LONG>(std::lround(nx * 65535.0));
-    input.mi.dy = static_cast<LONG>(std::lround(ny * 65535.0));
+    input.mi.dwFlags =
+        MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+    input.mi.dx = static_cast<LONG>(screen_x);
+    input.mi.dy = static_cast<LONG>(screen_y);
     return SendInput(1, &input, sizeof(input)) == 1 ? status::ok
                                                     : status::unavailable;
   }
@@ -194,6 +232,8 @@ class windows_input final : public input_injector {
  private:
   std::set<int> held_buttons_;
   std::set<WORD> held_keys_;
+  RECT display_{};
+  bool has_display_ = false;
 };
 
 }  // namespace

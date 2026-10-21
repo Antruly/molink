@@ -4,6 +4,8 @@
 #include <cstdlib>
 #include <random>
 
+#include "util.h"
+
 namespace molink {
 namespace {
 
@@ -45,16 +47,58 @@ bool parse_args(int argc, char** argv, core_config& cfg, std::string& err) {
     }
     if (arg == "--host") {
       if (!value(cfg.host)) return false;
+      cfg.host_explicit = true;
       continue;
     }
     if (arg == "--port") {
       std::string v;
       if (!value(v)) return false;
-      // 0 asks the OS for an ephemeral port; the shell relies on that.
+      // 0 asks the OS for an ephemeral port.
       if (!parse_int(v, 0, 65535, cfg.port)) {
         err = "invalid --port: " + v;
         return false;
       }
+      cfg.port_explicit = true;
+      continue;
+    }
+    if (arg == "--http3-port") {
+      std::string v;
+      if (!value(v)) return false;
+      if (!parse_int(v, 1, 65535, cfg.http3_port)) {
+        err = "invalid --http3-port: " + v;
+        return false;
+      }
+      cfg.http3_port_explicit = true;
+      continue;
+    }
+    if (arg == "--quic-port") {
+      std::string v;
+      if (!value(v)) return false;
+      if (!parse_int(v, 1, 65535, cfg.quic_port)) {
+        err = "invalid --quic-port: " + v;
+        return false;
+      }
+      cfg.quic_port_explicit = true;
+      continue;
+    }
+    if (arg == "--tcp-data-port") {
+      std::string v;
+      if (!value(v)) return false;
+      if (!parse_int(v, 1, 65535, cfg.tcp_data_port)) {
+        err = "invalid --tcp-data-port: " + v;
+        return false;
+      }
+      cfg.tcp_data_port_explicit = true;
+      continue;
+    }
+    if (arg == "--udp-port") {
+      std::string v;
+      if (!value(v)) return false;
+      if (!parse_int(v, 1, 65535, cfg.udp_port)) {
+        err = "invalid --udp-port: " + v;
+        return false;
+      }
+      cfg.udp_port_explicit = true;
       continue;
     }
     if (arg == "--token") {
@@ -86,6 +130,25 @@ bool parse_args(int argc, char** argv, core_config& cfg, std::string& err) {
       if (!value(v)) return false;
       if (!parse_int(v, 1, 60, cfg.capture_fps)) {
         err = "invalid --capture-fps: " + v;
+        return false;
+      }
+      continue;
+    }
+    if (arg == "--tile-size") {
+      std::string v;
+      if (!value(v)) return false;
+      if (!parse_int(v, 0, 1024, cfg.tile_size) ||
+          (cfg.tile_size != 0 && cfg.tile_size < 64)) {
+        err = "invalid --tile-size: " + v + " (0 = auto, otherwise 64..1024)";
+        return false;
+      }
+      continue;
+    }
+    if (arg == "--change-threshold") {
+      std::string v;
+      if (!value(v)) return false;
+      if (!parse_int(v, 0, 255, cfg.change_threshold)) {
+        err = "invalid --change-threshold: " + v;
         return false;
       }
       continue;
@@ -126,10 +189,12 @@ bool parse_args(int argc, char** argv, core_config& cfg, std::string& err) {
 
   if (cfg.token.empty()) cfg.token = env_or_empty("MOLINK_TOKEN");
 
-  // Binding to anything but loopback exposes screen contents and input to the
-  // local network. It is a deliberate opt-in, not a default.
-  if (!cfg.allow_remote && cfg.host != "127.0.0.1" && cfg.host != "::1" &&
-      cfg.host != "localhost") {
+  // The default binds all interfaces, so remote peers can reach the login
+  // page; verification is enforced separately. Naming a specific non-loopback
+  // address still needs --allow-remote, which keeps scripts from exposing an
+  // interface by accident. Repeating the default 0.0.0.0 is allowed.
+  if (cfg.host_explicit && !cfg.allow_remote &&
+      cfg.host != "0.0.0.0" && !is_loopback_host(cfg.host)) {
     err = "--host " + cfg.host +
           " is not loopback; pass --allow-remote to confirm";
     return false;

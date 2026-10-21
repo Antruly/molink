@@ -100,17 +100,29 @@ class x11_input final : public input_injector {
   bool available() const override { return display_ != nullptr; }
   std::string backend() const override { return "xtest"; }
 
+  void set_display_rect(int x, int y, int width, int height) override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    display_x_ = x;
+    display_y_ = y;
+    display_w_ = width;
+    display_h_ = height;
+  }
+
   status move(double nx, double ny) override {
     std::lock_guard<std::mutex> lock(mutex_);
     if (display_ == nullptr) return status::unavailable;
     if (nx < 0.0 || nx > 1.0 || ny < 0.0 || ny > 1.0) {
       return status::rejected;
     }
-    const int width = DisplayWidth(display_, screen_);
-    const int height = DisplayHeight(display_, screen_);
+    const int width =
+        display_w_ > 0 ? display_w_ : DisplayWidth(display_, screen_);
+    const int height =
+        display_h_ > 0 ? display_h_ : DisplayHeight(display_, screen_);
     if (width <= 0 || height <= 0) return status::unavailable;
-    const int x = static_cast<int>(std::lround(nx * (width - 1)));
-    const int y = static_cast<int>(std::lround(ny * (height - 1)));
+    const int x =
+        display_x_ + static_cast<int>(std::lround(nx * (width - 1)));
+    const int y =
+        display_y_ + static_cast<int>(std::lround(ny * (height - 1)));
     fake_motion_(display_, screen_, x, y, CurrentTime);
     XFlush(display_);
     return status::ok;
@@ -223,6 +235,10 @@ class x11_input final : public input_injector {
   void* lib_ = nullptr;
   Display* display_ = nullptr;
   int screen_ = 0;
+  int display_x_ = 0;
+  int display_y_ = 0;
+  int display_w_ = 0;
+  int display_h_ = 0;
   XTestFakeMotionEventFn fake_motion_ = nullptr;
   XTestFakeButtonEventFn fake_button_ = nullptr;
   XTestFakeKeyEventFn fake_key_ = nullptr;

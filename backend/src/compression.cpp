@@ -14,13 +14,15 @@ bool compression_available() {
 #endif
 }
 
-bool deflate_buffer(const uint8_t* data, std::size_t len,
+bool deflate_buffer(const uint8_t* data, std::size_t len, int level,
                     std::vector<uint8_t>& out, std::string& err) {
 #if MOLINK_HAVE_ZLIB
   if (len == 0) {
     out.clear();
     return true;
   }
+  if (level < 1) level = 1;
+  if (level > 9) level = 9;
   if (len > static_cast<std::size_t>(uLongf(-1))) {
     err = "tile is too large for zlib";
     return false;
@@ -30,7 +32,8 @@ bool deflate_buffer(const uint8_t* data, std::size_t len,
   // on builds where compressBound is conservative.
   uLongf bound = compressBound(static_cast<uLong>(len));
   out.resize(static_cast<std::size_t>(bound) + 64);
-  const int rc = compress2(out.data(), &bound, data, static_cast<uLong>(len), 1);
+  const int rc = compress2(out.data(), &bound, data, static_cast<uLong>(len),
+                           level);
   if (rc != Z_OK) {
     err = "zlib compress2 failed with " + std::to_string(rc);
     out.clear();

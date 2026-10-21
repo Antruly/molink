@@ -4,8 +4,17 @@ export interface DeviceCapabilities {
   clipboard: boolean
 }
 
+export interface AuthCode {
+  mode: 'single' | 'multi'
+  value: string
+  remaining: number
+  uses: number
+  long_term_set: boolean
+}
+
 export interface DeviceInfo {
   device_id: string
+  device_name?: string
   token: string
   service: string
   product: string
@@ -14,6 +23,7 @@ export interface DeviceInfo {
   host: string
   port: number
   capabilities: DeviceCapabilities
+  code?: AuthCode
 }
 
 export interface ServerState {
@@ -28,10 +38,15 @@ export interface ServerState {
   open_sessions: number
   host: string
   port: number
+  bound_port: number
+  tcp_port: number
+  udp_port: number
+  restart_required: boolean
 }
 
 export interface LoginResult {
   ok: boolean
+  session_token: string
   device_id: string
   service: string
   version: string
@@ -62,6 +77,9 @@ export class ApiError extends Error {
 }
 
 const params = new URLSearchParams(window.location.search)
+/// Per-launch token injected by the desktop shell. The core requires it for
+/// loopback UI/state/device access when allow_web_client is off.
+const clientToken = params.get('client') ?? ''
 
 /// Base URL of the local core. Three cases: shell/Vite pass host+port in the
 /// query, the page itself is served by the core, or we fall back to the
@@ -73,7 +91,7 @@ export function coreBaseUrl(): string {
   if (window.location.port && window.location.port !== '1420') {
     return window.location.origin
   }
-  const fallbackPort = port ?? '21118'
+  const fallbackPort = port ?? '28418'
   return `http://127.0.0.1:${fallbackPort}`
 }
 
@@ -84,6 +102,7 @@ async function request<T>(
 ): Promise<T> {
   const headers = new Headers(init.headers)
   if (token) headers.set('Authorization', `Bearer ${token}`)
+  if (clientToken) headers.set('X-MoLink-Client', clientToken)
   const response = await fetch(`${coreBaseUrl()}${path}`, {
     ...init,
     headers,
@@ -137,6 +156,104 @@ export function postUiState(
     { method: 'POST' },
     token,
   )
+}
+
+export interface NetworkPorts {
+  tcp_port: number
+  udp_port: number
+  bound_port: number
+  restart_required: boolean
+}
+
+export function postNetworkPorts(
+  token: string,
+  tcp: number,
+  udp: number,
+): Promise<NetworkPorts> {
+  return request<NetworkPorts>(
+    `/api/network?tcp=${tcp}&udp=${udp}`,
+    { method: 'POST' },
+    token,
+  )
+}
+
+export interface DiscoveredPeer {
+  device_id: string
+  name: string
+  host: string
+  port: number
+  last_seen_ms: number
+}
+
+export interface DiscoveryResult {
+  enabled: boolean
+  devices: DiscoveredPeer[]
+}
+
+export function fetchDiscovery(token: string): Promise<DiscoveryResult> {
+  return request<DiscoveryResult>('/api/discovery', {}, token)
+}
+
+export interface SecuritySettings {
+  allow_remote_access: boolean
+  allow_web_client: boolean
+  discovery_enabled: boolean
+  device_name: string
+  long_term_code: string
+  restart_required: boolean
+}
+
+export function fetchSettings(token: string): Promise<SecuritySettings> {
+  return request<SecuritySettings>('/api/settings', {}, token)
+}
+
+export function postSettings(
+  token: string,
+  values: {
+    allowRemote: boolean
+    allowWeb: boolean
+    discovery: boolean
+    name: string
+  },
+): Promise<SecuritySettings> {
+  const query = new URLSearchParams({
+    allow_remote: values.allowRemote ? '1' : '0',
+    allow_web: values.allowWeb ? '1' : '0',
+    discovery: values.discovery ? '1' : '0',
+    name: values.name,
+  })
+  return request<SecuritySettings>(
+    `/api/settings?${query.toString()}`,
+    { method: 'POST' },
+    token,
+  )
+}
+
+export function postAuthCode(
+  token: string,
+  mode: 'single' | 'multi',
+  uses: number,
+  value: string,
+): Promise<AuthCode> {
+  const query = new URLSearchParams({ mode, uses: String(uses), value })
+  return request<AuthCode>(
+    `/api/auth/code?${query.toString()}`,
+    { method: 'POST' },
+    token,
+  )
+}
+
+export async function postLongTermCode(
+  token: string,
+  value: string,
+): Promise<string> {
+  const query = new URLSearchParams({ value })
+  const result = await request<{ long_term_code: string }>(
+    `/api/auth/long-term?${query.toString()}`,
+    { method: 'POST' },
+    token,
+  )
+  return result.long_term_code
 }
 
 export async function postLockTimeout(

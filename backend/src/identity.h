@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 #include "config.h"
 
@@ -24,5 +25,14 @@ std::string config_directory();
 /// Idle-lock timeout persisted from the UI. Returns @p fallback when unset.
 int load_lock_timeout_setting(int fallback);
 void save_lock_timeout_setting(int seconds);
+
+/// Persisted network ports (1..65535). Returns @p fallback when unset/invalid.
+int load_port_setting(const std::string& name, int fallback);
+void save_port_setting(const std::string& name, int port);
+
+/// Permanently banned peer addresses, one per line in the config directory.
+/// Deleting that file and restarting the core clears the bans.
+std::vector<std::string> load_banned_ips();
+void save_banned_ips(const std::vector<std::string>& ips);
 
 }  // namespace molink

@@ -11,9 +11,9 @@ namespace molink {
 bool compression_available();
 
 /// zlib-wrapped deflate (what `DecompressionStream("deflate")` expects).
-/// Level 1: screen content compresses well and the capture thread must not
-/// spend long on a keyframe.
-bool deflate_buffer(const uint8_t* data, std::size_t len,
+/// @p level is 1..9. The capture thread picks a fast level for keyframes and
+/// bursts, and a slower one for small delta frames where the CPU is idle.
+bool deflate_buffer(const uint8_t* data, std::size_t len, int level,
                     std::vector<uint8_t>& out, std::string& err);
 
 }  // namespace molink

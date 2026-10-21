@@ -2,13 +2,22 @@ import { create } from 'zustand'
 import {
   ApiError,
   fetchDeviceInfo,
+  fetchDiscovery,
   fetchInfo,
+  fetchSettings,
   fetchState,
   login as apiLogin,
   postActivity,
+  postAuthCode,
   postLockTimeout,
+  postLongTermCode,
+  postNetworkPorts,
+  postSettings,
   postUiState,
+  type AuthCode,
   type DeviceInfo,
+  type DiscoveredPeer,
+  type SecuritySettings,
   type ServerState,
 } from '../lib/api'
 import type {
@@ -41,6 +50,7 @@ export interface SessionTab {
   stats: Stats
   error: string | null
   controlEnabled: boolean
+  displayIndex: number
 }
 
 export interface RecentConnection {
@@ -48,6 +58,8 @@ export interface RecentConnection {
   port: number
   label: string
   at: number
+  /// Optional saved authorization code. Stored only when the user opts in.
+  token?: string
 }
 
 interface AppState {
@@ -62,6 +74,8 @@ interface AppState {
   server: ServerState | null
   stateError: string | null
   device: DeviceInfo | null
+  security: SecuritySettings | null
+  nearby: DiscoveredPeer[]
   tabs: SessionTab[]
   activeTabId: string
   recents: RecentConnection[]
@@ -74,13 +88,37 @@ interface AppState {
   refreshState: () => Promise<void>
   authenticate: (code: string) => Promise<boolean>
   setLockTimeout: (seconds: number) => Promise<void>
+  setNetworkPorts: (tcp: number, udp: number) => Promise<boolean>
+  setAuthCode: (
+    mode: 'single' | 'multi',
+    uses: number,
+    value?: string,
+  ) => Promise<AuthCode | null>
+  refreshSecurity: () => Promise<void>
+  refreshDiscovery: () => Promise<void>
+  refreshDevice: () => Promise<void>
+  saveSecurity: (values: {
+    allowRemote: boolean
+    allowWeb: boolean
+    discovery: boolean
+    name: string
+  }) => Promise<boolean>
+  setLongTermCode: (value: string) => Promise<boolean>
   touchActivity: () => void
   syncUiState: () => void
+  rememberRecent: (
+    host: string,
+    port: number,
+    label: string,
+    token?: string,
+    saveToken?: boolean,
+  ) => void
   createSession: (
     host: string,
     port: number,
     token: string,
     label?: string,
+    saveToken?: boolean,
   ) => string
   closeTab: (id: string) => void
   setActiveTab: (id: string) => void
@@ -115,6 +153,8 @@ function writeStorage(key: string, value: string): void {
 }
 
 function initialTheme(): Theme {
+  const forced = new URLSearchParams(window.location.search).get('theme')
+  if (forced === 'light' || forced === 'dark') return forced
   const saved = readStorage(THEME_KEY)
   if (saved === 'light' || saved === 'dark') return saved
   return window.matchMedia?.('(prefers-color-scheme: light)').matches
@@ -168,8 +208,10 @@ export const useAppStore = create<AppState>((set, get) => {
     if (patch.phase !== undefined) get().syncUiState()
   }
 
-  const remember = (host: string, port: number, label: string): void => {
+  const remember = (host: string, port: number, label: string,
+                    token: string, saveToken: boolean): void => {
     const recent: RecentConnection = { host, port, label, at: Date.now() }
+    if (saveToken && token.trim() !== '') recent.token = token.trim()
     const recents = [
       recent,
       ...get().recents.filter(
@@ -192,6 +234,8 @@ export const useAppStore = create<AppState>((set, get) => {
     server: null,
     stateError: null,
     device: null,
+    security: null,
+    nearby: [],
     tabs: [],
     activeTabId: 'home',
     recents: initialRecents(),
@@ -238,6 +282,7 @@ export const useAppStore = create<AppState>((set, get) => {
               stateError: null,
             })
             get().syncUiState()
+            void get().refreshSecurity()
             return
           } catch {
             set({ authPhase: 'login', stateError: 'local_auth_failed' })
@@ -292,6 +337,7 @@ export const useAppStore = create<AppState>((set, get) => {
             const device = await fetchDeviceInfo()
             set({ device, token: device.token, authPhase: 'ready' })
             get().syncUiState()
+            void get().refreshSecurity()
           } catch {
             // stay on the login screen
           }
@@ -313,7 +359,7 @@ export const useAppStore = create<AppState>((set, get) => {
           clipboard: false,
         }
         try {
-          const info = await fetchInfo(code)
+          const info = await fetchInfo(result.session_token)
           capabilities = info.capabilities
         } catch {
           // capabilities are cosmetic; login already succeeded
@@ -323,9 +369,9 @@ export const useAppStore = create<AppState>((set, get) => {
           state?.host && state.host !== '0.0.0.0'
             ? state.host
             : window.location.hostname
-        const port = state?.port || Number(window.location.port) || 21118
+        const port = state?.port || Number(window.location.port) || 28418
         set({
-          token: code,
+          token: result.session_token,
           locked: false,
           localMode: result.local,
           lockTimeout: result.lock_timeout,
@@ -333,7 +379,7 @@ export const useAppStore = create<AppState>((set, get) => {
           stateError: null,
           device: {
             device_id: result.device_id,
-            token: code,
+            token: result.session_token,
             service: result.service,
             product: 'moLink',
             version: result.version,
@@ -344,14 +390,127 @@ export const useAppStore = create<AppState>((set, get) => {
           },
         })
         get().syncUiState()
+        if (result.local) {
+          // Refresh the local device card (temporary code state) and use the
+          // stable local session token rather than the login-issued one.
+          try {
+            const device = await fetchDeviceInfo()
+            set({ device, token: device.token })
+          } catch {
+            // keep the login result
+          }
+          void get().refreshSecurity()
+        }
         return true
       } catch (error) {
         let code = 'core_unreachable'
         if (error instanceof ApiError) {
           if (error.status === 401) code = 'invalid_token'
           else if (error.status === 423) code = 'locked'
+          else if (error.status === 429) code = 'too_many_attempts'
+          else if (error.status === 403) code = 'ip_banned'
         }
         set({ stateError: code })
+        return false
+      }
+    },
+
+    setNetworkPorts: async (tcp, udp) => {
+      const token = get().token
+      if (!token) return false
+      try {
+        const result = await postNetworkPorts(token, tcp, udp)
+        const server = get().server
+        set({
+          server: server
+            ? {
+                ...server,
+                tcp_port: result.tcp_port,
+                udp_port: result.udp_port,
+                restart_required: result.restart_required,
+              }
+            : server,
+          stateError: null,
+        })
+        return true
+      } catch {
+        set({ stateError: 'settings_failed' })
+        return false
+      }
+    },
+
+    setAuthCode: async (mode, uses, value = '') => {
+      const token = get().token
+      if (!token) return null
+      try {
+        const code = await postAuthCode(token, mode, uses, value)
+        const device = get().device
+        if (device) set({ device: { ...device, code } })
+        set({ stateError: null })
+        return code
+      } catch {
+        set({ stateError: 'settings_failed' })
+        return null
+      }
+    },
+
+    refreshSecurity: async () => {
+      const token = get().token
+      if (!token) return
+      try {
+        const security = await fetchSettings(token)
+        set({ security })
+      } catch {
+        // Remote sessions receive 403 here; keep the previous value.
+      }
+    },
+
+    refreshDiscovery: async () => {
+      const token = get().token
+      if (!token) return
+      try {
+        const result = await fetchDiscovery(token)
+        set({ nearby: result.devices })
+      } catch {
+        // Discovery is local-only; remote sessions simply keep an empty list.
+      }
+    },
+
+    refreshDevice: async () => {
+      if (!get().localMode) return
+      const token = get().token
+      if (!token) return
+      try {
+        const device = await fetchDeviceInfo()
+        set({ device, token: device.token })
+      } catch {
+        // Keep the last known code on transient failures.
+      }
+    },
+
+    saveSecurity: async (values) => {
+      const token = get().token
+      if (!token) return false
+      try {
+        const security = await postSettings(token, values)
+        set({ security })
+        return true
+      } catch {
+        set({ stateError: 'settings_failed' })
+        return false
+      }
+    },
+
+    setLongTermCode: async (value) => {
+      const token = get().token
+      if (!token) return false
+      try {
+        const longTermCode = await postLongTermCode(token, value)
+        const security = get().security
+        if (security) set({ security: { ...security, long_term_code: longTermCode } })
+        return true
+      } catch {
+        set({ stateError: 'settings_failed' })
         return false
       }
     },
@@ -382,7 +541,11 @@ export const useAppStore = create<AppState>((set, get) => {
       void postUiState(token, UI_CLIENT_ID, active).catch(() => undefined)
     },
 
-    createSession: (host, port, token, label) => {
+    rememberRecent: (host, port, label, token = '', saveToken = false) => {
+      remember(host, port, label, token, saveToken)
+    },
+
+    createSession: (host, port, token, label, saveToken = false) => {
       const id = `session-${nextId++}`
       const trimmedToken = token.trim()
       const tab: SessionTab = {
@@ -399,6 +562,7 @@ export const useAppStore = create<AppState>((set, get) => {
         stats: EMPTY_STATS,
         error: null,
         controlEnabled: false,
+        displayIndex: 0,
       }
       set((state) => ({
         tabs: [...state.tabs, tab],
@@ -424,7 +588,7 @@ export const useAppStore = create<AppState>((set, get) => {
         patchTab(id, { phase: 'error', error: 'no_token' })
       } else {
         connection.connect(tab.host, port, trimmedToken)
-        remember(tab.host, port, tab.label)
+        remember(tab.host, port, tab.label, trimmedToken, saveToken)
       }
       return id
     },

@@ -7,9 +7,11 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <future>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <utility>
@@ -30,7 +32,7 @@ uint64_t epoch_us() {
 
 class macos_capture final : public capture_base {
  public:
-  explicit macos_capture(const capture_options& options) : options_(options) {}
+  explicit macos_capture(const capture_options& options) : capture_base(options.fps), options_(options) {}
   ~macos_capture() override { stop(); }
 
   bool start(std::string& err) override {
@@ -57,6 +59,26 @@ class macos_capture final : public capture_base {
   std::string backend() const override { return "coregraphics"; }
   bool is_real() const override { return true; }
 
+  std::vector<display_info> displays() const override {
+    std::lock_guard<std::mutex> lock(displays_mutex_);
+    return displays_;
+  }
+  int current_display() const override { return display_index_.load(); }
+  display_info current_display_info() const override {
+    std::lock_guard<std::mutex> lock(displays_mutex_);
+    const int index = display_index_.load();
+    if (index >= 0 && index < static_cast<int>(displays_.size())) {
+      return displays_[index];
+    }
+    return display_info{};
+  }
+  bool select_display(int index) override {
+    std::lock_guard<std::mutex> lock(displays_mutex_);
+    if (index < 0 || index >= static_cast<int>(displays_.size())) return false;
+    requested_display_.store(index);
+    return true;
+  }
+
  private:
   void thread_main(std::promise<std::string>& ready) {
     // macOS 10.15+ gates screen capture behind a TCC permission.
@@ -71,19 +93,23 @@ class macos_capture final : public capture_base {
       return;
     }
 
-    const CGDirectDisplayID display = CGMainDisplayID();
-    const std::size_t width = CGDisplayPixelsWide(display);
-    const std::size_t height = CGDisplayPixelsHigh(display);
-    if (width == 0 || height == 0 || width > 65535 || height > 65535) {
-      ready.set_value("unexpected display size");
+    if (!enumerate_displays()) {
+      ready.set_value("no active display");
       running_.store(false);
       return;
     }
-    width_ = static_cast<uint16_t>(width);
-    height_ = static_cast<uint16_t>(height);
+    int wanted = options_.display_index;
+    if (wanted < 0 || wanted >= static_cast<int>(display_ids_.size())) {
+      wanted = 0;
+    }
+    if (!apply_display(wanted)) {
+      ready.set_value("could not select the display");
+      running_.store(false);
+      return;
+    }
     ready.set_value(std::string());
 
-    const int fps = options_.fps > 0 ? options_.fps : 15;
+    const int fps = target_fps();
     auto next_allowed = std::chrono::steady_clock::now();
     auto last_full = std::chrono::steady_clock::now();
     std::vector<uint8_t> pixels;
@@ -93,6 +119,14 @@ class macos_capture final : public capture_base {
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
         next_allowed = std::chrono::steady_clock::now();
         continue;
+      }
+
+      const int requested = requested_display_.exchange(-1);
+      if (requested >= 0 && requested != display_index_.load()) {
+        if (apply_display(requested)) {
+          keyframe_requested_.store(true);
+          last_full = std::chrono::steady_clock::now();
+        }
       }
 
       std::string grab_error;
@@ -114,6 +148,68 @@ class macos_capture final : public capture_base {
     }
   }
 
+  bool enumerate_displays() {
+    uint32_t count = 0;
+    if (CGGetActiveDisplayList(0, nullptr, &count) != kCGErrorSuccess ||
+        count == 0) {
+      return false;
+    }
+    std::vector<CGDirectDisplayID> ids(count);
+    if (CGGetActiveDisplayList(count, ids.data(), &count) != kCGErrorSuccess) {
+      return false;
+    }
+    ids.resize(count);
+    const CGDirectDisplayID main_id = CGMainDisplayID();
+    const auto main_it = std::find(ids.begin(), ids.end(), main_id);
+    if (main_it != ids.end()) {
+      std::rotate(ids.begin(), main_it, main_it + 1);
+    }
+
+    std::vector<display_info> list;
+    std::vector<CGDirectDisplayID> kept;
+    for (CGDirectDisplayID id : ids) {
+      const std::size_t pixel_w = CGDisplayPixelsWide(id);
+      const std::size_t pixel_h = CGDisplayPixelsHigh(id);
+      if (pixel_w == 0 || pixel_h == 0 || pixel_w > 65535 ||
+          pixel_h > 65535) {
+        continue;
+      }
+      const CGRect bounds = CGDisplayBounds(id);
+      display_info info;
+      info.index = static_cast<int>(list.size());
+      info.name = "Display " + std::to_string(info.index);
+      info.x = static_cast<int>(std::lround(bounds.origin.x));
+      info.y = static_cast<int>(std::lround(bounds.origin.y));
+      info.width = static_cast<uint16_t>(pixel_w);
+      info.height = static_cast<uint16_t>(pixel_h);
+      info.input_width = static_cast<int>(std::lround(bounds.size.width));
+      info.input_height = static_cast<int>(std::lround(bounds.size.height));
+      info.primary = id == main_id;
+      list.push_back(std::move(info));
+      kept.push_back(id);
+    }
+    if (list.empty()) return false;
+
+    std::lock_guard<std::mutex> lock(displays_mutex_);
+    displays_ = std::move(list);
+    display_ids_ = std::move(kept);
+    return true;
+  }
+
+  bool apply_display(int index) {
+    std::lock_guard<std::mutex> lock(displays_mutex_);
+    if (index < 0 || index >= static_cast<int>(display_ids_.size())) {
+      return false;
+    }
+    display_id_ = display_ids_[index];
+    display_index_.store(index);
+    width_ = displays_[index].width;
+    height_ = displays_[index].height;
+    previous_.clear();
+    have_previous_ = false;
+    return true;
+  }
+
   bool grab(std::vector<uint8_t>& pixels, std::string& err) {
     // macOS 15 marks CGDisplayCreateImage unavailable in the SDK while the
     // symbol still exists. Resolve it at runtime so the build is not tied to a
@@ -125,7 +221,7 @@ class macos_capture final : public capture_base {
       err = "CGDisplayCreateImage is unavailable on this system";
       return false;
     }
-    CGImageRef image = create_image(CGMainDisplayID());
+    CGImageRef image = create_image(display_id_);
     if (image == nullptr) {
       err = "screen capture returned null (permission revoked?)";
       return false;
@@ -185,53 +281,10 @@ class macos_capture final : public capture_base {
     header.tile_h = tile;
 
     std::vector<protocol::tile_blob> tiles;
-    for (uint32_t ty = 0; ty < height_; ty += tile) {
-      for (uint32_t tx = 0; tx < width_; tx += tile) {
-        const uint16_t tw =
-            static_cast<uint16_t>(std::min<uint32_t>(tile, width_ - tx));
-        const uint16_t th =
-            static_cast<uint16_t>(std::min<uint32_t>(tile, height_ - ty));
-        const std::size_t offset =
-            static_cast<std::size_t>(ty) * stride +
-            static_cast<std::size_t>(tx) * 4;
-
-        bool changed = keyframe;
-        if (!changed) {
-          for (uint16_t row = 0; row < th; ++row) {
-            const std::size_t at =
-                offset + static_cast<std::size_t>(row) * stride;
-            if (std::memcmp(pixels.data() + at, previous_.data() + at,
-                            static_cast<std::size_t>(tw) * 4) != 0) {
-              changed = true;
-              break;
-            }
-          }
-        }
-        if (!changed) continue;
-
-        protocol::tile_blob blob;
-        blob.x = static_cast<uint16_t>(tx);
-        blob.y = static_cast<uint16_t>(ty);
-        blob.w = tw;
-        blob.h = th;
-        blob.flags = protocol::kTileFlagChanged |
-                     (keyframe ? protocol::kTileFlagKeyframe : 0);
-        blob.data.resize(static_cast<std::size_t>(tw) * th * 4);
-        for (uint16_t row = 0; row < th; ++row) {
-          const std::size_t at =
-              offset + static_cast<std::size_t>(row) * stride;
-          std::memcpy(blob.data.data() + static_cast<std::size_t>(row) * tw * 4,
-                      pixels.data() + at, static_cast<std::size_t>(tw) * 4);
-          std::memcpy(previous_.data() + at, pixels.data() + at,
-                      static_cast<std::size_t>(tw) * 4);
-        }
-        // CGContext leaves the alpha byte undefined with alphaNoneSkipFirst.
-        for (std::size_t i = 0; i < blob.data.size(); i += 4) {
-          blob.data[i + 3] = 255;
-        }
-        tiles.push_back(std::move(blob));
-      }
-    }
+    build_changed_tiles(pixels.data(), stride, width_, height_, tile,
+                        previous_.data(), keyframe, nullptr,
+                        /*force_opaque=*/true,
+                        options_.change_threshold, tiles);
 
     std::vector<uint8_t> payload;
     std::string err;
@@ -256,6 +309,12 @@ class macos_capture final : public capture_base {
   capture_options options_;
   uint16_t width_ = 0;
   uint16_t height_ = 0;
+  CGDirectDisplayID display_id_ = CGMainDisplayID();
+  std::vector<display_info> displays_;
+  std::vector<CGDirectDisplayID> display_ids_;
+  mutable std::mutex displays_mutex_;
+  std::atomic<int> display_index_{0};
+  std::atomic<int> requested_display_{-1};
   std::vector<uint8_t> previous_;
   bool have_previous_ = false;
   uint32_t seq_ = 0;

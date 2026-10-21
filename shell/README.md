@@ -5,11 +5,22 @@
 | 平台 | 技术 | 目录 | 产物 |
 |---|---|---|---|
 | Linux | GTK 3 + WebKitGTK 4.1 | `native/` | `.deb`、`.AppImage` |
-| Windows | Win32 + WebView2 | `windows/` | NSIS `.exe` |
+| Windows | Win32 + WebView2 | `windows/` | Inno Setup `.exe`、免安装 `.exe` |
 | macOS | Cocoa + WKWebView | `macos/` | `.app`、`.dmg` |
 
 三者行为一致：定位并启动 `molink-core`，读取 `--print-ready` 行，把核心在 `/`
 托管的前端加载进 WebView，退出时回收子进程，并支持 `--smoke-test`。
+
+## 单实例
+
+同一用户会话只允许一个主实例。重复启动会向已运行实例发送“show”并聚焦窗口，
+不会再启动第二个核心；`--url`（独立会话窗口）和 `--smoke-test` 明确跳过该限制。
+
+| 平台 | 机制 |
+|---|---|
+| Linux | `$XDG_RUNTIME_DIR/molink-shell.sock`（回退 `/tmp/molink-shell-<uid>.sock`）的 Unix socket；残留 socket 会自动清理 |
+| Windows | `Local\moLinkShellInstance` 命名互斥量 + `FindWindowW("MoLinkShell")` |
+| macOS | `$TMPDIR/molink-shell-<uid>.sock` 的 Unix socket；Info.plist 另设 `LSMultipleInstancesProhibited` |
 
 ## 查找顺序
 
@@ -42,6 +53,14 @@ cmake --build shell/windows/build --config Release
 `WebView2Loader.dll` 会在构建后复制到可执行文件旁，安装器把它一起打包。
 Windows 10/11 通常已经带有 WebView2 Runtime。
 
+图标通过 `app.rc` 编译进 `moLink.exe`，并由窗口类、`WM_SETICON` 与
+`SetCurrentProcessExplicitAppUserModelID("com.molink.desktop")` 提供给任务栏；
+安装器快捷键使用同一个图标。
+
+核心默认监听 `0.0.0.0`，因此安装器会添加专用/域网络的防火墙规则；免安装版
+首次监听时由 Windows 询问。窗口关闭后仍在托盘运行，重复启动壳层会聚焦已有
+窗口，而不是再起一个核心。
+
 ## macOS
 
 ```bash
@@ -61,7 +80,7 @@ moLink.app/Contents/Resources/web/...
 ## 打包
 
 - Linux：`packaging/linux/build-deb.sh`、`build-appimage.sh`
-- Windows：`packaging/windows/stage.sh` + `installer.nsi`（NSIS）
+- Windows：`packaging/windows/stage.sh` + `installer.iss`（Inno Setup 6）；免安装单文件由 `portable.nsi`（NSIS）生成
 - macOS：`packaging/macos/build-dmg.sh`
 
 发布工作流在三个平台的 runner 上分别执行这些脚本。

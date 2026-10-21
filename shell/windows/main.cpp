@@ -19,6 +19,7 @@
 #define NOMINMAX
 #include <windows.h>
 #include <windowsx.h>
+#include <shobjidl.h>
 #include <shellapi.h>
 #include <shlobj.h>
 
@@ -55,6 +56,7 @@ bool g_tray_added = false;
 NOTIFYICONDATAW g_tray_data{};
 HMENU g_tray_menu = nullptr;
 HICON g_app_icon = nullptr;
+HANDLE g_instance_mutex = nullptr;
 
 void spawn_self(const std::wstring& uri);
 
@@ -160,7 +162,8 @@ bool json_string(const std::string& json, const char* key, std::string& out) {
 }
 
 bool start_core(const std::wstring& core, const std::wstring& web_root, int& port,
-                std::string& token, std::wstring& error) {
+                std::string& token, std::string& client_token,
+                std::wstring& error) {
   SECURITY_ATTRIBUTES attributes{};
   attributes.nLength = sizeof(attributes);
   attributes.bInheritHandle = TRUE;
@@ -179,7 +182,8 @@ bool start_core(const std::wstring& core, const std::wstring& web_root, int& por
   startup.hStdError = GetStdHandle(STD_ERROR_HANDLE);
   startup.hStdInput = nullptr;
 
-  std::wstring command = L"\"" + core + L"\" --port 0 --print-ready --parent-pid " +
+  std::wstring command = L"\"" + core +
+                         L"\" --print-ready --parent-pid " +
                          std::to_wstring(GetCurrentProcessId());
   if (!web_root.empty()) command += L" --web-root \"" + web_root + L"\"";
 
@@ -220,8 +224,9 @@ bool start_core(const std::wstring& core, const std::wstring& web_root, int& por
 
   long parsed_port = 0;
   if (!complete || !json_number(line, "port", parsed_port) ||
-      !json_string(line, "token", token) || parsed_port <= 0) {
-    error = L"molink-core did not report a ready port and token";
+      !json_string(line, "token", token) ||
+      !json_string(line, "client_token", client_token) || parsed_port <= 0) {
+    error = L"molink-core did not report a ready port and tokens";
     return false;
   }
   port = static_cast<int>(parsed_port);
@@ -541,10 +546,41 @@ void spawn_self(const std::wstring& uri) {
   }
 }
 
+// The core now binds a fixed TCP port (28418 by default), so a second shell
+// cannot start its own core. Instead of failing after the readiness timeout,
+// focus the window of the instance that is already running. --url pop-outs
+// must bypass this: they are deliberately separate shells.
+bool focus_running_instance() {
+  g_instance_mutex =
+      CreateMutexW(nullptr, FALSE, L"Local\\moLinkShellInstance");
+  if (g_instance_mutex == nullptr) return false;
+  if (GetLastError() != ERROR_ALREADY_EXISTS) return false;
+
+  HWND existing = nullptr;
+  for (int attempt = 0; attempt < 100 && existing == nullptr; ++attempt) {
+    existing = FindWindowW(L"MoLinkShell", L"moLink");
+    if (existing == nullptr) Sleep(100);
+  }
+  if (existing != nullptr) {
+    ShowWindow(existing, IsIconic(existing) ? SW_RESTORE : SW_SHOW);
+    SetForegroundWindow(existing);
+  }
+  CloseHandle(g_instance_mutex);
+  g_instance_mutex = nullptr;
+  return true;
+}
+
 HICON load_app_icon() {
-  const std::wstring path = exe_dir() + L"\\molink.ico";
-  HICON icon = static_cast<HICON>(LoadImageW(
-      nullptr, path.c_str(), IMAGE_ICON, 0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE));
+  // Prefer the icon embedded in the executable (resource id 1); fall back to
+  // the file shipped next to it for unpackaged builds.
+  HICON icon = static_cast<HICON>(
+      LoadImageW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(1), IMAGE_ICON, 0,
+                 0, LR_DEFAULTSIZE));
+  if (icon == nullptr) {
+    const std::wstring path = exe_dir() + L"\\molink.ico";
+    icon = static_cast<HICON>(LoadImageW(nullptr, path.c_str(), IMAGE_ICON, 0,
+                                        0, LR_LOADFROMFILE | LR_DEFAULTSIZE));
+  }
   if (icon == nullptr) icon = LoadIconW(nullptr, IDI_APPLICATION);
   return icon;
 }
@@ -715,6 +751,11 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
 int run(HINSTANCE instance) {
   CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
+  if (!g_url_mode && !g_smoke && focus_running_instance()) {
+    CoUninitialize();
+    return 0;
+  }
+
   if (g_url_mode) {
     g_url = g_url_override;
     g_origin = L"http://127.0.0.1:";
@@ -732,8 +773,9 @@ int run(HINSTANCE instance) {
 
   int port = 0;
   std::string token;
+  std::string client_token;
   std::wstring error;
-  if (!start_core(core, web_root, port, token, error)) {
+  if (!start_core(core, web_root, port, token, client_token, error)) {
     fail_box(error.c_str());
     stop_core();
     return 1;
@@ -742,14 +784,22 @@ int run(HINSTANCE instance) {
   g_url = L"http://127.0.0.1:" + std::to_wstring(port) +
           L"/?host=127.0.0.1&port=" + std::to_wstring(port) +
           L"&shell=1&platform=windows";
+  if (!client_token.empty()) {
+    g_url += L"&client=" + widen(client_token);
+  }
   g_origin = L"http://127.0.0.1:" + std::to_wstring(port);
   }
+
+  SetCurrentProcessExplicitAppUserModelID(L"com.molink.desktop");
+  g_app_icon = load_app_icon();
 
   WNDCLASSEXW window_class{};
   window_class.cbSize = sizeof(window_class);
   window_class.lpfnWndProc = window_proc;
   window_class.hInstance = instance;
   window_class.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+  window_class.hIcon = g_app_icon;
+  window_class.hIconSm = g_app_icon;
   window_class.lpszClassName = L"MoLinkShell";
   window_class.hbrBackground = CreateSolidBrush(RGB(5, 13, 11));
   RegisterClassExW(&window_class);
@@ -762,7 +812,6 @@ int run(HINSTANCE instance) {
     stop_core();
     return 1;
   }
-  g_app_icon = load_app_icon();
   SendMessageW(g_window, WM_SETICON, ICON_BIG,
                reinterpret_cast<LPARAM>(g_app_icon));
   SendMessageW(g_window, WM_SETICON, ICON_SMALL,
@@ -827,6 +876,10 @@ int run(HINSTANCE instance) {
     g_controller = nullptr;
   }
   FreeLibrary(loader_module);
+  if (g_instance_mutex != nullptr) {
+    CloseHandle(g_instance_mutex);
+    g_instance_mutex = nullptr;
+  }
   CoUninitialize();
   return g_exit_code;
 }

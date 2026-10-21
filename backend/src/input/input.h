@@ -19,6 +19,16 @@ class input_injector {
   virtual bool available() const = 0;
   virtual std::string backend() const = 0;
 
+  /// Tells the injector which monitor the remote view shows. Coordinates are
+  /// in the platform's input units (desktop pixels on X11/Windows, points on
+  /// macOS). The default is the whole screen.
+  virtual void set_display_rect(int x, int y, int width, int height) {
+    (void)x;
+    (void)y;
+    (void)width;
+    (void)height;
+  }
+
   virtual status move(double nx, double ny) = 0;
   virtual status button(int button, bool down) = 0;
   /// dx/dy in wheel notches; positive y scrolls down.

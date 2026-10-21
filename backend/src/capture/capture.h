@@ -41,6 +41,21 @@ struct cursor_snapshot {
   std::vector<uint8_t> rgba;  ///< width * height * 4, non-premultiplied
 };
 
+/// One selectable monitor as reported by the capture backend. `width/height`
+/// are capture pixels; `input_width/input_height` are the units the input
+/// injector uses (points on macOS, desktop pixels on X11/Windows).
+struct display_info {
+  int index = 0;
+  std::string name;
+  int x = 0;
+  int y = 0;
+  uint16_t width = 0;
+  uint16_t height = 0;
+  int input_width = 0;
+  int input_height = 0;
+  bool primary = false;
+};
+
 struct capture_stats {  uint64_t frames = 0;
   uint64_t keyframes = 0;
   uint64_t full_grabs = 0;
@@ -59,7 +74,17 @@ struct capture_options {
   // reachable). The X11 source uses the real screen size instead.
   uint16_t synthetic_width = 640;
   uint16_t synthetic_height = 360;
+  /// Per-channel delta that still counts as unchanged when diffing tiles.
+  /// 0 = exact memcmp. A small value ignores anti-aliasing and encoder noise.
+  int change_threshold = 4;
+  /// Monitor index to capture initially (0 = first/primary).
+  int display_index = 0;
 };
+
+/// Picks a tile edge from the detected CPU width: smaller tiles spread updates
+/// more evenly and lower latency on strong machines; larger tiles reduce
+/// per-tile overhead on weak ones.
+uint16_t choose_tile_size();
 
 class capture_source {
  public:
@@ -88,6 +113,23 @@ class capture_source {
   /// no viewers should not cost a core.
   virtual void set_active(bool active) = 0;
 
+  /// Change the target capture rate (1..60). Used by the adaptive quality
+  /// controller when a client reports high latency or low bandwidth. Sources
+  /// that cannot pace themselves may ignore this.
+  virtual void set_target_fps(int fps) { (void)fps; }
+
+  /// Monitors this source can capture. Empty means the source is not ready or
+  /// does not support selection (clients fall back to the whole screen).
+  virtual std::vector<display_info> displays() const { return {}; }
+  virtual int current_display() const { return 0; }
+  virtual display_info current_display_info() const { return {}; }
+
+  /// Requests a monitor switch. The capture thread applies it and publishes a
+  /// keyframe. Returns false for an unknown index.
+  virtual bool select_display(int index) {
+    return index == 0;
+  }
+
   /// True when frames come from a real display rather than the test pattern.
   virtual bool is_real() const = 0;
 
@@ -102,10 +144,14 @@ class capture_source {
 /// request flag, running flag.
 class capture_base : public capture_source {
  public:
+  explicit capture_base(int fps = 15) : target_fps_(clamp_fps(fps)) {}
+
   std::shared_ptr<const captured_frame> latest() const override;
   std::shared_ptr<const captured_frame> find(uint32_t seq) const override;
   void request_keyframe() override { keyframe_requested_.store(true); }
   void set_active(bool active) override { active_.store(active); }
+  void set_target_fps(int fps) override { target_fps_.store(clamp_fps(fps)); }
+  int target_fps() const { return target_fps_.load(); }
   bool running() const override { return running_.load(); }
   virtual capture_stats stats() const override;
 
@@ -118,6 +164,8 @@ class capture_base : public capture_source {
   static constexpr std::size_t kHistoryMaxFrames = 120;
 
  protected:
+  static int clamp_fps(int fps) { return fps < 1 ? 1 : (fps > 60 ? 60 : fps); }
+
   void publish(std::shared_ptr<const captured_frame> frame);
   void note_grab(bool full, uint16_t dirty_w, uint16_t dirty_h);
   void set_cursor(cursor_snapshot snapshot);
@@ -132,6 +180,7 @@ class capture_base : public capture_source {
   std::atomic<bool> keyframe_requested_{false};
   std::atomic<bool> active_{false};
   std::atomic<bool> running_{false};
+  std::atomic<int> target_fps_{15};
   std::atomic<uint64_t> stat_frames_{0};
   std::atomic<uint64_t> stat_keyframes_{0};
   std::atomic<uint64_t> stat_full_grabs_{0};

@@ -6,11 +6,11 @@
 #include <string>
 #include <vector>
 
-namespace uvcpp {
-class uvcpp_ws_connection;
-}
+#include "transport/session_transport.h"
 
 namespace molink {
+
+class session_controller;
 
 struct session_info {
   uint32_t id = 0;
@@ -34,7 +34,12 @@ struct session_info {
   int cursor_y = INT32_MIN;
   bool cursor_visible = false;
   bool cursor_has_shape = false;
-  uvcpp::uvcpp_ws_connection* conn = nullptr;
+  /// Transport-independent channel. The registry owns this reference; the
+  /// controller/transport handlers do not keep a stronger one.
+  std::shared_ptr<session_transport> transport;
+  /// Keeps the session state machine alive while the transport handlers are
+  /// installed. Set by session_controller::start().
+  std::shared_ptr<session_controller> controller;
 };
 
 /// Tracks every live WebSocket session. The registry owns the records, not the
@@ -42,9 +47,8 @@ struct session_info {
 /// shared_ptr so a record cannot disappear between a lookup and a send.
 class session_registry {
  public:
-  std::shared_ptr<session_info> add(uvcpp::uvcpp_ws_connection* conn,
-                                    const std::string& peer_ip,
-                                    unsigned int peer_port);
+  std::shared_ptr<session_info> add(
+      std::shared_ptr<session_transport> transport);
   void remove(uint32_t id);
   std::shared_ptr<session_info> find(uint32_t id);
   std::shared_ptr<session_info> find_by_public_id(const std::string& public_id);

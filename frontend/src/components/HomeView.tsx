@@ -13,11 +13,10 @@ import {
   Trash2,
   Wifi,
 } from 'lucide-react'
-import { useState, type FormEvent, type ReactNode } from 'react'
+import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { claimFirstWindow, openSessionWindow } from '../lib/windows'
 import { useAppStore, type RecentConnection } from '../store/app'
-import { PreferencesControls } from './PreferencesControls'
 
 const params = new URLSearchParams(window.location.search)
 
@@ -47,6 +46,16 @@ function Capability({
   )
 }
 
+export function formatDeviceId(raw: string): string {
+  const clean = raw
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '')
+    .slice(0, 9)
+  return [clean.slice(0, 3), clean.slice(3, 6), clean.slice(6, 9)]
+    .filter(Boolean)
+    .join('-')
+}
+
 export function HomeView() {
   const { t, i18n } = useTranslation()
   const device = useAppStore((state) => state.device)
@@ -56,16 +65,48 @@ export function HomeView() {
   const stateError = useAppStore((state) => state.stateError)
   const refreshState = useAppStore((state) => state.refreshState)
   const createSession = useAppStore((state) => state.createSession)
+  const setAuthCode = useAppStore((state) => state.setAuthCode)
   const recents = useAppStore((state) => state.recents)
   const forgetRecent = useAppStore((state) => state.forgetRecent)
+  const nearby = useAppStore((state) => state.nearby)
+  const refreshDiscovery = useAppStore((state) => state.refreshDiscovery)
+  const refreshDevice = useAppStore((state) => state.refreshDevice)
+  const rememberRecent = useAppStore((state) => state.rememberRecent)
 
+  const [deviceIdInput, setDeviceIdInput] = useState('')
+  const [rememberCode, setRememberCode] = useState(false)
   const [host, setHost] = useState('')
-  const [port, setPort] = useState(params.get('port') ?? '21118')
+  const [port, setPort] = useState(params.get('port') ?? '28418')
   const [code, setCode] = useState('')
   const [showCode, setShowCode] = useState(false)
   const [showDeviceCode, setShowDeviceCode] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [copied, setCopied] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!localMode) return
+    void refreshDiscovery()
+    void refreshDevice()
+    const timer = window.setInterval(() => {
+      void refreshDiscovery()
+      void refreshDevice()
+    }, 3000)
+    return () => window.clearInterval(timer)
+  }, [localMode, refreshDiscovery, refreshDevice])
+
+  const prefillFromNearby = (peer: {
+    device_id: string
+    name: string
+    host: string
+    port: number
+  }) => {
+    setDeviceIdInput(formatDeviceId(peer.device_id))
+    setHost(peer.host)
+    setPort(String(peer.port))
+    setCode('')
+    setError(null)
+    document.getElementById('connect-code')?.focus()
+  }
 
   const copy = async (key: string, value: string) => {
     try {
@@ -82,6 +123,7 @@ export function HomeView() {
     targetPort: number,
     targetToken: string,
     label?: string,
+    saveToken = false,
   ) => {
     if (localMode && claimFirstWindow()) {
       if (openSessionWindow({
@@ -90,20 +132,48 @@ export function HomeView() {
         token: targetToken,
         label,
       })) {
+        rememberRecent(
+          targetHost,
+          targetPort,
+          label?.trim() || targetHost,
+          targetToken,
+          saveToken,
+        )
         return
       }
     }
-    createSession(targetHost, targetPort, targetToken, label)
+    createSession(targetHost, targetPort, targetToken, label, saveToken)
   }
 
   const submit = (event: FormEvent) => {
     event.preventDefault()
     const numericPort = Number(port)
-    if (host.trim() === '') {
+    let targetHost = host.trim()
+    let targetPort = numericPort
+    const rawDeviceId = deviceIdInput.replace(/-/g, '')
+    if (rawDeviceId !== '') {
+      if (rawDeviceId.length !== 9) {
+        setError('device_not_found')
+        return
+      }
+      const match = nearby.find(
+        (peer) => formatDeviceId(peer.device_id) === deviceIdInput,
+      )
+      if (!match) {
+        setError('device_not_found')
+        return
+      }
+      targetHost = match.host
+      targetPort = match.port
+    } else if (targetHost === '') {
       setError('no_host')
       return
     }
-    if (!Number.isInteger(numericPort) || numericPort < 1 || numericPort > 65535) {
+    if (
+      !Number.isInteger(targetPort) ||
+      targetPort < 1 ||
+      targetPort > 65535
+    ) {
       setError('invalid_port')
       return
     }
@@ -112,36 +182,36 @@ export function HomeView() {
       return
     }
     if (localMode) {
-      const targetHost = host.trim().toLowerCase()
+      const lower = targetHost.toLowerCase()
       const servingPort = server?.port || Number(window.location.port)
       const servingHost = window.location.hostname.toLowerCase()
       const loopback = ['127.0.0.1', 'localhost', '::1', '0.0.0.0'].includes(
-        targetHost,
+        lower,
       )
       if (
-        numericPort === servingPort &&
-        (loopback || targetHost === servingHost)
+        targetPort === servingPort &&
+        (loopback || lower === servingHost)
       ) {
         setError('self_connect')
         return
       }
     }
     setError(null)
-    startConnection(host.trim(), numericPort, code.trim(), host.trim())
+    startConnection(targetHost, targetPort, code.trim(), targetHost, rememberCode)
   }
 
   const controlHost = () => {
     if (!device || !authToken) return
     const host = window.location.hostname || server?.host || '127.0.0.1'
     const port =
-      Number(window.location.port) || server?.port || device.port || 21118
+      Number(window.location.port) || server?.port || device.port || 28418
     createSession(host, port, authToken, device.device_id)
   }
 
   const prefillFromRecent = (recent: RecentConnection) => {
     setHost(recent.host)
     setPort(String(recent.port))
-    setCode('')
+    setCode(recent.token ?? '')
     setError(null)
     document.getElementById('connect-code')?.focus()
   }
@@ -160,6 +230,73 @@ export function HomeView() {
           {t('home.subtitle')}
         </p>
       </div>
+
+      {localMode ? (
+        <section className="card mb-5 p-5 sm:p-6">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h2 className="text-base font-semibold">{t('home.nearby')}</h2>
+              <p className="mt-1 text-[12px] text-muted">
+                {t('home.nearbyHint')}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => void refreshDiscovery()}
+              className="btn btn-quiet h-8 w-8 !px-0"
+              title={t('home.refresh')}
+              aria-label={t('home.refresh')}
+            >
+              <RefreshCw size={14} />
+            </button>
+          </div>
+          {nearby.length === 0 ? (
+            <p className="mt-4 text-[12px] text-muted">{t('home.noNearby')}</p>
+          ) : (
+            <ul className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+              {nearby.map((peer) => (
+                <li key={peer.device_id}>
+                  <button
+                    type="button"
+                    onClick={() => prefillFromNearby(peer)}
+                    onDoubleClick={() => {
+                      prefillFromNearby(peer)
+                      const saved = recents.find(
+                        (item) =>
+                          item.host === peer.host &&
+                          item.port === peer.port &&
+                          item.token,
+                      )
+                      if (saved?.token) {
+                        startConnection(
+                          peer.host,
+                          peer.port,
+                          saved.token,
+                          peer.name || peer.device_id,
+                          true,
+                        )
+                      } else {
+                        document.getElementById('connect-code')?.focus()
+                      }
+                    }}
+                    className="w-full rounded-lg border border-line bg-panel px-3 py-2.5 text-left transition hover:border-accent/40 hover:bg-surface"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="truncate text-[13px] font-medium text-ink">
+                        {peer.name || peer.device_id}
+                      </span>
+                      <span className="chip">{peer.port}</span>
+                    </div>
+                    <div className="mt-1 truncate font-mono text-[11px] text-muted">
+                      {peer.device_id} · {peer.host}
+                    </div>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+      ) : null}
 
       <div className="grid gap-5 lg:grid-cols-2">
         <section className="card relative overflow-hidden p-5 sm:p-6">
@@ -214,43 +351,90 @@ export function HomeView() {
                   </div>
                 </div>
 
-                <div className="mt-4">
-                  <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-[0.18em] text-muted">
-                    {t('home.verification')}
-                    <span className="normal-case tracking-normal text-muted/70">
-                      · {t('home.verificationHint')}
-                    </span>
-                  </div>
-                  <div className="mt-1.5 flex items-center gap-2">
-                    <div className="flex-1 rounded-lg border border-line bg-panel px-3 py-2 font-mono text-sm tracking-[0.3em] text-ink">
-                      {showDeviceCode
-                        ? device.token
-                        : '•'.repeat(Math.min(12, device.token.length))}
+                {device.code ? (
+                  <div className="mt-4">
+                    <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-[0.18em] text-muted">
+                      {t('home.verification')}
+                      <span className="normal-case tracking-normal text-muted/70">
+                        · {t('home.verificationHint')}
+                      </span>
+                      <span className="ml-auto normal-case tracking-normal text-muted/70">
+                        {device.code.mode === 'single'
+                          ? t('home.singleUse')
+                          : t('home.multiRemaining', {
+                              count: device.code.remaining,
+                            })}
+                      </span>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => setShowDeviceCode((value) => !value)}
-                      className="btn btn-quiet h-8 w-8 !px-0"
-                      title={showDeviceCode ? t('home.hide') : t('home.show')}
-                      aria-label={showDeviceCode ? t('home.hide') : t('home.show')}
-                    >
-                      {showDeviceCode ? <EyeOff size={14} /> : <Eye size={14} />}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => copy('code', device.token)}
-                      className="btn btn-quiet h-8 w-8 !px-0"
-                      title={t('home.copy')}
-                      aria-label={t('home.copy')}
-                    >
-                      {copied === 'code' ? (
-                        <Check size={14} className="text-accent" />
-                      ) : (
-                        <Copy size={14} />
-                      )}
-                    </button>
+                    <div className="mt-1.5 flex items-center gap-2">
+                      <div className="flex-1 rounded-lg border border-line bg-panel px-3 py-2 font-mono text-sm tracking-[0.3em] text-ink">
+                        {showDeviceCode
+                          ? device.code.value
+                          : '•'.repeat(
+                              Math.min(12, device.code.value.length),
+                            )}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setShowDeviceCode((value) => !value)}
+                        className="btn btn-quiet h-8 w-8 !px-0"
+                        title={showDeviceCode ? t('home.hide') : t('home.show')}
+                        aria-label={showDeviceCode ? t('home.hide') : t('home.show')}
+                      >
+                        {showDeviceCode ? <EyeOff size={14} /> : <Eye size={14} />}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => copy('code', device.code!.value)}
+                        className="btn btn-quiet h-8 w-8 !px-0"
+                        title={t('home.copy')}
+                        aria-label={t('home.copy')}
+                      >
+                        {copied === 'code' ? (
+                          <Check size={14} className="text-accent" />
+                        ) : (
+                          <Copy size={14} />
+                        )}
+                      </button>
+                    </div>
+                    <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => void setAuthCode('single', 1)}
+                        className={
+                          'btn h-7 px-2 text-[11px] ' +
+                          (device.code.mode === 'single' ? 'btn-primary' : '')
+                        }
+                      >
+                        {t('home.singleUse')}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void setAuthCode('multi', 20)}
+                        className={
+                          'btn h-7 px-2 text-[11px] ' +
+                          (device.code.mode === 'multi' ? 'btn-primary' : '')
+                        }
+                      >
+                        {t('home.multiUse')}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          void setAuthCode(
+                            device.code!.mode,
+                            device.code!.uses,
+                          )
+                        }
+                        className="btn btn-quiet h-7 w-7 !px-0"
+                        title={t('home.refreshCode')}
+                        aria-label={t('home.refreshCode')}
+                      >
+                        <RefreshCw size={12} />
+                      </button>
+                    </div>
                   </div>
-                </div>
+                ) : null}
 
                 <div className="mt-4 flex flex-wrap gap-1.5">
                   <Capability
@@ -326,6 +510,25 @@ export function HomeView() {
           </p>
 
           <form onSubmit={submit} className="mt-5 space-y-4">
+            <label className="block">
+              <span className="mb-1.5 block text-[10px] uppercase tracking-[0.16em] text-muted">
+                {t('home.deviceId')}
+              </span>
+              <input
+                value={deviceIdInput}
+                onChange={(event) =>
+                  setDeviceIdInput(formatDeviceId(event.target.value))
+                }
+                className="field font-mono"
+                placeholder="ABC-DEF-GHJ"
+                maxLength={11}
+                spellCheck={false}
+                autoComplete="off"
+              />
+              <span className="mt-1 block text-[10px] text-muted">
+                {t('home.deviceIdHint')}
+              </span>
+            </label>
             <div className="grid grid-cols-[1fr_110px] gap-3">
               <label className="block">
                 <span className="mb-1.5 block text-[10px] uppercase tracking-[0.16em] text-muted">
@@ -377,6 +580,16 @@ export function HomeView() {
                   {showCode ? <EyeOff size={14} /> : <Eye size={14} />}
                 </button>
               </div>
+            </label>
+
+            <label className="flex items-center gap-2 text-[11px] text-muted">
+              <input
+                type="checkbox"
+                checked={rememberCode}
+                onChange={(event) => setRememberCode(event.target.checked)}
+                className="h-3.5 w-3.5"
+              />
+              {t('home.rememberCode')}
             </label>
 
             {errorText ? (
@@ -445,11 +658,6 @@ export function HomeView() {
               ))}
             </ul>
           )}
-        </section>
-
-        <section className="card p-5 sm:p-6">
-          <h2 className="mb-4 text-sm font-medium">{t('settings.title')}</h2>
-          <PreferencesControls />
         </section>
       </div>
     </div>

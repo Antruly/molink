@@ -103,6 +103,7 @@
 约束：
 
 - 瓦片矩形必须落在 `screen_w × screen_h` 内；接收方应做边界检查。
+- 瓦片尺寸不要求等于 `tile_w × tile_h`：服务端会把同一行里连续变化的瓦片合并成一条完整的水平条带（关键帧因此是每行一条），接收方必须按表项中的 `w/h` 处理任意矩形。
 - 瓦片字节**不跨包**。一个瓦片必须完整落在同一帧包内。
 - 表项顺序即数据顺序，无空洞、无尾部多余字节（解析器会拒绝）。
 
@@ -123,7 +124,8 @@
 - `codec = 5` 时，每个瓦片的 `byte_length` 是 zlib 流（带 zlib 头，浏览器
   `DecompressionStream("deflate")` 可直接解压）的长度。
 - 解压后必须恰好是 `w * h * 4` 字节的 BGRA。
-- 服务端使用 zlib 级别 1；如果整帧压缩后不小于原始大小，整帧回退为 `codec = 1`。
+- 服务端自适应选择 zlib 级别：关键帧/大突发用级别 1 保低延迟，少量小瓦片用 3 或 6 换更高压缩比；如果整帧压缩后不小于原始大小，整帧回退为 `codec = 1`。
+- 浏览器原生只支持 `DecompressionStream("deflate")`，所以服务端不直接发 Brotli；桌面客户端如需要 Brotli，应在传输协商中单独约定 codec，而不是复用 codec 5。
 - 帧内所有瓦片使用同一种 codec，不混合。
 
 ---
@@ -148,6 +150,7 @@
 
 3. 令牌正确 → `welcome`；错误 → `error` 后以 close code `1008` 关闭。
 4. 连接后 5 秒内未完成鉴权 → 服务端以 `1008 "hello timeout"` 关闭。
+5. 错误令牌按来源 IP 计数，与 `/api/login` 共用阶梯封禁额度（见 §5.1）；封禁中的来源在握手后立即以 `1008` 关闭。
 
 令牌来自 `molink-core` 启动时的随机生成（32 位十六进制）或 `MOLINK_TOKEN` / `--token`。
 
@@ -158,7 +161,7 @@
 | type | 字段 | 说明 |
 |---|---|---|
 | `hello_required` | `protocol`, `service`, `version` | 等待鉴权 |
-| `welcome` | `session`, `session_id`, `protocol`, `service`, `version`, `transport`, `tiles` | 鉴权成功 |
+| `welcome` | `session`, `session_id`, `protocol`, `service`, `version`, `transport`, `tiles`, `displays`, `display_index` | 鉴权成功；`displays` 为可切换显示器列表 |
 | `ping` | `t` | 应用层心跳，每 15 秒 |
 | `pong` | `t`, `server_ms` | 对客户端 ping 的回应 |
 | `error` | `code`, `message` | 错误 |
@@ -172,7 +175,7 @@
   "session_id": 1,
   "protocol": 1,
   "service": "moLink Core",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "transport": "websocket",
   "tiles": {
     "codec": "deflate-bgra",
@@ -203,8 +206,14 @@
 | `pong` | `t` | 回应服务端心跳 |
 | `request-frame` | — | 请求一帧。服务端返回自上次以来所有未送达的帧；无变化时返回 0 瓦片帧 |
 | `request-keyframe` | — | 请求下一个捕获帧标记为关键帧（客户端丢失基准时使用） |
+| `capture-fps` / `quality` | `fps` (1..30) | 调整主机的采集帧率（全局）；用于高延迟/带宽不足时的自适应降帧，服务端回 `capture-fps` |
+| `display` | `index` | 切换被控端显示器（全局）；服务端回 `display` 并发送新关键帧 |
 | `input` | `events[]` | 指针/键盘事件；需要已鉴权，见 §4.3 |
 | `bye` | — | 正常关闭 |
+
+### 4.2.1 显示器选择
+
+`welcome.displays` 的每一项包含 `index`、`name`、`x`、`y`、`width`、`height`、`primary`；`display_index` 是当前采集的显示器，默认 `0`（主显示器）。客户端发送 `{"type":"display","index":N}` 后，服务端切换采集、按新显示器重算输入坐标，并发布关键帧。显示器列表是主机级共享的：一个会话切换会影响同一主机上的其他会话。
 
 ### 4.3 输入事件
 
@@ -317,28 +326,37 @@ X11 的屏幕抓取**不包含鼠标光标**，服务端单独发送形状与位
 
 ## 5. HTTP 接口
 
-绑定地址默认 `127.0.0.1`，端口默认 `21118`。非回环地址需要 `--allow-remote` 明确确认。
+核心监听 `0.0.0.0:28418`，但 `allow_remote_access` 默认关闭：非回环 TCP 连接在 HTTP 解析前立即关闭，已有远程 WebSocket 也会断开。打开该设置后立即生效，无需重启；显式 `--host 127.0.0.1` 则真正只绑定本机。非回环浏览器还需要 `allow_web_client`，且必须通过授权码登录。
 
 | 方法 | 路径 | 鉴权 | 说明 |
 |---|---|---|---|
 | GET | `/healthz` | 否 | 健康检查，含 `service: "moLink Core"` |
 | GET | `/api/health` | 否 | 同 `/healthz` |
-| GET | `/api/state` | 否 | 本机/远程、锁定状态、设备 ID、锁定超时 |
-| POST | `/api/login` | 否 | 用验证码登录/解锁；失败限速 |
-| GET | `/api/device` | 仅回环 | 设备 ID 与验证码；锁定时 423 |
+| GET | `/api/state` | 否 | 本机/远程、锁定状态、设备 ID、锁定超时、全部端口 |
+| GET | `/api/transports` | 否 | 传输协商表：可用性、端口、推荐顺序 |
+| POST | `/api/login` | 否 | 用长期/临时授权码登录/解锁；返回 `session_token`；失败限速 |
+| GET | `/api/device` | 仅回环 | 设备 ID、本机会话 token、临时码状态；锁定时 423 |
+| GET | `/api/discovery` | 是 + 仅回环 | 局域网发现的设备列表 |
+| GET | `/api/settings` | 是 + 仅回环 | 安全设置与长期授权码 |
+| POST | `/api/settings?allow_remote=&allow_web=&discovery=&name=` | 是 + 仅回环 | 修改安全设置 |
+| POST | `/api/auth/code?mode=&uses=&value=` | 是 + 仅回环 | 切换/刷新单次或多次临时码 |
+| POST | `/api/auth/long-term?value=` | 是 + 仅回环 | 设置/生成长期授权码 |
 | GET | `/api/info` | 是 | 版本、绑定地址、能力开关、会话数 |
 | GET | `/api/sessions` | 是 | 当前会话快照 |
 | POST | `/api/activity` | 是 | 记录一次用户活动 |
 | POST | `/api/ui-state?client=&sessions=` | 是 | 上报某窗口打开的会话数 |
 | POST | `/api/lock-timeout?seconds=` | 是 | 修改并持久化空闲锁定时间（0 = 从不） |
+| POST | `/api/network?tcp=&udp=` | 是 | 修改并持久化 TCP/UDP 端口；重启后生效 |
 | GET | `/` | 否 | 配置了 `--web-root` 时返回前端 `index.html`，否则返回服务自述 JSON |
 
-鉴权头（二者其一）：
+鉴权头（二者其一）使用 `/api/login` 返回的会话 token（不是授权码）：
 
 ```
-Authorization: Bearer <token>
-X-MoLink-Token: <token>
+Authorization: Bearer <session_token>
+X-MoLink-Token: <session_token>
 ```
+
+桌面壳通过回环 `/api/device` 获取自己的会话 token。WebSocket 的 `hello` / `?token=` 可以携带会话 token 或授权码；代码成功鉴权后会按单次/多次规则消耗。
 
 健康检查响应：
 
@@ -346,7 +364,7 @@ X-MoLink-Token: <token>
 {
   "status": "ok",
   "service": "moLink Core",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "protocol": 1,
   "pid": 12345,
   "uptime_ms": 2032,
@@ -359,27 +377,74 @@ CORS 只对本地开发来源 `http://localhost:1420`、`http://127.0.0.1:1420` 
 ### 5.1 访问模型与锁定
 
 - `peer` 为回环地址（`127.0.0.1`、`::1`、`::ffff:127.0.0.1`）时视为本机访问，可免验证读取 `/api/device`。
-- 其他来源必须用验证码登录（`POST /api/login`，Bearer/`X-MoLink-Token`）；通过后可访问其余 API 与 WebSocket。
+- 默认只绑定回环；`allow_remote_access` 打开后才接受非回环连接，`allow_web_client` 控制非回环浏览器能否加载 UI/登录页。
+- 其他来源必须用授权码登录（`POST /api/login`）；成功后返回 `session_token`，后续 API 使用该 token。授权码分长期码、单次码、多次码：长期码始终有效；单次码用一次后自动换新；多次码按次数扣减，用完后自动换新。
 - 没有已鉴权 WebSocket 会话、且所有 UI 窗口上报的 `sessions` 为 0、且空闲超过 `lock_timeout` 秒时，核心锁定。
 - 锁定期间：除 `/api/state`、`/api/login`、`/api/health` 外的 `/api/*` 返回 `423 locked`；WS `hello` 以 `1008 locked` 关闭。
-- `POST /api/login` 连续失败 5 次后暂停接受 30 秒。
+- 验证失败按来源 IP 计数，`/api/login`、其他 `/api/*` 的错误会话 token 与 WebSocket `hello` 共用额度：每轮 5 次失败后锁定，时长依次为 30 秒、2 分钟、10 分钟、1 小时、6 小时；第 6 轮永久封禁。24 小时无新失败重置阶梯；回环地址不计数。
+- 临时锁定返回 `429` 与 `Retry-After`（JSON 中同时带 `retry_after`），永久封禁返回 `403 ip_banned`。封禁列表保存在配置目录的 `banned_ips`，删除后重启核心即可解除。
+
+### 5.2 传输协商
+
+`GET /api/transports`（无需鉴权，锁定期间也可用）返回当前 build 的传输能力和端口表：
+
+```json
+{
+  "current": "websocket",
+  "preferred": ["quic","http3","tcp","http2","websocket","udp"],
+  "ports": {"web":28418,"http3":28419,"quic":28420,"tcp_data":28421,"udp_data":28422},
+  "transports": [
+    {"name":"websocket","role":"web","available":true,"secure":false,
+     "port":28418,"note":"browser baseline; /ws/session"},
+    {"name":"http2","role":"api","available":false,"secure":false,
+     "port":28418,"note":"h2c prior knowledge on the web port"},
+    {"name":"http3","role":"api","available":false,"secure":true,
+     "port":28419,"note":"needs TLS + QUIC front-end"},
+    {"name":"quic","role":"data","available":false,"secure":true,
+     "port":28420,"note":"direct data channel (planned)"},
+    {"name":"tcp","role":"data","available":false,"secure":false,
+     "port":28421,"note":"direct data channel (planned)"},
+    {"name":"udp","role":"data","available":false,"secure":false,
+     "port":28422,"note":"direct data channel (planned)"}
+  ]
+}
+```
+
+- 选择规则：客户端按 `preferred` 顺序取第一个自己支持且 `available: true` 的项；当前所有客户端都会落到 `websocket`。
+- WebSocket `welcome` 同时带 `transport`、`transports` 与 `transport_ports`，已连接的客户端不需要再走一次 HTTP。
+- 浏览器 WebSocket API 基于 HTTP/1.1，h2/h3 不会替代它；h2c 只对桌面/命令行客户端有意义，HTTP/3 需要 TLS 证书与独立 QUIC 前端。
+- 直连数据通道（QUIC/TCP/UDP）接入后只把对应条目的 `available` 置真，协商字段和端口表不变。
 
 ---
 
 ## 6. 命令行与就绪行
 
 ```
-molink-core [--host <addr>] [--port <n>] [--token <secret>]
+molink-core [--host <addr>] [--port <n>] [--http3-port <n>] [--quic-port <n>]
+            [--tcp-data-port <n>] [--udp-port <n>] [--token <secret>]
             [--allow-remote] [--parent-pid <pid>] [--print-ready]
 ```
+
+`--host` 默认 `0.0.0.0`。端口段：`28418` 网页/API/WS、`28419` HTTP/3、
+`28420` QUIC 数据、`28421` TCP 数据、`28422` UDP 数据。命令行参数优先于
+`/api/network` 与 `/api/lock-timeout` 写入配置目录的持久化值。
 
 `--print-ready` 在开始监听后向 stdout 输出一行 JSON，壳层据此得到端口与令牌：
 
 ```json
-{"event":"ready","service":"moLink Core","version":"0.3.0","protocol":1,
- "pid":12345,"host":"127.0.0.1","port":21118,"token":"<32 hex>",
- "session_endpoint":"/ws/session","synthetic_frames":true}
+{"event":"ready","service":"moLink Core","version":"0.4.0","protocol":1,
+ "pid":12345,"host":"127.0.0.1","port":28418,"token":"<32 hex>",
+ "client_token":"<32 hex>","session_endpoint":"/ws/session",
+ "transport":"websocket",
+ "transports":["websocket"],
+ "ports":{"web":28418,"http3":28419,"quic":28420,
+          "tcp_data":28421,"udp_data":28422},
+ "synthetic_frames":true}
 ```
+
+`token` 是只给本机壳层的会话 token，不是授权码；授权码通过 `/api/device` / 设置页展示。
+
+`client_token` 只通过 ready 行交给壳层。`allow_web_client=0` 时，回环 Web UI、`/api/state`、`/api/login`、`/api/device`、`/api/transports` 需要请求头 `X-MoLink-Client` 或初始 URL 的 `client=`；WebSocket 不受这道门限制（浏览器 WS 不能加自定义头），仍必须用授权码或会话 token 鉴权。
 
 `--parent-pid` 让核心每秒检查一次父进程；父进程消失则自行退出，避免壳层被杀后留下孤儿进程。
 

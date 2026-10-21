@@ -14,7 +14,7 @@ pnpm dev        # http://localhost:1420
 无需手动输入验证码。开发时打开：
 
 ```
-http://localhost:1420/?host=127.0.0.1&port=21118
+http://localhost:1420/?host=127.0.0.1&port=28418
 ```
 
 来自其他设备的访问由核心托管同一套页面，打开时会显示验证码登录页；验证通过后

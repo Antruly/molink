@@ -9,20 +9,25 @@
 #include <string>
 #include <thread>
 
+#include <net/uvcpp_tcp_client.h>
 #include <webapp/uvcpp_web_app.h>
 #include <webapp/uvcpp_web_json.h>
 
 #include "api.h"
+#include "auth_state.h"
 #include "capture/capture.h"
 #include "clipboard/clipboard.h"
 #include "config.h"
+#include "discovery.h"
 #include "identity.h"
 #include "lock_state.h"
+#include "network_settings.h"
 #include "input/input.h"
 #include "session_registry.h"
 #include "util.h"
 #include "version.h"
-#include "ws_session.h"
+#include "session_controller.h"
+#include "transport/ws_transport.h"
 
 #ifdef _WIN32
 #include <process.h>
@@ -97,12 +102,21 @@ void print_usage() {
   std::cout
       << "molink-core " MOLINK_VERSION "\n\n"
       << "Usage: molink-core [options]\n\n"
-      << "  --host <addr>        bind address (default 127.0.0.1)\n"
-      << "  --port <n>           bind port (default 21118)\n"
+      << "  --host <addr>        bind address (default 127.0.0.1; use 0.0.0.0\n"
+      << "                       for LAN access)\n"
+      << "  --port <n>           web/API/WS port (default 28418; 0 = ephemeral)\n"
+      << "  --http3-port <n>     HTTP/3 QUIC web port (default 28419; reserved)\n"
+      << "  --quic-port <n>      direct QUIC data port (default 28420; reserved)\n"
+      << "  --tcp-data-port <n>  direct TCP data port (default 28421; reserved)\n"
+      << "  --udp-port <n>       direct UDP data port (default 28422; reserved)\n"
       << "  --token <secret>     shared token; generated if omitted\n"
-      << "  --allow-remote       permit a non-loopback --host\n"
+      << "  --allow-remote       permit an explicitly chosen non-loopback\n"
+      << "                       --host\n"
       << "  --parent-pid <pid>   exit when that process disappears\n"
       << "  --capture-fps <n>    screen capture frames per second (default 15)\n"
+      << "  --tile-size <n>      tile edge in pixels (0 = auto; default 0)\n"
+      << "  --change-threshold <n>  per-channel delta treated as unchanged\n"
+      << "                        (default 4; 0 = exact comparison)\n"
       << "  --no-capture         use synthetic test frames instead of the screen\n"
       << "  --no-input           disable pointer and keyboard injection\n"
       << "  --no-compress        send raw BGRA tiles instead of zlib-compressed\n"
@@ -114,9 +128,11 @@ void print_usage() {
 }
 
 void print_ready(const molink::core_config& cfg, int port,
-                 const std::string& token, const std::string& capture_backend,
+                 const std::string& token, const std::string& client_token,
+                 const std::string& capture_backend,
                  const std::string& input_backend,
-                 const std::string& device_id) {
+                 const std::string& device_id, bool http2_available,
+                 int tile_size, int change_threshold) {
   uvcpp::uvcpp_json j;
   j["event"] = "ready";
   j["service"] = MOLINK_CORE_SERVICE;
@@ -126,9 +142,21 @@ void print_ready(const molink::core_config& cfg, int port,
   j["host"] = cfg.host;
   j["port"] = port;
   j["token"] = token;
+  j["client_token"] = client_token;
   j["session_endpoint"] = "/ws/session";
+  j["transport"] = "websocket";
+  j["transports"] = uvcpp::uvcpp_json::array();
+  j["transports"].push_back("websocket");
+  if (http2_available) j["transports"].push_back("http2");
+  j["ports"]["web"] = port;
+  j["ports"]["http3"] = cfg.http3_port;
+  j["ports"]["quic"] = cfg.quic_port;
+  j["ports"]["tcp_data"] = cfg.tcp_data_port;
+  j["ports"]["udp_data"] = cfg.udp_port;
   j["device_id"] = device_id;
   j["capture"] = capture_backend;
+  j["tile_size"] = tile_size;
+  j["change_threshold"] = change_threshold;
   j["input"] = input_backend;
   j["synthetic_frames"] = capture_backend == "synthetic";
   std::cout << uvcpp::uvcpp_json_dump(j) << std::endl;
@@ -138,6 +166,12 @@ void print_ready(const molink::core_config& cfg, int port,
 
 int main(int argc, char** argv) {
   using namespace molink;
+
+#if defined(_WIN32)
+  // Keep GetSystemMetrics/SendInput in physical pixels so they match the DXGI
+  // output rectangles used for capture and monitor selection.
+  SetProcessDPIAware();
+#endif
 
   core_config cfg;
   std::string err;
@@ -161,11 +195,29 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "molink identity: %s\n", identity_error.c_str());
   }
 
+  // Security settings own the long-term code and the bind policy. Existing
+  // installations migrate the old token file into the long-term slot.
+  app_settings stored_settings = load_settings();
+  if (stored_settings.long_term_code.empty()) {
+    stored_settings.long_term_code = identity.token;
+  }
+  auto auth = std::make_shared<auth_state>(std::move(stored_settings));
+  // Only the shell receives this token (through the ready line). It gates the
+  // loopback web UI when allow_web_client is off.
+  const std::string client_token = generate_token();
+  // The listener stays on 0.0.0.0 so the Security toggle can take effect
+  // immediately; `allow_remote_access` is enforced by the connection hook
+  // below. An explicit --host 127.0.0.1 still binds local-only.
+
   auto registry = std::make_shared<session_registry>();
   const uint64_t started_ms = now_ms();
 
   capture_options capture_opts;
   capture_opts.fps = cfg.capture_fps;
+  capture_opts.tile_size =
+      cfg.tile_size > 0 ? static_cast<uint16_t>(cfg.tile_size)
+                        : choose_tile_size();
+  capture_opts.change_threshold = cfg.change_threshold;
   capture_opts.compress = !cfg.no_compress;
   std::string capture_note;
   std::shared_ptr<capture_source> capture =
@@ -175,6 +227,33 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  if (!cfg.port_explicit) {
+    const int saved = load_port_setting("tcp_port", -1);
+    if (saved > 0) cfg.port = saved;
+  }
+  if (!cfg.http3_port_explicit) {
+    const int saved = load_port_setting("http3_port", -1);
+    if (saved > 0) cfg.http3_port = saved;
+  }
+  if (!cfg.quic_port_explicit) {
+    const int saved = load_port_setting("quic_port", -1);
+    if (saved > 0) cfg.quic_port = saved;
+  }
+  if (!cfg.tcp_data_port_explicit) {
+    const int saved = load_port_setting("tcp_data_port", -1);
+    if (saved > 0) cfg.tcp_data_port = saved;
+  }
+  if (!cfg.udp_port_explicit) {
+    const int saved = load_port_setting("udp_port", -1);
+    if (saved > 0) cfg.udp_port = saved;
+  }
+  auto network = std::make_shared<network_settings>();
+  network->tcp_port.store(cfg.port);
+  network->http3_port.store(cfg.http3_port);
+  network->quic_port.store(cfg.quic_port);
+  network->tcp_data_port.store(cfg.tcp_data_port);
+  network->udp_port.store(cfg.udp_port);
+
   int lock_timeout = cfg.lock_timeout_seconds;
   if (!cfg.lock_timeout_explicit) {
     const int saved = load_lock_timeout_setting(-1);
@@ -182,10 +261,10 @@ int main(int argc, char** argv) {
   }
   auto lock = std::make_shared<lock_state>(lock_timeout);
 
-  ws_options wsopt;
-  wsopt.token = cfg.token;
-  wsopt.version = MOLINK_VERSION;
-  wsopt.capture = capture;
+  session_options session_opts;
+  session_opts.auth = auth;
+  session_opts.version = MOLINK_VERSION;
+  session_opts.capture = capture;
 
   std::shared_ptr<input_injector> input;
   if (!cfg.no_input) {
@@ -203,7 +282,14 @@ int main(int argc, char** argv) {
       std::fprintf(stderr, "molink input: %s\n", input_error.c_str());
     }
   }
-  wsopt.input = input;
+  session_opts.input = input;
+  if (input) {
+    const display_info display = capture->current_display_info();
+    if (display.input_width > 0 && display.input_height > 0) {
+      input->set_display_rect(display.x, display.y, display.input_width,
+                              display.input_height);
+    }
+  }
 
   std::shared_ptr<clipboard_service> clipboard;
   if (!cfg.no_clipboard) {
@@ -224,33 +310,65 @@ int main(int argc, char** argv) {
       std::fprintf(stderr, "molink clipboard: %s\n", clipboard_error.c_str());
     }
   }
-  wsopt.clipboard = clipboard;
-  wsopt.device_id = identity.device_id;
-  wsopt.lock = lock;
+  session_opts.clipboard = clipboard;
+  session_opts.device_id = identity.device_id;
+  session_opts.lock = lock;
 
   uvcpp::uvcpp_web_app app;
-  wsopt.post = [&app](std::function<void()> fn) { app.post(std::move(fn)); };
+  session_opts.post = [&app](std::function<void()> fn) { app.post(std::move(fn)); };
   app.set_host(cfg.host)
       .set_port(cfg.port)
       .set_server_header(std::string(MOLINK_PRODUCT_NAME) + "/" + MOLINK_VERSION)
       .set_access_log(false)
       .set_max_body_size(1024u * 1024u);
 
+  // Hot-swappable LAN access: the listener stays on 0.0.0.0, and when the
+  // setting is off a non-loopback TCP connection is closed before HTTP parsing.
+  // This is what lets the Security switch apply without restarting the app.
+  app.on_connection([auth](uvcpp::uvcpp_web_conn_id,
+                           uvcpp::uvcpp_tcp_client* client) {
+    if (client == nullptr) return;
+    std::string ip;
+    int port = 0;
+    client->getPeerAddrs(ip, port);
+    if (is_loopback_peer(ip)) return;
+    if (auth->settings().allow_remote_access) return;
+    client->close();
+  });
+
+  // h2c is available in libuvcpp but its request dispatch hangs against the
+  // curl h2c client in the 1.8.x builds we tested, so it stays off until that
+  // is verified. `/api/transports` reports http2 as unavailable in this
+  // build; the client negotiation ladder already knows where it will sit.
+
   const std::string web_root = resolve_web_root(cfg);
   auto bound_port = std::make_shared<std::atomic<int>>(cfg.port);
+  auto discovery = std::make_shared<discovery_service>(
+      auth, identity.device_id, cfg.port);
   api_deps deps;
   deps.bound_port = bound_port;
+  deps.discovery = discovery;
   deps.serve_web = !web_root.empty();
   deps.registry = registry;
   deps.capture = capture;
   deps.input = input;
   deps.clipboard = clipboard;
   deps.device_id = identity.device_id;
+  deps.client_token = client_token;
+  deps.auth = auth;
   deps.lock = lock;
+  deps.network = network;
   deps.config = cfg;
   deps.started_ms = started_ms;
+  deps.http2_available = app.h2c_enabled();
+  deps.tile_size = capture_opts.tile_size;
+  deps.change_threshold = capture_opts.change_threshold;
+  session_opts.network = network;
+  session_opts.bound_port = bound_port;
+  session_opts.http2_available = deps.http2_available;
+  session_opts.tile_size = capture_opts.tile_size;
   register_http_routes(app, deps);
-  app.websocket("/ws/session", make_ws_handler(registry, wsopt));
+  app.websocket("/ws/session", make_ws_handler(registry, session_opts));
 
   if (!web_root.empty()) {
     uvcpp::uvcpp_web_static_options static_options;
@@ -275,10 +393,15 @@ int main(int argc, char** argv) {
   }
 
   const int port = app.bound_port();
-  cfg.port = port;
   bound_port->store(port);
+  discovery->set_web_port(port);
+  {
+    const app_settings current = auth->settings();
+    discovery->set_enabled(current.allow_remote_access &&
+                           current.discovery_enabled);
+  }
 
-  session_supervisor supervisor(app, registry, wsopt);
+  session_supervisor supervisor(app, registry, session_opts);
   supervisor.start();
 
   std::atomic<bool> parent_gone{false};
@@ -296,9 +419,12 @@ int main(int argc, char** argv) {
     });
   }
 
+  const code_view display_code = auth->view();
   if (cfg.print_ready_json) {
-    print_ready(cfg, port, cfg.token, capture->backend(),
-                input ? input->backend() : "none", identity.device_id);
+    print_ready(cfg, port, auth->local_session_token(), client_token,
+                capture->backend(), input ? input->backend() : "none",
+                identity.device_id, deps.http2_available,
+                capture_opts.tile_size, capture_opts.change_threshold);
   } else {
     std::cerr << MOLINK_CORE_SERVICE << " " MOLINK_VERSION << " listening on "
               << cfg.host << ":" << port << "\n"
@@ -307,13 +433,22 @@ int main(int argc, char** argv) {
               << "  health:  http://" << cfg.host << ":" << port
               << "/healthz\n"
               << "  capture: " << capture_note << "\n"
+              << "  tiles:   " << capture_opts.tile_size << " px"
+              << " (change threshold " << cfg.change_threshold << ")\n"
               << "  device:  " << identity.device_id << "\n"
               << "  lock:    " << lock_timeout << " s idle\n"
+              << "  udp:     " << cfg.udp_port << " (reserved)\n"
               << "  input:   " << (input ? input->backend() : "disabled")
               << "\n"
               << "  web:     "
               << (web_root.empty() ? "(none)" : web_root) << "\n"
-              << "  token:   " << cfg.token << "\n";
+              << "  code:    " << display_code.value << " ("
+              << display_code.mode << ", remaining " << display_code.remaining
+              << ")\n"
+              << "  security: long-term code in Preferences > Security; "
+              << "remote access "
+              << (auth->settings().allow_remote_access ? "on" : "off")
+              << "\n";
   }
 
   while (g_stop == 0) {
@@ -322,6 +457,7 @@ int main(int argc, char** argv) {
 
   if (parent_watch.joinable()) parent_watch.join();
   supervisor.stop();
+  discovery->set_enabled(false);
   capture->stop();
   clipboard.reset();
   app.stop();

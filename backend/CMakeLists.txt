@@ -79,7 +79,10 @@ set(MOLINK_CORE_SOURCES
   src/capture/frame_encode.cpp
   src/clipboard/x11_clipboard.cpp
   src/clipboard/windows_clipboard.cpp
+  src/auth_state.cpp
   src/compression.cpp
+  src/discovery.cpp
+  src/settings.cpp
   src/input/x11_input.cpp
   src/input/windows_input.cpp
   src/input/macos_input.cpp
@@ -88,8 +91,9 @@ set(MOLINK_CORE_SOURCES
   src/lock_state.cpp
   src/session_registry.cpp
   src/test_pattern.cpp
+  src/transport/ws_transport.cpp
   src/util.cpp
-  src/ws_session.cpp
+  src/session_controller.cpp
   src/protocol/frame_packet.cpp
 )
 
@@ -115,7 +119,8 @@ if(MOLINK_BUILD_CORE)
   endif()
 
   if(WIN32)
-    target_link_libraries(molink-core PRIVATE d3d11 dxgi dxguid gdi32 user32 ole32)
+    target_link_libraries(molink-core PRIVATE
+      d3d11 dxgi dxguid gdi32 user32 ole32 ws2_32)
   endif()
   if(APPLE)
     target_link_libraries(molink-core PRIVATE
