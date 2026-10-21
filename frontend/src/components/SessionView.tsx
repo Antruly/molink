@@ -4,6 +4,7 @@ import {
   ClipboardPaste,
   ExternalLink,
   Hand,
+  Keyboard,
   LogOut,
   Monitor,
   MousePointer2,
@@ -35,6 +36,59 @@ function formatBandwidth(bytesPerSecond: number): string {
     return `${Math.round(bytesPerSecond / 1024)} KB/s`
   }
   return `${bytesPerSecond} B/s`
+}
+
+/// `KeyboardEvent.code` is reliable on physical keyboards but mobile virtual
+/// keyboards often report `Unidentified`; fall back to the printable key.
+function keyToCode(key: string): string {
+  if (key.length === 1) {
+    if (key >= 'a' && key <= 'z') return 'Key' + key.toUpperCase()
+    if (key >= 'A' && key <= 'Z') return 'Key' + key
+    if (key >= '0' && key <= '9') return 'Digit' + key
+    const punctuation: Record<string, string> = {
+      ' ': 'Space',
+      '\n': 'Enter',
+      '-': 'Minus',
+      '=': 'Equal',
+      '[': 'BracketLeft',
+      ']': 'BracketRight',
+      '\\': 'Backslash',
+      ';': 'Semicolon',
+      "'": 'Quote',
+      '`': 'Backquote',
+      ',': 'Comma',
+      '.': 'Period',
+      '/': 'Slash',
+    }
+    return punctuation[key] ?? ''
+  }
+  const named: Record<string, string> = {
+    Enter: 'Enter',
+    Backspace: 'Backspace',
+    Tab: 'Tab',
+    Escape: 'Escape',
+    Delete: 'Delete',
+    Home: 'Home',
+    End: 'End',
+    PageUp: 'PageUp',
+    PageDown: 'PageDown',
+    ArrowLeft: 'ArrowLeft',
+    ArrowRight: 'ArrowRight',
+    ArrowUp: 'ArrowUp',
+    ArrowDown: 'ArrowDown',
+  }
+  return named[key] ?? ''
+}
+
+function touchPrimary(): boolean {
+  try {
+    if (new URLSearchParams(window.location.search).get('touch') === '1') {
+      return true
+    }
+    return window.matchMedia?.('(pointer: coarse)').matches ?? false
+  } catch {
+    return false
+  }
 }
 
 function Stat({ label, value }: { label: string; value: string }) {
@@ -74,11 +128,40 @@ export function SessionView({
   const pressedButtons = useRef<Set<number>>(new Set())
   const [surfaceSize, setSurfaceSize] = useState({ width: 0, height: 0 })
   const [actionError, setActionError] = useState<string | null>(null)
+  const touchDevice = touchPrimary()
+  const [virtualMouse, setVirtualMouse] = useState(false)
+  const keyboardRef = useRef<HTMLTextAreaElement>(null)
+  const virtualPos = useRef({ x: 0.5, y: 0.5 })
+  const touchPoints = useRef(new Map<number, { x: number; y: number }>())
+  const touchStart = useRef<{
+    time: number
+    x: number
+    y: number
+    moved: boolean
+  } | null>(null)
+  const longPressTimer = useRef<number | null>(null)
+  const suppressTap = useRef(false)
+  const scrollAccum = useRef({ x: 0, y: 0 })
+  const lastCentroid = useRef<{ x: number; y: number } | null>(null)
+  const composingRef = useRef(false)
 
   const connection = useCallback(
     () => sessionConnection(tab.id),
     [tab.id],
   )
+
+  useEffect(() => {
+    const points = touchPoints.current
+    return () => {
+      if (longPressTimer.current !== null) {
+        window.clearTimeout(longPressTimer.current)
+        longPressTimer.current = null
+      }
+      points.clear()
+      touchStart.current = null
+      suppressTap.current = false
+    }
+  }, [tab.id])
 
   useEffect(() => {
     if (tab.phase !== 'live') return
@@ -159,8 +242,214 @@ export function SessionView({
     return { x: Number(nx.toFixed(5)), y: Number(ny.toFixed(5)) }
   }
 
+  const sendVirtualMove = () => {
+    const point = virtualPos.current
+    connection()?.sendInput({
+      k: 'move',
+      x: Number(point.x.toFixed(5)),
+      y: Number(point.y.toFixed(5)),
+    })
+  }
+
+  const sendVirtualClick = (button: number) => {
+    sendVirtualMove()
+    connection()?.sendInput({ k: 'button', button, down: true })
+    connection()?.sendInput({ k: 'button', button, down: false })
+  }
+
+  const cancelLongPress = () => {
+    if (longPressTimer.current !== null) {
+      window.clearTimeout(longPressTimer.current)
+      longPressTimer.current = null
+    }
+  }
+
+  const touchCentroid = () => {
+    let x = 0
+    let y = 0
+    for (const point of touchPoints.current.values()) {
+      x += point.x
+      y += point.y
+    }
+    const count = Math.max(1, touchPoints.current.size)
+    return { x: x / count, y: y / count }
+  }
+
+  const toggleVirtualMouse = () => {
+    if (!tab.controlEnabled) setControlEnabled(tab.id, true)
+    if (!virtualMouse) {
+      const screenW = tab.frame?.screenW || welcome?.tiles.screen_w || 0
+      const screenH = tab.frame?.screenH || welcome?.tiles.screen_h || 0
+      const cursor = tab.cursorPosition
+      if (cursor && cursor.visible && screenW > 0 && screenH > 0) {
+        virtualPos.current = {
+          x: Math.min(1, Math.max(0, cursor.x / screenW)),
+          y: Math.min(1, Math.max(0, cursor.y / screenH)),
+        }
+      } else {
+        virtualPos.current = { x: 0.5, y: 0.5 }
+      }
+    }
+    setVirtualMouse((value) => !value)
+  }
+
+  const openKeyboard = () => {
+    if (!tab.controlEnabled) setControlEnabled(tab.id, true)
+    keyboardRef.current?.focus()
+  }
+
+  const onTouchpadDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!tab.controlEnabled || !inputAvailable) return
+    event.preventDefault()
+    event.currentTarget.focus()
+    event.currentTarget.setPointerCapture(event.pointerId)
+    touchPoints.current.set(event.pointerId, {
+      x: event.clientX,
+      y: event.clientY,
+    })
+
+    if (touchPoints.current.size === 1) {
+      touchStart.current = {
+        time: Date.now(),
+        x: event.clientX,
+        y: event.clientY,
+        moved: false,
+      }
+      suppressTap.current = false
+      scrollAccum.current = { x: 0, y: 0 }
+      lastCentroid.current = null
+      cancelLongPress()
+      longPressTimer.current = window.setTimeout(() => {
+        longPressTimer.current = null
+        if (touchPoints.current.size !== 1 || !touchStart.current ||
+            touchStart.current.moved) {
+          return
+        }
+        suppressTap.current = true
+        sendVirtualClick(3)
+        navigator.vibrate?.(12)
+      }, 520)
+    } else {
+      cancelLongPress()
+      suppressTap.current = true
+      lastCentroid.current = touchCentroid()
+      scrollAccum.current = { x: 0, y: 0 }
+    }
+  }
+
+  const onTouchpadMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!tab.controlEnabled || !inputAvailable) return
+    const point = touchPoints.current.get(event.pointerId)
+    if (!point) return
+    event.preventDefault()
+    const dx = event.clientX - point.x
+    const dy = event.clientY - point.y
+    point.x = event.clientX
+    point.y = event.clientY
+
+    if (touchPoints.current.size >= 2) {
+      const centroid = touchCentroid()
+      if (lastCentroid.current) {
+        scrollAccum.current.x += centroid.x - lastCentroid.current.x
+        scrollAccum.current.y += centroid.y - lastCentroid.current.y
+        const step = 14
+        const notchesX = Math.trunc(scrollAccum.current.x / step)
+        const notchesY = Math.trunc(scrollAccum.current.y / step)
+        if (notchesX !== 0 || notchesY !== 0) {
+          scrollAccum.current.x -= notchesX * step
+          scrollAccum.current.y -= notchesY * step
+          connection()?.sendInput({
+            k: 'wheel',
+            dx: -notchesX,
+            dy: -notchesY,
+          })
+        }
+      }
+      lastCentroid.current = centroid
+      return
+    }
+
+    const start = touchStart.current
+    if (start && !start.moved) {
+      const distance = Math.hypot(
+        event.clientX - start.x,
+        event.clientY - start.y,
+      )
+      if (distance > 6) {
+        start.moved = true
+        cancelLongPress()
+      }
+    }
+
+    const rect = surfaceRef.current?.getBoundingClientRect()
+    if (!rect) return
+    const sensitivity = 1.7
+    virtualPos.current = {
+      x: Math.min(
+        1,
+        Math.max(
+          0,
+          virtualPos.current.x +
+            (dx / Math.max(1, rect.width)) * sensitivity,
+        ),
+      ),
+      y: Math.min(
+        1,
+        Math.max(
+          0,
+          virtualPos.current.y +
+            (dy / Math.max(1, rect.height)) * sensitivity,
+        ),
+      ),
+    }
+    sendVirtualMove()
+  }
+
+  const onTouchpadUp = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!tab.controlEnabled) return
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
+    const start = touchStart.current
+    touchPoints.current.delete(event.pointerId)
+    cancelLongPress()
+
+    if (touchPoints.current.size > 0) {
+      lastCentroid.current = null
+      return
+    }
+
+    if (
+      start &&
+      !start.moved &&
+      !suppressTap.current &&
+      Date.now() - start.time < 520
+    ) {
+      sendVirtualClick(1)
+    }
+    touchStart.current = null
+    suppressTap.current = false
+    lastCentroid.current = null
+    scrollAccum.current = { x: 0, y: 0 }
+  }
+
+  const onTouchpadCancel = (event: ReactPointerEvent<HTMLDivElement>) => {
+    touchPoints.current.delete(event.pointerId)
+    cancelLongPress()
+    if (touchPoints.current.size === 0) {
+      touchStart.current = null
+      suppressTap.current = false
+      lastCentroid.current = null
+      scrollAccum.current = { x: 0, y: 0 }
+    }
+  }
+
   const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (!tab.controlEnabled || !inputAvailable) return
+    if (virtualMouse) {
+      onTouchpadDown(event)
+      return
+    }
     const point = normalize(event.clientX, event.clientY)
     if (!point) return
     event.preventDefault()
@@ -176,6 +465,10 @@ export function SessionView({
 
   const onPointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (!inputAvailable) return
+    if (virtualMouse) {
+      onTouchpadUp(event)
+      return
+    }
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId)
     }
@@ -188,6 +481,10 @@ export function SessionView({
 
   const onPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (!tab.controlEnabled || !inputAvailable) return
+    if (virtualMouse) {
+      onTouchpadMove(event)
+      return
+    }
     const point = normalize(event.clientX, event.clientY)
     if (!point) return
     pendingMove.current = point
@@ -217,16 +514,25 @@ export function SessionView({
     if (!tab.controlEnabled) return
     const keys = pressedKeys.current
     const buttons = pressedButtons.current
+    const codeFor = (event: KeyboardEvent) =>
+      event.code && event.code !== 'Unidentified'
+        ? event.code
+        : keyToCode(event.key)
     const down = (event: KeyboardEvent) => {
-      if (event.repeat) return
+      if (event.repeat || event.isComposing) return
+      const code = codeFor(event)
+      if (!code) return
       event.preventDefault()
-      keys.add(event.code)
-      connection()?.sendInput({ k: 'key', code: event.code, down: true })
+      keys.add(code)
+      connection()?.sendInput({ k: 'key', code, down: true })
     }
     const up = (event: KeyboardEvent) => {
+      if (event.isComposing) return
+      const code = codeFor(event)
+      if (!code) return
       event.preventDefault()
-      keys.delete(event.code)
-      connection()?.sendInput({ k: 'key', code: event.code, down: false })
+      keys.delete(code)
+      connection()?.sendInput({ k: 'key', code, down: false })
     }
     window.addEventListener('keydown', down)
     window.addEventListener('keyup', up)
@@ -384,7 +690,11 @@ export function SessionView({
           {inputAvailable ? (
             <button
               type="button"
-              onClick={() => setControlEnabled(tab.id, !tab.controlEnabled)}
+              onClick={() => {
+                const next = !tab.controlEnabled
+                setControlEnabled(tab.id, next)
+                if (!next) setVirtualMouse(false)
+              }}
               className={
                 tab.controlEnabled
                   ? 'btn border-accent/50 bg-accent-soft text-accent'
@@ -441,6 +751,7 @@ export function SessionView({
           onPointerDown={onPointerDown}
           onPointerUp={onPointerUp}
           onPointerMove={onPointerMove}
+          onPointerCancel={onTouchpadCancel}
           onContextMenu={(event) => {
             if (tab.controlEnabled) event.preventDefault()
           }}
@@ -460,13 +771,15 @@ export function SessionView({
             </div>
           )}
 
-          {!tab.controlEnabled && !synthetic ? (
+          {(!tab.controlEnabled || virtualMouse) && !synthetic ? (
             <RemoteCursor
               shape={tab.cursorShape}
               position={tab.cursorPosition}
               welcome={welcome}
               viewWidth={surfaceSize.width}
               viewHeight={surfaceSize.height}
+              screenWidth={tab.frame?.screenW}
+              screenHeight={tab.frame?.screenH}
             />
           ) : null}
 
@@ -500,6 +813,73 @@ export function SessionView({
               <span>{formatBandwidth(tab.stats.bytesPerSec)}</span>
               <span className="text-muted/60">{welcome?.tiles.codec ?? ''}</span>
             </div>
+          ) : null}
+
+          {touchDevice && inputAvailable ? (
+            <div className="pointer-events-none absolute inset-x-0 bottom-3 z-20 flex flex-col items-center gap-1">
+              <div
+                className="pointer-events-auto flex items-center gap-1 rounded-full border border-line bg-surface/90 p-1.5 shadow-lg backdrop-blur"
+                onPointerDown={(event) => event.stopPropagation()}
+                onPointerUp={(event) => event.stopPropagation()}
+              >
+                <button
+                  type="button"
+                  onClick={toggleVirtualMouse}
+                  className={
+                    'btn h-8 gap-1.5 px-2.5 text-[11px] ' +
+                    (virtualMouse ? 'btn-primary' : 'btn-quiet')
+                  }
+                  aria-pressed={virtualMouse}
+                >
+                  <MousePointer2 size={14} />
+                  {t('session.virtualMouse')}
+                </button>
+                <button
+                  type="button"
+                  onClick={openKeyboard}
+                  className="btn btn-quiet h-8 gap-1.5 px-2.5 text-[11px]"
+                >
+                  <Keyboard size={14} />
+                  {t('session.virtualKeyboard')}
+                </button>
+              </div>
+              {virtualMouse ? (
+                <div className="pointer-events-none max-w-[92%] rounded-md border border-line bg-surface/85 px-2 py-1 text-center text-[10px] leading-relaxed text-muted backdrop-blur">
+                  {t('session.virtualMouseHint')}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+
+          {touchDevice ? (
+            <textarea
+              ref={keyboardRef}
+              aria-hidden
+              tabIndex={-1}
+              className="pointer-events-none absolute left-0 top-0 h-px w-px resize-none opacity-0"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+              onCompositionStart={() => {
+                composingRef.current = true
+              }}
+              onCompositionEnd={(event) => {
+                composingRef.current = false
+                const value = event.currentTarget.value
+                event.currentTarget.value = ''
+                if (value) {
+                  connection()?.sendInput({ k: 'text', text: value })
+                }
+              }}
+              onInput={(event) => {
+                if (composingRef.current) return
+                const value = event.currentTarget.value
+                event.currentTarget.value = ''
+                if (value) {
+                  connection()?.sendInput({ k: 'text', text: value })
+                }
+              }}
+            />
           ) : null}
         </div>
       </div>

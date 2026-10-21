@@ -13,6 +13,9 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <vector>
+
+#include "util.h"
 
 namespace molink {
 namespace {
@@ -173,6 +176,50 @@ class x11_input final : public input_injector {
     XFlush(display_);
     if (down) held_keys_.insert(keycode);
     else held_keys_.erase(keycode);
+    return status::ok;
+  }
+
+  status text(const std::string& utf8) override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (display_ == nullptr) return status::unavailable;
+    const std::vector<uint32_t> codepoints = utf8_codepoints(utf8);
+    if (codepoints.empty()) return status::rejected;
+
+    int min_keycode = 0;
+    int max_keycode = 0;
+    XDisplayKeycodes(display_, &min_keycode, &max_keycode);
+    if (max_keycode <= min_keycode) return status::unavailable;
+    const KeyCode spare = static_cast<KeyCode>(max_keycode);
+
+    int per_keycode = 0;
+    KeySym* original = XGetKeyboardMapping(display_, spare, 1, &per_keycode);
+
+    for (uint32_t cp : codepoints) {
+      KeySym symbol = NoSymbol;
+      if (cp == '\n' || cp == '\r') symbol = XK_Return;
+      else if (cp == '\t') symbol = XK_Tab;
+      else if (cp == 0x08) symbol = XK_BackSpace;
+      else {
+        symbol = cp < 0x100 ? static_cast<KeySym>(cp)
+                            : (0x01000000u | static_cast<KeySym>(cp));
+      }
+      if (symbol == NoSymbol) continue;
+      KeySym symbols[2] = {symbol, symbol};
+      XChangeKeyboardMapping(display_, spare, 2, symbols, 1);
+      XSync(display_, False);
+      fake_key_(display_, spare, True, CurrentTime);
+      fake_key_(display_, spare, False, CurrentTime);
+      XSync(display_, False);
+    }
+
+    if (original != nullptr && per_keycode > 0) {
+      XChangeKeyboardMapping(display_, spare, per_keycode, original, 1);
+      XFree(original);
+    } else {
+      KeySym none[2] = {NoSymbol, NoSymbol};
+      XChangeKeyboardMapping(display_, spare, 2, none, 1);
+    }
+    XSync(display_, False);
     return status::ok;
   }
 

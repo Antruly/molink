@@ -8,6 +8,9 @@
 #include <cmath>
 #include <set>
 #include <string>
+#include <vector>
+
+#include "util.h"
 
 namespace molink {
 namespace {
@@ -140,6 +143,40 @@ class macos_input final : public input_injector {
     CFRelease(event);
     if (down) held_keys_.insert(keycode);
     else held_keys_.erase(keycode);
+    return status::ok;
+  }
+
+  status text(const std::string& utf8) override {
+    const std::vector<uint32_t> codepoints = utf8_codepoints(utf8);
+    if (codepoints.empty()) return status::rejected;
+    std::u16string utf16;
+    utf16.reserve(codepoints.size());
+    for (uint32_t cp : codepoints) {
+      if (cp <= 0xffff) {
+        utf16.push_back(static_cast<char16_t>(cp));
+      } else {
+        cp -= 0x10000;
+        utf16.push_back(static_cast<char16_t>(0xd800 + (cp >> 10)));
+        utf16.push_back(static_cast<char16_t>(0xdc00 + (cp & 0x3ff)));
+      }
+    }
+
+    CGEventRef down = CGEventCreateKeyboardEvent(nullptr, 0, true);
+    if (down == nullptr) return status::unavailable;
+    CGEventKeyboardSetUnicodeString(
+        down, static_cast<UniCharCount>(utf16.size()),
+        reinterpret_cast<const UniChar*>(utf16.data()));
+    CGEventPost(kCGHIDEventTap, down);
+    CFRelease(down);
+
+    CGEventRef up = CGEventCreateKeyboardEvent(nullptr, 0, false);
+    if (up != nullptr) {
+      CGEventKeyboardSetUnicodeString(
+          up, static_cast<UniCharCount>(utf16.size()),
+          reinterpret_cast<const UniChar*>(utf16.data()));
+      CGEventPost(kCGHIDEventTap, up);
+      CFRelease(up);
+    }
     return status::ok;
   }
 

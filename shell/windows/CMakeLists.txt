@@ -24,7 +24,8 @@ set(MOLINK_ICON_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../assets/icons/icon.ico")
 if(NOT EXISTS "${MOLINK_ICON_PATH}")
   message(FATAL_ERROR "Application icon not found: ${MOLINK_ICON_PATH}")
 endif()
-file(TO_NATIVE_PATH "${MOLINK_ICON_PATH}" MOLINK_ICON_PATH_NATIVE)
+# Keep forward slashes in the generated .rc: rc.exe treats backslashes in
+# quoted paths as escape sequences (e.g. \a, \m), which breaks the path.
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/app.rc.in"
                "${CMAKE_CURRENT_BINARY_DIR}/app.rc" @ONLY)
 add_executable(moLink WIN32 main.cpp "${CMAKE_CURRENT_BINARY_DIR}/app.rc")

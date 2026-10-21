@@ -14,6 +14,9 @@
 #include <cmath>
 #include <set>
 #include <string>
+#include <vector>
+
+#include "util.h"
 
 namespace molink {
 namespace {
@@ -201,6 +204,37 @@ class windows_input final : public input_injector {
     if (SendInput(1, &input, sizeof(input)) != 1) return status::unavailable;
     if (down) held_keys_.insert(virtual_key);
     else held_keys_.erase(virtual_key);
+    return status::ok;
+  }
+
+  status text(const std::string& utf8) override {
+    const std::vector<uint32_t> codepoints = utf8_codepoints(utf8);
+    if (codepoints.empty()) return status::rejected;
+    std::u16string utf16;
+    utf16.reserve(codepoints.size());
+    for (uint32_t cp : codepoints) {
+      if (cp <= 0xffff) {
+        utf16.push_back(static_cast<char16_t>(cp));
+      } else {
+        cp -= 0x10000;
+        utf16.push_back(static_cast<char16_t>(0xd800 + (cp >> 10)));
+        utf16.push_back(static_cast<char16_t>(0xdc00 + (cp & 0x3ff)));
+      }
+    }
+    for (char16_t unit : utf16) {
+      INPUT input{};
+      input.type = INPUT_KEYBOARD;
+      input.ki.wVk = 0;
+      input.ki.wScan = static_cast<WORD>(unit);
+      input.ki.dwFlags = KEYEVENTF_UNICODE;
+      if (SendInput(1, &input, sizeof(input)) != 1) {
+        return status::unavailable;
+      }
+      input.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
+      if (SendInput(1, &input, sizeof(input)) != 1) {
+        return status::unavailable;
+      }
+    }
     return status::ok;
   }
 

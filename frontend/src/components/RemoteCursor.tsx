@@ -7,6 +7,8 @@ interface Props {
   welcome: Welcome | null
   viewWidth: number
   viewHeight: number
+  screenWidth?: number
+  screenHeight?: number
 }
 
 /// Draws the remote pointer. X11 screen grabs do not include the cursor, so
@@ -19,6 +21,8 @@ export function RemoteCursor({
   welcome,
   viewWidth,
   viewHeight,
+  screenWidth,
+  screenHeight,
 }: Props) {
   const src = useMemo(() => {
     if (!shape) return null
@@ -45,8 +49,10 @@ export function RemoteCursor({
     return null
   }
 
-  const screenW = welcome.tiles.screen_w
-  const screenH = welcome.tiles.screen_h
+  const screenW =
+    screenWidth && screenWidth > 0 ? screenWidth : welcome.tiles.screen_w
+  const screenH =
+    screenHeight && screenHeight > 0 ? screenHeight : welcome.tiles.screen_h
   if (screenW <= 0 || screenH <= 0) return null
 
   const scale = Math.min(viewWidth / screenW, viewHeight / screenH)

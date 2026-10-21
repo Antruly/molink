@@ -1,7 +1,7 @@
 ; moLink Windows installer (Inno Setup 6).
 ;
 ; Build with:
-;   ISCC.exe /DAppVersion=0.4.0 \
+;   ISCC.exe /DAppVersion=0.4.1 \
 ;            /DPkgDir=C:\path\to\staged\pkg \
 ;            /DOutputDir=C:\path\to\build\package \
 ;            installer.iss
@@ -14,7 +14,7 @@
 ; add a rule; Windows prompts on first LAN listen instead.
 
 #ifndef AppVersion
-  #define AppVersion "0.4.0"
+  #define AppVersion "0.4.1"
 #endif
 #ifndef PkgDir
   #error PkgDir must point at the staged package directory

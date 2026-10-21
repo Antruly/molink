@@ -115,6 +115,14 @@ input_injector::status inject_one(input_injector& input, const uvcpp_json& event
     }
     return input.key(code, bool_field(event, "down", true));
   }
+  if (kind == "text") {
+    const std::string value = string_field(event, "text");
+    if (value.empty() || value.size() > 4096) {
+      err = "text must be 1..4096 bytes";
+      return input_injector::status::rejected;
+    }
+    return input.text(value);
+  }
 
   err = "unknown input event kind: " + kind;
   return input_injector::status::rejected;

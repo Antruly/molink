@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace molink {
 
@@ -17,6 +18,9 @@ bool is_loopback_peer(const std::string& peer);
 /// Uppercase base32-ish alphabet without I/L/O/0/1, so a session id can be read
 /// aloud or typed from a screenshot without ambiguity.
 std::string make_session_public_id();
+
+/// Decode UTF-8 into Unicode scalar values. Invalid sequences are skipped.
+std::vector<uint32_t> utf8_codepoints(const std::string& text);
 
 /// Monotonic milliseconds since an arbitrary origin.
 uint64_t now_ms();

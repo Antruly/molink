@@ -113,6 +113,9 @@
     "inputUnavailable": "Input injection unavailable",
     "disconnect": "Disconnect",
     "display": "Monitor",
+    "virtualMouse": "Virtual mouse",
+    "virtualKeyboard": "Keyboard",
+    "virtualMouseHint": "Touchpad: drag to move, tap for left click, long-press for right click, two fingers to scroll.",
     "popOut": "Open in a new window",
     "closeWindow": "Close window"
   },

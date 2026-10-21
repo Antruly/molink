@@ -35,6 +35,9 @@ class input_injector {
   virtual status wheel(int dx, int dy) = 0;
   /// @p code is a browser KeyboardEvent.code ("KeyA", "Enter", "ArrowLeft").
   virtual status key(const std::string& code, bool down) = 0;
+  /// Types composed/IME text as Unicode. Used by the mobile virtual keyboard
+  /// where key codes are not available.
+  virtual status text(const std::string& utf8) = 0;
 
   /// Releases anything held down, so a client disconnect cannot leave the
   /// remote machine with a stuck modifier or button.

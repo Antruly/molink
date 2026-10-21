@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.4.1] — 2026-10-22
+
+### Added
+
+- 移动端 Web 虚拟鼠标：整块画面作为触摸板，滑动移动远端光标，点击左键，长按右键，双指上下/左右滚动；虚拟鼠标模式下显示远端光标
+- 移动端虚拟键盘：触摸设备显示“虚拟键盘”按钮；支持带组合输入（IME）的文本注入
+- `text` 输入事件与输入后端：Windows `KEYEVENTF_UNICODE`、macOS `CGEventKeyboardSetUnicodeString`、X11 Unicode keysym 临时映射
+- PC 端不显示虚拟鼠标 / 虚拟键盘按钮
+
+### Fixed
+
+- Windows 资源编译器把图标路径中的 `\a`、`\m` 当成转义字符，导致 `RC2135: file not found`；生成的 `.rc` 改用正斜杠路径
+
 ## [0.4.0] — 2026-10-22
 
 ### Added

@@ -113,6 +113,9 @@
     "inputUnavailable": "输入注入不可用",
     "disconnect": "断开",
     "display": "显示器",
+    "virtualMouse": "虚拟鼠标",
+    "virtualKeyboard": "虚拟键盘",
+    "virtualMouseHint": "触摸板模式：滑动移动光标，点击左键，长按右键，双指上下/左右滚动。",
     "popOut": "在新窗口打开",
     "closeWindow": "关闭窗口"
   },
