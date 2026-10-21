@@ -50,6 +50,23 @@ cat > "$APP/Contents/Info.plist" <<EOF
 </plist>
 EOF
 
+# Make the bundle relocatable regardless of how the dependencies were built:
+# point every copied dylib at @loader_path and rewrite the core's references.
+for lib in "$APP/Contents/MacOS/"*.dylib; do
+  [ -f "$lib" ] || continue
+  install_name_tool -id "@loader_path/$(basename "$lib")" "$lib" 2>/dev/null || true
+done
+if command -v otool >/dev/null 2>&1; then
+  while read -r dep; do
+    case "$dep" in
+      *uvcpp*|*llhttp*|*libuv*)
+        install_name_tool -change "$dep" "@loader_path/$(basename "$dep")" \
+          "$APP/Contents/MacOS/molink-core" 2>/dev/null || true
+        ;;
+    esac
+  done < <(otool -L "$APP/Contents/MacOS/molink-core" | awk 'NR>1 {print $1}')
+fi
+
 # Ad-hoc signature: enough for local use; a real release needs a Developer ID.
 codesign --force --deep --sign - "$APP" 2>/dev/null || echo "codesign skipped"
 
