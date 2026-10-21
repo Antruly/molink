@@ -27,8 +27,21 @@ struct captured_frame {
   std::vector<uint8_t> payload;
 };
 
-struct capture_stats {
-  uint64_t frames = 0;
+/// The pointer cursor as the display reports it. Cursor pixels are not part of
+/// a screen grab on X11, so clients draw this separately.
+struct cursor_snapshot {
+  bool valid = false;
+  uint32_t serial = 0;  ///< changes whenever the cursor shape changes
+  uint16_t width = 0;
+  uint16_t height = 0;
+  uint16_t hotspot_x = 0;
+  uint16_t hotspot_y = 0;
+  int x = 0;  ///< pointer position in screen pixels
+  int y = 0;
+  std::vector<uint8_t> rgba;  ///< width * height * 4, non-premultiplied
+};
+
+struct capture_stats {  uint64_t frames = 0;
   uint64_t keyframes = 0;
   uint64_t full_grabs = 0;
   uint64_t rect_grabs = 0;
@@ -79,6 +92,10 @@ class capture_source {
   virtual bool is_real() const = 0;
 
   virtual capture_stats stats() const = 0;
+
+  /// Latest cursor shape and position, or false when the backend cannot report
+  /// one (synthetic frames, missing XFixes).
+  virtual bool cursor(cursor_snapshot& out) const = 0;
 };
 
 /// Shared bookkeeping for concrete sources: latest-frame slot, keyframe
@@ -90,7 +107,9 @@ class capture_base : public capture_source {
   void request_keyframe() override { keyframe_requested_.store(true); }
   void set_active(bool active) override { active_.store(active); }
   bool running() const override { return running_.load(); }
-  capture_stats stats() const override;
+  virtual capture_stats stats() const override;
+
+  bool cursor(cursor_snapshot& out) const override;
 
   /// Hard bounds for the replay history, whichever comes first. Partial frames
   /// are usually small; the byte cap exists so a burst of full-screen changes
@@ -101,11 +120,15 @@ class capture_base : public capture_source {
  protected:
   void publish(std::shared_ptr<const captured_frame> frame);
   void note_grab(bool full, uint16_t dirty_w, uint16_t dirty_h);
+  void set_cursor(cursor_snapshot snapshot);
 
   mutable std::mutex mutex_;
   std::shared_ptr<const captured_frame> latest_;
   std::deque<std::shared_ptr<const captured_frame>> history_;
   std::size_t history_bytes_ = 0;
+
+  mutable std::mutex cursor_mutex_;
+  cursor_snapshot cursor_;
   std::atomic<bool> keyframe_requested_{false};
   std::atomic<bool> active_{false};
   std::atomic<bool> running_{false};

@@ -33,7 +33,9 @@
     "controlOnHint": "Keyboard and pointer events go to the remote machine",
     "controlHint": "Start control to send keyboard and pointer input",
     "inputUnavailable": "Input injection is unavailable on this host",
-    "controlSynthetic": "Control is unavailable while showing the test pattern"
+    "controlSynthetic": "Control is unavailable while showing the test pattern",
+    "clipboardGet": "Copy remote clipboard",
+    "clipboardSet": "Send clipboard"
   },
   "stats": {
     "fps": "FPS",
@@ -46,6 +48,9 @@
     "dismiss": "Dismiss",
     "no_token": "An access token is required.",
     "invalid_port": "Port must be a whole number between 1 and 65535.",
-    "connection failed": "The connection failed."
+    "connection failed": "The connection failed.",
+    "clipboard_read_failed": "Could not read the local clipboard",
+    "clipboard_write_failed": "Could not write to the local clipboard",
+    "clipboard_unavailable": "The browser does not expose the clipboard here"
   }
 }

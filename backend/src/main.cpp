@@ -12,6 +12,7 @@
 
 #include "api.h"
 #include "capture/capture.h"
+#include "clipboard/clipboard.h"
 #include "config.h"
 #include "input/input.h"
 #include "session_registry.h"
@@ -66,6 +67,7 @@ void print_usage() {
       << "  --no-capture         use synthetic test frames instead of the screen\n"
       << "  --no-input           disable pointer and keyboard injection\n"
       << "  --no-compress        send raw BGRA tiles instead of zlib-compressed\n"
+      << "  --no-clipboard       disable clipboard synchronization\n"
       << "  --print-ready        print one JSON line on stdout when ready\n"
       << "  --version            print version and exit\n"
       << "  --help               show this help\n";
@@ -143,7 +145,21 @@ int main(int argc, char** argv) {
   }
   wsopt.input = input;
 
+  std::shared_ptr<clipboard_service> clipboard;
+  if (!cfg.no_clipboard) {
+    std::string clipboard_error;
+    std::unique_ptr<clipboard_service> created =
+        make_x11_clipboard(clipboard_error);
+    if (created) {
+      clipboard = std::move(created);
+    } else {
+      std::fprintf(stderr, "molink clipboard: %s\n", clipboard_error.c_str());
+    }
+  }
+  wsopt.clipboard = clipboard;
+
   uvcpp::uvcpp_web_app app;
+  wsopt.post = [&app](std::function<void()> fn) { app.post(std::move(fn)); };
   app.set_host(cfg.host)
       .set_port(cfg.port)
       .set_server_header(std::string(MOLINK_PRODUCT_NAME) + "/" + MOLINK_VERSION)
@@ -154,6 +170,7 @@ int main(int argc, char** argv) {
   deps.registry = registry;
   deps.capture = capture;
   deps.input = input;
+  deps.clipboard = clipboard;
   deps.config = cfg;
   deps.started_ms = started_ms;
   register_http_routes(app, deps);
@@ -216,6 +233,7 @@ int main(int argc, char** argv) {
   if (parent_watch.joinable()) parent_watch.join();
   supervisor.stop();
   capture->stop();
+  clipboard.reset();
   app.stop();
   app.join();
   return 0;

@@ -32,4 +32,31 @@ uint64_t now_ms() {
           .count());
 }
 
+std::string base64_encode(const uint8_t* data, std::size_t len) {
+  static const char kAlphabet[] =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  std::string out;
+  out.reserve(((len + 2) / 3) * 4);
+  std::size_t i = 0;
+  for (; i + 2 < len; i += 3) {
+    const uint32_t v = (static_cast<uint32_t>(data[i]) << 16) |
+                       (static_cast<uint32_t>(data[i + 1]) << 8) |
+                       static_cast<uint32_t>(data[i + 2]);
+    out.push_back(kAlphabet[(v >> 18) & 0x3f]);
+    out.push_back(kAlphabet[(v >> 12) & 0x3f]);
+    out.push_back(kAlphabet[(v >> 6) & 0x3f]);
+    out.push_back(kAlphabet[v & 0x3f]);
+  }
+  if (i < len) {
+    uint32_t v = static_cast<uint32_t>(data[i]) << 16;
+    const bool two = i + 1 < len;
+    if (two) v |= static_cast<uint32_t>(data[i + 1]) << 8;
+    out.push_back(kAlphabet[(v >> 18) & 0x3f]);
+    out.push_back(kAlphabet[(v >> 12) & 0x3f]);
+    out.push_back(two ? kAlphabet[(v >> 6) & 0x3f] : '=');
+    out.push_back('=');
+  }
+  return out;
+}
+
 }  // namespace molink

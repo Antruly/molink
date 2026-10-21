@@ -7,7 +7,10 @@
 
 #include <webapp/uvcpp_web_ws.h>
 
+#include <functional>
+
 #include "capture/capture.h"
+#include "clipboard/clipboard.h"
 #include "input/input.h"
 #include "session_registry.h"
 
@@ -25,6 +28,10 @@ struct ws_options {
   int idle_close_ms = 45000;
   std::shared_ptr<capture_source> capture;
   std::shared_ptr<input_injector> input;
+  std::shared_ptr<clipboard_service> clipboard;
+  /// Hop a callback onto the app loop (used for clipboard results, which are
+  /// produced on the clipboard thread).
+  std::function<void(std::function<void()>)> post;
 };
 
 /// Handler for WS /ws/session. Authentication is part of the application

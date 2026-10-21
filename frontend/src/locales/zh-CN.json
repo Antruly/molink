@@ -33,7 +33,9 @@
     "controlOnHint": "键盘与指针事件已发送到远端",
     "controlHint": "点击「开始控制」后操作远端",
     "inputUnavailable": "本机输入注入不可用",
-    "controlSynthetic": "合成测试帧模式下不提供控制"
+    "controlSynthetic": "合成测试帧模式下不提供控制",
+    "clipboardGet": "复制远端剪贴板",
+    "clipboardSet": "发送剪贴板"
   },
   "stats": {
     "fps": "帧率",
@@ -46,6 +48,9 @@
     "dismiss": "关闭",
     "no_token": "必须填写访问令牌。",
     "invalid_port": "端口必须是 1–65535 之间的整数。",
-    "connection failed": "连接失败。"
+    "connection failed": "连接失败。",
+    "clipboard_read_failed": "无法读取本机剪贴板",
+    "clipboard_write_failed": "无法写入本机剪贴板",
+    "clipboard_unavailable": "当前浏览器环境不提供剪贴板"
   }
 }

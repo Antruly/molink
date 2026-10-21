@@ -22,6 +22,8 @@
 | React 前端（连接页 / 会话页 / 中英双语） | ✅ |
 | **Linux 真实抓屏（X11 + XShm）** | ✅ 增量瓦片、XDamage、无会话时暂停 |
 | **Linux 输入注入（XTEST）** | ✅ 指针、按键、滚轮、组合键；控制模式需手动开启 |
+| **远端光标** | ✅ XFixes 形状 + 位置，客户端覆盖层对齐渲染 |
+| **剪贴板同步** | ✅ X11 文本剪贴板，双向，上限 192 KiB |
 | **瓦片 zlib 压缩（codec 5）** | ✅ 真实桌面实测 94 → 7.4 Mbps |
 | Linux Wayland / PipeWire 门户抓屏 | ⏳ 未实现（接口已抽象） |
 | Windows / macOS 捕获与注入 | ⏳ 未实现 |
@@ -79,6 +81,7 @@ Linux 默认使用 X11/XShm 抓取当前屏幕；在 Wayland 会话或没有显�
 ./backend/build/molink-core --no-capture          # 强制合成测试帧
 ./backend/build/molink-core --no-input            # 禁止指针/键盘注入
 ./backend/build/molink-core --no-compress         # 关闭 zlib 瓦片压缩
+./backend/build/molink-core --no-clipboard        # 关闭剪贴板同步
 MOLINK_DISPLAY=:1 ./backend/build/molink-core     # 指定 X display
 ```
 

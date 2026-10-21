@@ -28,6 +28,12 @@ struct session_info {
   /// usable base image yet.
   int64_t last_capture_seq = -1;
   bool has_image = false;
+  /// Cursor state last sent to this session. 0xffffffff forces a shape send.
+  uint32_t cursor_serial = 0xffffffffu;
+  int cursor_x = INT32_MIN;
+  int cursor_y = INT32_MIN;
+  bool cursor_visible = false;
+  bool cursor_has_shape = false;
   uvcpp::uvcpp_ws_connection* conn = nullptr;
 };
 

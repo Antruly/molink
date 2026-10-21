@@ -48,4 +48,6 @@ src/
 - `deflate_bgra` 依赖浏览器的 `DecompressionStream("deflate")`（Chromium 80+、
   WebKit 16.4+）。
 - 输入注入依赖后台的 XTEST 支持；控制模式需要在会话页手动开启，默认不接管输入。
+- 远端光标由后台单独发送，控制模式开启时隐藏覆盖层（由本地光标指示）。
+- 剪贴板按钮依赖浏览器 Clipboard API；非安全上下文或未授权时会提示错误。
 - 帧率与带宽取决于后台抓屏与 zlib 压缩，未使用视频编码器。

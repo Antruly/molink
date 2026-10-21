@@ -1,5 +1,11 @@
 import { create } from 'zustand'
-import { MolinkClient, type ClientPhase, type Welcome } from '../lib/client'
+import {
+  MolinkClient,
+  type ClientPhase,
+  type CursorPosition,
+  type CursorShape,
+  type Welcome,
+} from '../lib/client'
 import type { Frame } from '../lib/protocol'
 
 export const client = new MolinkClient()
@@ -40,6 +46,8 @@ export interface SessionState {
   error: string | null
   welcome: Welcome | null
   frame: Frame | null
+  cursorShape: CursorShape | null
+  cursorPosition: CursorPosition | null
   stats: Stats
   controlEnabled: boolean
   setField: (field: 'host' | 'port' | 'token', value: string) => void
@@ -77,6 +85,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   error: null,
   welcome: null,
   frame: null,
+  cursorShape: null,
+  cursorPosition: null,
   stats: emptyStats(),
   controlEnabled: false,
 
@@ -102,6 +112,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       error: null,
       welcome: null,
       frame: null,
+      cursorShape: null,
+      cursorPosition: null,
       controlEnabled: false,
       stats: emptyStats(),
     })
@@ -115,6 +127,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       phase: 'idle',
       frame: null,
       welcome: null,
+      cursorShape: null,
+      cursorPosition: null,
       controlEnabled: false,
       stats: emptyStats(),
     })
@@ -173,6 +187,24 @@ client.setHandlers({
 
   onError: (message) => {
     useSessionStore.setState({ error: message })
+  },
+
+  onCursor: (shape) => {
+    useSessionStore.setState({ cursorShape: shape })
+  },
+
+  onCursorPosition: (position) => {
+    useSessionStore.setState({ cursorPosition: position })
+  },
+
+  onClipboard: (text) => {
+    if (typeof navigator === 'undefined' || !navigator.clipboard?.writeText) {
+      useSessionStore.setState({ error: 'clipboard_unavailable' })
+      return
+    }
+    navigator.clipboard.writeText(text).catch(() => {
+      useSessionStore.setState({ error: 'clipboard_write_failed' })
+    })
   },
 })
 

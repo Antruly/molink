@@ -41,6 +41,21 @@ uint32_t swap32(uint32_t v) {
          (v << 24);
 }
 
+/// XFixesCursorImage. As with XDamage, the runtime library is present but the
+/// development headers often are not.
+struct xfixes_cursor_image {
+  short x;
+  short y;
+  unsigned short width;
+  unsigned short height;
+  unsigned short xhot;
+  unsigned short yhot;
+  unsigned long cursor_serial;
+  unsigned long* pixels;
+  unsigned long atom_name;
+  unsigned long cursor_name;
+};
+
 uint8_t extract_channel(uint32_t pixel, unsigned long mask) {
   if (mask == 0) return 0;
   unsigned shift = 0;
@@ -238,6 +253,7 @@ class x11_capture final : public capture_base {
       XRectangle dirty{};
       bool have_dirty = false;
       bool want_capture = false;
+      update_cursor();
 
       if (damage_mode) {
         struct pollfd descriptor;
@@ -325,6 +341,7 @@ class x11_capture final : public capture_base {
     width_ = static_cast<uint16_t>(DisplayWidth(display_, screen_));
     height_ = static_cast<uint16_t>(DisplayHeight(display_, screen_));
     setup_damage();  // best effort; fixed-rate capture works without it
+    setup_cursor();
     return width_ > 0 && height_ > 0;
   }
 
@@ -369,6 +386,65 @@ class x11_capture final : public capture_base {
     damage_ = id;
     damage_event_base_ = event_base;
     return true;
+  }
+
+  /// libXfixes, resolved dynamically for the same reason as libXdamage.
+  void setup_cursor() {
+    void* lib = dlopen("libXfixes.so.3", RTLD_NOW | RTLD_LOCAL);
+    if (lib == nullptr) return;
+    auto query = reinterpret_cast<int (*)(Display*, int*, int*)>(
+        dlsym(lib, "XFixesQueryExtension"));
+    auto get = reinterpret_cast<xfixes_cursor_image* (*)(Display*)>(
+        dlsym(lib, "XFixesGetCursorImage"));
+    int event_base = 0;
+    int error_base = 0;
+    if (query == nullptr || get == nullptr ||
+        !query(display_, &event_base, &error_base)) {
+      dlclose(lib);
+      return;
+    }
+    xfixes_lib_ = lib;
+    get_cursor_image_ = get;
+    xfixes_available_ = true;
+  }
+
+  void teardown_cursor() {
+    if (xfixes_lib_ != nullptr) {
+      dlclose(xfixes_lib_);
+      xfixes_lib_ = nullptr;
+    }
+    get_cursor_image_ = nullptr;
+    xfixes_available_ = false;
+  }
+
+  void update_cursor() {
+    if (!xfixes_available_) return;
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last_cursor_query_ < std::chrono::milliseconds(100)) return;
+    last_cursor_query_ = now;
+
+    xfixes_cursor_image* image = get_cursor_image_(display_);
+    if (image == nullptr) return;
+
+    cursor_snapshot snapshot;
+    snapshot.valid = true;
+    snapshot.serial = static_cast<uint32_t>(image->cursor_serial);
+    snapshot.width = image->width;
+    snapshot.height = image->height;
+    snapshot.hotspot_x = image->xhot;
+    snapshot.hotspot_y = image->yhot;
+    snapshot.x = image->x;
+    snapshot.y = image->y;
+    snapshot.rgba.resize(static_cast<std::size_t>(image->width) * image->height * 4);
+    for (std::size_t i = 0; i < static_cast<std::size_t>(image->width) * image->height; ++i) {
+      const unsigned long pixel = image->pixels[i];  // ARGB
+      snapshot.rgba[i * 4 + 0] = static_cast<uint8_t>((pixel >> 16) & 0xff);
+      snapshot.rgba[i * 4 + 1] = static_cast<uint8_t>((pixel >> 8) & 0xff);
+      snapshot.rgba[i * 4 + 2] = static_cast<uint8_t>(pixel & 0xff);
+      snapshot.rgba[i * 4 + 3] = static_cast<uint8_t>((pixel >> 24) & 0xff);
+    }
+    XFree(image);
+    set_cursor(std::move(snapshot));
   }
 
   bool drain_damage_events(XRectangle& dirty) {
@@ -484,6 +560,7 @@ class x11_capture final : public capture_base {
   void teardown() {
     teardown_image();
     teardown_damage();
+    teardown_cursor();
     if (display_ != nullptr) {
       XCloseDisplay(display_);
       display_ = nullptr;
@@ -717,6 +794,11 @@ class x11_capture final : public capture_base {
   DamageSubtractFn damage_subtract_ = nullptr;
   DamageId damage_ = 0;
   int damage_event_base_ = -1;
+
+  void* xfixes_lib_ = nullptr;
+  xfixes_cursor_image* (*get_cursor_image_)(Display*) = nullptr;
+  bool xfixes_available_ = false;
+  std::chrono::steady_clock::time_point last_cursor_query_{};
 
   std::thread thread_;
 

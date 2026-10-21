@@ -17,4 +17,8 @@ std::string make_session_public_id();
 /// Monotonic milliseconds since an arbitrary origin.
 uint64_t now_ms();
 
+/// Standard base64 (with padding). Used for small binary payloads embedded in
+/// JSON control messages, such as the cursor bitmap.
+std::string base64_encode(const uint8_t* data, std::size_t len);
+
 }  // namespace molink

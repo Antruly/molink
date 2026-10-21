@@ -28,6 +28,23 @@ export interface Welcome {
   }
   input?: boolean
   input_backend?: string
+  clipboard?: boolean
+  clipboard_backend?: string
+}
+
+export interface CursorShape {
+  serial: number
+  w: number
+  h: number
+  hotspotX: number
+  hotspotY: number
+  rgba: Uint8Array
+}
+
+export interface CursorPosition {
+  x: number
+  y: number
+  visible: boolean
 }
 
 export interface ClientHandlers {
@@ -36,6 +53,9 @@ export interface ClientHandlers {
   onFrame: (frame: Frame, byteLength: number) => void
   onLatency: (ms: number) => void
   onError: (message: string) => void
+  onCursor: (shape: CursorShape) => void
+  onCursorPosition: (position: CursorPosition) => void
+  onClipboard: (text: string) => void
 }
 
 interface ControlMessage {
@@ -43,6 +63,29 @@ interface ControlMessage {
   code?: string
   message?: string
   session?: string
+  serial?: number
+  w?: number
+  h?: number
+  hotspotX?: number
+  hotspotY?: number
+  rgba?: string
+  x?: number
+  y?: number
+  visible?: boolean
+  text?: string
+}
+
+function decodeBase64(text: string): Uint8Array | null {
+  try {
+    const binary = atob(text)
+    const out = new Uint8Array(binary.length)
+    for (let i = 0; i < binary.length; i += 1) {
+      out[i] = binary.charCodeAt(i)
+    }
+    return out
+  } catch {
+    return null
+  }
 }
 
 async function inflateTile(data: Uint8Array): Promise<Uint8Array> {
@@ -145,6 +188,14 @@ export class MolinkClient {
     this.sendJson({ type: 'input', ...payload })
   }
 
+  requestClipboard(): void {
+    this.sendJson({ type: 'clipboard', action: 'get' })
+  }
+
+  setClipboard(text: string): void {
+    this.sendJson({ type: 'clipboard', action: 'set', text })
+  }
+
   private handleText(text: string): void {
     let message: ControlMessage
     try {
@@ -172,6 +223,38 @@ export class MolinkClient {
       }
       case 'ping':
         this.sendJson({ type: 'pong', t: (message as { t?: number }).t })
+        break
+      case 'cursor': {
+        const w = message.w ?? 0
+        const h = message.h ?? 0
+        const rgba = message.rgba ? decodeBase64(message.rgba) : null
+        if (
+          rgba &&
+          w > 0 &&
+          h > 0 &&
+          rgba.byteLength === w * h * 4 &&
+          typeof message.serial === 'number'
+        ) {
+          this.handlers.onCursor?.({
+            serial: message.serial,
+            w,
+            h,
+            hotspotX: message.hotspotX ?? 0,
+            hotspotY: message.hotspotY ?? 0,
+            rgba,
+          })
+        }
+        break
+      }
+      case 'cursor-position':
+        this.handlers.onCursorPosition?.({
+          x: message.x ?? 0,
+          y: message.y ?? 0,
+          visible: message.visible !== false,
+        })
+        break
+      case 'clipboard':
+        this.handlers.onClipboard?.(message.text ?? '')
         break
       case 'error':
         this.handlers.onError?.(message.message ?? message.code ?? 'error')

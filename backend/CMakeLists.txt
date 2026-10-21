@@ -52,6 +52,7 @@ set(MOLINK_CORE_SOURCES
   src/capture/synthetic_capture.cpp
   src/capture/x11_capture.cpp
   src/capture/frame_encode.cpp
+  src/clipboard/x11_clipboard.cpp
   src/compression.cpp
   src/input/x11_input.cpp
   src/config.cpp

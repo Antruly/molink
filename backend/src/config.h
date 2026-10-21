@@ -25,6 +25,8 @@ struct core_config {
   bool no_input = false;
   /// Disable zlib tile compression.
   bool no_compress = false;
+  /// Disable clipboard synchronization.
+  bool no_clipboard = false;
 };
 
 /// Parse command-line arguments. Unknown arguments are reported through

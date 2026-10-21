@@ -142,6 +142,12 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
               j["input"]["backend"] = deps.input->backend();
               j["input"]["available"] = deps.input->available();
             }
+            j["capabilities"]["clipboard"] =
+                deps.clipboard != nullptr && deps.clipboard->available();
+            if (deps.clipboard) {
+              j["clipboard"]["backend"] = deps.clipboard->backend();
+              j["clipboard"]["available"] = deps.clipboard->available();
+            }
             if (deps.capture) {
               j["capture"]["backend"] = deps.capture->backend();
               j["capture"]["running"] = deps.capture->running();

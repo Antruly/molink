@@ -5,6 +5,7 @@
 #include <string>
 
 #include "capture/capture.h"
+#include "clipboard/clipboard.h"
 #include "config.h"
 #include "input/input.h"
 #include "session_registry.h"
@@ -19,6 +20,7 @@ struct api_deps {
   std::shared_ptr<session_registry> registry;
   std::shared_ptr<capture_source> capture;
   std::shared_ptr<input_injector> input;
+  std::shared_ptr<clipboard_service> clipboard;
   core_config config;
   uint64_t started_ms = 0;
 };

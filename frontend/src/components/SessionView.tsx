@@ -1,8 +1,21 @@
-import { Hand, LogOut, MousePointer2, Radio } from 'lucide-react'
-import { useEffect, useRef, type PointerEvent as ReactPointerEvent } from 'react'
+import {
+  ClipboardCopy,
+  ClipboardPaste,
+  Hand,
+  LogOut,
+  MousePointer2,
+  Radio,
+} from 'lucide-react'
+import {
+  useEffect,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+} from 'react'
 import { useTranslation } from 'react-i18next'
 import type { Stats } from '../store/session'
 import { client, useSessionStore } from '../store/session'
+import { RemoteCursor } from './RemoteCursor'
 import { TileCanvas } from './TileCanvas'
 
 function formatBandwidth(bytesPerSecond: number): string {
@@ -48,6 +61,8 @@ export function SessionView() {
   const phase = useSessionStore((state) => state.phase)
   const welcome = useSessionStore((state) => state.welcome)
   const frame = useSessionStore((state) => state.frame)
+  const cursorShape = useSessionStore((state) => state.cursorShape)
+  const cursorPosition = useSessionStore((state) => state.cursorPosition)
   const stats = useSessionStore((state) => state.stats)
   const error = useSessionStore((state) => state.error)
   const controlEnabled = useSessionStore((state) => state.controlEnabled)
@@ -58,11 +73,26 @@ export function SessionView() {
   // Blind input into a real desktop is not useful and can be destructive:
   // control stays off whenever the picture is a test pattern.
   const inputAvailable = welcome?.input === true && !synthetic
+  const clipboardAvailable = welcome?.clipboard === true
   const surfaceRef = useRef<HTMLDivElement>(null)
   const pendingMove = useRef<{ x: number; y: number } | null>(null)
   const moveScheduled = useRef(false)
   const pressedKeys = useRef<Set<string>>(new Set())
   const pressedButtons = useRef<Set<number>>(new Set())
+  const [surfaceSize, setSurfaceSize] = useState({ width: 0, height: 0 })
+
+  // The cursor overlay must line up with the letterboxed canvas, so track the
+  // surface size rather than assuming it fills the viewport.
+  useEffect(() => {
+    const element = surfaceRef.current
+    if (!element) return
+    const update = () =>
+      setSurfaceSize({ width: element.clientWidth, height: element.clientHeight })
+    update()
+    const observer = new ResizeObserver(update)
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [])
 
   // Request the next frame only when the previous one has arrived, so a slow
   // link degrades to a lower frame rate instead of a growing request queue.
@@ -73,6 +103,17 @@ export function SessionView() {
     }, 60)
     return () => window.clearInterval(timer)
   }, [phase])
+
+  const sendClipboard = () => {
+    if (!navigator.clipboard?.readText) {
+      useSessionStore.setState({ error: 'clipboard_unavailable' })
+      return
+    }
+    navigator.clipboard
+      .readText()
+      .then((text) => client.setClipboard(text))
+      .catch(() => useSessionStore.setState({ error: 'clipboard_read_failed' }))
+  }
 
   const normalize = (clientX: number, clientY: number) => {
     const element = surfaceRef.current
@@ -205,6 +246,28 @@ export function SessionView() {
 
         <div className="flex items-center gap-2">
           <StatsRow stats={stats} />
+          {clipboardAvailable ? (
+            <>
+              <button
+                type="button"
+                onClick={() => client.requestClipboard()}
+                title={t('session.clipboardGet')}
+                className="flex items-center gap-1.5 rounded-md border border-line bg-panel px-2.5 py-1.5 text-[11px] text-fog transition hover:border-signal/50 hover:text-mist"
+              >
+                <ClipboardCopy size={13} />
+                <span className="hidden lg:inline">{t('session.clipboardGet')}</span>
+              </button>
+              <button
+                type="button"
+                onClick={sendClipboard}
+                title={t('session.clipboardSet')}
+                className="flex items-center gap-1.5 rounded-md border border-line bg-panel px-2.5 py-1.5 text-[11px] text-fog transition hover:border-signal/50 hover:text-mist"
+              >
+                <ClipboardPaste size={13} />
+                <span className="hidden lg:inline">{t('session.clipboardSet')}</span>
+              </button>
+            </>
+          ) : null}
           {inputAvailable ? (
             <button
               type="button"
@@ -234,7 +297,7 @@ export function SessionView() {
 
       {error ? (
         <div className="border-b border-alert/30 bg-alert/10 px-5 py-2 text-xs text-alert sm:px-8">
-          {error}
+          {String(t(`error.${error}`, { defaultValue: error }))}
         </div>
       ) : null}
 
@@ -261,6 +324,16 @@ export function SessionView() {
               {t('session.waiting')}
             </div>
           )}
+
+          {!controlEnabled && !synthetic ? (
+            <RemoteCursor
+              shape={cursorShape}
+              position={cursorPosition}
+              welcome={welcome}
+              viewWidth={surfaceSize.width}
+              viewHeight={surfaceSize.height}
+            />
+          ) : null}
 
           <div className="pointer-events-none absolute left-3 top-3 flex flex-wrap gap-2">
             {welcome ? (

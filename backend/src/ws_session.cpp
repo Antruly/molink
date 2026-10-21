@@ -174,6 +174,56 @@ void send_empty_frame(uvcpp_ws_connection* conn,
                      payload);
 }
 
+/// Cursor bitmap and position are sent alongside frames: they are small, change
+/// independently of screen damage, and are not part of an X11 grab.
+void maybe_send_cursor(uvcpp_ws_connection* conn,
+                       const std::shared_ptr<session_info>& session,
+                       const ws_options& opt) {
+  if (!opt.capture) return;
+  cursor_snapshot cursor;
+  if (!opt.capture->cursor(cursor)) return;
+
+  const bool visible = cursor.width > 0 && cursor.height > 0;
+  if (!visible) {
+    if (session->cursor_visible) {
+      uvcpp_json j;
+      j["type"] = "cursor-position";
+      j["visible"] = false;
+      send_json(conn, j);
+      session->cursor_visible = false;
+    }
+    return;
+  }
+
+  if (!session->cursor_has_shape || cursor.serial != session->cursor_serial) {
+    uvcpp_json j;
+    j["type"] = "cursor";
+    j["serial"] = cursor.serial;
+    j["w"] = cursor.width;
+    j["h"] = cursor.height;
+    j["hotspotX"] = cursor.hotspot_x;
+    j["hotspotY"] = cursor.hotspot_y;
+    j["rgba"] = base64_encode(cursor.rgba.data(), cursor.rgba.size());
+    send_json(conn, j);
+    session->cursor_serial = cursor.serial;
+    session->cursor_has_shape = true;
+    session->cursor_x = INT32_MIN;  // force a position after a shape change
+  }
+
+  if (cursor.x != session->cursor_x || cursor.y != session->cursor_y ||
+      !session->cursor_visible) {
+    uvcpp_json j;
+    j["type"] = "cursor-position";
+    j["x"] = cursor.x;
+    j["y"] = cursor.y;
+    j["visible"] = true;
+    send_json(conn, j);
+    session->cursor_x = cursor.x;
+    session->cursor_y = cursor.y;
+    session->cursor_visible = true;
+  }
+}
+
 void send_capture_frame(uvcpp_ws_connection* conn,
                         const std::shared_ptr<session_info>& session,
                         const ws_options& opt) {
@@ -265,6 +315,8 @@ void send_welcome(uvcpp_ws_connection* conn, const session_info& session,
   j["tiles"]["synthetic"] = opt.capture ? !opt.capture->is_real() : true;
   j["input"] = opt.input != nullptr && opt.input->available();
   j["input_backend"] = opt.input ? opt.input->backend() : "none";
+  j["clipboard"] = opt.clipboard != nullptr && opt.clipboard->available();
+  j["clipboard_backend"] = opt.clipboard ? opt.clipboard->backend() : "none";
   send_json(conn, j);
 }
 
@@ -341,7 +393,47 @@ uvcpp::uvcpp_web_ws_handler make_ws_handler(
         return;
       }
 
+      if (type == "clipboard") {
+        if (!options.clipboard || !options.clipboard->available()) {
+          send_error(conn, "not_implemented", "clipboard is unavailable on this host");
+          return;
+        }
+        const std::string action = string_field(j, "action");
+        if (action == "set") {
+          std::string text = string_field(j, "text");
+          constexpr std::size_t kMaxText = 192 * 1024;
+          if (text.size() > kMaxText) {
+            send_error(conn, "clipboard_too_large",
+                       "clipboard text exceeds 192 KiB");
+            return;
+          }
+          options.clipboard->set_text(std::move(text));
+          return;
+        }
+        if (action == "get") {
+          auto registry_ref = registry;
+          auto post = options.post;
+          const uint32_t session_id = session->id;
+          options.clipboard->request_text(
+              [registry_ref, post, session_id](std::string text) {
+                if (!post) return;
+                post([registry_ref, session_id, text = std::move(text)] {
+                  const auto live = registry_ref->find(session_id);
+                  if (!live || !live->conn) return;
+                  uvcpp_json j;
+                  j["type"] = "clipboard";
+                  j["text"] = text;
+                  send_json(live->conn, j);
+                });
+              });
+          return;
+        }
+        send_error(conn, "bad_clipboard", "action must be set or get");
+        return;
+      }
+
       if (type == "request-frame") {
+        maybe_send_cursor(conn, session, options);
         send_capture_frame(conn, session, options);
         return;
       }

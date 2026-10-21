@@ -43,6 +43,7 @@ cmake --build build && ctest --test-dir build --output-on-failure
 | `--no-capture` | 强制使用合成测试帧 |
 | `--no-input` | 禁用指针与键盘注入 |
 | `--no-compress` | 关闭 zlib 瓦片压缩，发送原始 BGRA |
+| `--no-clipboard` | 关闭剪贴板同步 |
 | `--print-ready` | 就绪后向 stdout 输出一行 JSON |
 
 `MOLINK_DISPLAY` 可指定 X display（默认沿用 `DISPLAY`）。
@@ -77,6 +78,12 @@ src/capture/
 | 单核 CPU（活跃会话） | ~35% | ~24% |
 | 无会话空闲 | 0% | 0% |
 
+## 光标
+
+`XGetImage` 不包含光标。X11 后端通过 XFixes（同样 `dlopen`）取得光标位图与位置，
+随帧请求以 `cursor` / `cursor-position` 控制消息发给客户端，由前端绘制覆盖层。
+形状只在 `serial` 变化时重发。
+
 ## 输入注入
 
 ```
@@ -93,6 +100,20 @@ src/input/
   客户端隐藏控制按钮。
 - `--no-input` 可完全关闭注入。
 
+## 剪贴板
+
+```
+src/clipboard/
+├── clipboard.h
+└── x11_clipboard.cpp   独立线程 + 独立 Display 连接
+```
+
+- `set`：取得 CLIPBOARD 所有权，响应 SelectionRequest（TARGETS/UTF8_STRING/STRING）。
+- `get`：XConvertSelection 异步读取，支持 INCR 分段；超时 2 秒。
+- 文本上限 192 KiB（受 X11 单次属性写入大小限制）。
+- 结果通过 `ws_options::post` 投回事件循环再发送，剪贴板线程不碰连接状态。
+- `--no-clipboard` 可关闭。
+
 ## 结构
 
 ```
@@ -104,6 +125,7 @@ src/
 ├── ws_session.*          /ws/session 处理器、心跳、帧回放与回收线程
 ├── capture/              屏幕捕获（X11/XShm/XDamage、合成回退、帧编码）
 ├── input/                指针/键盘注入（XTEST）
+├── clipboard/            文本剪贴板（X11 selection）
 ├── compression.*         zlib 瓦片压缩
 ├── test_pattern.*        合成测试帧
 ├── protocol/frame_packet.*  MOLK 编解码（无 libuvcpp 依赖）

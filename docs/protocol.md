@@ -184,13 +184,15 @@
     "synthetic": false
   },
   "input": true,
-  "input_backend": "xtest"
+  "input_backend": "xtest",
+  "clipboard": true,
+  "clipboard_backend": "x11-selection"
 }
 ```
 
 `backend` 取值：`x11-shm`、`x11`、`synthetic`。`synthetic: true` 表示当前是合成测试帧，
 不是真实屏幕。`codec` 反映当前帧实际使用的编码（`bgra` 或 `deflate-bgra`）；
-`input` 表示本机是否支持输入注入。
+`input` 表示本机是否支持输入注入；`clipboard` 表示本机是否支持剪贴板同步。
 
 **客户端 → 服务端**
 
@@ -235,7 +237,49 @@
 - 会话断开且没有其它已鉴权会话时，服务端释放所有按下的键与按钮。
 - 输入不可用时返回 `not_implemented`。
 
-### 4.4 帧送达与关键帧
+### 4.4 光标
+
+X11 的屏幕抓取**不包含鼠标光标**，服务端单独发送形状与位置：
+
+```json
+{"type":"cursor","serial":300,"w":48,"h":48,"hotspotX":7,"hotspotY":7,
+ "rgba":"<base64>"}
+{"type":"cursor-position","x":1617,"y":1006,"visible":true}
+```
+
+| 字段 | 说明 |
+|---|---|
+| `serial` | 光标形状序号；序号变化时才重发 `cursor` |
+| `w`, `h` | 光标像素尺寸 |
+| `hotspotX`, `hotspotY` | 热点（光标坐标对应的像素） |
+| `rgba` | `w*h*4` 字节的 RGBA（非预乘），base64 |
+| `x`, `y` | 指针在屏幕坐标系中的位置 |
+| `visible` | 为 false 时客户端应隐藏光标 |
+
+- 两条消息随 `request-frame` 的响应发送；形状只在变化时发送。
+- 客户端在控制模式开启时通常隐藏该覆盖层，改由本地光标指示位置。
+
+### 4.5 剪贴板
+
+**客户端 → 服务端**
+
+```json
+{"type":"clipboard","action":"set","text":"hello"}
+{"type":"clipboard","action":"get"}
+```
+
+**服务端 → 客户端**
+
+```json
+{"type":"clipboard","text":"hello from the remote machine"}
+```
+
+- 仅支持文本（UTF8_STRING），单条上限 192 KiB。
+- `set` 让服务端取得 X11 CLIPBOARD 所有权，本地应用随后粘贴即可得到该文本。
+- `get` 异步请求当前所有者；没有所有者或超时返回空字符串。
+- 剪贴板不可用时返回 `not_implemented`。
+
+### 4.6 帧送达与关键帧
 
 - 帧包按会话独立编号（包头的 `seq`），每个响应至少包含一个帧包。
 - **0 瓦片帧**表示"当前没有变化"，仍推进包序号，客户端不应重绘。
@@ -245,7 +289,7 @@
   到达。抓屏侧每 30 秒也会主动产生一次关键帧。
 - 客户端在收到首个关键帧之前不应绘制任何增量帧。
 
-### 4.5 错误码
+### 4.7 错误码
 
 | code | 含义 |
 |---|---|
@@ -254,12 +298,14 @@
 | `unknown_type` | 不支持的控制消息类型 |
 | `not_implemented` | 功能不可用（本机没有输入注入能力） |
 | `bad_input` | 输入事件字段缺失或越界 |
+| `bad_clipboard` | `action` 不是 `set`/`get` |
+| `clipboard_too_large` | 剪贴板文本超过 192 KiB |
 | `bad_packet` | 二进制消息不是合法 MOLK 包 |
 | `frame_build_failed` | 服务端构造帧失败 |
 | `send_failed` | 帧入队失败 |
 | `unexpected_packet` | 该方向不接受此包类型 |
 
-### 4.6 保活与回收
+### 4.8 保活与回收
 
 | 参数 | 值 | 行为 |
 |---|---:|---|

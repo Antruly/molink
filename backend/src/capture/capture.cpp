@@ -1,5 +1,7 @@
 #include "capture/capture.h"
 
+#include <utility>
+
 namespace molink {
 
 std::shared_ptr<const captured_frame> capture_base::latest() const {
@@ -42,6 +44,18 @@ void capture_base::note_grab(bool full, uint16_t dirty_w, uint16_t dirty_h) {
   }
   stat_dirty_w_.store(dirty_w);
   stat_dirty_h_.store(dirty_h);
+}
+
+void capture_base::set_cursor(cursor_snapshot snapshot) {
+  std::lock_guard<std::mutex> lock(cursor_mutex_);
+  cursor_ = std::move(snapshot);
+}
+
+bool capture_base::cursor(cursor_snapshot& out) const {
+  std::lock_guard<std::mutex> lock(cursor_mutex_);
+  if (!cursor_.valid) return false;
+  out = cursor_;
+  return true;
 }
 
 capture_stats capture_base::stats() const {

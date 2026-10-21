@@ -101,6 +101,10 @@ bool parse_args(int argc, char** argv, core_config& cfg, std::string& err) {
       cfg.no_compress = true;
       continue;
     }
+    if (arg == "--no-clipboard") {
+      cfg.no_clipboard = true;
+      continue;
+    }
     err = "unknown argument: " + arg;
     return false;
   }
