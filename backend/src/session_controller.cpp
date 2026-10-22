@@ -23,6 +23,44 @@ namespace {
 using uvcpp::uvcpp_json;
 using uvcpp::uvcpp_json_dump;
 
+namespace {
+
+struct clipboard_sync_state {
+  std::mutex mutex;
+  std::unordered_set<std::string> seen;
+  std::deque<std::string> order;
+  std::atomic<bool> fetch_pending{false};
+};
+
+clipboard_sync_state g_clipboard_sync;
+
+std::string clipboard_hash(const std::string& text) {
+  uint32_t hash = 2166136261u;
+  for (unsigned char byte : text) {
+    hash ^= byte;
+    hash *= 16777619u;
+  }
+  char buffer[9] = {};
+  std::snprintf(buffer, sizeof(buffer), "%08x", hash);
+  return buffer;
+}
+
+/// Returns true the first time a hash is seen; the bounded set keeps the
+/// echo suppression window small (the last 256 clipboard values).
+bool clipboard_take_hash(const std::string& hash) {
+  std::lock_guard<std::mutex> lock(g_clipboard_sync.mutex);
+  if (g_clipboard_sync.seen.count(hash) != 0) return false;
+  g_clipboard_sync.seen.insert(hash);
+  g_clipboard_sync.order.push_back(hash);
+  while (g_clipboard_sync.order.size() > 256) {
+    g_clipboard_sync.seen.erase(g_clipboard_sync.order.front());
+    g_clipboard_sync.order.pop_front();
+  }
+  return true;
+}
+
+}  // namespace
+
 uint64_t epoch_us() {
   using namespace std::chrono;
   return static_cast<uint64_t>(
@@ -742,22 +780,9 @@ void session_controller::on_text(const std::string& text) {
       return;
     }
     const std::string text = string_field(j, "text");
-    const std::string hash = string_field(j, "hash");
-    if (text.empty() || text.size() > 192 * 1024 || hash.empty()) return;
-
-    static std::mutex clip_mutex;
-    static std::unordered_set<std::string> clip_seen;
-    static std::deque<std::string> clip_order;
-    {
-      std::lock_guard<std::mutex> lock(clip_mutex);
-      if (clip_seen.count(hash) != 0) return;
-      clip_seen.insert(hash);
-      clip_order.push_back(hash);
-      while (clip_order.size() > 256) {
-        clip_seen.erase(clip_order.front());
-        clip_order.pop_front();
-      }
-    }
+    if (text.empty() || text.size() > 192 * 1024) return;
+    const std::string hash = clipboard_hash(text);
+    if (!clipboard_take_hash(hash)) return;
 
     std::string chain = string_field(j, "chain");
     const std::string& device = options_.device_id;
@@ -981,6 +1006,35 @@ void session_supervisor::run() {
       std::this_thread::sleep_for(tick);
     }
     if (!running_.load()) break;
+
+    // Push local (host) clipboard changes to every watching session. Remote
+    // updates already marked their hash before set_text, so they are skipped.
+    if (options_.clipboard && options_.clipboard->available() &&
+        registry_->has_authenticated() &&
+        !g_clipboard_sync.fetch_pending.exchange(true)) {
+      auto registry_ref = registry_;
+      auto post = options_.post;
+      const std::string device = options_.device_id;
+      options_.clipboard->request_text(
+          [registry_ref, post, device](std::string text) {
+            g_clipboard_sync.fetch_pending.store(false);
+            if (text.empty() || text.size() > 192 * 1024) return;
+            const std::string hash = clipboard_hash(text);
+            if (!clipboard_take_hash(hash)) return;
+            if (!post) return;
+            post([registry_ref, text, hash, device] {
+              for (const session_info& peer : registry_ref->snapshot()) {
+                if (!peer.authenticated || !peer.transport) continue;
+                uvcpp_json out;
+                out["type"] = "clipboard-sync";
+                out["text"] = text;
+                out["hash"] = hash;
+                out["chain"] = device;
+                send_json(peer.transport.get(), out);
+              }
+            });
+          });
+    }
 
     const uint64_t now = now_ms();
     if (options_.lock &&
