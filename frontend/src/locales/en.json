@@ -191,5 +191,16 @@
     "requestTitle": "Remote access request",
     "allow": "Allow",
     "deny": "Deny"
+  },
+  "service": {
+    "promptTitle": "Install the background service?",
+    "promptBody": "The optional service enables remote access from the lock/login screen and Windows session switching.",
+    "promptLockScreen": "Remote control on the lock screen and login page",
+    "promptSession": "List, switch to console, or log off an RDP session",
+    "promptElevation": "Installing needs administrator approval (UAC). The service starts and stops with the app.",
+    "install": "Install service",
+    "installing": "Installing…",
+    "later": "Not now",
+    "installFailed": "Service installation failed or was cancelled."
   }
 }

@@ -91,6 +91,7 @@ set(MOLINK_CORE_SOURCES
   src/identity.cpp
   src/lock_state.cpp
   src/session_registry.cpp
+  src/service_control.cpp
   src/test_pattern.cpp
   src/transport/ws_transport.cpp
   src/util.cpp

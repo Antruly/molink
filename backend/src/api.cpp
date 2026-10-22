@@ -1,5 +1,7 @@
 #include "api.h"
 
+#include "service_control.h"
+
 #ifdef _WIN32
 // libuv includes winsock2.h. Keep windows.h from pulling the old winsock.h.
 #ifndef WIN32_LEAN_AND_MEAN
@@ -764,6 +766,70 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
                                     uvcpp_web_response& resp,
                                     uvcpp_web_next) {
              windows_session_action(req, resp, "kick");
+           });
+
+  app.get("/api/service/status",
+          [](uvcpp_web_request& req, uvcpp_web_response& resp,
+             uvcpp_web_next) {
+            if (!is_loopback_peer(req.peer_ip())) {
+              resp.status(403).json_str(R"({"code":"loopback_only"})");
+              resp.end();
+              return;
+            }
+            const service_status_info status = query_session_service();
+            uvcpp_json j;
+            j["available"] = status.available;
+            j["installed"] = status.installed;
+            j["running"] = status.running;
+            if (!status.error.empty()) j["error"] = status.error;
+            resp.set_header("Cache-Control", "no-store").json(j);
+            resp.end();
+          });
+
+  auto service_action = [](uvcpp_web_request& req, uvcpp_web_response& resp,
+                           const char* action) {
+    if (!is_loopback_peer(req.peer_ip())) {
+      resp.status(403).json_str(R"({"code":"loopback_only"})");
+      resp.end();
+      return;
+    }
+    std::string err;
+    bool ok = false;
+    const std::string what(action);
+    if (what == "install") {
+      ok = install_session_service(err);
+    } else if (what == "uninstall") {
+      ok = uninstall_session_service(err);
+    } else if (what == "start") {
+      ok = start_session_service(err);
+    } else if (what == "stop") {
+      ok = stop_session_service(err);
+    }
+    uvcpp_json j;
+    j["ok"] = ok;
+    if (!err.empty()) j["error"] = err;
+    resp.status(ok ? 200 : 500).json(j);
+    resp.end();
+  };
+  app.post("/api/service/install",
+           [service_action](uvcpp_web_request& req, uvcpp_web_response& resp,
+                            uvcpp_web_next) {
+             service_action(req, resp, "install");
+           });
+  app.post("/api/service/uninstall",
+           [service_action](uvcpp_web_request& req, uvcpp_web_response& resp,
+                            uvcpp_web_next) {
+             service_action(req, resp, "uninstall");
+           });
+  app.post("/api/service/start",
+           [service_action](uvcpp_web_request& req, uvcpp_web_response& resp,
+                            uvcpp_web_next) {
+             service_action(req, resp, "start");
+           });
+  app.post("/api/service/stop",
+           [service_action](uvcpp_web_request& req, uvcpp_web_response& resp,
+                            uvcpp_web_next) {
+             service_action(req, resp, "stop");
            });
 
   app.get("/api/settings",

@@ -191,5 +191,16 @@
     "requestTitle": "远程访问请求",
     "allow": "允许",
     "deny": "拒绝"
+  },
+  "service": {
+    "promptTitle": "安装后台服务？",
+    "promptBody": "可选服务用于支持锁屏/登录页远程，以及 Windows 会话切换。",
+    "promptLockScreen": "锁屏和登录页也能远程控制",
+    "promptSession": "列出会话、切回控制台或踢 RDP 下线",
+    "promptElevation": "安装需要管理员权限（会弹出 UAC）。服务随应用启动/停止。",
+    "install": "安装服务",
+    "installing": "安装中…",
+    "later": "暂不安装",
+    "installFailed": "服务安装失败或被取消。"
   }
 }

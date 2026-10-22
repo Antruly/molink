@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.6.4] — 2026-10-22
+
+### Added
+
+- Windows 后台服务接入：便携版启动时弹窗询问是否安装；安装包新增「安装后台服务」任务（默认勾选）
+- 服务安装到 `%ProgramData%\moLink\service`，按需启动；服务 DACL 允许本机用户启动/停止，安装/卸载仍需要管理员
+- 核心启动时自动启动服务、退出时停止；锁屏/登录页远程与 Windows 会话切换的基础设施
+- 本机 API：`/api/service/status|install|start|stop|uninstall`（仅回环）
+
 ## [0.6.3] — 2026-10-22
 
 ### Fixed

@@ -274,6 +274,28 @@ export function postWindowsSession(
   )
 }
 
+export interface ServiceStatus {
+  available: boolean
+  installed: boolean
+  running: boolean
+  error?: string
+}
+
+export function fetchServiceStatus(token: string): Promise<ServiceStatus> {
+  return request<ServiceStatus>('/api/service/status', {}, token)
+}
+
+export function postServiceAction(
+  token: string,
+  action: 'install' | 'uninstall' | 'start' | 'stop',
+): Promise<{ ok: boolean; error?: string }> {
+  return request<{ ok: boolean; error?: string }>(
+    `/api/service/${action}`,
+    { method: 'POST' },
+    token,
+  )
+}
+
 export function postAccessDecision(
   token: string,
   id: number,

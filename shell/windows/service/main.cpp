@@ -291,25 +291,69 @@ void WINAPI service_main(DWORD, wchar_t**) {
   SetServiceStatus(g_status, &g_service_status);
 }
 
-bool install_service() {
-  SC_HANDLE manager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CREATE_SERVICE);
-  if (manager == nullptr) return false;
+std::wstring program_data_service_dir() {
+  wchar_t base[MAX_PATH * 2] = {};
+  const DWORD length = GetEnvironmentVariableW(L"ProgramData", base,
+                                               static_cast<DWORD>(std::size(base)));
+  if (length == 0 || length >= std::size(base)) return std::wstring();
+  return std::wstring(base) + L"\\moLink\\service";
+}
+
+std::wstring module_path() {
   wchar_t path[MAX_PATH * 4] = {};
   GetModuleFileNameW(nullptr, path, static_cast<DWORD>(std::size(path)));
+  return path;
+}
+
+bool install_service() {
+  const std::wstring source = module_path();
+  const std::size_t slash = source.find_last_of(L"\\/");
+  const std::wstring install_dir = program_data_service_dir();
+  if (source.empty() || install_dir.empty()) return false;
+  const std::size_t parent_cut = install_dir.find_last_of(L"\\");
+  if (parent_cut != std::wstring::npos) {
+    CreateDirectoryW(install_dir.substr(0, parent_cut).c_str(), nullptr);
+  }
+  CreateDirectoryW(install_dir.c_str(), nullptr);
+  const std::wstring target = install_dir + L"\\molink-service.exe";
+  if (_wcsicmp(source.c_str(), target.c_str()) != 0) {
+    if (!CopyFileW(source.c_str(), target.c_str(), FALSE)) return false;
+    if (slash != std::wstring::npos) {
+      const std::wstring helper_src = source.substr(0, slash + 1) +
+                                      L"molink-helper.exe";
+      const std::wstring helper_dst = install_dir + L"\\molink-helper.exe";
+      CopyFileW(helper_src.c_str(), helper_dst.c_str(), FALSE);
+    }
+  }
+  SC_HANDLE manager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CREATE_SERVICE);
+  if (manager == nullptr) return false;
   SC_HANDLE service = CreateServiceW(
       manager, kServiceName, L"moLink session helper",
-      SERVICE_ALL_ACCESS, SERVICE_WIN32_OWN_PROCESS, SERVICE_AUTO_START,
-      SERVICE_ERROR_NORMAL, path, nullptr, nullptr, nullptr, nullptr, nullptr);
+      SERVICE_ALL_ACCESS, SERVICE_WIN32_OWN_PROCESS, SERVICE_DEMAND_START,
+      SERVICE_ERROR_NORMAL, target.c_str(), nullptr, nullptr, nullptr, nullptr,
+      nullptr);
   if (service == nullptr && GetLastError() == ERROR_SERVICE_EXISTS) {
     service = OpenServiceW(manager, kServiceName, SERVICE_ALL_ACCESS);
+    if (service != nullptr) {
+      ChangeServiceConfigW(service, SERVICE_NO_CHANGE, SERVICE_DEMAND_START,
+                           SERVICE_NO_CHANGE, target.c_str(), nullptr, nullptr,
+                           nullptr, nullptr, nullptr, L"moLink session helper");
+    }
   }
   if (service == nullptr) {
     CloseServiceHandle(manager);
     return false;
   }
-  ChangeServiceConfigW(service, SERVICE_NO_CHANGE, SERVICE_AUTO_START,
-                       SERVICE_NO_CHANGE, nullptr, nullptr, nullptr, nullptr,
-                       nullptr, nullptr, L"moLink session helper");
+  // Let the interactive user start/stop the service from the app without an
+  // elevation prompt every time. Install and uninstall still require admin.
+  PSECURITY_DESCRIPTOR descriptor = nullptr;
+  if (ConvertStringSecurityDescriptorToSecurityDescriptorW(
+          L"D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCLCSWRPWPDTLOCRRC;;;BA)"
+          L"(A;;CCLCSWRPWPDTLOCRRC;;;IU)",
+          SDDL_REVISION_1, &descriptor, nullptr)) {
+    SetServiceObjectSecurity(service, DACL_SECURITY_INFORMATION, descriptor);
+    LocalFree(descriptor);
+  }
   CloseServiceHandle(service);
   CloseServiceHandle(manager);
   return true;
@@ -328,6 +372,12 @@ bool uninstall_service() {
   const bool ok = DeleteService(service) != 0;
   CloseServiceHandle(service);
   CloseServiceHandle(manager);
+  const std::wstring dir = program_data_service_dir();
+  if (!dir.empty()) {
+    DeleteFileW((dir + L"\\molink-service.exe").c_str());
+    DeleteFileW((dir + L"\\molink-helper.exe").c_str());
+    RemoveDirectoryW(dir.c_str());
+  }
   return ok;
 }
 

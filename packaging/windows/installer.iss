@@ -1,7 +1,7 @@
 ; moLink Windows installer (Inno Setup 6).
 ;
 ; Build with:
-;   ISCC.exe /DAppVersion=0.6.3 \
+;   ISCC.exe /DAppVersion=0.6.4 \
 ;            /DPkgDir=C:\path\to\staged\pkg \
 ;            /DOutputDir=C:\path\to\build\package \
 ;            installer.iss
@@ -14,7 +14,7 @@
 ; add a rule; Windows prompts on first LAN listen instead.
 
 #ifndef AppVersion
-  #define AppVersion "0.6.3"
+  #define AppVersion "0.6.4"
 #endif
 #ifndef PkgDir
   #error PkgDir must point at the staged package directory
@@ -63,6 +63,7 @@ Name: "chinesesimplified"; MessagesFile: "{#LangFile}"
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 Name: "firewall"; Description: "Allow moLink through Windows Firewall (private and domain networks)"; GroupDescription: "Network access"
+Name: "service"; Description: "安装 moLink 后台服务（支持锁屏/登录页远程）"; GroupDescription: "后台服务"; Flags: checkedonce
 
 [Files]
 Source: "{#PkgDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -74,7 +75,9 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; WorkingDir: "
 [Run]
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""moLink"""; Flags: runhidden; Tasks: firewall
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""moLink"" dir=in action=allow program=""{app}\molink-core.exe"" profile=private,domain enable=yes"; Flags: runhidden; Tasks: firewall
+Filename: "{app}\molink-service.exe"; Parameters: "--install"; Flags: runhidden waituntilterminated; Tasks: service
 Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
+Filename: "{app}\molink-service.exe"; Parameters: "--uninstall"; Flags: runhidden waituntilterminated
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""moLink"""; Flags: runhidden

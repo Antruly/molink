@@ -26,6 +26,7 @@
 #include "session_registry.h"
 #include "util.h"
 #include "version.h"
+#include "service_control.h"
 #include "session_controller.h"
 #include "transport/ws_transport.h"
 
@@ -385,7 +386,10 @@ int main(int argc, char** argv) {
   std::signal(SIGINT, on_signal);
   std::signal(SIGTERM, on_signal);
 
+  std::string service_error;
+  start_session_service(service_error);
   const int rc = app.start();
+  stop_session_service(service_error);
   if (rc != 0) {
     // Stop capture before returning: its thread owns a joinable std::thread,
     // and unwinding past it would call std::terminate.

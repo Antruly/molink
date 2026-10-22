@@ -6,6 +6,7 @@ import { AuthGate } from './components/AuthGate'
 import { HomeView } from './components/HomeView'
 import { Logo } from './components/Logo'
 import { AccessRequestDialog } from './components/AccessRequestDialog'
+import { ServicePrompt } from './components/ServicePrompt'
 import { ResizeFrame } from './components/ResizeFrame'
 import { SessionView } from './components/SessionView'
 import { SettingsPanel } from './components/SettingsPanel'
@@ -126,6 +127,7 @@ export default function App() {
       <TitleBar />
       <ResizeFrame />
       <AccessRequestDialog />
+      <ServicePrompt />
 
       {authPhase === 'booting' ? (
         <BootSplash />
