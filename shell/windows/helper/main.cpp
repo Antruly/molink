@@ -48,6 +48,35 @@ bool open_input_desktop(std::string& err) {
   return true;
 }
 
+bool refresh_input_desktop() {
+  HDESK current = OpenInputDesktop(0, FALSE, DESKTOP_READOBJECTS |
+                                             DESKTOP_WRITEOBJECTS |
+                                             DESKTOP_SWITCHDESKTOP);
+  if (current == nullptr) return false;
+  if (g_desktop == nullptr) {
+    g_desktop = current;
+    return SetThreadDesktop(current) != 0;
+  }
+  wchar_t old_name[256] = {};
+  wchar_t new_name[256] = {};
+  DWORD needed = 0;
+  GetUserObjectInformationW(g_desktop, UOI_NAME, old_name, sizeof(old_name),
+                            &needed);
+  GetUserObjectInformationW(current, UOI_NAME, new_name, sizeof(new_name),
+                            &needed);
+  if (_wcsicmp(old_name, new_name) == 0) {
+    CloseDesktop(current);
+    return true;
+  }
+  if (!SetThreadDesktop(current)) {
+    CloseDesktop(current);
+    return false;
+  }
+  CloseDesktop(g_desktop);
+  g_desktop = current;
+  return true;
+}
+
 std::string desktop_json() {
   wchar_t name[256] = {};
   DWORD needed = 0;
@@ -125,6 +154,7 @@ void send_unicode(const std::wstring& text) {
 
 std::string handle_line(const std::string& line, std::vector<uint8_t>& frame,
                         int& width, int& height) {
+  if (line != "quit") refresh_input_desktop();
   if (line == "info") return desktop_json();
   if (line == "capture") {
     std::string err;
@@ -161,6 +191,43 @@ std::string handle_line(const std::string& line, std::vector<uint8_t>& frame,
     SendInput(1, &input, sizeof(input));
     return R"({"ok":true})";
   }
+  if (line.rfind("wheel ", 0) == 0) {
+    int dx = 0;
+    int dy = 0;
+    std::sscanf(line.c_str(), "wheel %d %d", &dx, &dy);
+    if (dy != 0) {
+      INPUT input{};
+      input.type = INPUT_MOUSE;
+      input.mi.dwFlags = MOUSEEVENTF_WHEEL;
+      input.mi.mouseData = static_cast<DWORD>(dy * WHEEL_DELTA);
+      SendInput(1, &input, sizeof(input));
+    }
+    if (dx != 0) {
+      INPUT input{};
+      input.type = INPUT_MOUSE;
+      input.mi.dwFlags = MOUSEEVENTF_HWHEEL;
+      input.mi.mouseData = static_cast<DWORD>(dx * WHEEL_DELTA);
+      SendInput(1, &input, sizeof(input));
+    }
+    return R"({"ok":true})";
+  }
+  if (line == "release-all") {
+    for (WORD vk : {VK_SHIFT, VK_CONTROL, VK_MENU, VK_LWIN, VK_RWIN}) {
+      INPUT input{};
+      input.type = INPUT_KEYBOARD;
+      input.ki.wVk = vk;
+      input.ki.dwFlags = KEYEVENTF_KEYUP;
+      SendInput(1, &input, sizeof(input));
+    }
+    for (DWORD flag : {MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEUP,
+                       MOUSEEVENTF_RIGHTUP}) {
+      INPUT input{};
+      input.type = INPUT_MOUSE;
+      input.mi.dwFlags = flag;
+      SendInput(1, &input, sizeof(input));
+    }
+    return R"({"ok":true})";
+  }
   if (line.rfind("key ", 0) == 0) {
     int vk = 0;
     int down = 1;
@@ -193,8 +260,8 @@ void pipe_loop(std::atomic<bool>& running) {
   while (running.load()) {
     HANDLE pipe = CreateNamedPipeW(
         kPipeName, PIPE_ACCESS_DUPLEX,
-        PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT, 1, 8 * 1024 * 1024,
-        8 * 1024 * 1024, 0, &attributes);
+        PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT, 1,
+        64 * 1024 * 1024, 64 * 1024 * 1024, 0, &attributes);
     if (pipe == INVALID_HANDLE_VALUE) {
       Sleep(500);
       continue;

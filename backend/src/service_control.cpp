@@ -48,6 +48,17 @@ bool run_elevated(const wchar_t* verb, const std::string& args,
 
 }  // namespace
 
+bool running_in_console_session() {
+#if defined(_WIN32)
+  DWORD session = 0;
+  const DWORD console = WTSGetActiveConsoleSessionId();
+  return ProcessIdToSessionId(GetCurrentProcessId(), &session) != 0 &&
+         session == console;
+#else
+  return false;
+#endif
+}
+
 service_status_info query_session_service() {
   service_status_info info;
 #if defined(_WIN32)

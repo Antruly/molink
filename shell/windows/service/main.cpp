@@ -112,6 +112,54 @@ bool client_is_elevated(HANDLE pipe) {
   return elevated;
 }
 
+bool launch_helper(std::string& err) {
+  if (g_helper.hProcess != nullptr) return true;
+  DWORD session = WTSGetActiveConsoleSessionId();
+  if (session == 0xFFFFFFFF) {
+    err = "no active console session";
+    return false;
+  }
+  // Use the service's own SYSTEM token. WTSQueryUserToken fails at the login
+  // screen because no user is logged on yet.
+  HANDLE process_token = nullptr;
+  if (!OpenProcessToken(GetCurrentProcess(),
+                        TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY | TOKEN_QUERY,
+                        &process_token)) {
+    err = "OpenProcessToken failed";
+    return false;
+  }
+  HANDLE token = nullptr;
+  const BOOL duplicated = DuplicateTokenEx(
+      process_token, MAXIMUM_ALLOWED, nullptr, SecurityImpersonation,
+      TokenPrimary, &token);
+  CloseHandle(process_token);
+  if (!duplicated) {
+    err = "DuplicateTokenEx failed";
+    return false;
+  }
+  SetTokenInformation(token, TokenSessionId, &session, sizeof(session));
+  wchar_t path[MAX_PATH * 4] = {};
+  GetModuleFileNameW(nullptr, path, static_cast<DWORD>(std::size(path)));
+  std::wstring helper(path);
+  const std::size_t slash = helper.find_last_of(L"\\/");
+  helper = (slash == std::wstring::npos ? std::wstring()
+                                        : helper.substr(0, slash + 1)) +
+           L"molink-helper.exe";
+  STARTUPINFOW startup{};
+  startup.cb = sizeof(startup);
+  startup.lpDesktop = const_cast<wchar_t*>(L"winsta0\\default");
+  const BOOL created = CreateProcessAsUserW(
+      token, helper.c_str(), nullptr, nullptr, nullptr, FALSE,
+      CREATE_NEW_PROCESS_GROUP | CREATE_UNICODE_ENVIRONMENT, nullptr, nullptr,
+      &startup, &g_helper);
+  CloseHandle(token);
+  if (!created) {
+    err = "CreateProcessAsUser failed";
+    return false;
+  }
+  return true;
+}
+
 std::string handle_command(HANDLE pipe, const std::string& line) {
   std::istringstream input(line);
   std::string command;
@@ -134,43 +182,9 @@ std::string handle_command(HANDLE pipe, const std::string& line) {
     return R"({"ok":true})";
   }
   if (command == "secure-start") {
-    if (g_helper.hProcess != nullptr) {
-      return R"({"ok":true,"already_running":true})";
-    }
-    DWORD session = WTSGetActiveConsoleSessionId();
-    if (session == 0xFFFFFFFF) {
-      return R"({"ok":false,"error":"no active console session"})";
-    }
-    HANDLE user = nullptr;
-    if (!WTSQueryUserToken(session, &user)) {
-      return R"({"ok":false,"error":"WTSQueryUserToken failed"})";
-    }
-    HANDLE token = nullptr;
-    const BOOL duplicated = DuplicateTokenEx(
-        user, MAXIMUM_ALLOWED, nullptr, SecurityImpersonation, TokenPrimary,
-        &token);
-    CloseHandle(user);
-    if (!duplicated) {
-      return R"({"ok":false,"error":"DuplicateTokenEx failed"})";
-    }
-    SetTokenInformation(token, TokenSessionId, &session, sizeof(session));
-    wchar_t path[MAX_PATH * 4] = {};
-    GetModuleFileNameW(nullptr, path, static_cast<DWORD>(std::size(path)));
-    std::wstring helper(path);
-    const std::size_t slash = helper.find_last_of(L"\\/");
-    helper = (slash == std::wstring::npos ? std::wstring()
-                                          : helper.substr(0, slash + 1)) +
-             L"molink-helper.exe";
-    STARTUPINFOW startup{};
-    startup.cb = sizeof(startup);
-    startup.lpDesktop = const_cast<wchar_t*>(L"winsta0\\default");
-    const BOOL created = CreateProcessAsUserW(
-        token, helper.c_str(), nullptr, nullptr, nullptr, FALSE,
-        CREATE_NEW_PROCESS_GROUP | CREATE_UNICODE_ENVIRONMENT, nullptr, nullptr,
-        &startup, &g_helper);
-    CloseHandle(token);
-    if (!created) {
-      return R"({"ok":false,"error":"CreateProcessAsUser failed"})";
+    std::string err;
+    if (!launch_helper(err)) {
+      return R"({"ok":false,"error":"helper_launch_failed"})";
     }
     char reply[96] = {};
     std::snprintf(reply, sizeof(reply), R"({"ok":true,"pid":%lu})",
@@ -282,10 +296,18 @@ void WINAPI service_main(DWORD, wchar_t**) {
   SetServiceStatus(g_status, &g_service_status);
   g_stop_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
   report_running();
+  std::string helper_error;
+  launch_helper(helper_error);
   std::thread pipe_thread(pipe_server);
   WaitForSingleObject(g_stop_event, INFINITE);
   g_running.store(false);
   pipe_thread.join();
+  if (g_helper.hProcess != nullptr) {
+    TerminateProcess(g_helper.hProcess, 0);
+    CloseHandle(g_helper.hThread);
+    CloseHandle(g_helper.hProcess);
+    g_helper = PROCESS_INFORMATION{};
+  }
   if (g_stop_event != nullptr) CloseHandle(g_stop_event);
   g_service_status.dwCurrentState = SERVICE_STOPPED;
   SetServiceStatus(g_status, &g_service_status);

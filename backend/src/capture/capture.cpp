@@ -1,5 +1,10 @@
 #include "capture/capture.h"
 
+#if defined(_WIN32)
+#include "capture/windows_secure_capture.h"
+#include "service_control.h"
+#endif
+
 #include <algorithm>
 #include <thread>
 #include <utility>
@@ -163,6 +168,19 @@ std::shared_ptr<capture_source> start_capture(const capture_options& options,
                                               std::string& note) {
   if (allow_display) {
 #if defined(_WIN32)
+    // When the session service is installed it launches a SYSTEM helper in the
+    // active console session; that helper can also see the Winlogon desktop.
+    if (query_session_service().installed && running_in_console_session()) {
+      std::unique_ptr<capture_source> secure =
+          make_windows_secure_capture(options);
+      if (secure) {
+        std::string secure_error;
+        if (secure->start(secure_error)) {
+          note = "capture: secure-desktop";
+          return secure;
+        }
+      }
+    }
     std::unique_ptr<capture_source> windows = make_windows_capture(options);
     if (windows) {
       std::string err;

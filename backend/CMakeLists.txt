@@ -76,6 +76,7 @@ set(MOLINK_CORE_SOURCES
   src/capture/synthetic_capture.cpp
   src/capture/x11_capture.cpp
   src/capture/windows_capture.cpp
+  src/capture/windows_secure_capture.cpp
   src/capture/frame_encode.cpp
   src/clipboard/x11_clipboard.cpp
   src/clipboard/windows_clipboard.cpp
@@ -86,6 +87,7 @@ set(MOLINK_CORE_SOURCES
   src/settings.cpp
   src/input/x11_input.cpp
   src/input/windows_input.cpp
+  src/input/windows_secure_input.cpp
   src/input/macos_input.cpp
   src/config.cpp
   src/identity.cpp

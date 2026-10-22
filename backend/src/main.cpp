@@ -23,6 +23,9 @@
 #include "lock_state.h"
 #include "network_settings.h"
 #include "input/input.h"
+#if defined(_WIN32)
+#include "input/windows_secure_input.h"
+#endif
 #include "session_registry.h"
 #include "util.h"
 #include "version.h"
@@ -221,6 +224,10 @@ int main(int argc, char** argv) {
                         : choose_tile_size();
   capture_opts.change_threshold = cfg.change_threshold;
   capture_opts.compress = !cfg.no_compress;
+  // Start the optional session service first: it launches the secure-desktop
+  // helper, which start_capture() may prefer over DXGI.
+  std::string service_error;
+  start_session_service(service_error);
   std::string capture_note;
   std::shared_ptr<capture_source> capture =
       start_capture(capture_opts, !cfg.no_capture, capture_note);
@@ -273,7 +280,11 @@ int main(int argc, char** argv) {
   if (!cfg.no_input) {
     std::string input_error;
 #if defined(_WIN32)
-    std::unique_ptr<input_injector> created = make_windows_input(input_error);
+    std::unique_ptr<input_injector> created;
+    if (capture->backend() == "secure-desktop") {
+      created = make_windows_secure_input();
+    }
+    if (!created) created = make_windows_input(input_error);
 #elif defined(__APPLE__)
     std::unique_ptr<input_injector> created = make_macos_input(input_error);
 #else
@@ -386,8 +397,6 @@ int main(int argc, char** argv) {
   std::signal(SIGINT, on_signal);
   std::signal(SIGTERM, on_signal);
 
-  std::string service_error;
-  start_session_service(service_error);
   const int rc = app.start();
   stop_session_service(service_error);
   if (rc != 0) {
