@@ -137,6 +137,12 @@ jobs:
             -DWEBVIEW2_SDK="$(cygpath -w "$GITHUB_WORKSPACE/wv2")"
           cmake --build shell/windows/build --config Release --parallel
 
+      - name: Build experimental session service
+        shell: bash
+        run: |
+          cmake -S shell/windows/service -B shell/windows/service/build
+          cmake --build shell/windows/service/build --config Release --parallel
+
       - name: Stage and build packages
         shell: bash
         run: |
