@@ -533,6 +533,7 @@ void session_controller::approve_access_request() {
   session->access_request_id = 0;
   registry_->set_awaiting_approval(session, false);
   registry_->set_authenticated(session);
+  registry_->touch(*session);
   if (options_.capture) options_.capture->set_active(true);
   send_welcome_message();
 }
@@ -1116,7 +1117,11 @@ void session_supervisor::run() {
           const uint32_t id = s.id;
           app_.post([registry = registry_, id] {
             const auto live = registry->find(id);
-            if (live && live->transport) {
+            if (!live) return;
+            // Remove before closing so a recycled transport cannot be closed
+            // again by the next supervisor tick.
+            registry->remove(id);
+            if (live->transport) {
               live->transport->close(transport_close::policy,
                                      "hello timeout");
             }
@@ -1139,12 +1144,17 @@ void session_supervisor::run() {
         });
       }
 
-      if (now - s.last_seen_ms >
-          static_cast<uint64_t>(options_.idle_close_ms)) {
+      if (!s.awaiting_approval &&
+          now - s.last_seen_ms >
+              static_cast<uint64_t>(options_.idle_close_ms)) {
         const uint32_t id = s.id;
         app_.post([registry = registry_, id] {
           const auto live = registry->find(id);
-          if (live && live->transport) {
+          if (!live) return;
+          // Drop the record first: libuvcpp may recycle the connection object
+          // for a later handshake, and a stale close would hit the new peer.
+          registry->remove(id);
+          if (live->transport) {
             live->transport->close(transport_close::going_away,
                                    "idle timeout");
           }
