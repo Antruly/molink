@@ -99,7 +99,15 @@
     "customMultiHint": "至少 4 位；次数用完后会自动更换新码。",
     "uses": "次数",
     "allowAccessRequests": "允许免密远程请求",
-    "allowAccessRequestsHint": "对方没有验证码时可以发出请求，每次仍需你手动同意。默认开启。"
+    "allowAccessRequestsHint": "对方没有验证码时可以发出请求，每次仍需你手动同意。默认开启。",
+    "windowsSessions": "Windows 会话",
+    "windowsSessionsHint": "实验性：通过 molink-service 枚举。切换控制台或踢 RDP 需要管理员权限。",
+    "windowsServiceMissing": "molink-service 未运行，请以管理员身份安装（见 shell/windows/service/README.md）。",
+    "windowsAdminRequired": "该操作需要管理员权限。",
+    "windowsNoSessions": "没有可显示的会话。",
+    "windowsSwitchConsole": "切到控制台",
+    "windowsKick": "踢下线",
+    "refresh": "刷新"
   },
   "session": {
     "connecting": "连接中…",

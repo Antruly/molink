@@ -13,6 +13,7 @@ import { useTranslation } from 'react-i18next'
 import { setLanguage } from '../i18n'
 import type { ServerState } from '../lib/api'
 import { useAppStore, type QualityMode, type Theme } from '../store/app'
+import { WindowsSessionsPanel } from './WindowsSessionsPanel'
 
 function Segment<T extends string>({
   value,
@@ -170,6 +171,7 @@ export function PreferencesControls() {
   const lockTimeout = useAppStore((state) => state.lockTimeout)
   const setLockTimeout = useAppStore((state) => state.setLockTimeout)
   const server = useAppStore((state) => state.server)
+  const token = useAppStore((state) => state.token)
   const setNetworkPorts = useAppStore((state) => state.setNetworkPorts)
   const language = i18n.language.startsWith('zh') ? 'zh-CN' : 'en'
 
@@ -275,6 +277,8 @@ export function PreferencesControls() {
           onSave={setNetworkPorts}
         />
       ) : null}
+
+      {server?.local ? <WindowsSessionsPanel token={token} /> : null}
 
       <div className="space-y-2">
         <div className="flex items-center gap-2 text-[12px] font-medium text-ink">

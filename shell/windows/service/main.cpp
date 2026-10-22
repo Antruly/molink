@@ -94,11 +94,32 @@ std::string session_json() {
   return out.str();
 }
 
-std::string handle_command(const std::string& line) {
+bool client_is_elevated(HANDLE pipe) {
+  if (!ImpersonateNamedPipeClient(pipe)) return false;
+  HANDLE token = nullptr;
+  bool elevated = false;
+  if (OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &token)) {
+    TOKEN_ELEVATION elevation{};
+    DWORD size = 0;
+    if (GetTokenInformation(token, TokenElevation, &elevation,
+                            sizeof(elevation), &size)) {
+      elevated = elevation.TokenIsElevated != 0;
+    }
+    CloseHandle(token);
+  }
+  RevertToSelf();
+  return elevated;
+}
+
+std::string handle_command(HANDLE pipe, const std::string& line) {
   std::istringstream input(line);
   std::string command;
   input >> command;
   if (command == "sessions") return session_json();
+  if ((command == "kick" || command == "switch") &&
+      !client_is_elevated(pipe)) {
+    return R"({"ok":false,"error":"admin_required"})";
+  }
   if (command == "kick") {
     DWORD session_id = 0;
     input >> session_id;
@@ -166,7 +187,8 @@ void pipe_server() {
   // SYSTEM and Administrators only. Do not expose session switching to an
   // unprivileged interactive process.
   ConvertStringSecurityDescriptorToSecurityDescriptorW(
-      L"D:P(A;;GA;;;SY)(A;;GA;;;BA)", SDDL_REVISION_1, &attributes.lpSecurityDescriptor,
+      L"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)", SDDL_REVISION_1,
+      &attributes.lpSecurityDescriptor,
       nullptr);
   while (g_running.load()) {
     HANDLE pipe = CreateNamedPipeW(
@@ -184,7 +206,7 @@ void pipe_server() {
       DWORD read = 0;
       if (ReadFile(pipe, buffer, sizeof(buffer) - 1, &read, nullptr) && read > 0) {
         buffer[read] = '\0';
-        std::string reply = handle_command(buffer);
+        std::string reply = handle_command(pipe, buffer);
         DWORD written = 0;
         WriteFile(pipe, reply.data(), static_cast<DWORD>(reply.size()),
                   &written, nullptr);

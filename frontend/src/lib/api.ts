@@ -242,6 +242,38 @@ export function postSettings(
   )
 }
 
+export interface WindowsSession {
+  id: number
+  state: number
+  station: string
+  user: string
+}
+
+export interface WindowsSessionsResult {
+  ok: boolean
+  available?: boolean
+  error?: string
+  sessions?: WindowsSession[]
+}
+
+export function fetchWindowsSessions(
+  token: string,
+): Promise<WindowsSessionsResult> {
+  return request<WindowsSessionsResult>('/api/windows/sessions', {}, token)
+}
+
+export function postWindowsSession(
+  token: string,
+  action: 'switch' | 'kick',
+  id: number,
+): Promise<{ ok: boolean; error?: string }> {
+  return request<{ ok: boolean; error?: string }>(
+    `/api/windows/session/${action}?id=${id}`,
+    { method: 'POST' },
+    token,
+  )
+}
+
 export function postAccessDecision(
   token: string,
   id: number,

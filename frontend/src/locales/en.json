@@ -99,7 +99,15 @@
     "customMultiHint": "4+ characters. The code rotates automatically after its uses run out.",
     "uses": "Uses",
     "allowAccessRequests": "Approve remote requests",
-    "allowAccessRequestsHint": "A remote user without a code can ask for access; you still approve every session. Enabled by default."
+    "allowAccessRequestsHint": "A remote user without a code can ask for access; you still approve every session. Enabled by default.",
+    "windowsSessions": "Windows sessions",
+    "windowsSessionsHint": "Experimental: uses molink-service. Switching console or kicking RDP requires administrator rights.",
+    "windowsServiceMissing": "molink-service is not running. Install it as administrator (see shell/windows/service/README.md).",
+    "windowsAdminRequired": "Administrator rights are required for this action.",
+    "windowsNoSessions": "No sessions reported.",
+    "windowsSwitchConsole": "To console",
+    "windowsKick": "Log off",
+    "refresh": "Refresh"
   },
   "session": {
     "connecting": "Connecting…",

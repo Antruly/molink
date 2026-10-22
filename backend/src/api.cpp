@@ -1,5 +1,9 @@
 #include "api.h"
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 #include <cstdint>
 #include <cstdlib>
 #include <string>
@@ -24,6 +28,34 @@
 
 namespace molink {
 namespace {
+
+/// Ask the experimental LocalSystem session service. Returns a JSON string
+/// produced by the service, or an unavailable marker on other platforms.
+std::string windows_session_command(const std::string& command) {
+#ifdef _WIN32
+  HANDLE pipe = CreateFileW(L"\\\\.\\pipe\\molink-session",
+                            GENERIC_READ | GENERIC_WRITE, 0, nullptr,
+                            OPEN_EXISTING, 0, nullptr);
+  if (pipe == INVALID_HANDLE_VALUE) {
+    return R"({"ok":false,"available":false,"error":"service_unavailable"})";
+  }
+  DWORD mode = PIPE_READMODE_MESSAGE;
+  SetNamedPipeHandleState(pipe, &mode, nullptr, nullptr);
+  DWORD written = 0;
+  WriteFile(pipe, command.data(), static_cast<DWORD>(command.size()), &written,
+            nullptr);
+  char buffer[64 * 1024] = {};
+  DWORD read = 0;
+  ReadFile(pipe, buffer, sizeof(buffer) - 1, &read, nullptr);
+  CloseHandle(pipe);
+  return read > 0 ? std::string(buffer, read)
+                  : R"({"ok":false,"error":"no_response"})";
+#else
+  (void)command;
+  return R"({"ok":false,"available":false,"error":"windows_only"})";
+#endif
+}
+
 
 using uvcpp::uvcpp_json;
 using uvcpp::uvcpp_web_next;
@@ -682,6 +714,51 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
            [access_decision](uvcpp_web_request& req, uvcpp_web_response& resp,
                              uvcpp_web_next) {
              access_decision(req, resp, false);
+           });
+
+  app.get("/api/windows/sessions",
+          [](uvcpp_web_request& req, uvcpp_web_response& resp,
+             uvcpp_web_next) {
+            if (!is_loopback_peer(req.peer_ip())) {
+              resp.status(403).json_str(R"({"code":"loopback_only"})");
+              resp.end();
+              return;
+            }
+            resp.set_header("Cache-Control", "no-store")
+                .json_str(windows_session_command("sessions"));
+            resp.end();
+          });
+
+  auto windows_session_action = [](uvcpp_web_request& req,
+                                   uvcpp_web_response& resp,
+                                   const char* action) {
+    if (!is_loopback_peer(req.peer_ip())) {
+      resp.status(403).json_str(R"({"code":"loopback_only"})");
+      resp.end();
+      return;
+    }
+    const std::string* raw = req.query("id");
+    const std::string id = raw != nullptr ? *raw : std::string();
+    if (id.empty() || id.find_first_not_of("0123456789") != std::string::npos) {
+      resp.status(400).json_str(R"({"ok":false,"error":"bad_session_id"})");
+      resp.end();
+      return;
+    }
+    resp.set_header("Cache-Control", "no-store")
+        .json_str(windows_session_command(std::string(action) + " " + id));
+    resp.end();
+  };
+  app.post("/api/windows/session/switch",
+           [windows_session_action](uvcpp_web_request& req,
+                                    uvcpp_web_response& resp,
+                                    uvcpp_web_next) {
+             windows_session_action(req, resp, "switch");
+           });
+  app.post("/api/windows/session/kick",
+           [windows_session_action](uvcpp_web_request& req,
+                                    uvcpp_web_response& resp,
+                                    uvcpp_web_next) {
+             windows_session_action(req, resp, "kick");
            });
 
   app.get("/api/settings",

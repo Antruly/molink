@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.6.0] — 2026-10-22
+
+### Added
+
+- 实时剪贴板（文本）：核心转发、被控端剪贴板 watcher、内容 hash 去重、套娃链防回环；连接时默认以控制端剪贴板为准
+- 显示器分辨率切换：会话工具栏选择分辨率，Windows 通过 `ChangeDisplaySettingsEx` 应用
+- 实验性 Windows 会话服务 `molink-service`：WTS 会话枚举、`tscon` 切回控制台、踢 RDP；设置页「Windows 会话」列表；控制类操作要求管理员权限
+- Windows 会话/虚拟显示器/剪贴板实施文档
+
+### Experimental / limitations
+
+- 锁屏、UAC、Winlogon 安全桌面的抓屏与输入**尚未实现**；`molink-service` 未在 Windows 真机验证
+- 创建虚拟显示器仍需 IddCx 内核驱动；当前只支持在已有输出上切换分辨率
+- 实时剪贴板暂支持文本；图片/文件与 RDP 真机共存待验证
+
 ## [0.5.1] — 2026-10-22
 
 ### Added
