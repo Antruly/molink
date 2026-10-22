@@ -70,7 +70,7 @@ uint64_t epoch_us() {
 
 /// Replaying more than this means the client is hopelessly behind; a keyframe
 /// is cheaper than shipping dozens of deltas it will render in one go.
-constexpr uint32_t kMaxReplayFrames = 60;
+constexpr uint32_t kMaxReplayFrames = 120;
 
 const char* codec_name(uint8_t codec) {
   switch (static_cast<protocol::codec>(codec)) {
@@ -311,16 +311,29 @@ void send_capture_frame(session_transport* transport,
   }
 
   if (!session->has_image) {
-    if (latest->keyframe) {
-      session->has_image = true;
-      session->last_capture_seq = latest->seq;
-      send_frame_payload(transport, session, protocol::kPacketFlagKeyframe,
-                         latest->ts_us, latest->payload);
+    // The newest frame is usually a delta. Look back through the short
+    // capture history for the keyframe instead of waiting for a fresh one;
+    // otherwise a client that misses the exact keyframe moment keeps getting
+    // empty frames.
+    int64_t start_seq = latest->keyframe ? static_cast<int64_t>(latest->seq)
+                                         : -1;
+    if (start_seq < 0) {
+      for (uint32_t back = 0;
+           back < kMaxReplayFrames && latest->seq >= back; ++back) {
+        const auto candidate = opt.capture->find(latest->seq - back);
+        if (candidate && candidate->keyframe) {
+          start_seq = candidate->seq;
+          break;
+        }
+      }
+    }
+    if (start_seq < 0) {
+      opt.capture->request_keyframe();
+      send_empty_frame(transport, session, latest->width, latest->height,
+                       false);
       return;
     }
-    opt.capture->request_keyframe();
-    send_empty_frame(transport, session, latest->width, latest->height, false);
-    return;
+    session->last_capture_seq = start_seq - 1;
   }
 
   const int64_t last = session->last_capture_seq;
