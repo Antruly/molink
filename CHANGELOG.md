@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.6.6] — 2026-10-23
+
+### Fixed
+
+- Windows 构建：安全桌面采集/输入源未定义 `NOMINMAX`，`windows.h` 的 `min`/`max` 宏破坏了 `std::min`/`std::max`；修复后 0.6.5 的锁屏接入可以正常编译
+
 ## [0.6.5] — 2026-10-23
 
 ### Added
