@@ -100,6 +100,23 @@ class windows_capture final : public capture_base {
     return true;
   }
 
+  bool set_display_mode(uint16_t width, uint16_t height) override {
+    const display_info info = current_display_info();
+    if (info.name.empty() || width == 0 || height == 0) return false;
+    const std::wstring device(info.name.begin(), info.name.end());
+    DEVMODEW mode{};
+    mode.dmSize = sizeof(mode);
+    if (!EnumDisplaySettingsExW(device.c_str(), ENUM_CURRENT_SETTINGS, &mode, 0)) {
+      return false;
+    }
+    mode.dmPelsWidth = width;
+    mode.dmPelsHeight = height;
+    mode.dmFields |= DM_PELSWIDTH | DM_PELSHEIGHT;
+    const LONG result = ChangeDisplaySettingsExW(
+        device.c_str(), &mode, nullptr, CDS_UPDATEREGISTRY, nullptr);
+    return result == DISP_CHANGE_SUCCESSFUL;
+  }
+
  private:
   void thread_main(std::promise<std::string>& ready) {
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);

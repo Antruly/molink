@@ -134,7 +134,8 @@
     "qualityBalanced": "Balanced",
     "qualityHigh": "Quality",
     "qualityAuto": "Auto",
-    "waitingApproval": "Waiting for the host to approve…"
+    "waitingApproval": "Waiting for the host to approve…",
+    "resolution": "Resolution"
   },
   "stats": {
     "fps": "FPS",

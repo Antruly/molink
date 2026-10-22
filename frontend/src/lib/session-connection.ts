@@ -218,6 +218,10 @@ export class SessionConnection {
     this.client.setDisplay(index)
   }
 
+  setDisplayMode(width: number, height: number): void {
+    this.client.setDisplayMode(width, height)
+  }
+
   requestClipboard(): void {
     this.client.requestClipboard()
   }

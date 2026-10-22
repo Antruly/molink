@@ -244,6 +244,12 @@ export class MolinkClient {
     this.sendJson({ type: 'display', index })
   }
 
+  /** Asks the host driver for a different display mode. */
+  setDisplayMode(width: number, height: number): void {
+    if (!this.isLive()) return
+    this.sendJson({ type: 'display-mode', width, height })
+  }
+
   requestClipboard(): void {
     this.sendJson({ type: 'clipboard', action: 'get' })
   }

@@ -161,6 +161,16 @@ class capture_source {
     return index == 0;
   }
 
+  /// Change the current display mode. Windows applies it with
+  /// ChangeDisplaySettingsEx; this only works when the driver already exposes
+  /// the requested mode (virtual display drivers usually do). Returns false
+  /// when the platform or driver cannot apply it.
+  virtual bool set_display_mode(uint16_t width, uint16_t height) {
+    (void)width;
+    (void)height;
+    return false;
+  }
+
   /// True when frames come from a real display rather than the test pattern.
   virtual bool is_real() const = 0;
 

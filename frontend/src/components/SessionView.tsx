@@ -1259,6 +1259,45 @@ export function SessionView({
                   </select>
                 </label>
               ) : null}
+              {welcome && !welcome.tiles.synthetic ? (
+                <label
+                  className="flex items-center gap-1 rounded-md border border-line bg-panel px-1.5 text-muted"
+                  title={t('session.resolution')}
+                >
+                  <Monitor size={12} />
+                  <select
+                    value={`${tab.frame?.screenW ?? welcome.tiles.screen_w}x${
+                      tab.frame?.screenH ?? welcome.tiles.screen_h
+                    }`}
+                    onChange={(event) => {
+                      const [width, height] = event.target.value
+                        .split('x')
+                        .map(Number)
+                      if (width && height) {
+                        connection()?.setDisplayMode(width, height)
+                      }
+                    }}
+                    aria-label={t('session.resolution')}
+                    className="h-7 bg-transparent text-[11px] text-ink outline-none"
+                  >
+                    {[
+                      `${tab.frame?.screenW ?? welcome.tiles.screen_w}x${
+                        tab.frame?.screenH ?? welcome.tiles.screen_h
+                      }`,
+                      '1280x720',
+                      '1920x1080',
+                      '2560x1440',
+                      '3840x2160',
+                    ]
+                      .filter((value, index, all) => all.indexOf(value) === index)
+                      .map((value) => (
+                        <option key={value} value={value}>
+                          {value}
+                        </option>
+                      ))}
+                  </select>
+                </label>
+              ) : null}
               <span className="chip" title={t('session.transport')}>
                 {transportLabel}
               </span>

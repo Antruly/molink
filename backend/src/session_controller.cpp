@@ -809,6 +809,41 @@ void session_controller::on_text(const std::string& text) {
     return;
   }
 
+  if (type == "display-mode") {
+    if (!options_.capture) {
+      send_error(transport.get(), "not_implemented", "capture is unavailable");
+      return;
+    }
+    const auto width_it = j.find("width");
+    const auto height_it = j.find("height");
+    if (width_it == j.end() || height_it == j.end() ||
+        !width_it->is_number() || !height_it->is_number()) {
+      send_error(transport.get(), "bad_display_mode",
+                 "width and height must be numbers");
+      return;
+    }
+    const int width = static_cast<int>(width_it->get<double>());
+    const int height = static_cast<int>(height_it->get<double>());
+    if (width < 320 || height < 240 || width > 16384 || height > 16384) {
+      send_error(transport.get(), "bad_display_mode",
+                 "display mode out of range");
+      return;
+    }
+    if (!options_.capture->set_display_mode(static_cast<uint16_t>(width),
+                                            static_cast<uint16_t>(height))) {
+      send_error(transport.get(), "display_mode_failed",
+                 "the capture backend or display driver rejected this mode");
+      return;
+    }
+    options_.capture->request_keyframe();
+    uvcpp_json ack;
+    ack["type"] = "display-mode";
+    ack["width"] = width;
+    ack["height"] = height;
+    send_json(transport.get(), ack);
+    return;
+  }
+
   if (type == "clipboard") {
     if (!options_.clipboard || !options_.clipboard->available()) {
       send_error(transport.get(), "not_implemented",
