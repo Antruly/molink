@@ -485,6 +485,28 @@ void session_controller::send_welcome_message() {
   }
 }
 
+void session_controller::approve_access_request() {
+  std::shared_ptr<session_transport> transport = transport_.lock();
+  std::shared_ptr<session_info> session = session_.lock();
+  if (!transport || !session) return;
+  session->access_request_id = 0;
+  registry_->set_awaiting_approval(session, false);
+  registry_->set_authenticated(session);
+  if (options_.capture) options_.capture->set_active(true);
+  send_welcome_message();
+}
+
+void session_controller::deny_access_request() {
+  std::shared_ptr<session_transport> transport = transport_.lock();
+  std::shared_ptr<session_info> session = session_.lock();
+  if (!transport || !session) return;
+  session->access_request_id = 0;
+  registry_->set_awaiting_approval(session, false);
+  send_error(transport.get(), "access_denied",
+             "the host declined the request");
+  transport->close(transport_close::policy, "access denied");
+}
+
 void session_controller::on_text(const std::string& text) {
   std::shared_ptr<session_transport> transport = transport_.lock();
   std::shared_ptr<session_info> session = session_.lock();
@@ -549,6 +571,65 @@ void session_controller::on_text(const std::string& text) {
 
   if (type == "ping") {
     send_pong(transport.get(), j);
+    return;
+  }
+
+  // No-code remote access: the local user gets a dialog and decides. The
+  // session stays unauthenticated (and alive) until then.
+  if (type == "request-access") {
+    if (session->authenticated) {
+      send_welcome_message();
+      return;
+    }
+    if (!options_.access_requests) {
+      send_error(transport.get(), "approval_unavailable",
+                 "access requests are unavailable");
+      return;
+    }
+    const app_settings settings =
+        options_.auth ? options_.auth->settings() : app_settings{};
+    if (!settings.allow_access_requests) {
+      send_error(transport.get(), "approval_disabled",
+                 "remote approval is disabled on this host");
+      return;
+    }
+    if (options_.lock && options_.lock->locked()) {
+      send_error(transport.get(), "locked", "the UI is locked");
+      transport->close(transport_close::policy, "locked");
+      return;
+    }
+    if (session->access_request_id != 0) {
+      uvcpp_json ack;
+      ack["type"] = "access-requested";
+      ack["id"] = session->access_request_id;
+      send_json(transport.get(), ack);
+      return;
+    }
+    access_request_info info;
+    info.peer_ip = peer_ip;
+    info.name = string_field(j, "name").substr(0, 64);
+    info.client = string_field(j, "client").substr(0, 32);
+    info.created_ms = now_ms();
+    const std::weak_ptr<session_controller> weak = weak_from_this();
+    const uint32_t id = options_.access_requests->add(
+        info,
+        [weak] {
+          if (auto self = weak.lock()) self->approve_access_request();
+        },
+        [weak] {
+          if (auto self = weak.lock()) self->deny_access_request();
+        });
+    if (id == 0) {
+      send_error(transport.get(), "too_many_requests",
+                 "too many pending access requests");
+      return;
+    }
+    session->access_request_id = id;
+    registry_->set_awaiting_approval(session, true);
+    uvcpp_json ack;
+    ack["type"] = "access-requested";
+    ack["id"] = id;
+    send_json(transport.get(), ack);
     return;
   }
 
@@ -785,6 +866,9 @@ void session_controller::on_binary(const uint8_t* data, std::size_t len) {
 void session_controller::on_close(int code, const std::string& reason) {
   std::shared_ptr<session_info> session = session_.lock();
   if (!session) return;
+  if (session->access_request_id != 0 && options_.access_requests) {
+    options_.access_requests->remove(session->access_request_id);
+  }
   registry_->remove(session->id);
   // Stop grabbing the screen once nobody is watching.
   if (options_.capture && !registry_->has_authenticated()) {
@@ -880,8 +964,12 @@ void session_supervisor::run() {
     }
     for (const session_info& s : sessions) {
       if (!s.authenticated) {
-        if (now - s.connected_ms >
-            static_cast<uint64_t>(options_.hello_timeout_ms)) {
+        // A pending approval is a deliberate wait, not a stuck client.
+        const uint64_t limit = s.awaiting_approval
+                                   ? 120000
+                                   : static_cast<uint64_t>(
+                                         options_.hello_timeout_ms);
+        if (now - s.connected_ms > limit) {
           const uint32_t id = s.id;
           app_.post([registry = registry_, id] {
             const auto live = registry->find(id);

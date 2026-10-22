@@ -26,6 +26,14 @@ export interface DeviceInfo {
   code?: AuthCode
 }
 
+export interface AccessRequest {
+  id: number
+  peer_ip: string
+  name: string
+  client: string
+  created_ms: number
+}
+
 export interface ServerState {
   service: string
   product: string
@@ -34,6 +42,8 @@ export interface ServerState {
   device_id: string
   local: boolean
   locked: boolean
+  allow_access_requests: boolean
+  access_requests?: AccessRequest[]
   lock_timeout: number
   open_sessions: number
   host: string
@@ -198,6 +208,7 @@ export interface SecuritySettings {
   allow_remote_access: boolean
   allow_web_client: boolean
   discovery_enabled: boolean
+  allow_access_requests: boolean
   device_name: string
   long_term_code: string
   restart_required: boolean
@@ -213,6 +224,7 @@ export function postSettings(
     allowRemote: boolean
     allowWeb: boolean
     discovery: boolean
+    allowAccessRequests: boolean
     name: string
   },
 ): Promise<SecuritySettings> {
@@ -220,10 +232,23 @@ export function postSettings(
     allow_remote: values.allowRemote ? '1' : '0',
     allow_web: values.allowWeb ? '1' : '0',
     discovery: values.discovery ? '1' : '0',
+    access_requests: values.allowAccessRequests ? '1' : '0',
     name: values.name,
   })
   return request<SecuritySettings>(
     `/api/settings?${query.toString()}`,
+    { method: 'POST' },
+    token,
+  )
+}
+
+export function postAccessDecision(
+  token: string,
+  id: number,
+  allow: boolean,
+): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>(
+    `/api/access/${allow ? 'approve' : 'deny'}?id=${id}`,
     { method: 'POST' },
     token,
   )

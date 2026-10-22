@@ -73,12 +73,14 @@ export interface ClientHandlers {
   onCursorPosition: (position: CursorPosition) => void
   onClipboard: (text: string) => void
   onDisplay?: (index: number) => void
+  onAccessRequested?: (id: number) => void
   /** Every FRAME packet, including empty "nothing changed" responses. */
   onWireFrame?: () => void
 }
 
 interface ControlMessage {
   type?: string
+  id?: number
   code?: string
   message?: string
   session?: string
@@ -129,7 +131,8 @@ export class MolinkClient {
     this.handlers = handlers
   }
 
-  connect(host: string, port: number, token: string): void {
+  connect(host: string, port: number, token: string,
+          requestAccess = false): void {
     this.disconnect()
     this.closedByUser = false
     this.hasImage = false
@@ -150,7 +153,14 @@ export class MolinkClient {
     this.ws = ws
 
     ws.onopen = () => {
-      this.sendJson({ type: 'hello', token, client: 'molink-web', protocol: 1 })
+      if (requestAccess || token === '') {
+        // No code: ask the host user to approve this session.
+        this.sendJson({ type: 'request-access', name: 'moLink web',
+                        client: 'molink-web' })
+      } else {
+        this.sendJson({ type: 'hello', token, client: 'molink-web',
+                        protocol: 1 })
+      }
     }
 
     ws.onmessage = (event: MessageEvent) => {
@@ -259,6 +269,9 @@ export class MolinkClient {
         break
       case 'hello_required':
         // Expected before our hello is processed; nothing to report.
+        break
+      case 'access-requested':
+        this.handlers.onAccessRequested?.(message.id ?? 0)
         break
       case 'display':
         if (typeof message.index === 'number') {

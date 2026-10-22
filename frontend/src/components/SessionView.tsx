@@ -4,6 +4,7 @@ import {
   ClipboardPaste,
   ExternalLink,
   Gauge,
+  GripHorizontal,
   Hand,
   Keyboard,
   LogOut,
@@ -165,8 +166,30 @@ export function SessionView({
   const touchDevice = touchPrimary()
   const [virtualMouse, setVirtualMouse] = useState(false)
   const [displayMode, setDisplayMode] = useState<DisplayMode>('fit')
-  const [isFullscreen, setIsFullscreen] = useState(false)
+  const [elementFullscreen, setElementFullscreen] = useState(false)
+  const [shellFullscreen, setShellFullscreen] = useState(false)
+  const isFullscreen = elementFullscreen || shellFullscreen
   const [quickOpen, setQuickOpen] = useState(false)
+  const [quickPos, setQuickPos] = useState<{ x: number; y: number } | null>(null)
+  const quickBarRef = useRef<HTMLDivElement>(null)
+  const quickDrag = useRef<{
+    offsetX: number
+    offsetY: number
+    startX: number
+    startY: number
+    moved: boolean
+  } | null>(null)
+  const quickSuppressClick = useRef(false)
+  const [mobilePos, setMobilePos] = useState<{ x: number; y: number } | null>(
+    null,
+  )
+  const mobileDockRef = useRef<HTMLDivElement>(null)
+  const mobileDrag = useRef<{
+    offsetX: number
+    offsetY: number
+    startX: number
+    startY: number
+  } | null>(null)
   const [autoTier, setAutoTier] = useState<ResolvedQuality>('balanced')
   const sessionRootRef = useRef<HTMLDivElement>(null)
   const panPointer = useRef<{ x: number; y: number } | null>(null)
@@ -228,10 +251,30 @@ export function SessionView({
   }, [tab.phase, tab.id, connection, pullMs])
 
   useEffect(() => {
-    const update = () => setIsFullscreen(document.fullscreenElement !== null)
+    const update = () => setElementFullscreen(document.fullscreenElement !== null)
     document.addEventListener('fullscreenchange', update)
+    update()
     return () => document.removeEventListener('fullscreenchange', update)
   }, [])
+
+  // The expanded quick bar collapses when focus or the pointer moves outside.
+  useEffect(() => {
+    if (!quickOpen) return
+    const onPointerDown = (event: PointerEvent) => {
+      if (!quickBarRef.current?.contains(event.target as Node)) {
+        setQuickOpen(false)
+      }
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setQuickOpen(false)
+    }
+    document.addEventListener('pointerdown', onPointerDown, true)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown, true)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [quickOpen])
 
   // In 1:1 mode the image can be larger than the window. Keep scrolling while
   // the pointer rests near an edge, so panning follows the mouse.
@@ -444,21 +487,160 @@ export function SessionView({
   }
 
   const toggleFullscreen = () => {
-    if (shellInfo.enabled) {
-      windowAction('fullscreen')
-      setIsFullscreen((value) => !value)
-      return
-    }
+    const next = !isFullscreen
+    // Element fullscreen hides the app header/title bar and gives the session
+    // the whole viewport; the native action also removes the window frame and
+    // system panels when running in the desktop shell.
     if (document.fullscreenElement) {
       void document.exitFullscreen()
-    } else {
-      void sessionRootRef.current?.requestFullscreen()
+    } else if (next) {
+      void sessionRootRef.current?.requestFullscreen().catch(() => undefined)
+    }
+    if (shellInfo.enabled) {
+      windowAction('fullscreen')
+      setShellFullscreen(next)
     }
   }
 
   const changeDisplayMode = (mode: DisplayMode) => {
     setDisplayMode(mode)
     setQuickOpen(false)
+  }
+
+  const quickHandleDown = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    const surface = surfaceRef.current
+    if (!surface) return
+    event.preventDefault()
+    event.stopPropagation()
+    const rect = surface.getBoundingClientRect()
+    const position = quickPos ?? {
+      x: Math.max(4, rect.width / 2 - 18),
+      y: 12,
+    }
+    quickDrag.current = {
+      offsetX: event.clientX - rect.left - position.x,
+      offsetY: event.clientY - rect.top - position.y,
+      startX: event.clientX,
+      startY: event.clientY,
+      moved: false,
+    }
+    setQuickPos(position)
+    event.currentTarget.setPointerCapture(event.pointerId)
+  }
+
+  const quickHandleMove = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    const drag = quickDrag.current
+    const surface = surfaceRef.current
+    if (!drag || !surface) return
+    const rect = surface.getBoundingClientRect()
+    if (
+      Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) > 5
+    ) {
+      drag.moved = true
+    }
+    setQuickPos({
+      x: Math.min(
+        Math.max(event.clientX - rect.left - drag.offsetX, 4),
+        Math.max(4, rect.width - 40),
+      ),
+      y: Math.min(
+        Math.max(event.clientY - rect.top - drag.offsetY, 4),
+        Math.max(4, rect.height - 40),
+      ),
+    })
+  }
+
+  const quickHandleUp = () => {
+    const drag = quickDrag.current
+    quickDrag.current = null
+    if (!drag?.moved) return
+    quickSuppressClick.current = true
+    window.setTimeout(() => {
+      quickSuppressClick.current = false
+    }, 0)
+  }
+
+  const toggleQuickOpen = () => {
+    if (quickSuppressClick.current) {
+      quickSuppressClick.current = false
+      return
+    }
+    setQuickOpen((value) => !value)
+  }
+
+  const quickHandlePos = {
+    x: Math.min(
+      quickPos?.x ?? Math.max(4, surfaceSize.width / 2 - 18),
+      Math.max(4, surfaceSize.width - 40),
+    ),
+    y: Math.min(
+      quickPos?.y ?? 12,
+      Math.max(4, surfaceSize.height - 40),
+    ),
+  }
+
+  const mobileDockDown = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    const surface = surfaceRef.current
+    const dock = mobileDockRef.current
+    if (!surface || !dock) return
+    event.preventDefault()
+    event.stopPropagation()
+    const rect = surface.getBoundingClientRect()
+    const dockRect = dock.getBoundingClientRect()
+    mobileDrag.current = {
+      offsetX: event.clientX - dockRect.left,
+      offsetY: event.clientY - dockRect.top,
+      startX: event.clientX,
+      startY: event.clientY,
+    }
+    setMobilePos({
+      x: dockRect.left - rect.left,
+      y: dockRect.top - rect.top,
+    })
+    event.currentTarget.setPointerCapture(event.pointerId)
+  }
+
+  const mobileDockMove = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    const drag = mobileDrag.current
+    const surface = surfaceRef.current
+    const dock = mobileDockRef.current
+    if (!drag || !surface || !dock) return
+    const rect = surface.getBoundingClientRect()
+    const width = dock.offsetWidth
+    const height = dock.offsetHeight
+    setMobilePos({
+      x: Math.min(
+        Math.max(event.clientX - rect.left - drag.offsetX, 8),
+        Math.max(8, rect.width - width - 8),
+      ),
+      y: Math.min(
+        Math.max(event.clientY - rect.top - drag.offsetY, 8),
+        Math.max(8, rect.height - height - 8),
+      ),
+    })
+  }
+
+  const mobileDockUp = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    const drag = mobileDrag.current
+    const surface = surfaceRef.current
+    const dock = mobileDockRef.current
+    mobileDrag.current = null
+    if (!drag || !surface || !dock) return
+    const rect = surface.getBoundingClientRect()
+    const width = dock.offsetWidth
+    const height = dock.offsetHeight
+    const x = event.clientX - rect.left - drag.offsetX
+    const y = event.clientY - rect.top - drag.offsetY
+    setMobilePos({
+      x: Math.min(
+        Math.max(x + width / 2 < rect.width / 2 ? 8 : rect.width - width - 8, 8),
+        Math.max(8, rect.width - width - 8),
+      ),
+      y: Math.min(
+        Math.max(y, 8),
+        Math.max(8, rect.height - height - 8),
+      ),
+    })
   }
 
   const onTouchpadDown = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -957,138 +1139,154 @@ export function SessionView({
             <div className="absolute inset-0 flex items-center justify-center gap-2 text-sm text-muted">
               <Radio size={15} className="animate-pulse text-accent" />
               {tab.phase === 'connecting'
-                ? t('session.connecting')
+                ? tab.notice === 'waiting_approval'
+                  ? t('session.waitingApproval')
+                  : t('session.connecting')
                 : t('session.waiting')}
             </div>
           )}
 
-          <div
-            className="pointer-events-none absolute left-1/2 top-3 z-30 -translate-x-1/2"
-            onPointerDown={(event) => event.stopPropagation()}
-            onPointerUp={(event) => event.stopPropagation()}
-          >
+          {quickOpen ? (
             <div
-              className={
-                'group pointer-events-auto flex items-center gap-1 overflow-hidden rounded-full border border-line bg-surface/90 p-1 shadow-lg backdrop-blur transition-all duration-200 ' +
-                (quickOpen
-                  ? 'max-w-[92vw]'
-                  : 'max-w-[2.5rem] hover:max-w-[92vw]')
-              }
-              onMouseLeave={() => setQuickOpen(false)}
+              ref={quickBarRef}
+              className="pointer-events-auto absolute left-1/2 top-3 z-30 flex max-w-[94vw] -translate-x-1/2 items-center gap-1 overflow-x-auto rounded-full border border-line bg-surface/95 p-1 shadow-lg backdrop-blur"
+              onPointerDown={(event) => event.stopPropagation()}
+              onPointerUp={(event) => event.stopPropagation()}
+              onBlur={(event) => {
+                if (
+                  !event.currentTarget.contains(event.relatedTarget as Node)
+                ) {
+                  setQuickOpen(false)
+                }
+              }}
             >
               <button
                 type="button"
-                onClick={() => setQuickOpen((value) => !value)}
+                onClick={() => setQuickOpen(false)}
                 className="btn btn-quiet h-7 w-7 shrink-0 !px-0"
                 title={t('session.quickActions')}
                 aria-label={t('session.quickActions')}
-                aria-expanded={quickOpen}
               >
                 <Settings2 size={14} />
               </button>
-              <div
-                className={
-                  'flex items-center gap-1 transition-opacity duration-150 ' +
-                  (quickOpen
-                    ? 'opacity-100'
-                    : 'opacity-0 group-hover:opacity-100')
+              <button
+                type="button"
+                onClick={toggleFullscreen}
+                className="btn btn-quiet h-7 gap-1 px-2 text-[11px]"
+                title={
+                  isFullscreen
+                    ? t('session.exitFullscreen')
+                    : t('session.fullscreen')
                 }
               >
+                {isFullscreen ? (
+                  <Minimize2 size={13} />
+                ) : (
+                  <Maximize2 size={13} />
+                )}
+                <span className="hidden sm:inline">
+                  {isFullscreen
+                    ? t('session.exitFullscreen')
+                    : t('session.fullscreen')}
+                </span>
+              </button>
+              <span className="mx-0.5 h-4 w-px bg-line" />
+              {(['fit', 'actual', 'fill'] as DisplayMode[]).map((mode) => (
                 <button
+                  key={mode}
                   type="button"
-                  onClick={toggleFullscreen}
-                  className="btn btn-quiet h-7 gap-1 px-2 text-[11px]"
-                  title={
-                    isFullscreen
-                      ? t('session.exitFullscreen')
-                      : t('session.fullscreen')
+                  onClick={() => changeDisplayMode(mode)}
+                  className={
+                    'btn h-7 px-2 text-[11px] ' +
+                    (displayMode === mode ? 'btn-primary' : 'btn-quiet')
                   }
                 >
-                  {isFullscreen ? (
-                    <Minimize2 size={13} />
-                  ) : (
-                    <Maximize2 size={13} />
-                  )}
-                  <span className="hidden sm:inline">
-                    {isFullscreen
-                      ? t('session.exitFullscreen')
-                      : t('session.fullscreen')}
-                  </span>
+                  {t(`session.${mode}`)}
                 </button>
-                <span className="mx-0.5 h-4 w-px bg-line" />
-                {(['fit', 'actual', 'fill'] as DisplayMode[]).map((mode) => (
-                  <button
-                    key={mode}
-                    type="button"
-                    onClick={() => changeDisplayMode(mode)}
-                    className={
-                      'btn h-7 px-2 text-[11px] ' +
-                      (displayMode === mode ? 'btn-primary' : 'btn-quiet')
-                    }
-                  >
-                    {t(`session.${mode}`)}
-                  </button>
-                ))}
-                <span className="mx-0.5 h-4 w-px bg-line" />
+              ))}
+              <span className="mx-0.5 h-4 w-px bg-line" />
+              <label
+                className="flex items-center gap-1 rounded-md border border-line bg-panel px-1.5 text-muted"
+                title={t('session.quality')}
+              >
+                <Gauge size={12} />
+                <select
+                  value={qualityMode}
+                  onChange={(event) =>
+                    setQualityMode(event.target.value as QualityMode)
+                  }
+                  aria-label={t('session.quality')}
+                  className="h-7 bg-transparent text-[11px] text-ink outline-none"
+                >
+                  <option value="smooth">{t('session.qualitySmooth')}</option>
+                  <option value="balanced">{t('session.qualityBalanced')}</option>
+                  <option value="quality">{t('session.qualityHigh')}</option>
+                  <option value="auto">{t('session.qualityAuto')}</option>
+                </select>
+              </label>
+              <button
+                type="button"
+                onClick={() => setQualityWatermark(!qualityWatermark)}
+                className={
+                  'btn h-7 w-7 !px-0 ' +
+                  (qualityWatermark ? 'btn-primary' : 'btn-quiet')
+                }
+                title={t('settings.watermark')}
+                aria-label={t('settings.watermark')}
+                aria-pressed={qualityWatermark}
+              >
+                <Activity size={13} />
+              </button>
+              {displays.length > 1 ? (
                 <label
                   className="flex items-center gap-1 rounded-md border border-line bg-panel px-1.5 text-muted"
-                  title={t('session.quality')}
+                  title={t('session.display')}
                 >
-                  <Gauge size={12} />
+                  <Monitor size={12} />
                   <select
-                    value={qualityMode}
+                    value={tab.displayIndex}
                     onChange={(event) =>
-                      setQualityMode(event.target.value as QualityMode)
+                      connection()?.setDisplay(Number(event.target.value))
                     }
-                    aria-label={t('session.quality')}
-                    className="h-7 bg-transparent text-[11px] text-ink outline-none"
+                    aria-label={t('session.display')}
+                    className="h-7 max-w-[8rem] bg-transparent text-[11px] text-ink outline-none"
                   >
-                    <option value="smooth">{t('session.qualitySmooth')}</option>
-                    <option value="balanced">
-                      {t('session.qualityBalanced')}
-                    </option>
-                    <option value="quality">
-                      {t('session.qualityHigh')}
-                    </option>
-                    <option value="auto">{t('session.qualityAuto')}</option>
+                    {displays.map((display) => (
+                      <option key={display.index} value={display.index}>
+                        {display.name || `Display ${display.index + 1}`}
+                      </option>
+                    ))}
                   </select>
                 </label>
-                {displays.length > 1 ? (
-                  <label
-                    className="flex items-center gap-1 rounded-md border border-line bg-panel px-1.5 text-muted"
-                    title={t('session.display')}
-                  >
-                    <Monitor size={12} />
-                    <select
-                      value={tab.displayIndex}
-                      onChange={(event) =>
-                        connection()?.setDisplay(Number(event.target.value))
-                      }
-                      aria-label={t('session.display')}
-                      className="h-7 max-w-[8rem] bg-transparent text-[11px] text-ink outline-none"
-                    >
-                      {displays.map((display) => (
-                        <option key={display.index} value={display.index}>
-                          {display.name || `Display ${display.index + 1}`}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                ) : null}
-                <span className="chip" title={t('session.transport')}>
-                  {transportLabel}
-                </span>
-              </div>
+              ) : null}
+              <span className="chip" title={t('session.transport')}>
+                {transportLabel}
+              </span>
             </div>
-          </div>
+          ) : (
+            <button
+              type="button"
+              onPointerDown={quickHandleDown}
+              onPointerMove={quickHandleMove}
+              onPointerUp={quickHandleUp}
+              onPointerCancel={quickHandleUp}
+              onClick={toggleQuickOpen}
+              className="pointer-events-auto absolute z-30 grid h-9 w-9 cursor-move place-items-center rounded-full border border-line bg-surface/90 text-muted shadow-lg backdrop-blur hover:text-ink"
+              style={{ left: quickHandlePos.x, top: quickHandlePos.y }}
+              title={t('session.quickActions')}
+              aria-label={t('session.quickActions')}
+            >
+              <Settings2 size={15} />
+            </button>
+          )}
 
           <div className="pointer-events-none absolute left-3 top-3 flex flex-wrap gap-1.5">
-            {welcome ? (
+            {qualityWatermark && welcome ? (
               <span className="rounded-md border border-line bg-surface/80 px-2 py-1 font-mono text-[10px] text-muted backdrop-blur">
                 {welcome.tiles.screen_w}×{welcome.tiles.screen_h}
               </span>
             ) : null}
-            {welcome ? (
+            {qualityWatermark && welcome ? (
               <span className="rounded-md border border-line bg-surface/80 px-2 py-1 font-mono text-[10px] uppercase text-muted backdrop-blur">
                 {codecLabel}
               </span>
@@ -1115,12 +1313,33 @@ export function SessionView({
           ) : null}
 
           {touchDevice && inputAvailable ? (
-            <div className="pointer-events-none absolute inset-x-0 bottom-3 z-20 flex flex-col items-center gap-1">
+            <div
+              ref={mobileDockRef}
+              className={
+                'pointer-events-none absolute z-20 flex flex-col gap-1 ' +
+                (mobilePos ? '' : 'inset-x-0 bottom-3 items-center')
+              }
+              style={
+                mobilePos ? { left: mobilePos.x, top: mobilePos.y } : undefined
+              }
+            >
               <div
                 className="pointer-events-auto flex items-center gap-1 rounded-full border border-line bg-surface/90 p-1.5 shadow-lg backdrop-blur"
                 onPointerDown={(event) => event.stopPropagation()}
                 onPointerUp={(event) => event.stopPropagation()}
               >
+                <button
+                  type="button"
+                  onPointerDown={mobileDockDown}
+                  onPointerMove={mobileDockMove}
+                  onPointerUp={mobileDockUp}
+                  onPointerCancel={mobileDockUp}
+                  className="grid h-8 w-7 cursor-move place-items-center text-muted"
+                  title={t('session.quickActions')}
+                  aria-label={t('session.quickActions')}
+                >
+                  <GripHorizontal size={13} />
+                </button>
                 <button
                   type="button"
                   onClick={toggleVirtualMouse}
@@ -1143,7 +1362,7 @@ export function SessionView({
                 </button>
               </div>
               {virtualMouse ? (
-                <div className="pointer-events-none max-w-[92%] rounded-md border border-line bg-surface/85 px-2 py-1 text-center text-[10px] leading-relaxed text-muted backdrop-blur">
+                <div className="pointer-events-none max-w-[70vw] rounded-md border border-line bg-surface/85 px-2 py-1 text-center text-[10px] leading-relaxed text-muted backdrop-blur">
                   {t('session.virtualMouseHint')}
                 </div>
               ) : null}

@@ -196,6 +196,12 @@ code_view auth_state::set_temp(const std::string& mode, int uses,
   return out;
 }
 
+void auth_state::set_allow_access_requests(bool allow) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  settings_.allow_access_requests = allow;
+  persist_locked();
+}
+
 void auth_state::update_access(bool allow_remote_access, bool allow_web_client,
                                bool discovery_enabled,
                                const std::string& device_name) {

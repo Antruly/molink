@@ -210,6 +210,7 @@ int main(int argc, char** argv) {
   // below. An explicit --host 127.0.0.1 still binds local-only.
 
   auto registry = std::make_shared<session_registry>();
+  auto access_requests = std::make_shared<access_request_registry>();
   const uint64_t started_ms = now_ms();
 
   capture_options capture_opts;
@@ -263,6 +264,7 @@ int main(int argc, char** argv) {
 
   session_options session_opts;
   session_opts.auth = auth;
+  session_opts.access_requests = access_requests;
   session_opts.version = MOLINK_VERSION;
   session_opts.capture = capture;
 
@@ -356,6 +358,7 @@ int main(int argc, char** argv) {
   deps.device_id = identity.device_id;
   deps.client_token = client_token;
   deps.auth = auth;
+  deps.access_requests = access_requests;
   deps.lock = lock;
   deps.network = network;
   deps.config = cfg;

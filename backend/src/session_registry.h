@@ -18,6 +18,9 @@ struct session_info {
   std::string peer_ip;
   unsigned int peer_port = 0;
   bool authenticated = false;
+  /// Waiting for the local user to approve a no-code request.
+  bool awaiting_approval = false;
+  uint32_t access_request_id = 0;
   uint64_t connected_ms = 0;
   uint64_t last_seen_ms = 0;
   uint64_t last_ping_ms = 0;
@@ -59,6 +62,8 @@ class session_registry {
   /// supervisor thread through snapshot(); take the registry lock so the
   /// flag is actually visible before the 5 s hello timeout is evaluated.
   void set_authenticated(const std::shared_ptr<session_info>& s);
+  void set_awaiting_approval(const std::shared_ptr<session_info>& s,
+                             bool awaiting);
   void touch(session_info& s);
 
  private:

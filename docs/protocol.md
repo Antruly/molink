@@ -179,6 +179,24 @@
 
 令牌来自 `molink-core` 启动时的随机生成（32 位十六进制）或 `MOLINK_TOKEN` / `--token`。
 
+### 4.1.1 免密审批
+
+没有验证码的客户端可以请求被控端手动同意：
+
+```json
+{"type":"request-access","name":"Alice 的浏览器","client":"molink-web"}
+```
+
+服务端回 `{"type":"access-requested","id":N}`，连接保持打开（不受 5 秒
+`hello timeout` 限制，审批等待上限 120 秒）。被控端在本机 UI 上允许后，
+服务端直接发 `welcome`，客户端无需再发 `hello`；拒绝则回 `error`
+（`code=access_denied`）并关闭。开关关闭时回 `approval_disabled`。
+
+本机 UI 通过 `/api/state` 的 `access_requests` 字段（仅回环地址返回）轮询
+待审批列表，通过 `POST /api/access/approve?id=N` 或 `/deny?id=N` 决定。
+「设置 → 安全 → 允许免密远程请求」对应 `/api/settings?access_requests=0|1`，
+默认开启。锁定状态下请求会被直接拒绝。
+
 ### 4.2 控制消息
 
 **服务端 → 客户端**
@@ -189,6 +207,7 @@
 | `welcome` | `session`, `session_id`, `protocol`, `service`, `version`, `transport`, `tiles`, `displays`, `display_index` | 鉴权成功；`displays` 为可切换显示器列表 |
 | `ping` | `t` | 应用层心跳，每 15 秒 |
 | `pong` | `t`, `server_ms` | 对客户端 ping 的回应 |
+| `access-requested` | `id` | 已登记免密请求，等待本机用户审批 |
 | `error` | `code`, `message` | 错误 |
 
 `welcome` 示例（真实屏幕）：
@@ -229,6 +248,7 @@
 | type | 字段 | 说明 |
 |---|---|---|
 | `hello` | `token` | 鉴权 |
+| `request-access` | `name`, `client` | 无验证码请求远程访问；需被控端开关开启 |
 | `ping` | `t` | 客户端主动测延迟；服务端回 `pong` 并原样带回 `t` |
 | `pong` | `t` | 回应服务端心跳 |
 | `request-frame` | — | 请求一帧。服务端返回自上次以来所有未送达的帧；无变化时返回 0 瓦片帧 |

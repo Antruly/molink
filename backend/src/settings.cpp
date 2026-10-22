@@ -87,6 +87,8 @@ app_settings load_settings() {
       settings.allow_web_client = parse_bool(value, false);
     } else if (key == "discovery_enabled") {
       settings.discovery_enabled = parse_bool(value, false);
+    } else if (key == "allow_access_requests") {
+      settings.allow_access_requests = parse_bool(value, true);
     } else if (key == "device_name") {
       if (!value.empty()) settings.device_name = value;
     } else if (key == "long_term_code") {
@@ -128,6 +130,8 @@ void save_settings(const app_settings& settings) {
   stream << "allow_web_client=" << (settings.allow_web_client ? 1 : 0) << "\n";
   stream << "discovery_enabled=" << (settings.discovery_enabled ? 1 : 0)
          << "\n";
+  stream << "allow_access_requests="
+         << (settings.allow_access_requests ? 1 : 0) << "\n";
   stream << "device_name=" << settings.device_name << "\n";
   stream << "long_term_code=" << settings.long_term_code << "\n";
   stream << "temp_mode=" << settings.temp_mode << "\n";

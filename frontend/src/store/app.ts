@@ -7,6 +7,7 @@ import {
   fetchSettings,
   fetchState,
   login as apiLogin,
+  postAccessDecision,
   postActivity,
   postAuthCode,
   postLockTimeout,
@@ -51,6 +52,7 @@ export interface SessionTab {
   cursorPosition: CursorPosition | null
   stats: Stats
   error: string | null
+  notice: string | null
   controlEnabled: boolean
   displayIndex: number
 }
@@ -105,8 +107,10 @@ interface AppState {
     allowRemote: boolean
     allowWeb: boolean
     discovery: boolean
+    allowAccessRequests: boolean
     name: string
   }) => Promise<boolean>
+  decideAccessRequest: (id: number, allow: boolean) => Promise<void>
   setLongTermCode: (value: string) => Promise<boolean>
   touchActivity: () => void
   syncUiState: () => void
@@ -123,6 +127,7 @@ interface AppState {
     token: string,
     label?: string,
     saveToken?: boolean,
+    requestAccess?: boolean,
   ) => string
   closeTab: (id: string) => void
   setActiveTab: (id: string) => void
@@ -178,7 +183,7 @@ function initialQualityMode(): QualityMode {
   ) {
     return saved
   }
-  return 'balanced'
+  return 'auto'
 }
 
 function initialRecents(): RecentConnection[] {
@@ -526,6 +531,17 @@ export const useAppStore = create<AppState>((set, get) => {
       }
     },
 
+    decideAccessRequest: async (id, allow) => {
+      const token = get().token
+      if (!token) return
+      try {
+        await postAccessDecision(token, id, allow)
+      } catch {
+        // The request may already have been answered or expired.
+      }
+      await get().refreshState()
+    },
+
     setLongTermCode: async (value) => {
       const token = get().token
       if (!token) return false
@@ -570,7 +586,8 @@ export const useAppStore = create<AppState>((set, get) => {
       remember(host, port, label, token, saveToken)
     },
 
-    createSession: (host, port, token, label, saveToken = false) => {
+    createSession: (host, port, token, label, saveToken = false,
+                    requestAccess = false) => {
       const id = `session-${nextId++}`
       const trimmedToken = token.trim()
       const tab: SessionTab = {
@@ -586,6 +603,7 @@ export const useAppStore = create<AppState>((set, get) => {
         cursorPosition: null,
         stats: EMPTY_STATS,
         error: null,
+        notice: null,
         controlEnabled: false,
         displayIndex: 0,
       }
@@ -609,11 +627,13 @@ export const useAppStore = create<AppState>((set, get) => {
       })
       runtimes.set(id, connection)
 
-      if (trimmedToken === '') {
+      if (trimmedToken === '' && !requestAccess) {
         patchTab(id, { phase: 'error', error: 'no_token' })
       } else {
-        connection.connect(tab.host, port, trimmedToken)
-        remember(tab.host, port, tab.label, trimmedToken, saveToken)
+        connection.connect(tab.host, port, trimmedToken, requestAccess)
+        if (trimmedToken !== '') {
+          remember(tab.host, port, tab.label, trimmedToken, saveToken)
+        }
       }
       return id
     },

@@ -79,6 +79,13 @@ void session_registry::set_authenticated(
   s->authenticated = true;
 }
 
+void session_registry::set_awaiting_approval(
+    const std::shared_ptr<session_info>& s, bool awaiting) {
+  if (!s) return;
+  std::lock_guard<std::mutex> lock(mu_);
+  s->awaiting_approval = awaiting;
+}
+
 void session_registry::touch(session_info& s) { s.last_seen_ms = now_ms(); }
 
 }  // namespace molink

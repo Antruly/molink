@@ -25,6 +25,7 @@ export interface TabPatch {
   cursorPosition?: CursorPosition | null
   stats?: Stats
   error?: string | null
+  notice?: string | null
   controlEnabled?: boolean
   label?: string
   displayIndex?: number
@@ -60,15 +61,23 @@ export class SessionConnection {
           this.sink.onPatch({
             phase,
             error: detail ?? 'connection failed',
+            notice: null,
             frame: null,
           })
           return
         }
         if (phase === 'live') {
-          this.sink.onPatch({ phase, error: null })
+          this.sink.onPatch({ phase, error: null, notice: null })
           return
         }
         this.sink.onPatch({ phase })
+      },
+      onAccessRequested: () => {
+        this.sink.onPatch({
+          phase: 'connecting',
+          error: null,
+          notice: 'waiting_approval',
+        })
       },
       onWelcome: (welcome) => {
         this.sink.onPatch({
@@ -99,7 +108,8 @@ export class SessionConnection {
         this.latency = ms
         this.sink.onPatch({ stats: this.snapshot() })
       },
-      onError: (message) => this.sink.onPatch({ error: message }),
+      onError: (message) =>
+        this.sink.onPatch({ error: message, notice: null }),
       onCursor: (cursorShape) => this.sink.onPatch({ cursorShape }),
       onCursorPosition: (cursorPosition) =>
         this.sink.onPatch({ cursorPosition }),
@@ -126,15 +136,21 @@ export class SessionConnection {
     }
   }
 
-  connect(host: string, port: number, token: string): void {
+  connect(host: string, port: number, token: string,
+          requestAccess = false): void {
     this.frameTimes = []
     this.packetTimes = []
     this.byteWindow = []
     this.latency = null
     this.frames = 0
     this.lastWirePatch = 0
-    this.sink.onPatch({ stats: emptyStats(), error: null, frame: null })
-    this.client.connect(host, port, token)
+    this.sink.onPatch({
+      stats: emptyStats(),
+      error: null,
+      notice: null,
+      frame: null,
+    })
+    this.client.connect(host, port, token, requestAccess)
   }
 
   disconnect(): void {

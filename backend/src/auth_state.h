@@ -56,6 +56,9 @@ class auth_state {
                      const std::string& value, std::string& err);
   void update_access(bool allow_remote_access, bool allow_web_client,
                      bool discovery_enabled, const std::string& device_name);
+  /// Toggle the no-code approval flow without touching the other access
+  /// switches. Defaults to enabled.
+  void set_allow_access_requests(bool allow);
 
  private:
   bool valid_session_locked(const std::string& token) const;

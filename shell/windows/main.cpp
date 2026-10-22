@@ -11,8 +11,10 @@
 #define _UNICODE
 #endif
 
+// Windows 7 SP1 is still a supported shell target. Keep the import table at
+// the Win7 level and resolve newer APIs dynamically (see window_dpi).
 #ifndef _WIN32_WINNT
-#define _WIN32_WINNT 0x0A00
+#define _WIN32_WINNT 0x0601
 #endif
 
 #define WIN32_LEAN_AND_MEAN
@@ -63,6 +65,32 @@ void toggle_fullscreen(HWND window);
 
 void fail_box(const wchar_t* message) {
   MessageBoxW(g_window, message, L"moLink", MB_ICONERROR | MB_OK);
+}
+
+// GetDpiForWindow is Windows 10 1607+. Resolve it at runtime so the same
+// executable loads on Windows 7, where the static import would fail with
+// "entry point not found" before WinMain runs. Fall back to the screen DPI.
+UINT window_dpi(HWND window) {
+  using get_dpi_fn = UINT(WINAPI*)(HWND);
+  static const get_dpi_fn get_dpi = reinterpret_cast<get_dpi_fn>(
+      GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow"));
+  if (get_dpi != nullptr) {
+    const UINT dpi = get_dpi(window);
+    if (dpi != 0) return dpi;
+  }
+  HWND dc_window = window;
+  HDC dc = GetDC(window);
+  if (dc == nullptr) {
+    dc_window = nullptr;
+    dc = GetDC(nullptr);
+  }
+  UINT dpi = 96;
+  if (dc != nullptr) {
+    const int value = GetDeviceCaps(dc, LOGPIXELSX);
+    if (value > 0) dpi = static_cast<UINT>(value);
+    ReleaseDC(dc_window, dc);
+  }
+  return dpi;
 }
 
 std::wstring exe_dir() {
@@ -659,7 +687,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
       ScreenToClient(window, &point);
       RECT client;
       GetClientRect(window, &client);
-      const UINT dpi = GetDpiForWindow(window);
+      const UINT dpi = window_dpi(window);
       const int border = MulDiv(6, dpi, 96);
       const int title = MulDiv(40, dpi, 96);
       const int controls = MulDiv(110, dpi, 96);
@@ -692,7 +720,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
         RECT client;
         GetClientRect(window, &client);
         if (client.right > 0 && client.bottom > 0) {
-          const int radius = MulDiv(28, GetDpiForWindow(window), 96);
+          const int radius = MulDiv(28, window_dpi(window), 96);
           HRGN region = CreateRoundRectRgn(0, 0, client.right + 1,
                                            client.bottom + 1, radius, radius);
           SetWindowRgn(window, region, TRUE);

@@ -52,6 +52,7 @@ function SecurityControls({
     allowRemote: boolean
     allowWeb: boolean
     discovery: boolean
+    allowAccessRequests: boolean
     name: string
   }) => Promise<boolean>
   onLongTerm: (value: string) => Promise<boolean>
@@ -61,6 +62,9 @@ function SecurityControls({
   const [allowRemote, setAllowRemote] = useState(settings.allow_remote_access)
   const [allowWeb, setAllowWeb] = useState(settings.allow_web_client)
   const [discovery, setDiscovery] = useState(settings.discovery_enabled)
+  const [allowAccessRequests, setAllowAccessRequests] = useState(
+    settings.allow_access_requests,
+  )
   const [name, setName] = useState(settings.device_name)
   const [longTerm, setLongTerm] = useState('')
   const [showLongTerm, setShowLongTerm] = useState(false)
@@ -73,6 +77,7 @@ function SecurityControls({
       allowRemote,
       allowWeb,
       discovery: allowRemote ? discovery : false,
+      allowAccessRequests,
       name,
     })
     setNote(ok ? t('settings.saved') : t('error.settings_failed'))
@@ -141,6 +146,21 @@ function SecurityControls({
             disabled={!allowRemote}
             onChange={setDiscovery}
             label={t('settings.discovery')}
+          />
+        </div>
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <div className="text-[12px] text-ink">
+              {t('settings.allowAccessRequests')}
+            </div>
+            <div className="mt-0.5 text-[11px] text-muted">
+              {t('settings.allowAccessRequestsHint')}
+            </div>
+          </div>
+          <Switch
+            checked={allowAccessRequests}
+            onChange={setAllowAccessRequests}
+            label={t('settings.allowAccessRequests')}
           />
         </div>
         <label className="block">

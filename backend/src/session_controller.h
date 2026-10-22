@@ -7,6 +7,7 @@
 #include <string>
 #include <thread>
 
+#include "access_requests.h"
 #include "auth_state.h"
 #include "capture/capture.h"
 #include "clipboard/clipboard.h"
@@ -32,6 +33,7 @@ struct session_options {
   std::shared_ptr<input_injector> input;
   std::shared_ptr<clipboard_service> clipboard;
   std::shared_ptr<lock_state> lock;
+  std::shared_ptr<access_request_registry> access_requests;
   std::shared_ptr<network_settings> network;
   std::shared_ptr<std::atomic<int>> bound_port;
   bool http2_available = false;
@@ -63,6 +65,9 @@ class session_controller final
   void on_binary(const uint8_t* data, std::size_t len);
   void on_close(int code, const std::string& reason);
   void send_welcome_message();
+  /// Called from the local approval dialog (through the request registry).
+  void approve_access_request();
+  void deny_access_request();
 
   std::shared_ptr<session_registry> registry_;
   std::weak_ptr<session_transport> transport_;

@@ -5,6 +5,7 @@
 #include <memory>
 #include <string>
 
+#include "access_requests.h"
 #include "capture/capture.h"
 #include "clipboard/clipboard.h"
 #include "auth_state.h"
@@ -34,6 +35,7 @@ struct api_deps {
   /// gates loopback web UI access when allow_web_client is off.
   std::string client_token;
   std::shared_ptr<auth_state> auth;
+  std::shared_ptr<access_request_registry> access_requests;
   std::shared_ptr<discovery_service> discovery;
   std::shared_ptr<std::atomic<int>> bound_port;
   /// True when this build can carry HTTP/2 (h2c) on the web port.

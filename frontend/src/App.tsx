@@ -5,6 +5,7 @@ import { AppHeader } from './components/AppHeader'
 import { AuthGate } from './components/AuthGate'
 import { HomeView } from './components/HomeView'
 import { Logo } from './components/Logo'
+import { AccessRequestDialog } from './components/AccessRequestDialog'
 import { ResizeFrame } from './components/ResizeFrame'
 import { SessionView } from './components/SessionView'
 import { SettingsPanel } from './components/SettingsPanel'
@@ -104,12 +105,15 @@ export default function App() {
     created.current = true
     const params = new URLSearchParams(window.location.search)
     const token = params.get('token') ?? ''
-    if (token === '') return
+    // An empty token means "ask the host for approval" rather than a hard
+    // failure; the core decides whether that flow is enabled.
     createSession(
       params.get('host') ?? '127.0.0.1',
       Number(params.get('port') ?? '28418'),
       token,
       params.get('label') ?? undefined,
+      false,
+      token === '',
     )
   }, [popout, authPhase, createSession])
 
@@ -121,6 +125,7 @@ export default function App() {
     <div className="flex h-screen flex-col overflow-hidden bg-canvas text-ink">
       <TitleBar />
       <ResizeFrame />
+      <AccessRequestDialog />
 
       {authPhase === 'booting' ? (
         <BootSplash />

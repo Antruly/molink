@@ -1,6 +1,7 @@
 #include "api.h"
 
 #include <cstdint>
+#include <cstdlib>
 #include <string>
 #include <utility>
 #include <vector>
@@ -300,7 +301,24 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
             j["version"] = MOLINK_VERSION;
             j["protocol"] = 1;
             j["device_id"] = deps.device_id;
-            j["local"] = is_loopback_peer(req.peer_ip());
+            const bool local = is_loopback_peer(req.peer_ip());
+            j["local"] = local;
+            const app_settings current_settings =
+                deps.auth ? deps.auth->settings() : app_settings{};
+            j["allow_access_requests"] = current_settings.allow_access_requests;
+            if (local && deps.access_requests) {
+              j["access_requests"] = uvcpp_json::array();
+              for (const access_request_info& request :
+                   deps.access_requests->list()) {
+                uvcpp_json item;
+                item["id"] = request.id;
+                item["peer_ip"] = request.peer_ip;
+                item["name"] = request.name;
+                item["client"] = request.client;
+                item["created_ms"] = request.created_ms;
+                j["access_requests"].push_back(std::move(item));
+              }
+            }
             j["locked"] = deps.lock != nullptr && deps.lock->locked();
             j["lock_timeout"] =
                 deps.lock != nullptr ? deps.lock->timeout_seconds() : 0;
@@ -633,6 +651,39 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
 
   // Security settings and code management are local-only. Remote peers can
   // authenticate, but must never read or change the host's long-term code.
+  auto access_decision = [deps](uvcpp_web_request& req,
+                                uvcpp_web_response& resp, bool allow) {
+    if (!is_loopback_peer(req.peer_ip())) {
+      resp.status(403).json_str(R"({"code":"loopback_only"})");
+      resp.end();
+      return;
+    }
+    const std::string* raw = req.query("id");
+    const uint32_t id = raw != nullptr
+                            ? static_cast<uint32_t>(
+                                  std::strtoul(raw->c_str(), nullptr, 10))
+                            : 0;
+    const bool ok =
+        deps.access_requests != nullptr &&
+        (allow ? deps.access_requests->approve(id)
+               : deps.access_requests->deny(id));
+    uvcpp_json j;
+    j["ok"] = ok;
+    resp.status(ok ? 200 : 404).json(j);
+    resp.end();
+  };
+
+  app.post("/api/access/approve",
+           [access_decision](uvcpp_web_request& req, uvcpp_web_response& resp,
+                             uvcpp_web_next) {
+             access_decision(req, resp, true);
+           });
+  app.post("/api/access/deny",
+           [access_decision](uvcpp_web_request& req, uvcpp_web_response& resp,
+                             uvcpp_web_next) {
+             access_decision(req, resp, false);
+           });
+
   app.get("/api/settings",
           [deps](uvcpp_web_request& req, uvcpp_web_response& resp,
                  uvcpp_web_next) {
@@ -651,6 +702,7 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
             j["allow_remote_access"] = settings.allow_remote_access;
             j["allow_web_client"] = settings.allow_web_client;
             j["discovery_enabled"] = settings.discovery_enabled;
+            j["allow_access_requests"] = settings.allow_access_requests;
             j["device_name"] = settings.device_name;
             j["long_term_code"] = settings.long_term_code;
             // The listener is always on 0.0.0.0; access toggles apply at once.
@@ -681,9 +733,12 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
              const bool allow_remote = flag("allow_remote", before.allow_remote_access);
              const bool allow_web = flag("allow_web", before.allow_web_client);
              const bool discovery = flag("discovery", before.discovery_enabled);
+             const bool access_requests =
+                 flag("access_requests", before.allow_access_requests);
              const std::string* name = req.query("name");
              deps.auth->update_access(allow_remote, allow_web, discovery,
                                       name != nullptr ? *name : std::string());
+             deps.auth->set_allow_access_requests(access_requests);
              const app_settings after = deps.auth->settings();
              if (deps.discovery) {
                deps.discovery->set_enabled(after.allow_remote_access &&
@@ -704,6 +759,7 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
              j["allow_remote_access"] = after.allow_remote_access;
              j["allow_web_client"] = after.allow_web_client;
              j["discovery_enabled"] = after.discovery_enabled;
+             j["allow_access_requests"] = after.allow_access_requests;
              j["device_name"] = after.device_name;
              j["restart_required"] = false;
              resp.set_header("Cache-Control", "no-store").json(j);

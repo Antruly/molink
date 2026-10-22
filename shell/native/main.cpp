@@ -367,9 +367,14 @@ void rounded_rect_path(cairo_t* cr, double x, double y, double w, double h,
   cairo_close_path(cr);
 }
 
+bool g_window_square = false;
+
 void apply_window_shape(GtkWidget* widget) {
   if (!gtk_widget_get_realized(widget)) return;
-  if (gtk_window_is_maximized(GTK_WINDOW(widget))) {
+  if (g_window_square || gtk_window_is_maximized(GTK_WINDOW(widget))) {
+    // Maximized and fullscreen windows must not be clipped to a rounded
+    // rectangle: a stale region hides the edges and makes the title buttons
+    // unreachable.
     gtk_widget_shape_combine_region(widget, nullptr);
     return;
   }
@@ -391,20 +396,30 @@ void apply_window_shape(GtkWidget* widget) {
 }
 
 gboolean on_size_allocate(GtkWidget* widget, GdkRectangle*, gpointer) {
-  apply_window_shape(widget);
+  if (g_window_square) {
+    gtk_widget_shape_combine_region(widget, nullptr);
+  } else {
+    apply_window_shape(widget);
+  }
   return FALSE;
 }
 
 gboolean on_window_state(GtkWidget* widget, GdkEventWindowState* event,
                          gpointer) {
-  if ((event->changed_mask &
-       (GDK_WINDOW_STATE_MAXIMIZED | GDK_WINDOW_STATE_FULLSCREEN)) != 0) {
+  const GdkWindowState square_mask = static_cast<GdkWindowState>(
+      GDK_WINDOW_STATE_MAXIMIZED | GDK_WINDOW_STATE_FULLSCREEN);
+  g_window_square = (event->new_window_state & square_mask) != 0;
+  if (g_window_square) {
+    gtk_widget_shape_combine_region(widget, nullptr);
+  } else {
     apply_window_shape(widget);
-    // Maximize/fullscreen can race the WebView's allocation; ask GTK to lay
-    // the child out again so the remote canvas fills the new window.
-    GtkWidget* child = gtk_bin_get_child(GTK_BIN(widget));
-    if (child != nullptr) gtk_widget_queue_resize(child);
   }
+  // Maximize/fullscreen can race the WebView's allocation; ask GTK to lay the
+  // window and its child out again so the remote canvas fills the new size.
+  GtkWidget* child = gtk_bin_get_child(GTK_BIN(widget));
+  if (child != nullptr) gtk_widget_queue_resize(child);
+  gtk_widget_queue_resize(widget);
+  gtk_widget_queue_draw(widget);
   return FALSE;
 }
 
@@ -700,6 +715,7 @@ int main(int argc, char** argv) {
   GtkWidget* view = webkit_web_view_new();
   WebKitSettings* settings = webkit_web_view_get_settings(WEBKIT_WEB_VIEW(view));
   webkit_settings_set_enable_developer_extras(settings, TRUE);
+  webkit_settings_set_enable_fullscreen(settings, TRUE);
   webkit_settings_set_javascript_can_access_clipboard(settings, TRUE);
   webkit_settings_set_javascript_can_open_windows_automatically(settings, TRUE);
   gtk_container_add(GTK_CONTAINER(window), view);

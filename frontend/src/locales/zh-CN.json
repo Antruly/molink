@@ -97,7 +97,9 @@
     "saved": "已保存。",
     "customMulti": "自定义多次授权码",
     "customMultiHint": "至少 4 位；次数用完后会自动更换新码。",
-    "uses": "次数"
+    "uses": "次数",
+    "allowAccessRequests": "允许免密远程请求",
+    "allowAccessRequestsHint": "对方没有验证码时可以发出请求，每次仍需你手动同意。默认开启。"
   },
   "session": {
     "connecting": "连接中…",
@@ -131,7 +133,8 @@
     "qualitySmooth": "流畅",
     "qualityBalanced": "平衡",
     "qualityHigh": "清晰",
-    "qualityAuto": "自适应"
+    "qualityAuto": "自适应",
+    "waitingApproval": "等待被控端同意…"
   },
   "stats": {
     "fps": "帧率",
@@ -174,5 +177,10 @@
     "local_auth_failed": "本机验证失败。",
     "settings_failed": "设置保存失败。",
     "retry": "重试"
+  },
+  "access": {
+    "requestTitle": "远程访问请求",
+    "allow": "允许",
+    "deny": "拒绝"
   }
 }

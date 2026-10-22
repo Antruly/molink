@@ -43,6 +43,7 @@ DefaultDirName={autopf}\moLink
 DefaultGroupName=moLink
 DisableProgramGroupPage=yes
 PrivilegesRequired=admin
+MinVersion=6.1sp1
 ArchitecturesAllowed=x64
 ArchitecturesInstallIn64BitMode=x64
 OutputDir={#OutputDir}

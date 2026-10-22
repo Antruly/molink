@@ -97,7 +97,9 @@
     "saved": "Saved.",
     "customMulti": "Custom multi-use code",
     "customMultiHint": "4+ characters. The code rotates automatically after its uses run out.",
-    "uses": "Uses"
+    "uses": "Uses",
+    "allowAccessRequests": "Approve remote requests",
+    "allowAccessRequestsHint": "A remote user without a code can ask for access; you still approve every session. Enabled by default."
   },
   "session": {
     "connecting": "Connecting…",
@@ -131,7 +133,8 @@
     "qualitySmooth": "Smooth",
     "qualityBalanced": "Balanced",
     "qualityHigh": "Quality",
-    "qualityAuto": "Auto"
+    "qualityAuto": "Auto",
+    "waitingApproval": "Waiting for the host to approve…"
   },
   "stats": {
     "fps": "FPS",
@@ -174,5 +177,10 @@
     "local_auth_failed": "Local sign-in failed.",
     "settings_failed": "Could not save the setting.",
     "retry": "Retry"
+  },
+  "access": {
+    "requestTitle": "Remote access request",
+    "allow": "Allow",
+    "deny": "Deny"
   }
 }

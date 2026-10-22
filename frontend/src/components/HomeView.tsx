@@ -125,6 +125,7 @@ export function HomeView() {
     label?: string,
     saveToken = false,
   ) => {
+    const requestAccess = targetToken.trim() === ''
     if (localMode && claimFirstWindow()) {
       if (openSessionWindow({
         host: targetHost,
@@ -142,7 +143,7 @@ export function HomeView() {
         return
       }
     }
-    createSession(targetHost, targetPort, targetToken, label, saveToken)
+    createSession(targetHost, targetPort, targetToken, label, saveToken, requestAccess)
   }
 
   const submit = (event: FormEvent) => {
@@ -175,10 +176,6 @@ export function HomeView() {
       targetPort > 65535
     ) {
       setError('invalid_port')
-      return
-    }
-    if (code.trim() === '') {
-      setError('no_token')
       return
     }
     if (localMode) {

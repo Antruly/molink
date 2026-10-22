@@ -79,6 +79,7 @@ set(MOLINK_CORE_SOURCES
   src/capture/frame_encode.cpp
   src/clipboard/x11_clipboard.cpp
   src/clipboard/windows_clipboard.cpp
+  src/access_requests.cpp
   src/auth_state.cpp
   src/compression.cpp
   src/discovery.cpp
