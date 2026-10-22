@@ -33,6 +33,7 @@ namespace {
 SERVICE_STATUS_HANDLE g_status = nullptr;
 SERVICE_STATUS g_service_status{};
 HANDLE g_stop_event = nullptr;
+PROCESS_INFORMATION g_helper{};
 std::atomic<bool> g_running{true};
 constexpr wchar_t kServiceName[] = L"moLinkSession";
 constexpr wchar_t kPipeName[] = L"\\\\.\\pipe\\molink-session";
@@ -116,7 +117,8 @@ std::string handle_command(HANDLE pipe, const std::string& line) {
   std::string command;
   input >> command;
   if (command == "sessions") return session_json();
-  if ((command == "kick" || command == "switch") &&
+  if ((command == "kick" || command == "switch" ||
+       command == "secure-start" || command == "secure-stop") &&
       !client_is_elevated(pipe)) {
     return R"({"ok":false,"error":"admin_required"})";
   }
@@ -129,6 +131,58 @@ std::string handle_command(HANDLE pipe, const std::string& line) {
     if (!WTSLogoffSession(WTS_CURRENT_SERVER_HANDLE, session_id, FALSE)) {
       return R"({"ok":false,"error":"WTSLogoffSession failed"})";
     }
+    return R"({"ok":true})";
+  }
+  if (command == "secure-start") {
+    if (g_helper.hProcess != nullptr) {
+      return R"({"ok":true,"already_running":true})";
+    }
+    DWORD session = WTSGetActiveConsoleSessionId();
+    if (session == 0xFFFFFFFF) {
+      return R"({"ok":false,"error":"no active console session"})";
+    }
+    HANDLE user = nullptr;
+    if (!WTSQueryUserToken(session, &user)) {
+      return R"({"ok":false,"error":"WTSQueryUserToken failed"})";
+    }
+    HANDLE token = nullptr;
+    const BOOL duplicated = DuplicateTokenEx(
+        user, MAXIMUM_ALLOWED, nullptr, SecurityImpersonation, TokenPrimary,
+        &token);
+    CloseHandle(user);
+    if (!duplicated) {
+      return R"({"ok":false,"error":"DuplicateTokenEx failed"})";
+    }
+    SetTokenInformation(token, TokenSessionId, &session, sizeof(session));
+    wchar_t path[MAX_PATH * 4] = {};
+    GetModuleFileNameW(nullptr, path, static_cast<DWORD>(std::size(path)));
+    std::wstring helper(path);
+    const std::size_t slash = helper.find_last_of(L"\\/");
+    helper = (slash == std::wstring::npos ? std::wstring()
+                                          : helper.substr(0, slash + 1)) +
+             L"molink-helper.exe";
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    startup.lpDesktop = const_cast<wchar_t*>(L"winsta0\\default");
+    const BOOL created = CreateProcessAsUserW(
+        token, helper.c_str(), nullptr, nullptr, nullptr, FALSE,
+        CREATE_NEW_PROCESS_GROUP | CREATE_UNICODE_ENVIRONMENT, nullptr, nullptr,
+        &startup, &g_helper);
+    CloseHandle(token);
+    if (!created) {
+      return R"({"ok":false,"error":"CreateProcessAsUser failed"})";
+    }
+    char reply[96] = {};
+    std::snprintf(reply, sizeof(reply), R"({"ok":true,"pid":%lu})",
+                  static_cast<unsigned long>(g_helper.dwProcessId));
+    return reply;
+  }
+  if (command == "secure-stop") {
+    if (g_helper.hProcess == nullptr) return R"({"ok":true})";
+    TerminateProcess(g_helper.hProcess, 0);
+    CloseHandle(g_helper.hThread);
+    CloseHandle(g_helper.hProcess);
+    g_helper = PROCESS_INFORMATION{};
     return R"({"ok":true})";
   }
   if (command == "switch") {

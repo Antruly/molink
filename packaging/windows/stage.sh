@@ -30,6 +30,13 @@ mkdir -p "$PKG/web"
 cp "$CORE" "$PKG/molink-core.exe"
 cp "$SHELL" "$PKG/moLink.exe"
 cp "$(dirname "$SHELL")/WebView2Loader.dll" "$PKG/"
+# Experimental session components (manual install; not registered by setup).
+for pair in service:molink-service helper:molink-helper; do
+  DIR=${pair%%:*}; EXE=${pair##*:}
+  FOUND=$(find_one "$ROOT/shell/windows/$DIR/build/Release/$EXE.exe" \
+                   "$ROOT/shell/windows/$DIR/build/$EXE.exe" || true)
+  [ -n "$FOUND" ] && cp "$FOUND" "$PKG/"
+done
 cp "$ROOT/shell/assets/icons/icon.ico" "$PKG/molink.ico"
 cp -r "$WEB/." "$PKG/web/"
 
