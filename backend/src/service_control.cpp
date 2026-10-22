@@ -1,6 +1,7 @@
 #include "service_control.h"
 
 #include <cstdint>
+#include <iterator>
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
