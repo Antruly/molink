@@ -53,6 +53,9 @@ export class SessionConnection {
   private latency: number | null = null
   private frames = 0
   private lastWirePatch = 0
+  private clipboardTimer: number | null = null
+  private lastClipboard = ''
+  private clipboardFailures = 0
 
   constructor(private readonly sink: SessionSink) {
     this.client.setHandlers({
@@ -68,6 +71,7 @@ export class SessionConnection {
         }
         if (phase === 'live') {
           this.sink.onPatch({ phase, error: null, notice: null })
+          this.startClipboardSync()
           return
         }
         this.sink.onPatch({ phase })
@@ -113,7 +117,11 @@ export class SessionConnection {
       onCursor: (cursorShape) => this.sink.onPatch({ cursorShape }),
       onCursorPosition: (cursorPosition) =>
         this.sink.onPatch({ cursorPosition }),
-      onClipboard: (text) => this.sink.onClipboard(text),
+      onClipboard: (text) => {
+        // Remember what we just wrote so the poll does not echo it back.
+        this.lastClipboard = text
+        this.sink.onClipboard(text)
+      },
     })
   }
 
@@ -138,6 +146,9 @@ export class SessionConnection {
 
   connect(host: string, port: number, token: string,
           requestAccess = false): void {
+    this.stopClipboardSync()
+    this.lastClipboard = ''
+    this.clipboardFailures = 0
     this.frameTimes = []
     this.packetTimes = []
     this.byteWindow = []
@@ -154,7 +165,37 @@ export class SessionConnection {
   }
 
   disconnect(): void {
+    this.stopClipboardSync()
     this.client.disconnect()
+  }
+
+  private startClipboardSync(): void {
+    this.stopClipboardSync()
+    const clipboard = navigator.clipboard
+    if (!clipboard?.readText) return
+    const poll = () => {
+      clipboard.readText().then((text) => {
+        this.clipboardFailures = 0
+        if (text !== '' && text !== this.lastClipboard) {
+          this.lastClipboard = text
+          this.client.sendClipboardSync(text)
+        }
+      }).catch(() => {
+        this.clipboardFailures += 1
+        // Browsers require a gesture/permission for clipboard reads. Retry on
+        // the next interaction instead of spamming the console.
+        if (this.clipboardFailures >= 3) this.stopClipboardSync()
+      })
+    }
+    poll()
+    this.clipboardTimer = window.setInterval(poll, 1000)
+  }
+
+  private stopClipboardSync(): void {
+    if (this.clipboardTimer !== null) {
+      window.clearInterval(this.clipboardTimer)
+      this.clipboardTimer = null
+    }
   }
 
   requestFrame(): void {

@@ -2,6 +2,9 @@
 
 #include <chrono>
 #include <cstdint>
+#include <deque>
+#include <mutex>
+#include <unordered_set>
 #include <vector>
 
 #include <web/uvcpp_ws_connection.h>
@@ -727,6 +730,57 @@ void session_controller::on_text(const std::string& text) {
     ack["type"] = "display";
     ack["index"] = index;
     send_json(transport.get(), ack);
+    return;
+  }
+
+  // Real-time clipboard sync. The core applies the text to the host
+  // clipboard and forwards it to every other authenticated session, keeping
+  // the origin chain so nested sessions cannot echo it back.
+  if (type == "clipboard-sync") {
+    if (!require_auth()) {
+      transport->close(transport_close::policy, "not authenticated");
+      return;
+    }
+    const std::string text = string_field(j, "text");
+    const std::string hash = string_field(j, "hash");
+    if (text.empty() || text.size() > 192 * 1024 || hash.empty()) return;
+
+    static std::mutex clip_mutex;
+    static std::unordered_set<std::string> clip_seen;
+    static std::deque<std::string> clip_order;
+    {
+      std::lock_guard<std::mutex> lock(clip_mutex);
+      if (clip_seen.count(hash) != 0) return;
+      clip_seen.insert(hash);
+      clip_order.push_back(hash);
+      while (clip_order.size() > 256) {
+        clip_seen.erase(clip_order.front());
+        clip_order.pop_front();
+      }
+    }
+
+    std::string chain = string_field(j, "chain");
+    const std::string& device = options_.device_id;
+    if (!device.empty() &&
+        ("," + chain + ",").find("," + device + ",") != std::string::npos) {
+      return;
+    }
+    if (!device.empty()) {
+      chain = chain.empty() ? device : chain + "," + device;
+    }
+
+    if (options_.clipboard) options_.clipboard->set_text(text);
+    for (const session_info& peer : registry_->snapshot()) {
+      if (peer.id == session->id || !peer.authenticated || !peer.transport) {
+        continue;
+      }
+      uvcpp_json out;
+      out["type"] = "clipboard-sync";
+      out["text"] = text;
+      out["hash"] = hash;
+      out["chain"] = chain;
+      send_json(peer.transport.get(), out);
+    }
     return;
   }
 

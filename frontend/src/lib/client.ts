@@ -252,6 +252,22 @@ export class MolinkClient {
     this.sendJson({ type: 'clipboard', action: 'set', text })
   }
 
+  /** Real-time clipboard update; the core forwards it to other sessions. */
+  sendClipboardSync(text: string): void {
+    if (!this.isLive() || text === '') return
+    let hash = 2166136261
+    for (let i = 0; i < text.length; i += 1) {
+      hash ^= text.charCodeAt(i)
+      hash = Math.imul(hash, 16777619)
+    }
+    this.sendJson({
+      type: 'clipboard-sync',
+      text,
+      hash: (hash >>> 0).toString(16),
+      chain: '',
+    })
+  }
+
   private handleText(text: string): void {
     let message: ControlMessage
     try {
@@ -318,6 +334,7 @@ export class MolinkClient {
         })
         break
       case 'clipboard':
+      case 'clipboard-sync':
         this.handlers.onClipboard?.(message.text ?? '')
         break
       case 'error':
