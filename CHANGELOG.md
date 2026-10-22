@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.6.1] — 2026-10-22
+
+### Fixed
+
+- Windows core build: `api.cpp` included `<windows.h>` before winsock2, causing `sockaddr`/`winsock2` redefinition errors; use `WIN32_LEAN_AND_MEAN` and include winsock2 first.
+
+### Added
+
+- Experimental secure-desktop helper source (`shell/windows/helper`) and `secure-start`/`secure-stop` service commands; CI compiles both, not wired to the core yet.
+
 ## [0.6.0] — 2026-10-22
 
 ### Added
