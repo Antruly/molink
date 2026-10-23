@@ -43,7 +43,10 @@ bool helper_command(const std::string& command, std::vector<uint8_t>& reply) {
   DWORD written = 0;
   WriteFile(pipe, command.data(), static_cast<DWORD>(command.size()), &written,
             nullptr);
-  reply.resize(64u * 1024u * 1024u);
+  if (reply.capacity() < 36u * 1024u * 1024u) {
+    reply.reserve(36u * 1024u * 1024u);
+  }
+  reply.resize(36u * 1024u * 1024u);
   DWORD read = 0;
   const bool ok = ReadFile(pipe, reply.data(),
                            static_cast<DWORD>(reply.size()), &read, nullptr) != 0;
@@ -128,7 +131,10 @@ class secure_capture final : public capture_base {
       }
       std::string err;
       capture_frame(err);
-      next += std::chrono::milliseconds(1000 / std::max(1, target_fps()));
+      // GDI + a large pipe copy is much heavier than DXGI; the lock screen
+      // does not need the full session frame rate.
+      const int fps = std::min(8, std::max(1, target_fps()));
+      next += std::chrono::milliseconds(1000 / fps);
       const auto now = std::chrono::steady_clock::now();
       if (next < now) next = now;
       std::this_thread::sleep_until(next);

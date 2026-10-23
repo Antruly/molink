@@ -179,8 +179,9 @@ class secure_input final : public input_injector {
 }  // namespace
 
 std::unique_ptr<input_injector> make_windows_secure_input() {
-  std::string reply;
-  if (!send_command("info", &reply)) return nullptr;
+  // Do not fail just because the one-shot info probe lost the pipe race with
+  // a frame transfer: input must still be attempted, and the size refreshes
+  // on the first move.
   return std::unique_ptr<input_injector>(new secure_input());
 }
 
