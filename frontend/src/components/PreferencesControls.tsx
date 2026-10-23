@@ -13,6 +13,7 @@ import { useTranslation } from 'react-i18next'
 import { setLanguage } from '../i18n'
 import type { ServerState } from '../lib/api'
 import { useAppStore, type QualityMode, type Theme } from '../store/app'
+import { ServicePanel } from './ServicePanel'
 import { WindowsSessionsPanel } from './WindowsSessionsPanel'
 
 function Segment<T extends string>({
@@ -278,6 +279,7 @@ export function PreferencesControls() {
         />
       ) : null}
 
+      {server?.local ? <ServicePanel token={token} /> : null}
       {server?.local ? <WindowsSessionsPanel token={token} /> : null}
 
       <div className="space-y-2">

@@ -804,6 +804,8 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
       ok = start_session_service(err);
     } else if (what == "stop") {
       ok = stop_session_service(err);
+    } else if (what == "restart") {
+      ok = restart_session_service(err);
     }
     uvcpp_json j;
     j["ok"] = ok;
@@ -830,6 +832,11 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
            [service_action](uvcpp_web_request& req, uvcpp_web_response& resp,
                             uvcpp_web_next) {
              service_action(req, resp, "stop");
+           });
+  app.post("/api/service/restart",
+           [service_action](uvcpp_web_request& req, uvcpp_web_response& resp,
+                            uvcpp_web_next) {
+             service_action(req, resp, "restart");
            });
 
   app.get("/api/settings",

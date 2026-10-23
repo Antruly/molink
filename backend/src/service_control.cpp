@@ -104,8 +104,15 @@ bool start_session_service(std::string& err) {
     CloseServiceHandle(manager);
     return false;
   }
-  const BOOL ok = StartServiceW(service, 0, nullptr) ||
-                  GetLastError() == ERROR_SERVICE_ALREADY_RUNNING;
+  BOOL ok = FALSE;
+  for (int attempt = 0; attempt < 4; ++attempt) {
+    if (StartServiceW(service, 0, nullptr) ||
+        GetLastError() == ERROR_SERVICE_ALREADY_RUNNING) {
+      ok = TRUE;
+      break;
+    }
+    Sleep(300);
+  }
   if (!ok) err = "StartService failed";
   CloseServiceHandle(service);
   CloseServiceHandle(manager);
@@ -137,6 +144,20 @@ bool stop_session_service(std::string& err) {
   CloseServiceHandle(service);
   CloseServiceHandle(manager);
   return ok != 0 || GetLastError() == ERROR_SERVICE_NOT_ACTIVE;
+#else
+  (void)err;
+  return false;
+#endif
+}
+
+bool restart_session_service(std::string& err) {
+#if defined(_WIN32)
+  stop_session_service(err);
+  for (int i = 0; i < 30; ++i) {
+    if (!query_session_service().running) break;
+    Sleep(100);
+  }
+  return start_session_service(err);
 #else
   (void)err;
   return false;

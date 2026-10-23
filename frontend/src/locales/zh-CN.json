@@ -201,6 +201,18 @@
     "install": "安装服务",
     "installing": "安装中…",
     "later": "暂不安装",
-    "installFailed": "服务安装失败或被取消。"
+    "installFailed": "服务安装失败或被取消。",
+    "panelTitle": "后台服务",
+    "status": "状态",
+    "running": "运行中",
+    "stopped": "已停止",
+    "notInstalled": "未安装",
+    "start": "启动",
+    "stop": "停止",
+    "restart": "重启",
+    "uninstall": "卸载",
+    "refresh": "刷新",
+    "actionFailed": "服务操作失败，可能需要管理员权限。",
+    "panelHint": "安装后启动/停止不需要提权；安装/卸载会弹出 UAC。"
   }
 }

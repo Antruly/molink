@@ -201,6 +201,18 @@
     "install": "Install service",
     "installing": "Installing…",
     "later": "Not now",
-    "installFailed": "Service installation failed or was cancelled."
+    "installFailed": "Service installation failed or was cancelled.",
+    "panelTitle": "Background service",
+    "status": "Status",
+    "running": "Running",
+    "stopped": "Stopped",
+    "notInstalled": "Not installed",
+    "start": "Start",
+    "stop": "Stop",
+    "restart": "Restart",
+    "uninstall": "Uninstall",
+    "refresh": "Refresh",
+    "actionFailed": "Service action failed. Administrator rights may be required.",
+    "panelHint": "Start/stop needs no elevation after installation. Install/uninstall opens a UAC prompt."
   }
 }

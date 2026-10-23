@@ -22,6 +22,7 @@ bool running_in_console_session();
 /// rights; no elevation prompt is expected after install.
 bool start_session_service(std::string& err);
 bool stop_session_service(std::string& err);
+bool restart_session_service(std::string& err);
 /// Run `molink-service.exe --install` / `--uninstall` with UAC. Returns false
 /// when the helper is missing or the user cancels the prompt.
 bool install_session_service(std::string& err);

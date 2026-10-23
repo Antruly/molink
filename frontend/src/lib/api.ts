@@ -287,7 +287,7 @@ export function fetchServiceStatus(token: string): Promise<ServiceStatus> {
 
 export function postServiceAction(
   token: string,
-  action: 'install' | 'uninstall' | 'start' | 'stop',
+  action: 'install' | 'uninstall' | 'start' | 'stop' | 'restart',
 ): Promise<{ ok: boolean; error?: string }> {
   return request<{ ok: boolean; error?: string }>(
     `/api/service/${action}`,
