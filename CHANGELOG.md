@@ -1,5 +1,33 @@
 # Changelog
 
+## [Server 0.2.0] — 2026-10-25
+
+服务端使用独立版本线与 `server-v*` 标签。
+
+### Added
+
+- 设备目录迁入数据库：默认 SQLite（WAL、连接池、事务化迁移），可选 PostgreSQL
+  （运行时加载 libpq）；旧 `devices.json` 首次启动自动导入并保留原文件
+- Web 管理控制台（独立 SPA）：首次初始化、登录、仪表盘、设备、管理员、安全策略、
+  封禁、审计与设置；亮/暗主题，随服务端 `web-admin` 目录发布
+- 多账户与角色（admin / operator / viewer）；HttpOnly 会话 Cookie + CSRF 双提交、
+  Origin 校验、PBKDF2-HMAC-SHA256（600000 轮）、最后一个管理员保护
+- IP 来源策略：私有 / 中国大陆 / 海外 + 自定义允许/拒绝 CIDR；内置 APNIC 中国
+  IPv4 表；默认仅私有 + 中国大陆
+- 请求限速（设备 API、注册、心跳、查询、管理 API）、登录失败阶梯与临时封禁；
+  受信代理 `X-Forwarded-For`；审计事件
+- 设备 API 与管理面分端口（28430 / 127.0.0.1:28431），管理面可选 TLS 或反向代理
+- 三平台打包：Linux deb/rpm/tar.gz + systemd（安装即启用）、Windows 安装器/zip +
+  可选 Windows 服务、macOS 未签名 pkg/tar.gz + LaunchDaemon
+- 独立 `release-server.yml` 发布工作流；libuvcpp 以 DB + OpenSSL + PostgreSQL
+  运行时加载构建，并在 CI 中断言这些开关确实生效
+
+### Known limitations
+
+- macOS pkg 未签名/未公证；Windows 包在干净系统上可能需要 VC++ Redistributable
+- 中国 IPv6 段未内置；公网 IPv6 按海外处理
+- 分布式/多节点管理与中继属于第三阶段（Pro），见 `docs/server-distributed.md`
+
 ## [0.8.0] — 2026-10-24
 
 ### Added

@@ -308,14 +308,22 @@ std::string sqlite_url_for(const std::string& data_dir) {
   for (char& c : normalized) {
     if (c == '\\') c = '/';
   }
+#if defined(_WIN32)
+  // libuvcpp hands everything after `sqlite://` to SQLite as the path. On
+  // Windows that must be `C:/...`, not `/C:/...`, so use two slashes.
+  return "sqlite://" + normalized;
+#else
   if (!normalized.empty() && normalized.front() != '/') {
     normalized.insert(normalized.begin(), '/');
   }
   return "sqlite:///" + normalized;
+#endif
 }
 
 bool parse_config(int argc, char** argv, server_config& out, std::string& err) {
   server_config cfg;
+  cfg.admin.host = "127.0.0.1";
+  cfg.admin.port = 28431;
 
   // The config path is needed before the file can be loaded, so scan for it
   // once and let CLI win over the environment.

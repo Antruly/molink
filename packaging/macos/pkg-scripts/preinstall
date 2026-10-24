@@ -1,0 +1,4 @@
+#!/bin/sh
+set -e
+launchctl bootout system/com.molink.server >/dev/null 2>&1 || true
+exit 0

@@ -85,7 +85,20 @@ jobs:
 
       - name: Install OpenSSL
         shell: pwsh
-        run: choco install openssl -y --no-progress
+        run: |
+          choco install openssl -y --no-progress
+          $roots = @(
+            'C:\Program Files\OpenSSL-Win64',
+            'C:\Program Files\OpenSSL'
+          ) | Where-Object { Test-Path $_ }
+          if (-not $roots) {
+            $roots = Get-ChildItem 'C:\Program Files' -Directory -Filter 'OpenSSL*' |
+              ForEach-Object { $_.FullName }
+          }
+          $root = @($roots)[0]
+          if (-not $root) { throw 'OpenSSL installation not found' }
+          "OPENSSL_ROOT_DIR=$root" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "OPENSSL_BIN=$root\bin" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Build libuvcpp
         shell: bash
@@ -99,10 +112,15 @@ jobs:
           cmake -S "$RUNNER_TEMP/libuvcpp" -B "$RUNNER_TEMP/libuvcpp/build" \
             -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
             -DUVCPP_ENABLE_OPENSSL=ON \
-            -DOPENSSL_ROOT_DIR="C:/Program Files/OpenSSL-Win64" \
+            -DOPENSSL_ROOT_DIR="$OPENSSL_ROOT_DIR" \
             -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/uvcpp"
           cmake --build "$RUNNER_TEMP/libuvcpp/build" --config Release --parallel
           cmake --install "$RUNNER_TEMP/libuvcpp/build" --config Release
+          cfg="$RUNNER_TEMP/uvcpp/include/uvcpp/uvcpp_config.h"
+          grep -q "^#define UVCPP_OPENSSL_ENABLE 1" "$cfg" || {
+            echo "::error::libuvcpp was built without OpenSSL" >&2
+            exit 1
+          }
 
       - name: Install libuv and zlib into the prefix
         shell: bash

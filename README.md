@@ -50,7 +50,7 @@
 - **传输抽象**：`transport/session_transport.h` 定义文本/二进制/关闭/对端信息接口；`session_controller` 只依赖该接口，WebSocket 是第一个实现。后续接 TCP/QUIC 时新增一个 transport 实现和监听器即可，会话状态机、鉴权、帧回放、输入和剪贴板逻辑都不用改。
 - **frontend/**：React 19 + TypeScript + Vite + Tailwind 4 + Zustand + react-i18next。
 - **shell/**：三个平台各自的原生壳层（Linux GTK/WebKitGTK、Windows WebView2、macOS WKWebView），启动并监管 `molink-core`，加载核心托管的前端。
-- **server/**、移动端：二阶段。
+- **server/**：设备目录与管理服务已实现（0.2.0，见 [docs/server.md](docs/server.md)）；移动端仍在二阶段。
 
 ## 目录
 
@@ -228,7 +228,17 @@ python3 tools/bench_quality.py http://127.0.0.1:28418 --token <ready-token>
 - Windows：Inno Setup 安装器 `.exe` + 免安装单文件 `.exe`
 - macOS：Apple Silicon 与 Intel 的 `.dmg`
 
-桌面端不发布 zip；服务端与移动端资产属于二阶段。
+桌面端不发布 zip。
+
+服务端使用独立的标签线：推送 `server-v*` 触发
+`.github/workflows/release-server.yml`，构建三平台服务端安装包：
+
+- Linux：`.deb`、`.rpm`、`.tar.gz`（deb/rpm 自动注册 systemd 服务）
+- Windows：Inno Setup 安装器（可选安装为 Windows 服务）+ `.zip`
+- macOS：未签名 `.pkg`（LaunchDaemon）+ `.tar.gz`
+
+服务端的部署、配置、安全与升级见 [docs/server.md](docs/server.md)，第三阶段分布式
+设计见 [docs/server-distributed.md](docs/server-distributed.md)。
 
 ## 发布状态
 
@@ -240,6 +250,9 @@ python3 tools/bench_quality.py http://127.0.0.1:28418 --token <ready-token>
 | Linux | `.deb`、`.AppImage`、`.rpm` | 本机验证；RPM 由 CI 构建 |
 | Windows | 安装器 `.exe`、免安装 `.exe` | 壳层交叉编译通过，由 CI 打包 |
 | macOS | `.dmg` | 由 macOS CI 构建 |
+| 服务端 Linux | `.deb`、`.rpm`、`.tar.gz` | 本机验证 deb；RPM 由 CI 构建 |
+| 服务端 Windows | 安装器 `.exe`、`.zip` | 由 Windows CI 构建 |
+| 服务端 macOS | `.pkg`（未签名）、`.tar.gz` | 由 macOS CI 构建 |
 
 AppImage 首次使用需要 `chmod +x`，并依赖系统的 GTK 3 与 WebKitGTK 4.1；缺少依赖时 AppRun 会弹出说明。
 

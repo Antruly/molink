@@ -1,0 +1,24 @@
+[Unit]
+Description=moLink Server
+Documentation=https://github.com/Antruly/molink
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=molink-server
+Group=molink-server
+ExecStart=/opt/molink-server/bin/molink-server --config /etc/molink-server/config.json
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/molink-server /var/log/molink-server
+StateDirectory=molink-server
+LogsDirectory=molink-server
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

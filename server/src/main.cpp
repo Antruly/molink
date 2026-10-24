@@ -7,6 +7,7 @@
 
 #include "config.h"
 #include "runtime.h"
+#include "service.h"
 #include "version.h"
 
 #if defined(_WIN32)
@@ -96,9 +97,24 @@ int main(int argc, char** argv) {
   }
   if (config.install_service || config.uninstall_service ||
       config.service_mode) {
-    std::fprintf(stderr,
-                 "molink-server: service mode is not wired into this build yet\n");
-    return 2;
+    std::string service_error;
+    if (config.install_service) {
+      if (!install_service(config, service_error)) {
+        std::fprintf(stderr, "molink-server: %s\n", service_error.c_str());
+        return 1;
+      }
+      std::printf("moLink Server service installed\n");
+      return 0;
+    }
+    if (config.uninstall_service) {
+      if (!uninstall_service(config, service_error)) {
+        std::fprintf(stderr, "molink-server: %s\n", service_error.c_str());
+        return 1;
+      }
+      std::printf("moLink Server service removed\n");
+      return 0;
+    }
+    return run_service(config);
   }
 
   server_runtime runtime(config);

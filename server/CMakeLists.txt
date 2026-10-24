@@ -52,6 +52,7 @@ add_library(molink_server_core STATIC
   src/db/migrations.cpp
   src/db/repositories.cpp
   src/db/db_executor.cpp
+  src/db/legacy_import.cpp
   src/settings.cpp
   src/settings_cache.cpp
   src/http_common.cpp
@@ -59,6 +60,7 @@ add_library(molink_server_core STATIC
   src/admin_api.cpp
   src/admin_ui.cpp
   src/runtime.cpp
+  src/service.cpp
   src/security/ban_cache.cpp
   src/security/ip.cpp
   src/security/cn_ranges.cpp
@@ -72,6 +74,11 @@ target_link_libraries(molink_server_core PUBLIC
   OpenSSL::Crypto
   Threads::Threads
 )
+if(WIN32)
+  # windows.h must not define min/max or pull in winsock.h before winsock2.h.
+  target_compile_definitions(molink_server_core PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
+  target_link_libraries(molink_server_core PUBLIC ws2_32)
+endif()
 
 add_executable(molink-server
   src/main.cpp

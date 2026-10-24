@@ -1,0 +1,36 @@
+{
+  "server": {
+    "data_dir": "/usr/local/var/molink-server",
+    "registration_token": "",
+    "public_url": "",
+    "offline_after_seconds": 90
+  },
+  "device": {
+    "host": "0.0.0.0",
+    "port": 28430,
+    "tls_cert": "",
+    "tls_key": ""
+  },
+  "admin": {
+    "host": "127.0.0.1",
+    "port": 28431,
+    "tls_cert": "",
+    "tls_key": "",
+    "web_root": "/usr/local/molink-server/share/web-admin",
+    "allow_insecure_remote": false
+  },
+  "database": {
+    "driver": "sqlite",
+    "url": "",
+    "pool_min": 1,
+    "pool_max": 8,
+    "busy_timeout_ms": 5000
+  },
+  "log": {
+    "level": "info",
+    "file": "/usr/local/var/log/molink-server/server.log",
+    "access_log": false,
+    "max_size_mb": 20,
+    "max_files": 5
+  }
+}

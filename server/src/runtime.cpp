@@ -10,12 +10,19 @@
 
 #include "admin_api.h"
 #include "admin_ui.h"
+#include "db/legacy_import.h"
 #include "device_api.h"
 #include "logging.h"
 #include "util.h"
 #include "version.h"
 
 #if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 #define MOLINK_PID GetCurrentProcessId()
 #else
@@ -73,10 +80,13 @@ bool server_runtime::initialize(std::string& error) {
       error = "database pool has no connection: " + db_.last_error();
       return false;
     }
-    const bool ok = settings_.load(*client, db_.dialect(), settings_repo_, error);
+    bool ok = settings_.load(*client, db_.dialect(), settings_repo_, error);
     if (ok) {
       const std::uint64_t now = epoch_ms();
-      ban_cache_.load(*client, db_.dialect(), bans_repo_, now, error);
+      ok = ban_cache_.load(*client, db_.dialect(), bans_repo_, now, error);
+    }
+    if (ok && !config_.skip_legacy_import) {
+      ok = import_legacy_devices(db_, *client, config_.data_dir, error);
     }
     db_.release(client);
     if (!ok) return false;
