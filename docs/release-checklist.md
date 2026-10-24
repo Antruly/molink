@@ -77,3 +77,17 @@ Linux 本机已完成编码/解码/端到端基准与关闭回归。**
 
 当前可交付：**Linux/X11 的 `.deb` 与 `.AppImage`**。三平台安装包在 CI 上可生成，
 但 Windows/macOS 运行时行为需要真机确认。
+
+## Windows 7 x86（预览，2026-10-25）
+
+| 项目 | 命令 / 方法 | 结果 |
+|---|---|---|
+| 构建 | `packaging/windows/build-win7-x86.ps1`（libuvcpp full + core + shell + service/helper + 安装器） | 通过 |
+| CI | `release-win7.yml` 手动触发 | 通过（run 40138250042，4m32s） |
+| 目录 / 域组 | 局域网 TLS 目录注册、ID 解析、域组码 | 通过 |
+| WS 会话 | 反向隧道 → welcome → 129 KB 真实关键帧 | 通过 |
+| GDI 采集 | 1024×768 控制台会话，`capture=gdi` | 通过 |
+| 输入 / 光标 | SendInput；`cursor` 32×32 RGBA + `cursor-position` | 通过 |
+| 音频 | 虚拟机无声卡设备，欢迎消息 `audio=false` | 预期行为 |
+| 安装器 | Inno Setup 编译 | 通过（未在 Win7 上以 UAC 实际安装） |
+| 防火墙 / 服务 | `install-firewall.cmd` / `install-service.cmd` | 需管理员运行，未在过滤令牌会话中验证 |

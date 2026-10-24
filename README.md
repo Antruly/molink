@@ -261,6 +261,7 @@ Windows 7 x86（32 位）是独立预览线：推送 `win7-x86-v*` 标签触发
 | Linux | `.deb`、`.AppImage`、`.rpm` | 本机验证；RPM 由 CI 构建 |
 | Windows | 安装器 `.exe`、免安装 `.exe` | 壳层交叉编译通过，由 CI 打包 |
 | macOS | `.dmg` | 由 macOS CI 构建 |
+| Windows 7 x86 | 安装器 `.exe`、便携 `.zip` | GDI 采集/输入已验证；由 `release-win7.yml` 构建；原生壳需 WebView2 109，浏览器 UI 可用 |
 | 服务端 Linux | `.deb`、`.rpm`、`.tar.gz` | 本机验证 deb；RPM 由 CI 构建 |
 | 服务端 Windows | 安装器 `.exe`、`.zip` | 由 Windows CI 构建 |
 | 服务端 macOS | `.pkg`（未签名）、`.tar.gz` | 由 macOS CI 构建 |
@@ -269,6 +270,8 @@ AppImage 首次使用需要 `chmod +x`，并依赖系统的 GTK 3 与 WebKitGTK 
 
 推送 `v*` 标签会触发 `.github/workflows/release-desktop.yml`，三个平台并行构建并把
 产物附加到同一个 Release；需要仓库变量 `UVCPP_REPO`（libuvcpp 源码地址）。
+Win7 x86 使用独立的 `.github/workflows/release-win7.yml`（`win7-x86-v*` 标签或手动
+触发），下载 libuvcpp Win7 kit 与 GCC 13 后产出 zip 和 Inno Setup 安装器。
 
 ## 许可证
 
