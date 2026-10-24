@@ -8,6 +8,7 @@ export function StatusBar() {
   const device = useAppStore((state) => state.device)
   const tabs = useAppStore((state) => state.tabs)
   const info = server?.server
+  const version = server?.version ?? device?.version ?? ''
   const enabled = info?.enabled ?? true
   const online = info?.online ?? false
   const registered = info?.registered ?? false
@@ -43,7 +44,7 @@ export function StatusBar() {
           : t('simple.statusSessionsNone')}
       </span>
       <span className="ml-auto font-mono">
-        {server?.version ?? device?.version ?? '0.9.0'}
+        {version || '—'}
       </span>
     </footer>
   )

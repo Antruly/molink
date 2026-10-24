@@ -9,13 +9,13 @@ export function NoticePanel() {
   const localMode = useAppStore((state) => state.localMode)
   const server = useAppStore((state) => state.server)
   const device = useAppStore((state) => state.device)
-  const version = server?.version ?? device?.version ?? '0.9.0'
+  const version = server?.version ?? device?.version ?? ''
   const [update, setUpdate] = useState<UpdateInfo | null>(() =>
     cachedUpdate(version),
   )
 
   useEffect(() => {
-    if (!localMode) return
+    if (!localMode || !version) return
     let alive = true
     if (!update) {
       void checkForUpdate(version).then((info) => {
