@@ -43,7 +43,7 @@
     "connect": "连接",
     "requestAccess": "发送远程请求",
     "requestAccessHint": "无需验证码：由被控端确认本次连接（60 秒内有效）",
-    "connectSaved": "点击直接连接（使用已保存的验证码）",
+    "connectSaved": "双击直接连接（使用已保存的验证码）",
     "prefillHint": "填入表单（没有保存的验证码）",
     "prefill": "填入表单",
     "useLocalCode": "使用本机验证码",

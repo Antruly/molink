@@ -43,7 +43,7 @@
     "connect": "Connect",
     "requestAccess": "Request access",
     "requestAccessHint": "No code needed: the host approves this session (valid for 60 s)",
-    "connectSaved": "Click to connect with the saved code",
+    "connectSaved": "Double-click to connect with the saved code",
     "prefillHint": "Fill the form (no saved code)",
     "prefill": "Fill form",
     "useLocalCode": "Use this device's code",

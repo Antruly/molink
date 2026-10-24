@@ -664,7 +664,8 @@ export function HomeView() {
                 >
                   <button
                     type="button"
-                    onClick={() => connectRecent(recent)}
+                    onClick={() => prefillFromRecent(recent)}
+                    onDoubleClick={() => connectRecent(recent)}
                     className="min-w-0 flex-1 text-left"
                     title={
                       recent.token
