@@ -15,7 +15,6 @@
 #include <atomic>
 #include <fstream>
 #include <functional>
-#include <mutex>
 #include <thread>
 #include <cstdint>
 #include <cstdio>
@@ -25,10 +24,12 @@
 
 namespace {
 
-HDESK g_desktop = nullptr;
+// Each pipe thread must track its own desktop: SetThreadDesktop only affects
+// the calling thread, and a shared handle made the input thread believe it had
+// already switched when the capture thread changed desktops.
+thread_local HDESK g_desktop = nullptr;
 constexpr wchar_t kPipeName[] = L"\\\\.\\pipe\\molink-secure";
 constexpr wchar_t kInputPipeName[] = L"\\\\.\\pipe\\molink-secure-input";
-std::mutex g_desktop_mutex;
 constexpr wchar_t kLogPath[] =
     L"C:\\ProgramData\\moLink\\service\\helper.log";
 
@@ -62,9 +63,12 @@ bool open_input_desktop(std::string& err) {
   log_line("start: station=" +
            object_name(GetProcessWindowStation()) + " thread-desktop=" +
            object_name(GetThreadDesktop(GetCurrentThreadId())));
-  g_desktop = OpenInputDesktop(0, FALSE, DESKTOP_READOBJECTS |
-                                             DESKTOP_WRITEOBJECTS |
-                                             DESKTOP_SWITCHDESKTOP);
+  g_desktop = OpenInputDesktop(0, FALSE, GENERIC_ALL);
+  if (g_desktop == nullptr) {
+    g_desktop = OpenInputDesktop(0, FALSE, DESKTOP_READOBJECTS |
+                                               DESKTOP_WRITEOBJECTS |
+                                               DESKTOP_SWITCHDESKTOP);
+  }
   if (g_desktop == nullptr) {
     const DWORD code = GetLastError();
     log_line("OpenInputDesktop failed: " + std::to_string(code));
@@ -80,10 +84,15 @@ bool open_input_desktop(std::string& err) {
 }
 
 bool refresh_input_desktop() {
-  std::lock_guard<std::mutex> lock(g_desktop_mutex);
-  HDESK current = OpenInputDesktop(0, FALSE, DESKTOP_READOBJECTS |
-                                             DESKTOP_WRITEOBJECTS |
-                                             DESKTOP_SWITCHDESKTOP);
+  // GENERIC_ALL matches what other secure-desktop injectors request; the
+  // smaller mask made SetThreadDesktop succeed but SendInput report access
+  // denied.
+  HDESK current = OpenInputDesktop(0, FALSE, GENERIC_ALL);
+  if (current == nullptr) {
+    current = OpenInputDesktop(0, FALSE, DESKTOP_READOBJECTS |
+                                            DESKTOP_WRITEOBJECTS |
+                                            DESKTOP_SWITCHDESKTOP);
+  }
   if (current == nullptr) {
     log_line("OpenInputDesktop failed: " + std::to_string(GetLastError()));
     return false;
@@ -238,7 +247,10 @@ void send_key(WORD vk, bool down) {
   input.type = INPUT_KEYBOARD;
   input.ki.wVk = vk;
   if (!down) input.ki.dwFlags = KEYEVENTF_KEYUP;
-  SendInput(1, &input, sizeof(input));
+  if (SendInput(1, &input, sizeof(input)) != 1) {
+    log_line("SendInput key " + std::to_string(vk) + " failed: " +
+             std::to_string(GetLastError()));
+  }
 }
 
 void send_unicode(const std::wstring& text) {
@@ -293,7 +305,9 @@ std::string handle_line(const std::string& line, std::vector<uint8_t>& frame,
     INPUT input{};
     input.type = INPUT_MOUSE;
     input.mi.dwFlags = flag;
-    SendInput(1, &input, sizeof(input));
+    if (SendInput(1, &input, sizeof(input)) != 1) {
+      log_line("SendInput button failed: " + std::to_string(GetLastError()));
+    }
     return R"({"ok":true})";
   }
   if (line.rfind("wheel ", 0) == 0) {

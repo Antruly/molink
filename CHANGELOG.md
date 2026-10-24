@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.6.32] — 2026-10-24
+
+### Fixed
+
+- Windows 锁屏/登录页远程输入完全失效：helper 打开输入桌面时只申请了
+  `DESKTOP_READOBJECTS|DESKTOP_WRITEOBJECTS|DESKTOP_SWITCHDESKTOP`，`SetThreadDesktop` 会成功，
+  但之后每次 `SendInput` 都返回 `ERROR_ACCESS_DENIED`（解锁状态下同样失败）。改用 `GENERIC_ALL`
+  打开输入桌面后，模拟按键可唤出登录页，登录页可远程输入密码完成解锁
+- 抓屏线程与输入线程各自记录自己的桌面句柄（`thread_local`）；此前共用句柄会让后启动的线程
+  误以为已经切换过桌面，从而把输入注入到错误的桌面
+- helper 改为在 `winsta0\default` 启动并加 `CREATE_NO_WINDOW`，不再在用户桌面弹出控制台窗口
+  并抢走前台焦点
+
 ## [0.6.31] — 2026-10-24
 
 ### Added

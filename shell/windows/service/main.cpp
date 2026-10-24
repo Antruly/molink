@@ -181,15 +181,18 @@ bool launch_helper(std::string& err) {
            L"molink-helper.exe";
   STARTUPINFOW startup{};
   startup.cb = sizeof(startup);
-  const wchar_t* desktops[] = {L"winsta0\\Winlogon",
-                               L"winsta0\\default"};
+  // Start on the interactive desktop; the helper switches each pipe thread to
+  // whichever desktop currently receives input.
+  const wchar_t* desktops[] = {L"winsta0\\default",
+                               L"winsta0\\Winlogon"};
   BOOL created = FALSE;
   for (const wchar_t* desktop : desktops) {
     startup.lpDesktop = const_cast<wchar_t*>(desktop);
     created = CreateProcessAsUserW(
         token, helper.c_str(), nullptr, nullptr, nullptr, FALSE,
-        CREATE_NEW_PROCESS_GROUP | CREATE_UNICODE_ENVIRONMENT, nullptr, nullptr,
-        &startup, &g_helper);
+        CREATE_NEW_PROCESS_GROUP | CREATE_UNICODE_ENVIRONMENT |
+            CREATE_NO_WINDOW,
+        nullptr, nullptr, &startup, &g_helper);
     if (created) {
       log_line(std::string("helper launched on ") +
                std::string(desktop, desktop + wcslen(desktop)) +
