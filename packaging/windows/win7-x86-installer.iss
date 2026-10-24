@@ -61,7 +61,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "chinesesimplified"; MessagesFile: "{#LangFile}"
 
 [Tasks]
-Name: "firewall"; Description: "Allow moLink through Windows Firewall (private and domain)"; GroupDescription: "Network access"; Flags: checkedonce
+Name: "firewall"; Description: "Allow moLink through Windows Firewall (all profiles)"; GroupDescription: "Network access"; Flags: checkedonce
 Name: "service"; Description: "Install the secure-desktop service (lock/login screen support)"; GroupDescription: "Background service"; Flags: unchecked
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
@@ -77,7 +77,7 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; WorkingDir: "
 
 [Run]
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""moLink Core 28418"""; Flags: runhidden
-Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""moLink Core 28418"" dir=in action=allow protocol=TCP localport=28418 profile=private,domain enable=yes"; Flags: runhidden; Tasks: firewall
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""moLink Core 28418"" dir=in action=allow protocol=TCP localport=28418 profile=any enable=yes"; Flags: runhidden; Tasks: firewall
 Filename: "{sys}\sc.exe"; Parameters: "stop moLinkSession"; Flags: runhidden; Tasks: service
 Filename: "{sys}\sc.exe"; Parameters: "delete moLinkSession"; Flags: runhidden; Tasks: service
 Filename: "{sys}\sc.exe"; Parameters: "create moLinkSession binPath= ""{commonappdata}\moLink\service\molink-service.exe"" start= demand DisplayName= ""moLink session helper"""; Flags: runhidden waituntilterminated; Tasks: service
