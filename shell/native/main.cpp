@@ -251,8 +251,46 @@ gboolean on_quit_signal(gpointer) {
   return G_SOURCE_CONTINUE;
 }
 
+/// GtkWindow normally allocates its only child the whole content area, but
+/// after a WM-driven maximize/fullscreen the WebKit view can keep its old
+/// allocation (the rest of the window stays transparent). Re-allocating it
+/// from the window's own allocation closes that gap.
+void force_child_allocate(GtkWidget* window) {
+  GtkWidget* child = gtk_bin_get_child(GTK_BIN(window));
+  if (child == nullptr) return;
+  // gtk_widget_get_allocation() can still report the pre-maximize size at
+  // this point; the GdkWindow already has the size the WM gave us.
+  int width = 0;
+  int height = 0;
+  GdkWindow* gdk_window = gtk_widget_get_window(window);
+  if (gdk_window != nullptr) {
+    width = gdk_window_get_width(gdk_window);
+    height = gdk_window_get_height(gdk_window);
+  }
+  if (width <= 0 || height <= 0) {
+    GtkAllocation allocation;
+    gtk_widget_get_allocation(window, &allocation);
+    width = allocation.width;
+    height = allocation.height;
+  }
+  if (width <= 0 || height <= 0) return;
+  GtkAllocation child_allocation = {0, 0, width, height};
+  gtk_widget_size_allocate(child, &child_allocation);
+}
+
 void on_load_changed(WebKitWebView* view, WebKitLoadEvent event, gpointer) {
   if (event != WEBKIT_LOAD_FINISHED) return;
+  // A window that the WM maximized before the page loaded can miss the
+  // resize; reallocate once the page is up as well.
+  GtkWidget* toplevel = gtk_widget_get_toplevel(GTK_WIDGET(view));
+  if (GTK_IS_WINDOW(toplevel)) {
+    g_timeout_add(100,
+                  [](gpointer data) -> gboolean {
+                    force_child_allocate(GTK_WIDGET(data));
+                    return G_SOURCE_REMOVE;
+                  },
+                  toplevel);
+  }
   if (!g_smoke) return;
   const char* title = webkit_web_view_get_title(view);
   std::printf("SHELL_SMOKE_OK title=%s\n", title != nullptr ? title : "");
@@ -412,39 +450,15 @@ void apply_window_shape(GtkWidget* widget) {
   }
 }
 
-/// GtkWindow normally allocates its only child the whole content area, but
-/// after a WM-driven maximize/fullscreen the WebKit view can keep its old
-/// allocation (the rest of the window stays transparent). Re-allocating it
-/// from the window's own allocation closes that gap.
-void force_child_allocate(GtkWidget* window) {
-  GtkWidget* child = gtk_bin_get_child(GTK_BIN(window));
-  if (child == nullptr) return;
-  // gtk_widget_get_allocation() can still report the pre-maximize size at
-  // this point; the GdkWindow already has the size the WM gave us.
-  int width = 0;
-  int height = 0;
-  GdkWindow* gdk_window = gtk_widget_get_window(window);
-  if (gdk_window != nullptr) {
-    width = gdk_window_get_width(gdk_window);
-    height = gdk_window_get_height(gdk_window);
-  }
-  if (width <= 0 || height <= 0) {
-    GtkAllocation allocation;
-    gtk_widget_get_allocation(window, &allocation);
-    width = allocation.width;
-    height = allocation.height;
-  }
-  if (width <= 0 || height <= 0) return;
-  GtkAllocation child_allocation = {0, 0, width, height};
-  gtk_widget_size_allocate(child, &child_allocation);
-}
-
 gboolean on_size_allocate(GtkWidget* widget, GdkRectangle*, gpointer) {
   if (g_window_square) {
     gtk_widget_shape_combine_region(widget, nullptr);
   } else {
     apply_window_shape(widget);
   }
+  // Every allocation, including the one produced by a maximize at startup,
+  // must reach the WebView.
+  force_child_allocate(widget);
   return FALSE;
 }
 
