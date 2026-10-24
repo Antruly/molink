@@ -22,12 +22,28 @@ if(NOT MOLINK_WIN7_KIT)
 endif()
 file(TO_CMAKE_PATH "${MOLINK_WIN7_KIT}" MOLINK_WIN7_KIT)
 
-set(CMAKE_C_COMPILER   "${MOLINK_WIN7_KIT}/deps/mingw32/bin/gcc.exe")
-set(CMAKE_CXX_COMPILER "${MOLINK_WIN7_KIT}/deps/mingw32/bin/g++.exe")
-set(CMAKE_RC_COMPILER  "${MOLINK_WIN7_KIT}/deps/mingw32/bin/windres.exe")
-set(CMAKE_MAKE_PROGRAM "${MOLINK_WIN7_KIT}/deps/mingw32/bin/mingw32-make.exe")
-set(CMAKE_AR           "${MOLINK_WIN7_KIT}/deps/mingw32/bin/ar.exe")
-set(CMAKE_RANLIB       "${MOLINK_WIN7_KIT}/deps/mingw32/bin/ranlib.exe")
+# The kit's GCC 8.1 is too old for moLink's C++17 std::filesystem use; point
+# MOLINK_WIN7_GCC at a newer i686 toolchain (e.g. mingw-builds 13.2 msvcrt).
+if(NOT MOLINK_WIN7_GCC AND DEFINED ENV{MOLINK_WIN7_GCC})
+  set(MOLINK_WIN7_GCC "$ENV{MOLINK_WIN7_GCC}")
+endif()
+if(MOLINK_WIN7_GCC)
+  file(TO_CMAKE_PATH "${MOLINK_WIN7_GCC}" MOLINK_WIN7_GCC)
+  set(_molink_gcc_bin "${MOLINK_WIN7_GCC}/bin")
+else()
+  set(_molink_gcc_bin "${MOLINK_WIN7_KIT}/deps/mingw32/bin")
+endif()
+
+set(CMAKE_C_COMPILER   "${_molink_gcc_bin}/gcc.exe")
+set(CMAKE_CXX_COMPILER "${_molink_gcc_bin}/g++.exe")
+set(CMAKE_RC_COMPILER  "${_molink_gcc_bin}/windres.exe")
+if(EXISTS "${_molink_gcc_bin}/mingw32-make.exe")
+  set(CMAKE_MAKE_PROGRAM "${_molink_gcc_bin}/mingw32-make.exe")
+else()
+  set(CMAKE_MAKE_PROGRAM "${MOLINK_WIN7_KIT}/deps/mingw32/bin/mingw32-make.exe")
+endif()
+set(CMAKE_AR           "${_molink_gcc_bin}/ar.exe")
+set(CMAKE_RANLIB       "${_molink_gcc_bin}/ranlib.exe")
 
 set(CMAKE_FIND_ROOT_PATH
   "${MOLINK_WIN7_KIT}/deps/mingw32/i686-w64-mingw32"

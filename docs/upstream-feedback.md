@@ -170,3 +170,33 @@ socket 设置 `SO_REUSEADDR`（Linux/macOS；Windows 上 libuv 已默认处理�
 > the same port immediately after exit fails with `EADDRINUSE` (libuv -98) while
 > `ss` shows no listener (TIME_WAIT). Set `SO_REUSEADDR` before bind on
 > Linux/macOS.
+
+---
+
+## 7. libuvcpp：webapp 在 Win7/MinGW 下编译失败（可修复的兼容缺陷）
+
+`UVCPP_FEATURES=full`（web + WebApp）、`UVCPP_WINVER=0x0601`、MinGW-w64 GCC
+8.1/13.2 下，`src/webapp/uvcpp_log_console.cpp` 编译失败：
+
+```text
+uvcpp_log_console.cpp:86:15: error: 'ENABLE_VIRTUAL_TERMINAL_PROCESSING' was not declared in this scope
+```
+
+该常量（`0x0004`）在 MinGW 头文件中只在较新的 `_WIN32_WINNT` 下定义。Win7
+目标应当允许它缺省：
+
+```cpp
+#ifndef ENABLE_VIRTUAL_TERMINAL_PROCESSING
+#define ENABLE_VIRTUAL_TERMINAL_PROCESSING 0x0004
+#endif
+```
+
+`SetConsoleMode` 在不支持的控制台上会失败，而 `detect_color_support()` 已经把
+失败当作“无颜色”，所以这是一个安全回退。本项目在本地 kit 中打了这个补丁；
+建议合入 `src/webapp/uvcpp_log_console.cpp`，否则官方 Win7 x86 的 full/webapp
+profile 无法用 MinGW 构建。
+
+另外，kit 自带的 GCC 8.1 的 `<filesystem>` 在处理 `wstring` 路径和 `path`
+比较时会触发 libstdc++ 8 的已知问题（`__is_encoded_char` 实例化后特化、
+`u8path` 等）。moLink 的 Win7 构建改用 GCC 13.2 i686（msvcrt），不是
+libuvcpp 本身的缺陷，但 kit 文档可以提示“使用 full/webapp 时建议 GCC 9+”。
