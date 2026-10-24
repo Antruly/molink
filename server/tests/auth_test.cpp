@@ -1,4 +1,6 @@
+#include <chrono>
 #include <cstdio>
+#include <thread>
 #include <filesystem>
 
 #include "auth/auth_service.h"
@@ -140,6 +142,7 @@ int main() {
   login_result expired;
   CHECK(auth.login(*client, dialect, "operator", "another strong password", "",
                    "", expired, error));
+  std::this_thread::sleep_for(std::chrono::milliseconds(5));
   admin_user expired_user;
   session_record expired_session;
   CHECK(!expiring.validate_session(*client, dialect, expired.session_token,

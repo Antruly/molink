@@ -111,6 +111,9 @@ class auth_service {
   static bool valid_username(const std::string& username);
   static bool valid_role(const std::string& role);
 
+  /// Called after settings load, before the listeners start.
+  void set_policy(const session_policy& policy) { policy_ = policy; }
+
  private:
   bool issue_session(uvcpp::uvcpp_db_client& client, const sql_dialect& dialect,
                      const admin_user& user, const std::string& ip,

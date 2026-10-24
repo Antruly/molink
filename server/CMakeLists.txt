@@ -53,6 +53,13 @@ add_library(molink_server_core STATIC
   src/db/repositories.cpp
   src/db/db_executor.cpp
   src/settings.cpp
+  src/settings_cache.cpp
+  src/http_common.cpp
+  src/device_api.cpp
+  src/admin_api.cpp
+  src/admin_ui.cpp
+  src/runtime.cpp
+  src/security/ban_cache.cpp
   src/security/ip.cpp
   src/security/cn_ranges.cpp
   src/security/rate_limiter.cpp
@@ -68,7 +75,6 @@ target_link_libraries(molink_server_core PUBLIC
 
 add_executable(molink-server
   src/main.cpp
-  src/store.cpp
 )
 target_link_libraries(molink-server PRIVATE molink_server_core)
 
