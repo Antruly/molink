@@ -295,7 +295,17 @@ export function SessionView({
       if (document.visibilityState === 'hidden') return
       connection()?.requestFrame()
     }, pullMs)
-    return () => window.clearInterval(timer)
+    // WebKitGTK marks a window hidden when it loses focus. Keep a slow pull so
+    // the session still receives its first frame and stays current instead of
+    // freezing until the user clicks the window.
+    const hiddenTimer = window.setInterval(() => {
+      if (document.visibilityState !== 'hidden') return
+      connection()?.requestFrame()
+    }, 1000)
+    return () => {
+      window.clearInterval(timer)
+      window.clearInterval(hiddenTimer)
+    }
   }, [tab.phase, tab.id, connection, pullMs])
 
   useEffect(() => {

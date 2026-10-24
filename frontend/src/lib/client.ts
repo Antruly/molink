@@ -289,6 +289,12 @@ export class MolinkClient {
         this.handlers.onWelcome?.(message as unknown as Welcome)
         this.handlers.onPhase?.('live')
         this.startPing()
+        // Ask for the first picture immediately. WebKitGTK reports the page
+        // as hidden while its window is unfocused, so waiting for the visible
+        // pull loop would leave a freshly opened session on "waiting for the
+        // first frame" until the user clicks the window.
+        this.requestKeyframe()
+        this.requestFrame()
         break
       case 'hello_required':
         // Expected before our hello is processed; nothing to report.
