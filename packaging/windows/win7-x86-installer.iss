@@ -83,7 +83,7 @@ Filename: "{sys}\sc.exe"; Parameters: "delete moLinkSession"; Flags: runhidden; 
 Filename: "{sys}\sc.exe"; Parameters: "create moLinkSession binPath= ""{commonappdata}\moLink\service\molink-service.exe"" start= demand DisplayName= ""moLink session helper"""; Flags: runhidden waituntilterminated; Tasks: service
 Filename: "{sys}\sc.exe"; Parameters: "description moLinkSession ""Secure desktop capture/input helper for moLink"""; Flags: runhidden; Tasks: service
 Filename: "{sys}\sc.exe"; Parameters: "start moLinkSession"; Flags: runhidden; Tasks: service
-Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent; Check: WebView2RuntimePresent
 
 [UninstallRun]
 Filename: "{sys}\sc.exe"; Parameters: "stop moLinkSession"; Flags: runhidden; RunOnceId: "StopService"
