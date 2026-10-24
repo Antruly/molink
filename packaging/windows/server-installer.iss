@@ -63,7 +63,7 @@ Filename: "netsh.exe"; Parameters: "advfirewall firewall add rule name=""moLink 
 
 [UninstallRun]
 Filename: "{app}\molink-server.exe"; Parameters: "--uninstall-service --service-name moLinkServer"; Flags: runhidden waituntilterminated; RunOnceId: "RemoveService"
-Filename: "netsh.exe"; Parameters: "advfirewall firewall delete rule name=""moLink Server Device API""; Flags: runhidden; RunOnceId: "RemoveFirewall"
+Filename: "netsh.exe"; Parameters: "advfirewall firewall delete rule name=""moLink Server Device API"""; Flags: runhidden; RunOnceId: "RemoveFirewall"
 
 [Code]
 function PrepareToInstall(var NeedsRestart: Boolean): String;

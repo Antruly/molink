@@ -93,6 +93,7 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           name: moLink Server ${{ github.ref_name }}
+          overwrite: true
           body: 'Linux server packages: .deb, .rpm and tar.gz.'
           files: |
             build/package/*.deb
@@ -222,6 +223,7 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           name: moLink Server ${{ github.ref_name }}
+          overwrite: true
           body: 'Windows server installer (optional Windows service) and portable zip.'
           files: |
             build/package/*.exe
@@ -316,6 +318,7 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           name: moLink Server ${{ github.ref_name }}
+          overwrite: true
           body: 'macOS server package (unsigned) and tar.gz.'
           files: |
             build/package/*.pkg
