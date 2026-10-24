@@ -1,7 +1,12 @@
 cmake_minimum_required(VERSION 3.20)
 project(molink-core LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 20)
+# The Win7 x86 MinGW kit carries GCC 8.1, whose newest standard is gnu++2a
+# with an incomplete library. The code only needs C++17 there; pass
+# -DMOLINK_CXX_STANDARD=17 for that build.
+set(MOLINK_CXX_STANDARD 20 CACHE STRING
+  "C++ standard for molink-core (17 for Win7 x86 / GCC 8)")
+set(CMAKE_CXX_STANDARD ${MOLINK_CXX_STANDARD})
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_OBJCXX_STANDARD 20)
 set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
@@ -133,6 +138,11 @@ if(MOLINK_BUILD_CORE)
   if(WIN32)
     target_link_libraries(molink-core PRIVATE
       d3d11 dxgi dxguid gdi32 user32 ole32 uuid ws2_32 advapi32 shell32)
+  endif()
+  if(MINGW AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
+     CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)
+    # GCC 8 keeps std::filesystem in a separate runtime library.
+    target_link_libraries(molink-core PRIVATE stdc++fs)
   endif()
   if(APPLE)
     target_link_libraries(molink-core PRIVATE

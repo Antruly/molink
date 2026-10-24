@@ -1,7 +1,9 @@
 cmake_minimum_required(VERSION 3.20)
 project(moLinkWindows LANGUAGES CXX RC)
 
-set(CMAKE_CXX_STANDARD 20)
+set(MOLINK_CXX_STANDARD 20 CACHE STRING
+  "C++ standard for the Windows shell (17 for Win7 x86 / GCC 8)")
+set(CMAKE_CXX_STANDARD ${MOLINK_CXX_STANDARD})
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(WEBVIEW2_SDK "" CACHE PATH "Root of the Microsoft.Web.WebView2 NuGet package")
