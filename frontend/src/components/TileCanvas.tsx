@@ -107,6 +107,10 @@ export function TileCanvas({
         }
       : undefined
 
+  const debug =
+    typeof window !== 'undefined' &&
+    new URLSearchParams(window.location.search).has('debug')
+
   return (
     <div
       ref={wrapRef}
@@ -118,6 +122,13 @@ export function TileCanvas({
         style={style}
         aria-label="Remote screen"
       />
+      {debug ? (
+        <div className="pointer-events-none absolute left-1 top-1 z-50 rounded bg-black/80 px-1 py-0.5 text-[10px] text-white">
+          box {box.width}x{box.height} · canvas{' '}
+          {frame ? `${Math.round((style?.width as number) ?? frame.screenW)}x${Math.round((style?.height as number) ?? frame.screenH)}` : '—'}{' '}
+          · src {frame ? `${frame.screenW}x${frame.screenH}` : '—'} · {mode}
+        </div>
+      ) : null}
     </div>
   )
 }

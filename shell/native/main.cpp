@@ -412,6 +412,20 @@ void apply_window_shape(GtkWidget* widget) {
   }
 }
 
+/// GtkWindow normally allocates its only child the whole content area, but
+/// after a WM-driven maximize/fullscreen the WebKit view can keep its old
+/// allocation (the rest of the window stays transparent). Re-allocating it
+/// from the window's own allocation closes that gap.
+void force_child_allocate(GtkWidget* window) {
+  GtkAllocation allocation;
+  gtk_widget_get_allocation(window, &allocation);
+  if (allocation.width <= 0 || allocation.height <= 0) return;
+  GtkWidget* child = gtk_bin_get_child(GTK_BIN(window));
+  if (child == nullptr) return;
+  GtkAllocation child_allocation = {0, 0, allocation.width, allocation.height};
+  gtk_widget_size_allocate(child, &child_allocation);
+}
+
 gboolean on_size_allocate(GtkWidget* widget, GdkRectangle*, gpointer) {
   if (g_window_square) {
     gtk_widget_shape_combine_region(widget, nullptr);
@@ -437,6 +451,14 @@ gboolean on_window_state(GtkWidget* widget, GdkEventWindowState* event,
   if (child != nullptr) gtk_widget_queue_resize(child);
   gtk_widget_queue_resize(widget);
   gtk_widget_queue_draw(widget);
+  // Let the WM finish the configure first, then make sure the WebView covers
+  // the new client area even if GTK skipped the child reallocation.
+  g_timeout_add(150,
+                [](gpointer data) -> gboolean {
+                  force_child_allocate(GTK_WIDGET(data));
+                  return G_SOURCE_REMOVE;
+                },
+                widget);
   return FALSE;
 }
 
