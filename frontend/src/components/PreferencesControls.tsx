@@ -233,6 +233,7 @@ export function PreferencesControls() {
           }
           className="field"
         >
+          <option value="turbo">{t('session.qualityTurbo')}</option>
           <option value="smooth">{t('session.qualitySmooth')}</option>
           <option value="balanced">{t('session.qualityBalanced')}</option>
           <option value="quality">{t('session.qualityHigh')}</option>

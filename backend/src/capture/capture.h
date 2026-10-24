@@ -19,6 +19,7 @@ enum class quality_mode : uint8_t {
   smooth,    ///< lossy 16-bit colour, fast zlib, higher frame rate
   balanced,  ///< lossless BGRA with the adaptive zlib policy
   quality,   ///< lossless BGRA, best zlib effort
+  turbo,     ///< 8-bit grayscale, coarse changes, low frame rate
 };
 
 struct quality_profile {

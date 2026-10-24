@@ -26,6 +26,9 @@ enum class tile_format : uint8_t {
   bgra,
   rgb24,
   rgb565,
+  /// One luminance byte per pixel. Used by the turbo preset for very poor
+  /// links: half the bytes of rgb565 and far less entropy.
+  gray8,
 };
 
 /// How much CPU the encoder may spend on zlib. `fast` is for low-latency

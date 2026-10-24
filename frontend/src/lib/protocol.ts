@@ -40,6 +40,8 @@ export const Codec = {
   rgb565: 7,
   deflateRgb24: 8,
   deflateRgb565: 9,
+  gray8: 10,
+  deflateGray8: 11,
 } as const
 
 /** Bytes per pixel after decompression; 0 when the codec is not pixel-based. */
@@ -54,6 +56,9 @@ export function codecBytesPerPixel(codec: number): number {
     case Codec.rgb565:
     case Codec.deflateRgb565:
       return 2
+    case Codec.gray8:
+    case Codec.deflateGray8:
+      return 1
     default:
       return 0
   }
@@ -77,6 +82,10 @@ export function codecName(codec: number): string {
       return 'deflate-rgb24'
     case Codec.deflateRgb565:
       return 'deflate-rgb565'
+    case Codec.gray8:
+      return 'gray8'
+    case Codec.deflateGray8:
+      return 'deflate-gray8'
     case Codec.bgra:
     default:
       return 'bgra'
@@ -87,7 +96,8 @@ export function isDeflatedCodec(codec: number): boolean {
   return (
     codec === Codec.deflateBgra ||
     codec === Codec.deflateRgb24 ||
-    codec === Codec.deflateRgb565
+    codec === Codec.deflateRgb565 ||
+    codec === Codec.deflateGray8
   )
 }
 

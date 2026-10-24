@@ -37,7 +37,7 @@ import {
 export type Theme = 'light' | 'dark'
 export type AuthPhase = 'booting' | 'login' | 'locked' | 'ready'
 /// "auto" is resolved in the client into one of the three concrete presets.
-export type QualityMode = 'smooth' | 'balanced' | 'quality' | 'auto'
+export type QualityMode = 'turbo' | 'smooth' | 'balanced' | 'quality' | 'auto'
 
 export interface SessionTab {
   id: string

@@ -143,6 +143,7 @@
     "fill": "Stretch",
     "transport": "Transport",
     "quality": "Quality",
+    "qualityTurbo": "Turbo (monochrome, low frame rate)",
     "qualitySmooth": "Smooth",
     "qualityBalanced": "Balanced",
     "qualityHigh": "Quality",

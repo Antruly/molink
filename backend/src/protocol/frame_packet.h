@@ -102,6 +102,8 @@ enum class codec : uint8_t {
   rgb565 = 7,          ///< packed 16-bit RGB565, little-endian
   deflate_rgb24 = 8,   ///< zlib deflate of an rgb24 tile
   deflate_rgb565 = 9,  ///< zlib deflate of an rgb565 tile
+  gray8 = 10,          ///< one 8-bit luminance byte per pixel
+  deflate_gray8 = 11,  ///< zlib deflate of a gray8 tile
 };
 
 enum frame_flags : uint8_t {

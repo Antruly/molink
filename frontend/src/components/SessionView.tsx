@@ -119,6 +119,7 @@ const QUALITY_PROFILES: Record<
   ResolvedQuality,
   { fps: number; pullMs: number }
 > = {
+  turbo: { fps: 5, pullMs: 200 },
   smooth: { fps: 30, pullMs: 33 },
   balanced: { fps: 20, pullMs: 50 },
   quality: { fps: 15, pullMs: 66 },
@@ -130,6 +131,7 @@ const AUTO_PROFILES: Record<
   ResolvedQuality,
   { fps: number; pullMs: number }
 > = {
+  turbo: { fps: 5, pullMs: 200 },
   smooth: { fps: 15, pullMs: 60 },
   balanced: { fps: 20, pullMs: 50 },
   quality: { fps: 15, pullMs: 66 },
@@ -1339,6 +1341,7 @@ export function SessionView({
                   aria-label={t('session.quality')}
                   className="h-7 bg-transparent text-[11px] text-ink outline-none"
                 >
+                  <option value="turbo">{t('session.qualityTurbo')}</option>
                   <option value="smooth">{t('session.qualitySmooth')}</option>
                   <option value="balanced">{t('session.qualityBalanced')}</option>
                   <option value="quality">{t('session.qualityHigh')}</option>

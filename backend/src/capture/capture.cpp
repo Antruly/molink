@@ -41,6 +41,8 @@ const char* quality_mode_name(quality_mode mode) {
       return "smooth";
     case quality_mode::quality:
       return "quality";
+    case quality_mode::turbo:
+      return "turbo";
     case quality_mode::balanced:
     default:
       return "balanced";
@@ -60,6 +62,10 @@ bool quality_mode_from_name(const std::string& name, quality_mode& out) {
     out = quality_mode::quality;
     return true;
   }
+  if (name == "turbo") {
+    out = quality_mode::turbo;
+    return true;
+  }
   return false;
 }
 
@@ -69,6 +75,8 @@ const char* tile_format_name(tile_format format) {
       return "rgb24";
     case tile_format::rgb565:
       return "rgb565";
+    case tile_format::gray8:
+      return "gray8";
     case tile_format::bgra:
     default:
       return "bgra";
@@ -92,6 +100,13 @@ quality_profile quality_profile_for(quality_mode mode) {
       profile.format = tile_format::bgra;
       profile.effort = compression_effort::best;
       profile.maximum_change_threshold = 1;
+      break;
+    case quality_mode::turbo:
+      // Monochrome and coarse: the absolute minimum for a link that cannot
+      // move colour frames at all. The client pairs it with a low frame rate.
+      profile.format = tile_format::gray8;
+      profile.effort = compression_effort::fast;
+      profile.minimum_change_threshold = 24;
       break;
     case quality_mode::balanced:
     default:

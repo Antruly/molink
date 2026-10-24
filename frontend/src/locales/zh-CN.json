@@ -143,6 +143,7 @@
     "fill": "拉伸",
     "transport": "传输",
     "quality": "画质",
+    "qualityTurbo": "极速（黑白，低帧率）",
     "qualitySmooth": "流畅",
     "qualityBalanced": "平衡",
     "qualityHigh": "清晰",

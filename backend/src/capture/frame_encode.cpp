@@ -19,6 +19,17 @@ namespace {
 void pack_tile_pixels(const std::vector<uint8_t>& bgra, tile_format format,
                       std::vector<uint8_t>& out) {
   const std::size_t pixels = bgra.size() / 4;
+  if (format == tile_format::gray8) {
+    out.resize(pixels);
+    for (std::size_t i = 0; i < pixels; ++i) {
+      const std::size_t src = i * 4;
+      const uint8_t b = bgra[src + 0];
+      const uint8_t g = bgra[src + 1];
+      const uint8_t r = bgra[src + 2];
+      out[i] = static_cast<uint8_t>((r * 77 + g * 150 + b * 29) >> 8);
+    }
+    return;
+  }
   if (format == tile_format::rgb565) {
     out.resize(pixels * 2);
     std::size_t at = 0;
@@ -56,6 +67,9 @@ uint8_t codec_for(tile_format format, bool deflated) {
     case tile_format::rgb565:
       return static_cast<uint8_t>(deflated ? codec::deflate_rgb565
                                            : codec::rgb565);
+    case tile_format::gray8:
+      return static_cast<uint8_t>(deflated ? codec::deflate_gray8
+                                           : codec::gray8);
     case tile_format::bgra:
     default:
       return static_cast<uint8_t>(deflated ? codec::deflate_bgra : codec::bgra);

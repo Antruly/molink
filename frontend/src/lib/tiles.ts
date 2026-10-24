@@ -5,7 +5,7 @@ import { Codec, codecBytesPerPixel } from './protocol'
  * deflate wrappers are removed by the client before this runs, so only the
  * pixel layout matters here.
  */
-export type TilePixelKind = 'bgra' | 'rgb24' | 'rgb565'
+export type TilePixelKind = 'bgra' | 'rgb24' | 'rgb565' | 'gray8'
 
 export function tilePixelKind(codec: number): TilePixelKind | null {
   switch (codec) {
@@ -18,6 +18,9 @@ export function tilePixelKind(codec: number): TilePixelKind | null {
     case Codec.rgb565:
     case Codec.deflateRgb565:
       return 'rgb565'
+    case Codec.gray8:
+    case Codec.deflateGray8:
+      return 'gray8'
     default:
       return null
   }
@@ -77,6 +80,11 @@ export function expandTile(
         out[i] =
           0xff000000 | (data[j + 2] << 16) | (data[j + 1] << 8) | data[j]
       }
+    }
+  } else if (kind === 'gray8') {
+    for (let i = 0; i < pixels; i += 1) {
+      const v = data[i]
+      out[i] = 0xff000000 | (v << 16) | (v << 8) | v
     }
   } else if (kind === 'rgb24') {
     for (let i = 0, j = 0; i < pixels; i += 1, j += 3) {

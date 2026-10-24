@@ -870,7 +870,7 @@ void session_controller::on_text(const std::string& text) {
     quality_mode mode = options_.capture->quality();
     if (!mode_name.empty() && !quality_mode_from_name(mode_name, mode)) {
       send_error(transport.get(), "bad_quality",
-                 "mode must be smooth, balanced or quality");
+                 "mode must be turbo, smooth, balanced or quality");
       return;
     }
     const auto fps_it = j.find("fps");
