@@ -19,7 +19,7 @@
 namespace molink {
 namespace {
 
-constexpr wchar_t kPipeName[] = L"\\\\.\\pipe\\molink-secure";
+constexpr wchar_t kPipeName[] = L"\\\\.\\pipe\\molink-secure-input";
 
 bool send_command(const std::string& command, std::string* reply = nullptr) {
   for (int attempt = 0; attempt < 4; ++attempt) {

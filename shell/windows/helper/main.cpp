@@ -13,6 +13,9 @@
 #include <sddl.h>
 
 #include <atomic>
+#include <functional>
+#include <mutex>
+#include <thread>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -22,6 +25,8 @@ namespace {
 
 HDESK g_desktop = nullptr;
 constexpr wchar_t kPipeName[] = L"\\\\.\\pipe\\molink-secure";
+constexpr wchar_t kInputPipeName[] = L"\\\\.\\pipe\\molink-secure-input";
+std::mutex g_desktop_mutex;
 
 std::string utf8(const wchar_t* text) {
   if (text == nullptr) return {};
@@ -49,6 +54,7 @@ bool open_input_desktop(std::string& err) {
 }
 
 bool refresh_input_desktop() {
+  std::lock_guard<std::mutex> lock(g_desktop_mutex);
   HDESK current = OpenInputDesktop(0, FALSE, DESKTOP_READOBJECTS |
                                              DESKTOP_WRITEOBJECTS |
                                              DESKTOP_SWITCHDESKTOP);
@@ -278,7 +284,50 @@ void pipe_loop(std::atomic<bool>& running) {
         int width = 0;
         int height = 0;
         const std::string reply =
-            handle_line(std::string(buffer.data()), frame, width, height);
+            handle_line(std::string(buffer.data(), read), frame, width, height);
+        DWORD written = 0;
+        WriteFile(pipe, reply.data(), static_cast<DWORD>(reply.size()),
+                  &written, nullptr);
+        if (reply.find("\"quit\":true") != std::string::npos) {
+          running.store(false);
+        }
+      }
+    }
+    DisconnectNamedPipe(pipe);
+    CloseHandle(pipe);
+  }
+  if (attributes.lpSecurityDescriptor != nullptr) {
+    LocalFree(attributes.lpSecurityDescriptor);
+  }
+}
+
+void input_pipe_loop(std::atomic<bool>& running) {
+  SECURITY_ATTRIBUTES attributes{};
+  attributes.nLength = sizeof(attributes);
+  ConvertStringSecurityDescriptorToSecurityDescriptorW(
+      L"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;IU)", SDDL_REVISION_1,
+      &attributes.lpSecurityDescriptor, nullptr);
+  std::vector<uint8_t> frame;
+  while (running.load()) {
+    HANDLE pipe = CreateNamedPipeW(
+        kInputPipeName, PIPE_ACCESS_DUPLEX,
+        PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT, 1, 64 * 1024,
+        64 * 1024, 0, &attributes);
+    if (pipe == INVALID_HANDLE_VALUE) {
+      Sleep(500);
+      continue;
+    }
+    const BOOL connected = ConnectNamedPipe(pipe, nullptr) != 0 ||
+                           GetLastError() == ERROR_PIPE_CONNECTED;
+    if (connected) {
+      char buffer[64 * 1024] = {};
+      DWORD read = 0;
+      if (ReadFile(pipe, buffer, sizeof(buffer) - 1, &read, nullptr) && read > 0) {
+        buffer[read] = '\0';
+        int width = 0;
+        int height = 0;
+        const std::string reply =
+            handle_line(std::string(buffer, read), frame, width, height);
         DWORD written = 0;
         WriteFile(pipe, reply.data(), static_cast<DWORD>(reply.size()),
                   &written, nullptr);
@@ -304,7 +353,9 @@ int wmain() {
     return 1;
   }
   std::atomic<bool> running{true};
+  std::thread input_thread(input_pipe_loop, std::ref(running));
   pipe_loop(running);
+  input_thread.join();
   if (g_desktop != nullptr) CloseDesktop(g_desktop);
   return 0;
 }
