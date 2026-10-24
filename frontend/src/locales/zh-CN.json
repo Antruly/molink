@@ -485,7 +485,7 @@
     "domainJoinPlaceholder": "输入域组码",
     "domainJoin": "加入",
     "domainHint": "同一域组的设备会出现在「域组」列表；把域组码发给需要互联的人即可。",
-    "domainHintUnregistered": "域组码由服务器在注册后生成，不支持自行生成。",
+    "domainHintUnregistered": "域组码由 0.2.1 及以上版本的服务器在注册后生成，不支持自行生成。",
     "domainRevokedHint": "此域组码已失效，请联系发起人获取新码，或更新自己的域组码。",
     "noDomainPeers": "当前域组还没有其他设备。"
   }

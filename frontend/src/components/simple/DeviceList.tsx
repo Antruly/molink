@@ -71,6 +71,7 @@ export function DeviceList({
   const serverInfo = server?.server
   const serverUrl = serverInfo?.url ?? ''
   const serverEnabled = serverInfo?.enabled ?? true
+  const registered = serverInfo?.registered ?? false
   const domainCode = serverInfo?.domain ?? ''
   const domainValid = serverInfo?.domain_valid ?? false
 
@@ -129,7 +130,14 @@ export function DeviceList({
       setDomainInvalid(false)
       return
     }
-    if (domainCode !== '' && !domainValid) {
+    // Older directories (0.2.0) never issue a domain code and have no
+    // /v1/devices/domain route; do not turn that 404 into "code revoked".
+    if (!registered || domainCode === '') {
+      setDomainPeers([])
+      setDomainInvalid(false)
+      return
+    }
+    if (!domainValid) {
       setDomainPeers([])
       setDomainInvalid(true)
       return
@@ -144,7 +152,7 @@ export function DeviceList({
         caught instanceof ApiError && caught.code === 'unknown_domain',
       )
     }
-  }, [localMode, serverEnabled, token, domainCode, domainValid])
+  }, [localMode, serverEnabled, token, registered, domainCode, domainValid])
 
   useEffect(() => {
     const initial = window.setTimeout(() => void refreshDomain(), 0)
@@ -368,11 +376,13 @@ export function DeviceList({
         : tab === 'domain'
           ? !serverEnabled
             ? t('simple.serverDisabledHint')
-            : domainInvalid || (domainCode !== '' && !domainValid)
-              ? t('simple.domainRevokedHint')
-              : domainCode === ''
-                ? t('simple.domainPending')
-                : t('simple.noDomainPeers')
+            : !registered
+              ? t('simple.serverPending')
+              : domainInvalid || (domainCode !== '' && !domainValid)
+                ? t('simple.domainRevokedHint')
+                : domainCode === ''
+                  ? t('simple.domainPending')
+                  : t('simple.noDomainPeers')
           : tab === 'lan'
             ? localMode
               ? t('simple.noLan')
