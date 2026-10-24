@@ -92,7 +92,7 @@ text
 | 阶段 | 范围 | Release 资产 |
 |---|---|---|
 | **一阶段** | 桌面三平台直连 + 局域网 Web 预览 | Windows `.exe`/`.msi`，Linux `.AppImage`/`.deb`，macOS `.dmg`；**不发布 zip** |
-| **二阶段** | 服务端 + 移动端 | 追加服务端安装包（`.deb`/`.AppImage`/`.exe`）与服务端 zip；Android `.apk`/`.aab`，iOS `.ipa` |
+| **二阶段** | 服务端 + 移动端 | 服务端独立 `server-v*` 标签：Linux `.deb`/`.rpm`/`.tar.gz`（systemd）、Windows 安装器 + `.zip`（可选服务）、macOS `.pkg`/`.tar.gz`（launchd）；Android `.apk`/`.aab`，iOS `.ipa` |
 
 **“不发布 zip”的含义**：Release 资产中不上传任何 `.zip` 格式的桌面客户端包。Windows 使用 Inno Setup `.exe` 安装包与免安装单文件 `.exe`，Linux 使用 AppImage（可执行单文件）和 `.deb`，macOS 使用 `.dmg`。二阶段服务端例外，允许 zip 作为便捷分发形态。
 
@@ -433,7 +433,7 @@ macOS	x64	.dmg	一阶段	macos-latest
 macOS	Arm64	.dmg	一阶段	macos-latest
 Android	arm64-v8a 等	.apk + .aab	二阶段	ubuntu-latest
 iOS	arm64	.ipa（TestFlight 或 Ad Hoc）	二阶段	macos-latest
-服务端	x64	.deb / .AppImage / .exe + .zip	二阶段	对应平台
+服务端	x64	.deb / .rpm / .tar.gz；.exe + .zip；.pkg / .tar.gz	二阶段	对应平台（server-v*）
 源代码仓库仅此一份，所有发布均从同一仓库的标签构建。第一阶段 Release 不包含移动端和服务端资产；第二阶段在同一个 Release 流程中追加，或按标签前缀区分（v* 同时触发桌面与移动端，服务端可用 server-v* 独立触发）。
 
 8. 关键工程决策与风险
