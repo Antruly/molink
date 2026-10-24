@@ -48,7 +48,12 @@ if [ -n "$OPENSSL_DIR" ] && [ -d "$OPENSSL_DIR" ]; then
 fi
 # App-local VC runtime, best effort.
 for dll in vcruntime140.dll vcruntime140_1.dll msvcp140.dll; do
-  FOUND=$(find "/c/Program Files/Microsoft Visual Studio" -name "$dll" 2>/dev/null | head -n 1 || true)
+  FOUND=$(find "/c/Program Files/Microsoft Visual Studio" -path '*Hostx64/x64*' \
+    -name "$dll" 2>/dev/null | head -n 1 || true)
+  if [ -z "$FOUND" ]; then
+    FOUND=$(find "/c/Program Files/Microsoft Visual Studio" -name "$dll" \
+      2>/dev/null | head -n 1 || true)
+  fi
   [ -n "$FOUND" ] && cp "$FOUND" "$PKG/"
 done
 UCRT="/c/Program Files (x86)/Windows Kits/10/Redist/ucrt/DLLs/x64"
