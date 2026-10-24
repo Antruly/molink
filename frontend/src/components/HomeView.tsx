@@ -13,12 +13,14 @@ import {
   Monitor,
   MousePointer2,
   RefreshCw,
+  Server,
   SquarePen,
   Trash2,
   Wifi,
 } from 'lucide-react'
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
+import { ApiError, lookupDevice } from '../lib/api'
 import { useAppStore, type RecentConnection } from '../store/app'
 import { ServiceCard } from './ServiceCard'
 
@@ -70,6 +72,7 @@ export function HomeView() {
   const setPreferredMode = useAppStore((state) => state.setPreferredMode)
   const historyView = useAppStore((state) => state.historyView)
   const setHistoryView = useAppStore((state) => state.setHistoryView)
+  const serverState = useAppStore((state) => state.server)
 
   const [rememberCode, setRememberCode] = useState(true)
   const [host, setHost] = useState('')
@@ -79,6 +82,9 @@ export function HomeView() {
   const [showDeviceCode, setShowDeviceCode] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [copied, setCopied] = useState<string | null>(null)
+  const [connectMode, setConnectMode] = useState<'address' | 'id'>('address')
+  const [deviceId, setDeviceId] = useState('')
+  const [resolving, setResolving] = useState(false)
 
   useEffect(() => {
     if (!localMode) return
@@ -144,8 +150,53 @@ export function HomeView() {
     }
   }
 
+  const submitById = async (requestAccess: boolean) => {
+    const serverUrl = serverState?.server?.url ?? ''
+    if (!serverUrl) {
+      setError('server_not_configured')
+      return
+    }
+    const normalized = deviceId.replace(/[^A-Za-z0-9]/g, '')
+    if (normalized === '') {
+      setError('device_not_found')
+      return
+    }
+    setResolving(true)
+    setError(null)
+    try {
+      const info = await lookupDevice(serverUrl, deviceId)
+      if (!info.online) {
+        setError('device_offline')
+        return
+      }
+      const targetHost = info.address || info.peer_ip
+      if (!targetHost || !info.port) {
+        setError('server_unreachable')
+        return
+      }
+      startConnection(
+        targetHost,
+        info.port,
+        requestAccess ? '' : code.trim(),
+        info.name || targetHost,
+        !requestAccess && rememberCode,
+      )
+    } catch (caught) {
+      const codeValue = caught instanceof ApiError ? caught.code : ''
+      setError(
+        codeValue === 'unknown_device' ? 'device_not_found' : 'server_unreachable',
+      )
+    } finally {
+      setResolving(false)
+    }
+  }
+
   const submit = (event: FormEvent) => {
     event.preventDefault()
+    if (connectMode === 'id') {
+      void submitById(false)
+      return
+    }
     const numericPort = Number(port)
     const targetHost = host.trim()
     const targetPort = numericPort
@@ -226,6 +277,10 @@ export function HomeView() {
   }
 
   const requestAccess = () => {
+    if (connectMode === 'id') {
+      void submitById(true)
+      return
+    }
     const targetHost = host.trim()
     const targetPort = Number(port)
     if (!targetHost || !Number.isFinite(targetPort) || targetPort <= 0) {
@@ -414,6 +469,48 @@ export function HomeView() {
                   />
                 </div>
 
+                {serverState?.server?.registered ? (
+                  <div className="mt-3 flex flex-wrap items-center gap-2 rounded-xl border border-line-soft bg-panel/40 px-3 py-2">
+                    <Server size={12} className="text-accent" />
+                    <span className="text-[10px] uppercase tracking-[0.16em] text-muted">
+                      {t('home.serverId')}
+                    </span>
+                    <span className="font-mono text-[12px] text-ink">
+                      {serverState.server.display_id ||
+                        serverState.server.device_id}
+                    </span>
+                    <span
+                      className={
+                        serverState.server.online ? 'chip chip-on' : 'chip'
+                      }
+                    >
+                      {serverState.server.online
+                        ? t('home.serverOnline')
+                        : t('home.serverOffline')}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        copy(
+                          'server',
+                          serverState.server?.display_id ||
+                            serverState.server?.device_id ||
+                            '',
+                        )
+                      }
+                      className="ml-auto grid h-6 w-6 place-items-center rounded text-muted transition hover:bg-panel hover:text-ink"
+                      title={t('home.copy')}
+                      aria-label={t('home.copy')}
+                    >
+                      {copied === 'server' ? (
+                        <Check size={12} className="text-accent" />
+                      ) : (
+                        <Copy size={12} />
+                      )}
+                    </button>
+                  </div>
+                ) : null}
+
                 <div className="mt-5 flex flex-wrap items-center gap-2">
                   {localMode ? (
                     <span className="chip chip-on">
@@ -491,7 +588,36 @@ export function HomeView() {
             {t('home.connectSubtitle')}
           </p>
 
-          {localMode ? (
+          <div className="mt-4 flex gap-1 rounded-xl border border-line bg-panel/60 p-1">
+            <button
+              type="button"
+              onClick={() => setConnectMode('address')}
+              className={
+                'flex flex-1 items-center justify-center gap-1.5 rounded-lg px-3 py-1.5 text-[12px] transition ' +
+                (connectMode === 'address'
+                  ? 'bg-accent text-on-accent shadow-sm'
+                  : 'text-muted hover:text-ink')
+              }
+            >
+              <Wifi size={13} />
+              {t('home.modeAddress')}
+            </button>
+            <button
+              type="button"
+              onClick={() => setConnectMode('id')}
+              className={
+                'flex flex-1 items-center justify-center gap-1.5 rounded-lg px-3 py-1.5 text-[12px] transition ' +
+                (connectMode === 'id'
+                  ? 'bg-accent text-on-accent shadow-sm'
+                  : 'text-muted hover:text-ink')
+              }
+            >
+              <Server size={13} />
+              {t('home.modeId')}
+            </button>
+          </div>
+
+          {localMode && connectMode === 'address' ? (
             <div className="mt-4 rounded-xl border border-line-soft bg-panel/40 p-2.5">
               <div className="flex items-center gap-2 px-1">
                 <span className="text-[10px] uppercase tracking-[0.16em] text-muted">
@@ -552,36 +678,58 @@ export function HomeView() {
           ) : null}
 
           <form onSubmit={submit} className="mt-4 space-y-4">
-            <div className="grid gap-3 sm:grid-cols-[1fr_120px]">
+            {connectMode === 'address' ? (
+              <div className="grid gap-3 sm:grid-cols-[1fr_120px]">
+                <label className="block">
+                  <span className="mb-1.5 block text-[10px] uppercase tracking-[0.16em] text-muted">
+                    {t('home.host')}
+                  </span>
+                  <input
+                    value={host}
+                    onChange={(event) => setHost(event.target.value)}
+                    className="field font-mono"
+                    placeholder="192.168.1.20"
+                    spellCheck={false}
+                    autoComplete="off"
+                  />
+                  <span className="mt-1 block text-[10px] text-muted">
+                    {t('home.hostHint')}
+                  </span>
+                </label>
+                <label className="block">
+                  <span className="mb-1.5 block text-[10px] uppercase tracking-[0.16em] text-muted">
+                    {t('home.port')}
+                  </span>
+                  <input
+                    value={port}
+                    onChange={(event) => setPort(event.target.value)}
+                    className="field font-mono"
+                    inputMode="numeric"
+                    autoComplete="off"
+                  />
+                </label>
+              </div>
+            ) : (
               <label className="block">
                 <span className="mb-1.5 block text-[10px] uppercase tracking-[0.16em] text-muted">
-                  {t('home.host')}
+                  {t('home.deviceId')}
                 </span>
                 <input
-                  value={host}
-                  onChange={(event) => setHost(event.target.value)}
+                  value={deviceId}
+                  onChange={(event) => setDeviceId(event.target.value.toUpperCase())}
                   className="field font-mono"
-                  placeholder="192.168.1.20"
+                  placeholder="ABC-DEF-GHJ"
+                  maxLength={11}
                   spellCheck={false}
                   autoComplete="off"
                 />
                 <span className="mt-1 block text-[10px] text-muted">
-                  {t('home.hostHint')}
+                  {serverState?.server?.url
+                    ? t('home.idLookupHint')
+                    : t('home.serverRequired')}
                 </span>
               </label>
-              <label className="block">
-                <span className="mb-1.5 block text-[10px] uppercase tracking-[0.16em] text-muted">
-                  {t('home.port')}
-                </span>
-                <input
-                  value={port}
-                  onChange={(event) => setPort(event.target.value)}
-                  className="field font-mono"
-                  inputMode="numeric"
-                  autoComplete="off"
-                />
-              </label>
-            </div>
+            )}
             <label className="block">
               <span className="mb-1.5 block text-[10px] uppercase tracking-[0.16em] text-muted">
                 {t('home.code')}
@@ -663,12 +811,17 @@ export function HomeView() {
             ) : null}
 
             <div className="flex flex-wrap items-center gap-2">
-              <button type="submit" className="btn btn-primary">
-                {t('home.connect')}
+              <button
+                type="submit"
+                disabled={resolving}
+                className="btn btn-primary"
+              >
+                {resolving ? t('home.resolving') : t('home.connect')}
               </button>
               <button
                 type="button"
                 onClick={requestAccess}
+                disabled={resolving}
                 className="btn"
                 title={t('home.requestAccessHint')}
               >

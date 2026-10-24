@@ -36,6 +36,31 @@ export interface AccessRequest {
   created_ms: number
 }
 
+export interface ServerInfo {
+  url: string
+  enabled: boolean
+  registered: boolean
+  online: boolean
+  device_id: string
+  display_id: string
+  last_error: string
+}
+
+export interface ServerConfig extends ServerInfo {
+  invite: string
+}
+
+export interface DeviceLookup {
+  id: string
+  display_id: string
+  name: string
+  online: boolean
+  address: string
+  peer_ip: string
+  port: number
+  version: string
+}
+
 export interface ServerState {
   service: string
   product: string
@@ -54,6 +79,8 @@ export interface ServerState {
   tcp_port: number
   udp_port: number
   restart_required: boolean
+  device_name?: string
+  server?: ServerInfo
 }
 
 export interface LoginResult {
@@ -392,4 +419,46 @@ export function postCall(
     { method: 'POST' },
     token,
   )
+}
+
+
+export function fetchServerConfig(token: string): Promise<ServerConfig> {
+  return request<ServerConfig>('/api/server', {}, token)
+}
+
+export function postServerConfig(
+  token: string,
+  url: string,
+  invite: string,
+): Promise<ServerConfig> {
+  const query = new URLSearchParams({ url, invite })
+  return request<ServerConfig>(
+    `/api/server?${query.toString()}`,
+    { method: 'POST' },
+    token,
+  )
+}
+
+/// Resolves a device ID through the public directory. The server enables CORS,
+/// so the UI can call it directly without a core-side proxy.
+export async function lookupDevice(
+  serverUrl: string,
+  id: string,
+): Promise<DeviceLookup> {
+  const base = serverUrl.replace(/\/+$/, '')
+  const response = await fetch(
+    `${base}/v1/devices?id=${encodeURIComponent(id)}`,
+    { cache: 'no-store' },
+  )
+  if (!response.ok) {
+    let code = `http_${response.status}`
+    try {
+      const body = (await response.json()) as { code?: string }
+      if (body.code) code = body.code
+    } catch {
+      // Keep the HTTP status as the code.
+    }
+    throw new ApiError(response.status, code)
+  }
+  return (await response.json()) as DeviceLookup
 }

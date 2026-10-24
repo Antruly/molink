@@ -588,7 +588,12 @@ void send_welcome(session_transport* transport, const session_info& session,
   j["clipboard"] = opt.clipboard != nullptr && opt.clipboard->available();
   j["clipboard_backend"] = opt.clipboard ? opt.clipboard->backend() : "none";
   j["device_id"] = opt.device_id;
-  j["device_name"] = opt.device_name;
+  std::string welcome_name = opt.device_name;
+  if (opt.auth) {
+    const app_settings current = opt.auth->settings();
+    if (!current.device_name.empty()) welcome_name = current.device_name;
+  }
+  j["device_name"] = welcome_name;
   send_json(transport, j);
 }
 

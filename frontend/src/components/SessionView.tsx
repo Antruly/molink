@@ -193,7 +193,9 @@ export function SessionView({
   const touchDevice = touchPrimary()
   const [virtualMouse, setVirtualMouse] = useState(false)
   const [displayMode, setDisplayMode] = useState<DisplayMode>('fit')
-  const [elementFullscreen, setElementFullscreen] = useState(false)
+  const [elementFullscreen, setElementFullscreen] = useState(
+    () => document.fullscreenElement !== null,
+  )
   const isFullscreen = elementFullscreen || immersive
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
   const [chatOpen, setChatOpen] = useState(false)
@@ -377,60 +379,12 @@ export function SessionView({
       if (!active && !shellInfo.enabled) setImmersive(false)
     }
     document.addEventListener('fullscreenchange', update)
-    setElementFullscreen(document.fullscreenElement !== null)
     return () => document.removeEventListener('fullscreenchange', update)
   }, [setImmersive])
 
   useEffect(() => {
     chatOpenRef.current = chatOpen
-    if (chatOpen) setChatUnread(0)
   }, [chatOpen])
-
-  useEffect(() => {
-    const active = connection()
-    if (!active) return
-    active.requestChatHistory()
-    return active.addListener((event) => {
-      if (event.kind === 'chat-history') {
-        setChatMessages(event.messages)
-      } else if (event.kind === 'chat') {
-        setChatMessages((previous) =>
-          [...previous, event.message].slice(-200),
-        )
-        if (!chatOpenRef.current) setChatUnread((count) => count + 1)
-      } else if (event.kind === 'audio') {
-        playerRef.current?.push(event.data)
-      } else if (event.kind === 'voice') {
-        voiceRef.current?.pushRemote(event.data)
-      } else if (event.kind === 'call') {
-        handleCallEvent(event)
-      }
-    })
-  }, [connection])
-
-  useEffect(() => {
-    return () => {
-      playerRef.current?.stop()
-      playerRef.current = null
-      sessionConnection(tab.id)?.stopAudio()
-    }
-  }, [tab.id])
-
-  useEffect(() => {
-    if (callPhase !== 'active' || callStartedAt === null) return
-    const timer = window.setInterval(() => {
-      setCallSeconds(Math.floor((Date.now() - callStartedAt) / 1000))
-    }, 1000)
-    return () => window.clearInterval(timer)
-  }, [callPhase, callStartedAt])
-
-  useEffect(() => {
-    return () => {
-      voiceRef.current?.stop()
-      voiceRef.current = null
-      sessionConnection(tab.id)?.hangupCall()
-    }
-  }, [tab.id])
 
   function stopVoiceCall() {
     voiceRef.current?.stop()
@@ -490,6 +444,53 @@ export function SessionView({
     setCallMuted(next)
     voiceRef.current?.setMuted(next)
   }
+
+  useEffect(() => {
+    const active = connection()
+    if (!active) return
+    active.requestChatHistory()
+    return active.addListener((event) => {
+      if (event.kind === 'chat-history') {
+        setChatMessages(event.messages)
+      } else if (event.kind === 'chat') {
+        setChatMessages((previous) =>
+          [...previous, event.message].slice(-200),
+        )
+        if (!chatOpenRef.current) setChatUnread((count) => count + 1)
+      } else if (event.kind === 'audio') {
+        playerRef.current?.push(event.data)
+      } else if (event.kind === 'voice') {
+        voiceRef.current?.pushRemote(event.data)
+      } else if (event.kind === 'call') {
+        handleCallEvent(event)
+      }
+    })
+  }, [connection])
+
+  useEffect(() => {
+    return () => {
+      playerRef.current?.stop()
+      playerRef.current = null
+      sessionConnection(tab.id)?.stopAudio()
+    }
+  }, [tab.id])
+
+  useEffect(() => {
+    if (callPhase !== 'active' || callStartedAt === null) return
+    const timer = window.setInterval(() => {
+      setCallSeconds(Math.floor((Date.now() - callStartedAt) / 1000))
+    }, 1000)
+    return () => window.clearInterval(timer)
+  }, [callPhase, callStartedAt])
+
+  useEffect(() => {
+    return () => {
+      voiceRef.current?.stop()
+      voiceRef.current = null
+      sessionConnection(tab.id)?.hangupCall()
+    }
+  }, [tab.id])
+
 
   // The expanded quick bar collapses when focus or the pointer moves outside.
   useEffect(() => {
@@ -1377,7 +1378,10 @@ export function SessionView({
           </button>
           <button
             type="button"
-            onClick={() => setChatOpen(true)}
+            onClick={() => {
+                  setChatUnread(0)
+                  setChatOpen(true)
+                }}
             className={
               'relative btn h-8 gap-1 px-2 text-[11px] ' +
               (chatOpen ? 'text-accent' : 'btn-quiet')
@@ -1802,6 +1806,7 @@ export function SessionView({
               <button
                 type="button"
                 onClick={() => {
+                  setChatUnread(0)
                   setChatOpen(true)
                   setFilesOpen(false)
                 }}

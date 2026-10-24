@@ -47,7 +47,7 @@
     "prefillHint": "填入表单（没有保存的验证码）",
     "prefill": "填入表单",
     "useLocalCode": "使用本机验证码",
-    "idNote": "同网络内可直接连接；通过设备 ID 连接需要 moLink Server（二阶段）。",
+    "idNote": "同网络内可直接连接；通过设备 ID 连接使用设置中配置的 moLink Server。",
     "recent": "最近连接",
     "recentEmpty": "还没有连接记录。",
     "forget": "从历史中移除",
@@ -71,7 +71,15 @@
     "tipModes": "远程控制模式连接后立即启用键鼠；仅查看模式只接收画面。",
     "tipTools": "会话中可随时打开聊天、文件传输；剪贴板同步可在悬浮工具栏关闭。",
     "computerName": "计算机名称",
-    "hostHint": "对方的地址（IP 或主机名）；局域网内可从上方“附近设备”选择。"
+    "hostHint": "对方的地址（IP 或主机名）；局域网内可从上方“附近设备”选择。",
+    "modeAddress": "地址",
+    "modeId": "设备 ID",
+    "idLookupHint": "通过已配置的 moLink Server 查到地址后直连。",
+    "serverRequired": "请先在设置中配置 moLink Server。",
+    "serverId": "服务端 ID",
+    "serverOnline": "在线",
+    "serverOffline": "离线",
+    "resolving": "解析中…"
   },
   "settings": {
     "title": "偏好设置",
@@ -128,7 +136,20 @@
     "windowsNoSessions": "没有可显示的会话。",
     "windowsSwitchConsole": "切到控制台",
     "windowsKick": "踢下线",
-    "refresh": "刷新"
+    "refresh": "刷新",
+    "server": "服务端",
+    "serverHint": "把本机注册到 moLink Server，其他人就可以通过设备 ID 找到这台电脑。",
+    "serverUrl": "服务端地址",
+    "serverInvite": "注册邀请码",
+    "serverInviteHint": "服务端开启邀请码时必填",
+    "serverSave": "保存并注册",
+    "serverClear": "停用",
+    "serverRegistered": "已注册",
+    "serverUnregistered": "未注册",
+    "serverOnline": "在线",
+    "serverOffline": "离线",
+    "serverId": "服务端 ID",
+    "serverTlsHint": "当前客户端只支持 http://。公网部署请在反向代理上终止 TLS，最后一跳只走可信内网。"
   },
   "session": {
     "connecting": "连接中…",
@@ -195,14 +216,17 @@
     "no_host": "请填写设备地址。",
     "invalid_port": "端口必须是 1–65535 之间的整数。",
     "invalid_uses": "次数必须是大于 0 的整数。",
-    "device_not_found": "当前局域网内没有发现该设备。",
+    "device_not_found": "没有找到该设备 ID",
     "clipboard_read_failed": "无法读取本机剪贴板",
     "clipboard_write_failed": "无法写入本机剪贴板",
     "clipboard_unavailable": "当前浏览器环境不提供剪贴板",
     "self_connect": "本机不能连接自己。",
     "core_unreachable": "无法连接本机后台。",
     "local_auth_failed": "本机验证失败。",
-    "settings_failed": "设置保存失败。"
+    "settings_failed": "设置保存失败。",
+    "server_not_configured": "尚未配置 moLink Server",
+    "device_offline": "对方设备当前离线",
+    "server_unreachable": "无法连接 moLink Server"
   },
   "popout": {
     "noToken": "这个窗口缺少连接验证码。"

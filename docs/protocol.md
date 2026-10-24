@@ -553,3 +553,23 @@ molink-core [--host <addr>] [--port <n>] [--http3-port <n>] [--quic-port <n>]
 - 新增可选控制消息类型不需要递增协议版本；旧客户端应把未知 `type` 当作可忽略/报错处理。
 - 新增包类型必须使用新值，不得复用被弃用的值。
 - 修改 `codec` 编号、包头/帧头/瓦片表项布局，必须递增协议版本并同步更新 C++ 与 TS 两份实现和本文件。
+
+---
+
+## 8. 二阶段设备目录（moLink Server）
+
+桌面核心在设置中配置 `server_url` / `server_invite` 后，会向目录服务注册并每 30 秒发送心跳；
+服务端 API 见 `server/README.md`。核心侧行为：
+
+- 配置保存在 `~/.config/molink/settings` 的 `server_url`、`server_invite`，核心线程每秒轮询，
+  修改后即时生效。
+- 注册得到的凭据保存在 `~/.config/molink/server.json`（`url`、`device_id`、`display_id`、`token`，
+  POSIX 下权限 0600）；重启后复用同一 ID，心跳失败（401/404）才重新注册。
+- `GET /api/server`（仅回环）：`url`、`invite`、`enabled`、`registered`、`online`、
+  `device_id`、`display_id`、`last_error`。
+- `POST /api/server?url=&invite=`（仅回环）：保存配置并触发重新注册。
+- `GET /api/state` 增加 `device_name` 与 `server` 对象（字段同上，但不含 token/invite）。
+- 通过设备 ID 连接：客户端使用已配置的 server URL 请求
+  `GET <server>/v1/devices?id=<ID>`，拿到 `address`/`peer_ip`/`port`/`name` 后按正常的直连
+  会话流程鉴权；目录只做寻址，不转发媒体。
+- 当前核心的目录客户端只支持 `http://`；公网部署应在反向代理终止 TLS，后续版本再补客户端 TLS。

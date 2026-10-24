@@ -344,7 +344,20 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
             j["local"] = local;
             const app_settings current_settings =
                 deps.auth ? deps.auth->settings() : app_settings{};
+            j["device_name"] = current_settings.device_name;
             j["allow_access_requests"] = current_settings.allow_access_requests;
+            if (deps.server) {
+              const server_status status = deps.server->status();
+              uvcpp_json server;
+              server["url"] = status.url;
+              server["enabled"] = status.enabled;
+              server["registered"] = status.registered;
+              server["online"] = status.online;
+              server["device_id"] = status.device_id;
+              server["display_id"] = status.display_id;
+              server["last_error"] = status.last_error;
+              j["server"] = server;
+            }
             if (local && deps.access_requests) {
               j["access_requests"] = uvcpp_json::array();
               for (const access_request_info& request :
@@ -503,6 +516,60 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
                   uvcpp_web_next) {
              if (deps.lock) deps.lock->touch();
              resp.status(204).end();
+           });
+
+  // Phase-2 directory configuration and status (local host UI only).
+  auto server_json = [deps]() {
+    const app_settings set = deps.auth ? deps.auth->settings() : app_settings{};
+    const server_status status =
+        deps.server ? deps.server->status() : server_status{};
+    uvcpp_json j;
+    j["url"] = set.server_url;
+    j["invite"] = set.server_invite;
+    j["enabled"] = status.enabled;
+    j["registered"] = status.registered;
+    j["online"] = status.online;
+    j["device_id"] = status.device_id;
+    j["display_id"] = status.display_id;
+    j["last_error"] = status.last_error;
+    return j;
+  };
+  app.get("/api/server",
+          [deps, server_json](uvcpp_web_request& req, uvcpp_web_response& resp,
+                              uvcpp_web_next) {
+            if (!is_loopback_peer(req.peer_ip()) || !deps.auth) {
+              resp.status(403).json_str(R"({"code":"loopback_only"})");
+              resp.end();
+              return;
+            }
+            resp.set_header("Cache-Control", "no-store").json(server_json());
+            resp.end();
+          });
+  app.post("/api/server",
+           [deps, server_json](uvcpp_web_request& req, uvcpp_web_response& resp,
+                               uvcpp_web_next) {
+             if (!is_loopback_peer(req.peer_ip()) || !deps.auth) {
+               resp.status(403).json_str(R"({"code":"loopback_only"})");
+               resp.end();
+               return;
+             }
+             const std::string* url = req.query("url");
+             const std::string* invite = req.query("invite");
+             std::string error;
+             if (!deps.auth->set_server(url != nullptr ? *url : std::string(),
+                                        invite != nullptr ? *invite
+                                                          : std::string(),
+                                        error)) {
+               uvcpp_json body;
+               body["code"] = "invalid_server";
+               body["message"] = error;
+               resp.status(400).json(body);
+               resp.end();
+               return;
+             }
+             if (deps.server) deps.server->reconfigure();
+             resp.set_header("Cache-Control", "no-store").json(server_json());
+             resp.end();
            });
 
   // Chat between the person at this machine and a controlling client. The

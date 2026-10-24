@@ -30,6 +30,7 @@
 #if defined(_WIN32)
 #include "input/windows_secure_input.h"
 #endif
+#include "server_client.h"
 #include "session_registry.h"
 #include "util.h"
 #include "version.h"
@@ -380,6 +381,8 @@ int main(int argc, char** argv) {
 
   const std::string web_root = resolve_web_root(cfg);
   auto bound_port = std::make_shared<std::atomic<int>>(cfg.port);
+  auto server_client_state =
+      std::make_shared<server_client>(auth, bound_port, MOLINK_VERSION);
   auto discovery = std::make_shared<discovery_service>(
       auth, identity.device_id, cfg.port);
   api_deps deps;
@@ -396,6 +399,7 @@ int main(int argc, char** argv) {
   deps.access_requests = access_requests;
   deps.chat = chat;
   deps.call = call;
+  deps.server = server_client_state;
   deps.lock = lock;
   deps.network = network;
   deps.config = cfg;
@@ -441,6 +445,7 @@ int main(int argc, char** argv) {
 
   const int port = app.bound_port();
   bound_port->store(port);
+  server_client_state->start();
   discovery->set_web_port(port);
   {
     const app_settings current = auth->settings();
@@ -512,6 +517,7 @@ int main(int argc, char** argv) {
   // asked for it, and the app's own lifetime defines when it is no longer
   // needed.
   stop_session_service(service_error);
+  server_client_state->stop();
   app.stop();
   app.join();
   return 0;

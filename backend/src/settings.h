@@ -22,6 +22,10 @@ struct app_settings {
   bool service_desired_running = true;
   std::string device_name;
 
+  /// Phase-2 directory server. Empty URL disables registration.
+  std::string server_url;
+  std::string server_invite;
+
   /// Long-term code: at least 8 characters and must mix letters and digits.
   std::string long_term_code;
 

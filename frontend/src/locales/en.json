@@ -47,7 +47,7 @@
     "prefillHint": "Fill the form (no saved code)",
     "prefill": "Fill form",
     "useLocalCode": "Use this device's code",
-    "idNote": "Direct connections work on the same network. Connecting by device ID needs moLink Server (phase 2).",
+    "idNote": "Direct connections work on the same network. Connecting by device ID uses the moLink Server configured in Settings.",
     "recent": "Recent connections",
     "recentEmpty": "No connections yet.",
     "forget": "Remove from history",
@@ -71,7 +71,15 @@
     "tipModes": "Remote control enables keyboard and mouse as soon as the session connects. View only receives the picture.",
     "tipTools": "Chat and file transfer are always available in a session; clipboard sync can be turned off in the floating toolbar.",
     "computerName": "Computer name",
-    "hostHint": "The other computer address (IP or hostname). On a LAN you can pick it from Nearby devices."
+    "hostHint": "The other computer address (IP or hostname). On a LAN you can pick it from Nearby devices.",
+    "modeAddress": "Address",
+    "modeId": "Device ID",
+    "idLookupHint": "Resolve through the configured moLink Server, then connect directly.",
+    "serverRequired": "Configure moLink Server in Settings first.",
+    "serverId": "Server ID",
+    "serverOnline": "Online",
+    "serverOffline": "Offline",
+    "resolving": "Resolving…"
   },
   "settings": {
     "title": "Preferences",
@@ -128,7 +136,20 @@
     "windowsNoSessions": "No sessions reported.",
     "windowsSwitchConsole": "To console",
     "windowsKick": "Log off",
-    "refresh": "Refresh"
+    "refresh": "Refresh",
+    "server": "Server",
+    "serverHint": "Register this computer with a moLink Server so others can connect by device ID.",
+    "serverUrl": "Server URL",
+    "serverInvite": "Registration invite",
+    "serverInviteHint": "Required when the server enables an invite",
+    "serverSave": "Save and register",
+    "serverClear": "Disable",
+    "serverRegistered": "Registered",
+    "serverUnregistered": "Not registered",
+    "serverOnline": "Online",
+    "serverOffline": "Offline",
+    "serverId": "Server ID",
+    "serverTlsHint": "This client supports http:// only for now. Terminate TLS in a reverse proxy for public servers and keep the last hop on a trusted network."
   },
   "session": {
     "connecting": "Connecting…",
@@ -195,14 +216,17 @@
     "no_host": "Enter the address of the device.",
     "invalid_port": "Port must be a whole number between 1 and 65535.",
     "invalid_uses": "Uses must be a whole number greater than 0.",
-    "device_not_found": "That device is not visible on this LAN.",
+    "device_not_found": "No device is registered with that ID",
     "clipboard_read_failed": "Could not read the local clipboard",
     "clipboard_write_failed": "Could not write to the local clipboard",
     "clipboard_unavailable": "The browser does not expose the clipboard here",
     "self_connect": "This device cannot connect to itself.",
     "core_unreachable": "Cannot reach the local core.",
     "local_auth_failed": "Local sign-in failed.",
-    "settings_failed": "Could not save the setting."
+    "settings_failed": "Could not save the setting.",
+    "server_not_configured": "moLink Server is not configured",
+    "device_offline": "That device is offline",
+    "server_unreachable": "The moLink Server could not be reached"
   },
   "popout": {
     "noToken": "This window is missing the connection code."

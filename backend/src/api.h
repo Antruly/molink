@@ -7,6 +7,7 @@
 
 #include "access_requests.h"
 #include "call_hub.h"
+#include "server_client.h"
 #include "capture/capture.h"
 #include "chat_hub.h"
 #include "clipboard/clipboard.h"
@@ -40,6 +41,7 @@ struct api_deps {
   std::shared_ptr<access_request_registry> access_requests;
   std::shared_ptr<chat_hub> chat;
   std::shared_ptr<call_hub> call;
+  std::shared_ptr<server_client> server;
   std::shared_ptr<discovery_service> discovery;
   std::shared_ptr<std::atomic<int>> bound_port;
   /// True when this build can carry HTTP/2 (h2c) on the web port.

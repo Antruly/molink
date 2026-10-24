@@ -75,6 +75,7 @@ set(MOLINK_CORE_SOURCES
   src/chat_hub.cpp
   src/file_transfer.cpp
   src/call_hub.cpp
+  src/server_client.cpp
   src/audio/audio.cpp
   src/audio/windows_audio.cpp
   src/audio/windows_voice.cpp

@@ -1,7 +1,13 @@
-import { Eye, EyeOff, RefreshCw, ShieldCheck, X } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { Copy, Eye, EyeOff, RefreshCw, Server, ShieldCheck, X } from 'lucide-react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import type { AuthCode, SecuritySettings } from '../lib/api'
+import {
+  fetchServerConfig,
+  postServerConfig,
+  type AuthCode,
+  type SecuritySettings,
+  type ServerConfig,
+} from '../lib/api'
 import { useAppStore } from '../store/app'
 import { PreferencesControls } from './PreferencesControls'
 
@@ -259,6 +265,171 @@ function SecurityControls({
   )
 }
 
+
+function ServerControls() {
+  const { t } = useTranslation()
+  const token = useAppStore((state) => state.token)
+  const [url, setUrl] = useState('')
+  const [invite, setInvite] = useState('')
+  const [status, setStatus] = useState<ServerConfig | null>(null)
+  const [note, setNote] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [copied, setCopied] = useState(false)
+  const initialized = useRef(false)
+
+  const load = useCallback(async () => {
+    if (!token) return
+    try {
+      const next = await fetchServerConfig(token)
+      setStatus(next)
+      if (!initialized.current) {
+        setUrl(next.url)
+        setInvite(next.invite)
+        initialized.current = true
+      }
+    } catch {
+      // The core may still be booting.
+    }
+  }, [token])
+
+  useEffect(() => {
+    const initial = window.setTimeout(() => void load(), 0)
+    const timer = window.setInterval(() => void load(), 2000)
+    return () => {
+      window.clearTimeout(initial)
+      window.clearInterval(timer)
+    }
+  }, [load])
+
+  const save = async (nextUrl: string) => {
+    if (!token) return
+    setBusy(true)
+    setNote(null)
+    try {
+      const next = await postServerConfig(token, nextUrl.trim(), invite.trim())
+      setStatus(next)
+      setUrl(next.url)
+      setNote(t('settings.saved'))
+    } catch {
+      setNote(t('error.settings_failed'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const copyId = async () => {
+    const value = status?.display_id || status?.device_id || ''
+    if (!value) return
+    try {
+      await navigator.clipboard.writeText(value)
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 1500)
+    } catch {
+      // Clipboard access can be denied; the ID is still visible.
+    }
+  }
+
+  return (
+    <div className="mt-6 space-y-3 border-t border-line-soft pt-4">
+      <div className="flex items-center gap-2 text-[12px] font-medium text-ink">
+        <Server size={14} className="text-accent" />
+        {t('settings.server')}
+      </div>
+      <p className="text-[11px] leading-relaxed text-muted">
+        {t('settings.serverHint')}
+      </p>
+      <label className="block">
+        <span className="mb-1 block text-[10px] uppercase tracking-[0.16em] text-muted">
+          {t('settings.serverUrl')}
+        </span>
+        <input
+          value={url}
+          onChange={(event) => setUrl(event.target.value)}
+          className="field font-mono text-[12px]"
+          placeholder="http://192.168.1.5:28430"
+          spellCheck={false}
+          autoComplete="off"
+        />
+      </label>
+      <label className="block">
+        <span className="mb-1 block text-[10px] uppercase tracking-[0.16em] text-muted">
+          {t('settings.serverInvite')}
+        </span>
+        <input
+          value={invite}
+          onChange={(event) => setInvite(event.target.value)}
+          className="field font-mono text-[12px]"
+          placeholder={t('settings.serverInviteHint')}
+          spellCheck={false}
+          autoComplete="off"
+        />
+      </label>
+      <div className="flex flex-wrap gap-2">
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => void save(url)}
+          className="btn btn-primary h-8 px-3 text-[11px]"
+        >
+          {t('settings.serverSave')}
+        </button>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => void save('')}
+          className="btn h-8 px-3 text-[11px]"
+        >
+          {t('settings.serverClear')}
+        </button>
+      </div>
+      {note ? <div className="text-[11px] text-muted">{note}</div> : null}
+      {status ? (
+        <div className="rounded-lg border border-line bg-panel/50 p-3 text-[11px]">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className={status.registered ? 'chip chip-on' : 'chip'}>
+              {status.registered
+                ? t('settings.serverRegistered')
+                : t('settings.serverUnregistered')}
+            </span>
+            {status.registered ? (
+              <span className={status.online ? 'chip chip-on' : 'chip'}>
+                {status.online
+                  ? t('settings.serverOnline')
+                  : t('settings.serverOffline')}
+              </span>
+            ) : null}
+          </div>
+          {status.registered ? (
+            <div className="mt-2 flex items-center gap-2">
+              <span className="text-muted">{t('settings.serverId')}</span>
+              <span className="font-mono text-[12px] text-ink">
+                {status.display_id || status.device_id}
+              </span>
+              <button
+                type="button"
+                onClick={() => void copyId()}
+                className="grid h-6 w-6 place-items-center rounded text-muted transition hover:bg-panel hover:text-ink"
+                title={t('home.copy')}
+                aria-label={t('home.copy')}
+              >
+                <Copy size={12} className={copied ? 'text-accent' : ''} />
+              </button>
+            </div>
+          ) : null}
+          {status.last_error ? (
+            <div className="mt-2 break-words text-warn">
+              {status.last_error}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+      <p className="text-[10px] leading-relaxed text-muted">
+        {t('settings.serverTlsHint')}
+      </p>
+    </div>
+  )
+}
+
 export function SettingsPanel() {
   const { t } = useTranslation()
   const open = useAppStore((state) => state.settingsOpen)
@@ -317,6 +488,8 @@ export function SettingsPanel() {
             onCustomCode={(uses, value) => setAuthCode('multi', uses, value)}
           />
         ) : null}
+
+        {localMode ? <ServerControls /> : null}
 
         <div className="mt-6 border-t border-line-soft pt-4 text-[11px] leading-relaxed text-muted">
           <div className="flex justify-between">

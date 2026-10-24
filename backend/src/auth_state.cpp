@@ -208,6 +208,44 @@ void auth_state::set_service_desired_running(bool enabled) {
   persist_locked();
 }
 
+bool auth_state::set_server(std::string url, std::string invite,
+                            std::string& err) {
+  auto trim = [](std::string value) {
+    while (!value.empty() &&
+           (value.back() == ' ' || value.back() == '\t' ||
+            value.back() == '\r' || value.back() == '\n')) {
+      value.pop_back();
+    }
+    std::size_t start = 0;
+    while (start < value.size() &&
+           (value[start] == ' ' || value[start] == '\t')) {
+      ++start;
+    }
+    return value.substr(start);
+  };
+  url = trim(std::move(url));
+  invite = trim(std::move(invite));
+  if (!url.empty()) {
+    if (url.rfind("http://", 0) != 0 && url.rfind("https://", 0) != 0) {
+      err = "server URL must start with http:// or https://";
+      return false;
+    }
+    if (url.size() > 512 || has_whitespace_or_control(url)) {
+      err = "server URL is invalid";
+      return false;
+    }
+  }
+  if (invite.size() > 128 || has_whitespace_or_control(invite)) {
+    err = "server invite is invalid";
+    return false;
+  }
+  std::lock_guard<std::mutex> lock(mutex_);
+  settings_.server_url = url;
+  settings_.server_invite = invite;
+  persist_locked();
+  return true;
+}
+
 void auth_state::update_access(bool allow_remote_access, bool allow_web_client,
                                bool discovery_enabled,
                                const std::string& device_name) {

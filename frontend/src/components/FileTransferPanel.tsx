@@ -333,18 +333,19 @@ export function FileTransferPanel({
     })
   }, [connection, handleMessage])
 
-  useEffect(() => {
-    if (!open || tab !== 'receive') return
-    connectionRef.current?.requestClipboardFiles()
-    if (listing) return
-    setLoading(true)
-    connectionRef.current?.sendFileAction('browse', { path: '' })
-  }, [open, tab, listing])
-
   const browse = (path: string) => {
     setLoading(true)
     setError(null)
     connectionRef.current?.sendFileAction('browse', { path })
+  }
+
+  const selectReceive = () => {
+    setTab('receive')
+    connectionRef.current?.requestClipboardFiles()
+    if (!listing) {
+      setLoading(true)
+      connectionRef.current?.sendFileAction('browse', { path: '' })
+    }
   }
 
   const enqueue = (files: FileList | File[]) => {
@@ -374,7 +375,9 @@ export function FileTransferPanel({
 
   if (!open) return null
 
-  const busy = activeRef.current !== null || queueRef.current.length > 0
+  const busy = uploads.some(
+    (item) => item.status === 'queued' || item.status === 'sending',
+  )
 
   return (
     <div
@@ -412,7 +415,7 @@ export function FileTransferPanel({
         </button>
         <button
           type="button"
-          onClick={() => setTab('receive')}
+          onClick={selectReceive}
           className={
             'flex flex-1 items-center justify-center gap-1.5 rounded-lg px-2 py-1.5 text-[11px] transition ' +
             (tab === 'receive'

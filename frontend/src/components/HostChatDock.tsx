@@ -46,7 +46,6 @@ export function HostChatDock() {
 
   useEffect(() => {
     openRef.current = open
-    if (open) setUnread(0)
   }, [open])
 
   useEffect(() => {
@@ -94,14 +93,10 @@ export function HostChatDock() {
   }, [messages, open])
 
   useEffect(() => {
-    if (call?.state !== 'active' || !call.started_ms) {
-      setCallSeconds(0)
-      return
-    }
-    const update = () =>
+    if (call?.state !== 'active' || !call.started_ms) return
+    const timer = window.setInterval(() => {
       setCallSeconds(Math.floor((Date.now() - call.started_ms) / 1000))
-    update()
-    const timer = window.setInterval(update, 1000)
+    }, 1000)
     return () => window.clearInterval(timer)
   }, [call?.state, call?.started_ms])
 
@@ -112,7 +107,9 @@ export function HostChatDock() {
     setCallBusy(true)
     try {
       await postCall(token, action)
-      setCall(await fetchCall(token))
+      const state = await fetchCall(token)
+      setCall(state)
+      if (state.state === 'active') setCallSeconds(0)
     } catch {
       // The call may have ended on the other side already.
     } finally {
@@ -291,7 +288,10 @@ export function HostChatDock() {
       ) : (
         <button
           type="button"
-          onClick={() => setOpen(true)}
+          onClick={() => {
+            setUnread(0)
+            setOpen(true)
+          }}
           className="fixed bottom-4 right-4 z-30 grid h-12 w-12 place-items-center rounded-full border border-line bg-surface text-accent shadow-xl transition hover:border-accent/50 hover:bg-panel"
           title={t('chat.title')}
           aria-label={t('chat.title')}
