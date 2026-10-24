@@ -22,6 +22,9 @@ device_identity load_identity(const core_config& config, std::string& err);
 /// Platform configuration directory, or empty when it cannot be determined.
 std::string config_directory();
 
+/// "windows" / "macos" / "linux" / "unknown" for the directory metadata.
+std::string device_platform();
+
 /// Idle-lock timeout persisted from the UI. Returns @p fallback when unset.
 int load_lock_timeout_setting(int fallback);
 void save_lock_timeout_setting(int seconds);

@@ -16,6 +16,7 @@ namespace molink {
 struct discovered_peer {
   std::string device_id;
   std::string name;
+  std::string platform;
   std::string host;
   int port = 0;
   uint64_t last_seen_ms = 0;

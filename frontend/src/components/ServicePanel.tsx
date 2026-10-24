@@ -85,27 +85,19 @@ export function ServicePanel({ token }: { token: string }) {
           </button>
         ) : (
           <>
-            {status.running ? (
-              <button
-                type="button"
-                className="btn h-8 gap-1 px-2 text-[11px]"
-                disabled={busy}
-                onClick={() => void act('stop')}
-              >
-                <Square size={12} />
-                {t('service.stop')}
-              </button>
-            ) : (
-              <button
-                type="button"
-                className="btn btn-primary h-8 gap-1 px-2 text-[11px]"
-                disabled={busy}
-                onClick={() => void act('start')}
-              >
-                <Play size={12} />
-                {t('service.start')}
-              </button>
-            )}
+            <button
+              type="button"
+              aria-pressed={status.running}
+              className={
+                'btn h-8 gap-1 px-2 text-[11px]' +
+                (status.running ? '' : ' btn-primary')
+              }
+              disabled={busy}
+              onClick={() => void act(status.running ? 'stop' : 'start')}
+            >
+              {status.running ? <Square size={12} /> : <Play size={12} />}
+              {status.running ? t('service.stop') : t('service.start')}
+            </button>
             <button
               type="button"
               className="btn h-8 gap-1 px-2 text-[11px]"

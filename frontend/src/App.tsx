@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next'
 import { AppHeader } from './components/AppHeader'
 import { AuthGate } from './components/AuthGate'
 import { HomeView } from './components/HomeView'
+import { SimpleHomeView } from './components/simple/SimpleHomeView'
 import { HostChatDock } from './components/HostChatDock'
 import { Logo } from './components/Logo'
 import { AccessRequestDialog } from './components/AccessRequestDialog'
@@ -40,6 +41,7 @@ export default function App() {
   const theme = useAppStore((state) => state.theme)
   const authPhase = useAppStore((state) => state.authPhase)
   const activeTabId = useAppStore((state) => state.activeTabId)
+  const uiMode = useAppStore((state) => state.uiMode)
   const tabs = useAppStore((state) => state.tabs)
   const boot = useAppStore((state) => state.boot)
   const refreshState = useAppStore((state) => state.refreshState)
@@ -161,7 +163,7 @@ export default function App() {
               )
             ) : showHome ? (
               <div className="min-h-0 flex-1 overflow-y-auto">
-                <HomeView />
+                {uiMode === 'simple' ? <SimpleHomeView /> : <HomeView />}
               </div>
             ) : active ? (
               <SessionView key={active.id} tab={active} />

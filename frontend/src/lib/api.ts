@@ -17,6 +17,8 @@ export interface AuthCode {
 export interface DeviceInfo {
   device_id: string
   device_name?: string
+  avatar?: string
+  platform?: string
   token: string
   service: string
   product: string
@@ -39,9 +41,14 @@ export interface AccessRequest {
 
 export interface ServerInfo {
   url: string
+  custom_url?: string
+  default_url?: string
+  using_default?: boolean
   enabled: boolean
   registered: boolean
   online: boolean
+  domain?: string
+  domain_valid?: boolean
   device_id: string
   display_id: string
   last_error: string
@@ -61,6 +68,70 @@ export interface DeviceLookup {
   peer_ip: string
   port: number
   version: string
+  platform?: string
+  avatar?: string
+}
+
+export interface PeerStatus {
+  id: string
+  display_id: string
+  name: string
+  platform?: string
+  avatar?: string
+  online: boolean
+  last_seen_ms: number
+}
+
+export interface DomainDevice {
+  id: string
+  display_id: string
+  name: string
+  platform?: string
+  avatar?: string
+  host: string
+  port: number
+  online: boolean
+  last_seen_ms: number
+}
+
+export interface DomainConfig {
+  domain: string
+  domain_valid: boolean
+}
+
+export interface DomainList {
+  domain: string
+  domain_valid: boolean
+  devices: DomainDevice[]
+}
+
+export interface SavedDevicePreference {
+  key: string
+  id?: string
+  host: string
+  port: number
+  label: string
+  platform?: string
+  avatar?: string
+  token?: string
+  savedAt: number
+}
+
+export interface RecentPreference {
+  host: string
+  port: number
+  label: string
+  at: number
+  token?: string
+  id?: string
+  platform?: string
+  avatar?: string
+}
+
+export interface UiPreferences {
+  uiMode?: 'simple' | 'advanced'
+  savedDevices?: SavedDevicePreference[]
+  recents?: RecentPreference[]
 }
 
 export interface ServerState {
@@ -82,6 +153,8 @@ export interface ServerState {
   udp_port: number
   restart_required: boolean
   device_name?: string
+  avatar?: string
+  platform?: string
   allow_remote_access?: boolean
   server?: ServerInfo
 }
@@ -225,6 +298,7 @@ export interface DiscoveredPeer {
   host: string
   port: number
   last_seen_ms: number
+  platform?: string
 }
 
 export interface DiscoveryResult {
@@ -237,6 +311,7 @@ export function fetchDiscovery(token: string): Promise<DiscoveryResult> {
 }
 
 export interface SecuritySettings {
+  server_enabled?: boolean
   allow_remote_access: boolean
   allow_web_client: boolean
   discovery_enabled: boolean
@@ -441,6 +516,97 @@ export function postServerConfig(
     { method: 'POST' },
     token,
   )
+}
+
+/// Toggle the remote directory without touching a configured custom URL.
+export function postServerEnabled(
+  token: string,
+  enabled: boolean,
+): Promise<ServerConfig> {
+  return request<ServerConfig>(
+    `/api/server?enabled=${enabled ? 1 : 0}`,
+    { method: 'POST' },
+    token,
+  )
+}
+
+export function saveAvatar(token: string, avatar: string): Promise<{ avatar: string }> {
+  return request<{ avatar: string }>(
+    '/api/avatar',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ avatar }),
+    },
+    token,
+  )
+}
+
+/// Ask the directory to join a shared code, or to issue a fresh one for this
+/// device (which revokes the code it owned).
+export function postDomain(
+  token: string,
+  action: 'join' | 'rotate',
+  code?: string,
+): Promise<DomainConfig> {
+  return request<DomainConfig>(
+    '/api/domain',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action, code }),
+    },
+    token,
+  )
+}
+
+export function fetchDomainDevices(token: string): Promise<DomainList> {
+  return request<DomainList>('/api/domain/devices', {}, token)
+}
+
+export function fetchUiPreferences(token: string): Promise<UiPreferences> {
+  return request<UiPreferences>('/api/ui-preferences', {}, token)
+}
+
+export function saveUiPreferences(
+  token: string,
+  value: UiPreferences,
+): Promise<UiPreferences> {
+  return request<UiPreferences>(
+    '/api/ui-preferences',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(value),
+    },
+    token,
+  )
+}
+
+/// Batch online status for the saved/recent device list. The directory only
+/// returns the caller's own list of IDs; there is no global enumeration.
+export async function lookupDevices(
+  serverUrl: string,
+  ids: string[],
+): Promise<PeerStatus[]> {
+  if (!serverUrl || ids.length === 0) return []
+  const base = serverUrl.replace(/\/+$/, '')
+  const query = ids.slice(0, 20).map(encodeURIComponent).join(',')
+  const response = await fetch(`${base}/v1/devices?ids=${query}`, {
+    cache: 'no-store',
+  })
+  if (!response.ok) {
+    let code = `http_${response.status}`
+    try {
+      const body = (await response.json()) as { code?: string }
+      if (body.code) code = body.code
+    } catch {
+      // Keep the HTTP status as the code.
+    }
+    throw new ApiError(response.status, code)
+  }
+  const body = (await response.json()) as { devices?: PeerStatus[] }
+  return body.devices ?? []
 }
 
 /// Resolves a device ID through the public directory. The server enables CORS,

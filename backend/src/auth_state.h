@@ -60,9 +60,13 @@ class auth_state {
   /// switches. Defaults to enabled.
   void set_allow_access_requests(bool allow);
   void set_service_desired_running(bool enabled);
-  /// Phase-2 directory: empty URL disables registration.
+  /// Phase-2 directory: the switch is independent from the custom URL (an
+  /// empty URL with the switch on means the built-in default).
   bool set_server(std::string url, std::string invite, std::string ca,
-                  std::string& err);
+                  bool enabled, std::string& err);
+
+  /// "preset:<name>" or a small image data URL; empty clears it.
+  bool set_avatar(std::string avatar, std::string& err);
 
  private:
   bool valid_session_locked(const std::string& token) const;

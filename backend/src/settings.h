@@ -22,11 +22,15 @@ struct app_settings {
   bool service_desired_running = true;
   std::string device_name;
 
-  /// Phase-2 directory server. Empty URL disables registration.
+  /// Master switch for the remote directory. Off means LAN/direct only.
+  bool server_enabled = true;
+  /// Built-in directory is used when this is empty (and the switch is on).
   std::string server_url;
   std::string server_invite;
   /// Optional PEM CA bundle used to verify an HTTPS directory.
   std::string server_ca;
+  /// "preset:<name>" or a small image data URL, synced to the directory.
+  std::string avatar;
 
   /// Long-term code: at least 8 characters and must mix letters and digits.
   std::string long_term_code;
@@ -43,5 +47,10 @@ void save_settings(const app_settings& settings);
 
 /// Human-readable default name for this machine.
 std::string default_device_name();
+
+/// The effective directory URL: empty when disabled, otherwise the custom URL
+/// or the built-in default.
+std::string effective_server_url(const app_settings& settings);
+std::string default_server_url();
 
 }  // namespace molink

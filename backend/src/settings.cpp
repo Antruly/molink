@@ -11,6 +11,7 @@
 #endif
 
 #include "identity.h"
+#include "version.h"
 
 namespace molink {
 namespace {
@@ -50,6 +51,14 @@ int parse_int(const std::string& value, int fallback) {
 }
 
 }  // namespace
+
+std::string default_server_url() { return MOLINK_DEFAULT_SERVER_URL; }
+
+std::string effective_server_url(const app_settings& settings) {
+  if (!settings.server_enabled) return std::string();
+  const std::string custom = trim(settings.server_url);
+  return custom.empty() ? default_server_url() : custom;
+}
 
 std::string default_device_name() {
 #if defined(_WIN32)
@@ -93,6 +102,10 @@ app_settings load_settings() {
       settings.service_desired_running = parse_bool(value, true);
     } else if (key == "device_name") {
       if (!value.empty()) settings.device_name = value;
+    } else if (key == "server_enabled") {
+      settings.server_enabled = parse_bool(value, true);
+    } else if (key == "avatar") {
+      settings.avatar = value;
     } else if (key == "server_url") {
       settings.server_url = value;
     } else if (key == "server_invite") {
@@ -143,6 +156,8 @@ void save_settings(const app_settings& settings) {
   stream << "service_desired_running="
          << (settings.service_desired_running ? 1 : 0) << "\n";
   stream << "device_name=" << settings.device_name << "\n";
+  stream << "avatar=" << settings.avatar << "\n";
+  stream << "server_enabled=" << (settings.server_enabled ? 1 : 0) << "\n";
   stream << "server_url=" << settings.server_url << "\n";
   stream << "server_invite=" << settings.server_invite << "\n";
   stream << "server_ca=" << settings.server_ca << "\n";

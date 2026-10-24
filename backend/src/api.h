@@ -25,6 +25,7 @@ class uvcpp_web_app;
 namespace molink {
 
 class discovery_service;
+class ui_store;
 
 struct api_deps {
   std::shared_ptr<session_registry> registry;
@@ -43,6 +44,7 @@ struct api_deps {
   std::shared_ptr<call_hub> call;
   std::shared_ptr<server_client> server;
   std::shared_ptr<discovery_service> discovery;
+  std::shared_ptr<ui_store> ui;
   std::shared_ptr<std::atomic<int>> bound_port;
   /// True when this build can carry HTTP/2 (h2c) on the web port.
   bool http2_available = false;

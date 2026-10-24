@@ -552,6 +552,24 @@ export function SessionView({
     }
   }, [tab.id])
 
+  // A files/chat connection from the simple home opens that panel as soon as
+  // the session is live; the desktop view stays available behind it.
+  useEffect(() => {
+    if (tab.phase !== 'live') return
+    if (tab.intent !== 'files' && tab.intent !== 'chat') return
+    const open = tab.intent
+    const timer = window.setTimeout(() => {
+      if (open === 'files') {
+        setFilesOpen(true)
+        setChatOpen(false)
+      } else {
+        setChatOpen(true)
+        setFilesOpen(false)
+      }
+    }, 0)
+    return () => window.clearTimeout(timer)
+  }, [tab.phase, tab.id, tab.intent])
+
 
   // The expanded quick bar collapses when focus or the pointer moves outside.
   useEffect(() => {

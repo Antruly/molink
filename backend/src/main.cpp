@@ -31,6 +31,7 @@
 #include "input/windows_secure_input.h"
 #endif
 #include "server_client.h"
+#include "ui_store.h"
 #include "session_registry.h"
 #include "util.h"
 #include "version.h"
@@ -385,8 +386,15 @@ int main(int argc, char** argv) {
       std::make_shared<server_client>(auth, bound_port, MOLINK_VERSION);
   auto discovery = std::make_shared<discovery_service>(
       auth, identity.device_id, cfg.port);
+  auto ui_preferences = std::make_shared<ui_store>();
+  std::string ui_error;
+  if (!ui_preferences->load(ui_error)) {
+    std::fprintf(stderr, "molink ui preferences: %s\n", ui_error.c_str());
+  }
+
   api_deps deps;
   deps.bound_port = bound_port;
+  deps.ui = ui_preferences;
   deps.discovery = discovery;
   deps.serve_web = !web_root.empty();
   deps.registry = registry;

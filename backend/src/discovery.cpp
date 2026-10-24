@@ -1,5 +1,7 @@
 #include "discovery.h"
 
+#include "identity.h"
+
 #include <chrono>
 #include <cstring>
 #include <string>
@@ -166,6 +168,7 @@ void discovery_service::run() {
       beacon["version"] = 1;
       beacon["device_id"] = device_id_;
       beacon["name"] = auth_ ? auth_->settings().device_name : device_id_;
+      beacon["platform"] = device_platform();
       beacon["port"] = web_port_.load();
       beacon["protocol"] = 1;
       const std::string body = beacon.dump();
@@ -192,6 +195,7 @@ void discovery_service::run() {
         discovered_peer peer;
         peer.device_id = parsed.value("device_id", "");
         peer.name = parsed.value("name", "");
+        peer.platform = parsed.value("platform", "");
         peer.port = parsed.value("port", 0);
         if (!peer.device_id.empty() && peer.device_id != device_id_ &&
             peer.port > 0 && peer.port <= 65535) {

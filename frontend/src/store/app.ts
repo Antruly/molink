@@ -3,9 +3,16 @@ import {
   ApiError,
   fetchDeviceInfo,
   fetchDiscovery,
+  fetchDomainDevices,
   fetchInfo,
   fetchSettings,
   fetchState,
+  fetchUiPreferences,
+  postDomain,
+  saveAvatar,
+  saveUiPreferences,
+  postServerEnabled,
+  type DomainDevice,
   login as apiLogin,
   postAccessDecision,
   postActivity,
@@ -55,6 +62,10 @@ export type QualityMode =
 /// A control session starts with input enabled; a view-only session starts
 /// with it off. The session toolbar can still change it later.
 export type SessionMode = 'control' | 'view'
+export type SessionIntent = 'desktop' | 'files' | 'chat'
+export type UiMode = 'simple' | 'advanced'
+/// 'unknown_domain' means the code was revoked (the device left the group).
+export type DomainOutcome = 'ok' | 'unknown_domain' | 'failed'
 export type HistoryView = 'cards' | 'list'
 
 export interface SessionTab {
@@ -77,6 +88,8 @@ export interface SessionTab {
   retryAt: number | null
   controlEnabled: boolean
   mode: SessionMode
+  /// What the simple home asked for before the session started.
+  intent: SessionIntent
   clipboardEnabled: boolean
   displayIndex: number
 }
@@ -88,6 +101,21 @@ export interface RecentConnection {
   at: number
   /// Optional saved authorization code. Stored only when the user opts in.
   token?: string
+  id?: string
+  platform?: string
+  avatar?: string
+}
+
+export interface SavedDevice {
+  key: string
+  id?: string
+  host: string
+  port: number
+  label: string
+  platform?: string
+  avatar?: string
+  token?: string
+  savedAt: number
 }
 
 interface AppState {
@@ -102,6 +130,8 @@ interface AppState {
   immersive: boolean
   historyView: HistoryView
   preferredMode: SessionMode
+  uiMode: UiMode
+  savedDevices: SavedDevice[]
   authPhase: AuthPhase
   localMode: boolean
   token: string
@@ -125,6 +155,16 @@ interface AppState {
   setImmersive: (value: boolean) => void
   setHistoryView: (view: HistoryView) => void
   setPreferredMode: (mode: SessionMode) => void
+  setUiMode: (mode: UiMode) => void
+  loadUiPreferences: () => Promise<void>
+  saveDevice: (device: Omit<SavedDevice, 'key' | 'savedAt'> & { key?: string }) => void
+  patchSavedDevice: (id: string, patch: Partial<SavedDevice>) => void
+  removeSavedDevice: (key: string) => void
+  setServerEnabled: (enabled: boolean) => Promise<boolean>
+  setAvatarValue: (avatar: string) => Promise<boolean>
+  /// Join another device's code, or ask the directory for a fresh one.
+  setDomain: (action: 'join' | 'rotate', code?: string) => Promise<DomainOutcome>
+  refreshDomainDevices: () => Promise<DomainDevice[]>
   boot: () => Promise<void>
   refreshState: () => Promise<void>
   authenticate: (code: string) => Promise<boolean>
@@ -164,6 +204,10 @@ interface AppState {
     saveToken?: boolean,
     requestAccess?: boolean,
     mode?: SessionMode,
+    intent?: SessionIntent,
+    deviceId?: string,
+    platform?: string,
+    avatar?: string,
   ) => string
   closeTab: (id: string) => void
   setActiveTab: (id: string) => void
@@ -179,6 +223,8 @@ const QUALITY_MODE_KEY = 'molink.qualityMode'
 const RECENT_KEY = 'molink.recents'
 const HISTORY_VIEW_KEY = 'molink.historyView'
 const MODE_KEY = 'molink.sessionMode'
+const UI_MODE_KEY = 'molink.uiMode'
+const SAVED_DEVICES_KEY = 'molink.savedDevices'
 const EMPTY_STATS: Stats = {
   fps: 0,
   wireFps: 0,
@@ -284,6 +330,30 @@ function initialRecents(): RecentConnection[] {
   }
 }
 
+function initialUiMode(): UiMode {
+  const forced = new URLSearchParams(window.location.search).get('ui')
+  if (forced === 'simple' || forced === 'advanced') return forced
+  const saved = readCookie('molink_uiMode') || readStorage(UI_MODE_KEY)
+  return saved === 'advanced' ? 'advanced' : 'simple'
+}
+
+function initialSavedDevices(): SavedDevice[] {
+  try {
+    const parsed = JSON.parse(readStorage(SAVED_DEVICES_KEY)) as SavedDevice[]
+    if (!Array.isArray(parsed)) return []
+    return parsed
+      .filter(
+        (item) =>
+          typeof item?.host === 'string' &&
+          typeof item?.port === 'number' &&
+          typeof item?.label === 'string',
+      )
+      .slice(0, 50)
+  } catch {
+    return []
+  }
+}
+
 const runtimes = new Map<string, SessionConnection>()
 let nextId = 1
 
@@ -313,9 +383,56 @@ export const useAppStore = create<AppState>((set, get) => {
     if (patch.phase !== undefined) get().syncUiState()
   }
 
-  const remember = (host: string, port: number, label: string,
-                    token: string, saveToken: boolean): void => {
-    const recent: RecentConnection = { host, port, label, at: Date.now() }
+  let persistTimer: number | null = null
+  const schedulePersist = (): void => {
+    if (persistTimer !== null) window.clearTimeout(persistTimer)
+    persistTimer = window.setTimeout(() => {
+      persistTimer = null
+      const token = get().token
+      if (!token) return
+      const saved = get().savedDevices.map((device) => ({
+        key: device.key,
+        id: device.id,
+        host: device.host,
+        port: device.port,
+        label: device.label,
+        platform: device.platform,
+        // Keep ui.json small: only preset avatars are persisted; uploaded
+        // images are fetched from the directory when the device is online.
+        avatar:
+          device.avatar && !device.avatar.startsWith('data:')
+            ? device.avatar
+            : undefined,
+        token: device.token,
+        savedAt: device.savedAt,
+      }))
+      void saveUiPreferences(token, {
+        uiMode: get().uiMode,
+        savedDevices: saved,
+        recents: get().recents,
+      }).catch(() => undefined)
+    }, 400)
+  }
+
+  const remember = (
+    host: string,
+    port: number,
+    label: string,
+    token: string,
+    saveToken: boolean,
+    meta?: { id?: string; platform?: string; avatar?: string },
+  ): void => {
+    const recent: RecentConnection = {
+      host,
+      port,
+      label,
+      at: Date.now(),
+      ...(meta?.id ? { id: meta.id } : {}),
+      ...(meta?.platform ? { platform: meta.platform } : {}),
+      ...(meta?.avatar && !meta.avatar.startsWith('data:')
+        ? { avatar: meta.avatar }
+        : {}),
+    }
     const previous = get().recents.find(
       (item) => item.host === host && item.port === port,
     )
@@ -333,6 +450,7 @@ export const useAppStore = create<AppState>((set, get) => {
     ].slice(0, 8)
     writeStorage(RECENT_KEY, JSON.stringify(recents))
     set({ recents })
+    schedulePersist()
   }
 
   return {
@@ -344,6 +462,8 @@ export const useAppStore = create<AppState>((set, get) => {
     immersive: false,
     historyView: initialHistoryView(),
     preferredMode: initialSessionMode(),
+    uiMode: initialUiMode(),
+    savedDevices: initialSavedDevices(),
     authPhase: 'booting',
     localMode: false,
     token: '',
@@ -406,6 +526,147 @@ export const useAppStore = create<AppState>((set, get) => {
       set({ preferredMode: mode })
     },
 
+    setUiMode: (mode) => {
+      writeStorage(UI_MODE_KEY, mode)
+      writeCookie('molink_uiMode', mode)
+      set({ uiMode: mode })
+      schedulePersist()
+    },
+
+    loadUiPreferences: async () => {
+      const token = get().token
+      if (!token) return
+      try {
+        const prefs = await fetchUiPreferences(token)
+        const next: Partial<AppState> = {}
+        if (prefs.uiMode === 'simple' || prefs.uiMode === 'advanced') {
+          next.uiMode = prefs.uiMode
+          writeStorage(UI_MODE_KEY, prefs.uiMode)
+          writeCookie('molink_uiMode', prefs.uiMode)
+        }
+        if (
+          Array.isArray(prefs.savedDevices) &&
+          (prefs.savedDevices.length > 0 || get().savedDevices.length === 0)
+        ) {
+          next.savedDevices = prefs.savedDevices.slice(0, 50).map((device) => ({
+            key:
+              device.key ||
+              (device.id
+                ? `id:${device.id}`
+                : `host:${device.host}:${device.port}`),
+            id: device.id,
+            host: device.host,
+            port: device.port,
+            label: device.label,
+            platform: device.platform,
+            avatar: device.avatar,
+            token: device.token,
+            savedAt: device.savedAt || Date.now(),
+          }))
+          writeStorage(
+            SAVED_DEVICES_KEY,
+            JSON.stringify(next.savedDevices),
+          )
+        }
+        if (Array.isArray(prefs.recents) && prefs.recents.length > 0) {
+          next.recents = prefs.recents.slice(0, 8)
+          writeStorage(RECENT_KEY, JSON.stringify(next.recents))
+        }
+        set(next)
+      } catch {
+        // Keep the local copy when the core is unavailable.
+      }
+    },
+
+    saveDevice: (input) => {
+      const id = input.id?.trim()
+      const key =
+        input.key ?? (id ? `id:${id}` : `host:${input.host}:${input.port}`)
+      const existing = get().savedDevices.find((device) => device.key === key)
+      const saved: SavedDevice = {
+        ...existing,
+        ...input,
+        key,
+        savedAt: existing?.savedAt ?? Date.now(),
+      }
+      const list = [
+        saved,
+        ...get().savedDevices.filter((device) => device.key !== key),
+      ].slice(0, 50)
+      writeStorage(SAVED_DEVICES_KEY, JSON.stringify(list))
+      set({ savedDevices: list })
+      schedulePersist()
+    },
+
+    patchSavedDevice: (id, patch) => {
+      const list = get().savedDevices.map((device) =>
+        device.id === id || device.key === id ? { ...device, ...patch } : device,
+      )
+      if (JSON.stringify(list) === JSON.stringify(get().savedDevices)) return
+      writeStorage(SAVED_DEVICES_KEY, JSON.stringify(list))
+      set({ savedDevices: list })
+      schedulePersist()
+    },
+
+    removeSavedDevice: (key) => {
+      const list = get().savedDevices.filter((device) => device.key !== key)
+      writeStorage(SAVED_DEVICES_KEY, JSON.stringify(list))
+      set({ savedDevices: list })
+      schedulePersist()
+    },
+
+    setServerEnabled: async (enabled) => {
+      const token = get().token
+      if (!token) return false
+      try {
+        await postServerEnabled(token, enabled)
+        await get().refreshState()
+        return true
+      } catch {
+        set({ stateError: 'server_settings_failed' })
+        return false
+      }
+    },
+
+    setAvatarValue: async (avatar) => {
+      const token = get().token
+      if (!token) return false
+      try {
+        const result = await saveAvatar(token, avatar)
+        const device = get().device
+        if (device) set({ device: { ...device, avatar: result.avatar } })
+        return true
+      } catch {
+        return false
+      }
+    },
+
+    setDomain: async (action, code) => {
+      const token = get().token
+      if (!token) return 'failed'
+      try {
+        await postDomain(token, action, code)
+        await get().refreshState()
+        return 'ok'
+      } catch (caught) {
+        if (caught instanceof ApiError && caught.code === 'unknown_domain') {
+          return 'unknown_domain'
+        }
+        return 'failed'
+      }
+    },
+
+    refreshDomainDevices: async () => {
+      const token = get().token
+      if (!token || !get().localMode) return []
+      try {
+        const result = await fetchDomainDevices(token)
+        return result.devices
+      } catch {
+        return []
+      }
+    },
+
     boot: async () => {
       set({ authPhase: 'booting', stateError: null })
       try {
@@ -431,6 +692,7 @@ export const useAppStore = create<AppState>((set, get) => {
             })
             get().syncUiState()
             void get().refreshSecurity()
+            void get().loadUiPreferences()
             return
           } catch {
             set({ authPhase: 'login', stateError: 'local_auth_failed' })
@@ -486,6 +748,7 @@ export const useAppStore = create<AppState>((set, get) => {
             set({ device, token: device.token, authPhase: 'ready' })
             get().syncUiState()
             void get().refreshSecurity()
+            void get().loadUiPreferences()
           } catch {
             // stay on the login screen
           }
@@ -548,6 +811,7 @@ export const useAppStore = create<AppState>((set, get) => {
             // keep the login result
           }
           void get().refreshSecurity()
+          void get().loadUiPreferences()
         }
         return true
       } catch (error) {
@@ -706,7 +970,11 @@ export const useAppStore = create<AppState>((set, get) => {
 
     createSession: (host, port, token, label, saveToken = false,
                     requestAccess = false,
-                    mode = get().preferredMode) => {
+                    mode = get().preferredMode,
+                    intent: SessionIntent = 'desktop',
+                    deviceId,
+                    platform,
+                    avatar) => {
       const id = `session-${nextId++}`
       const trimmedToken = token.trim()
       const tab: SessionTab = {
@@ -725,8 +993,9 @@ export const useAppStore = create<AppState>((set, get) => {
         notice: null,
         approvalDeadline: null,
         retryAt: null,
-        controlEnabled: mode === 'control',
+        controlEnabled: mode === 'control' && intent === 'desktop',
         mode,
+        intent,
         clipboardEnabled: true,
         displayIndex: 0,
       }
@@ -762,7 +1031,11 @@ export const useAppStore = create<AppState>((set, get) => {
       } else {
         connection.connect(tab.host, port, trimmedToken, requestAccess)
         if (trimmedToken !== '') {
-          remember(tab.host, port, tab.label, trimmedToken, saveToken)
+          remember(tab.host, port, tab.label, trimmedToken, saveToken, {
+            id: deviceId,
+            platform,
+            avatar,
+          })
         }
       }
       return id
@@ -797,9 +1070,11 @@ export const useAppStore = create<AppState>((set, get) => {
     },
 
     forgetRecent: (at) => {
+      // The list is persisted below via schedulePersist.
       const recents = get().recents.filter((item) => item.at !== at)
       writeStorage(RECENT_KEY, JSON.stringify(recents))
       set({ recents })
+      schedulePersist()
     },
 
     relabelRecent: (host, port, label) => {
@@ -814,6 +1089,7 @@ export const useAppStore = create<AppState>((set, get) => {
       if (!changed) return
       writeStorage(RECENT_KEY, JSON.stringify(recents))
       set({ recents })
+      schedulePersist()
     },
   }
 })

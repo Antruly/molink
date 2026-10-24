@@ -4,6 +4,8 @@ import {
   Languages,
   Moon,
   Network,
+  SlidersHorizontal,
+  Sparkles,
   Sun,
   Timer,
   Waves,
@@ -12,7 +14,7 @@ import { useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { setLanguage } from '../i18n'
 import type { ServerState } from '../lib/api'
-import { useAppStore, type QualityMode, type Theme } from '../store/app'
+import { useAppStore, type QualityMode, type Theme, type UiMode } from '../store/app'
 import { ServicePanel } from './ServicePanel'
 import { WindowsSessionsPanel } from './WindowsSessionsPanel'
 
@@ -165,6 +167,8 @@ export function PreferencesControls() {
   const { t, i18n } = useTranslation()
   const theme = useAppStore((state) => state.theme)
   const setTheme = useAppStore((state) => state.setTheme)
+  const uiMode = useAppStore((state) => state.uiMode)
+  const setUiMode = useAppStore((state) => state.setUiMode)
   const quality = useAppStore((state) => state.qualityWatermark)
   const setQuality = useAppStore((state) => state.setQualityWatermark)
   const qualityMode = useAppStore((state) => state.qualityMode)
@@ -196,6 +200,29 @@ export function PreferencesControls() {
               value: 'dark',
               label: t('settings.themeDark'),
               icon: <Moon size={13} />,
+            },
+          ]}
+        />
+      </div>
+
+      <div className="space-y-2">
+        <div className="flex items-center gap-2 text-[12px] font-medium text-ink">
+          <Sparkles size={14} className="text-accent" />
+          {t('ui.mode')}
+        </div>
+        <Segment<UiMode>
+          value={uiMode}
+          onChange={setUiMode}
+          options={[
+            {
+              value: 'simple',
+              label: t('ui.simple'),
+              icon: <Sparkles size={13} />,
+            },
+            {
+              value: 'advanced',
+              label: t('ui.advanced'),
+              icon: <SlidersHorizontal size={13} />,
             },
           ]}
         />

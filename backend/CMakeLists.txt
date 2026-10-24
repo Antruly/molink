@@ -92,6 +92,7 @@ set(MOLINK_CORE_SOURCES
   src/compression.cpp
   src/discovery.cpp
   src/settings.cpp
+  src/ui_store.cpp
   src/input/x11_input.cpp
   src/input/windows_input.cpp
   src/input/windows_secure_input.cpp

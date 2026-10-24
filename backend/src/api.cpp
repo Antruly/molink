@@ -23,6 +23,7 @@
 #include "config.h"
 #include "discovery.h"
 #include "identity.h"
+#include "ui_store.h"
 #include "util.h"
 #include "version.h"
 #ifdef _WIN32
@@ -347,15 +348,24 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
             j["device_name"] = current_settings.device_name;
             j["allow_access_requests"] = current_settings.allow_access_requests;
             j["allow_remote_access"] = current_settings.allow_remote_access;
+            j["avatar"] = current_settings.avatar;
+            j["platform"] = device_platform();
             if (deps.server) {
               const server_status status = deps.server->status();
               uvcpp_json server;
-              server["url"] = status.url;
-              server["enabled"] = status.enabled;
+              server["url"] = effective_server_url(current_settings);
+              server["custom_url"] = current_settings.server_url;
+              server["default_url"] = default_server_url();
+              server["enabled"] = current_settings.server_enabled;
+              server["using_default"] =
+                  current_settings.server_enabled &&
+                  current_settings.server_url.empty();
               server["registered"] = status.registered;
               server["online"] = status.online;
               server["device_id"] = status.device_id;
               server["display_id"] = status.display_id;
+              server["domain"] = status.domain;
+              server["domain_valid"] = status.domain_valid;
               server["last_error"] = status.last_error;
               j["server"] = server;
             }
@@ -525,14 +535,19 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
     const server_status status =
         deps.server ? deps.server->status() : server_status{};
     uvcpp_json j;
-    j["url"] = set.server_url;
+    j["url"] = effective_server_url(set);
+    j["custom_url"] = set.server_url;
+    j["default_url"] = default_server_url();
     j["invite"] = set.server_invite;
     j["ca"] = set.server_ca;
-    j["enabled"] = status.enabled;
+    j["enabled"] = set.server_enabled;
+    j["using_default"] = set.server_enabled && set.server_url.empty();
     j["registered"] = status.registered;
     j["online"] = status.online;
     j["device_id"] = status.device_id;
     j["display_id"] = status.display_id;
+    j["domain"] = status.domain;
+    j["domain_valid"] = status.domain_valid;
     j["last_error"] = status.last_error;
     return j;
   };
@@ -555,14 +570,22 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
                resp.end();
                return;
              }
+             const app_settings before = deps.auth->settings();
              const std::string* url = req.query("url");
              const std::string* invite = req.query("invite");
              const std::string* ca = req.query("ca");
+             const std::string* enabled = req.query("enabled");
+             bool server_enabled = before.server_enabled;
+             if (enabled != nullptr) {
+               server_enabled =
+                   *enabled == "1" || *enabled == "true" || *enabled == "yes";
+             }
              std::string error;
              if (!deps.auth->set_server(
-                     url != nullptr ? *url : std::string(),
-                     invite != nullptr ? *invite : std::string(),
-                     ca != nullptr ? *ca : std::string(), error)) {
+                     url != nullptr ? *url : before.server_url,
+                     invite != nullptr ? *invite : before.server_invite,
+                     ca != nullptr ? *ca : before.server_ca, server_enabled,
+                     error)) {
                uvcpp_json body;
                body["code"] = "invalid_server";
                body["message"] = error;
@@ -822,6 +845,9 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
                 deps.auth ? deps.auth->view() : code_view{};
             j["device_name"] =
                 deps.auth ? deps.auth->settings().device_name : std::string();
+            j["avatar"] =
+                deps.auth ? deps.auth->settings().avatar : std::string();
+            j["platform"] = device_platform();
             j["addresses"] = uvcpp_json::array();
             for (const std::string& address : local_ipv4_addresses()) {
               j["addresses"].push_back(address);
@@ -858,6 +884,7 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
                 uvcpp_json item;
                 item["device_id"] = peer.device_id;
                 item["name"] = peer.name;
+                item["platform"] = peer.platform;
                 item["host"] = peer.host;
                 item["port"] = peer.port;
                 item["last_seen_ms"] = peer.last_seen_ms;
@@ -1054,6 +1081,8 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
             j["discovery_enabled"] = settings.discovery_enabled;
             j["allow_access_requests"] = settings.allow_access_requests;
             j["device_name"] = settings.device_name;
+            j["avatar"] = settings.avatar;
+            j["server_enabled"] = settings.server_enabled;
             j["long_term_code"] = settings.long_term_code;
             // The listener is always on 0.0.0.0; access toggles apply at once.
             j["restart_required"] = false;
@@ -1115,6 +1144,180 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
              resp.set_header("Cache-Control", "no-store").json(j);
              resp.end();
            });
+
+  // Avatar update. The image data URL is too large for a query string, so the
+  // local UI posts a small JSON object.
+  // UI preferences (UI mode, saved devices, recents) live in ui.json because
+  // the core port changes every launch and localStorage is origin-scoped.
+  app.get("/api/ui-preferences",
+          [deps](uvcpp_web_request& req, uvcpp_web_response& resp,
+                 uvcpp_web_next) {
+            if (!is_loopback_peer(req.peer_ip()) || !deps.ui) {
+              resp.status(403).json_str(R"({"code":"loopback_only"})");
+              resp.end();
+              return;
+            }
+            resp.set_header("Cache-Control", "no-store").json(deps.ui->get());
+            resp.end();
+          });
+  app.post("/api/ui-preferences",
+           [deps](uvcpp_web_request& req, uvcpp_web_response& resp,
+                  uvcpp_web_next) {
+             if (!is_loopback_peer(req.peer_ip()) || !deps.ui) {
+               resp.status(403).json_str(R"({"code":"loopback_only"})");
+               resp.end();
+               return;
+             }
+             uvcpp_json body;
+             try {
+               body = uvcpp_json::parse(req.body_str());
+             } catch (...) {
+               resp.status(400).json_str(R"({"code":"invalid_ui_state"})");
+               resp.end();
+               return;
+             }
+             std::string err;
+             if (!deps.ui->save(body, err)) {
+               uvcpp_json out;
+               out["code"] = "invalid_ui_state";
+               out["message"] = err;
+               resp.status(400).json(out);
+               resp.end();
+               return;
+             }
+             resp.set_header("Cache-Control", "no-store").json(deps.ui->get());
+             resp.end();
+           });
+
+  app.post("/api/avatar",
+           [deps](uvcpp_web_request& req, uvcpp_web_response& resp,
+                  uvcpp_web_next) {
+             if (!is_loopback_peer(req.peer_ip()) || !deps.auth) {
+               resp.status(403).json_str(R"({"code":"loopback_only"})");
+               resp.end();
+               return;
+             }
+             uvcpp_json body;
+             try {
+               body = uvcpp_json::parse(req.body_str());
+             } catch (...) {
+               resp.status(400).json_str(R"({"code":"invalid_avatar"})");
+               resp.end();
+               return;
+             }
+             if (!body.is_object() || !body.contains("avatar") ||
+                 !body["avatar"].is_string()) {
+               resp.status(400).json_str(R"({"code":"invalid_avatar"})");
+               resp.end();
+               return;
+             }
+             std::string error;
+             if (!deps.auth->set_avatar(body["avatar"].get<std::string>(),
+                                        error)) {
+               uvcpp_json out;
+               out["code"] = "invalid_avatar";
+               out["message"] = error;
+               resp.status(400).json(out);
+               resp.end();
+               return;
+             }
+             uvcpp_json out;
+             out["avatar"] = deps.auth->settings().avatar;
+             resp.set_header("Cache-Control", "no-store").json(out);
+             resp.end();
+           });
+
+  // Domain ("channel") code management. The code itself is issued by the
+  // directory; the local UI only asks it to join or rotate.
+  app.post("/api/domain",
+           [deps](uvcpp_web_request& req, uvcpp_web_response& resp,
+                  uvcpp_web_next) {
+             if (!is_loopback_peer(req.peer_ip()) || !deps.server) {
+               resp.status(403).json_str(R"({"code":"loopback_only"})");
+               resp.end();
+               return;
+             }
+             uvcpp_json body;
+             try {
+               body = uvcpp_json::parse(req.body_str());
+             } catch (...) {
+               resp.status(400).json_str(R"({"code":"invalid_domain"})");
+               resp.end();
+               return;
+             }
+             if (!body.is_object() || !body.contains("action") ||
+                 !body["action"].is_string()) {
+               resp.status(400).json_str(R"({"code":"invalid_domain"})");
+               resp.end();
+               return;
+             }
+             const std::string action = body["action"].get<std::string>();
+             const std::string code =
+                 body.contains("code") && body["code"].is_string()
+                     ? body["code"].get<std::string>()
+                     : std::string();
+             std::string error;
+             if (!deps.server->set_domain(action, code, error)) {
+               uvcpp_json out;
+               out["code"] = error == "no such domain code"
+                                 ? "unknown_domain"
+                                 : "domain_failed";
+               out["message"] = error;
+               resp.status(error == "no such domain code" ? 404 : 400)
+                   .json(out);
+               resp.end();
+               return;
+             }
+             const server_status status = deps.server->status();
+             uvcpp_json out;
+             out["domain"] = status.domain;
+             out["domain_valid"] = status.domain_valid;
+             resp.set_header("Cache-Control", "no-store").json(out);
+             resp.end();
+           });
+
+  app.get("/api/domain/devices",
+          [deps](uvcpp_web_request& req, uvcpp_web_response& resp,
+                 uvcpp_web_next) {
+            if (!is_loopback_peer(req.peer_ip()) || !deps.server) {
+              resp.status(403).json_str(R"({"code":"loopback_only"})");
+              resp.end();
+              return;
+            }
+            std::vector<domain_peer> peers;
+            std::string error;
+            if (!deps.server->list_domain_devices(peers, error)) {
+              uvcpp_json out;
+              out["code"] = error == "no such domain code"
+                                ? "unknown_domain"
+                                : "domain_failed";
+              out["message"] = error;
+              resp.status(error == "no such domain code" ? 404 : 400)
+                  .json(out);
+              resp.end();
+              return;
+            }
+            const server_status status = deps.server->status();
+            uvcpp_json out;
+            out["domain"] = status.domain;
+            out["domain_valid"] = status.domain_valid;
+            out["devices"] = uvcpp_json::array();
+            for (const domain_peer& peer : peers) {
+              uvcpp_json item;
+              item["id"] = peer.id;
+              item["display_id"] = peer.display_id;
+              item["name"] = peer.name;
+              item["platform"] = peer.platform;
+              item["avatar"] = peer.avatar;
+              item["host"] = peer.host;
+              item["port"] = peer.port;
+              item["online"] = peer.online;
+              item["last_seen_ms"] = peer.last_seen_ms;
+              out["devices"].push_back(std::move(item));
+            }
+            resp.set_header("Cache-Control", "no-store").json(out);
+            resp.end();
+          });
 
   app.post("/api/auth/code",
            [deps](uvcpp_web_request& req, uvcpp_web_response& resp,

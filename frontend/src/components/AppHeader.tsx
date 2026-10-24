@@ -1,4 +1,4 @@
-import { Home, Moon, Settings2, Sun } from 'lucide-react'
+import { Home, Moon, Settings2, SlidersHorizontal, Sparkles, Sun } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useAppStore } from '../store/app'
 import { Logo } from './Logo'
@@ -9,6 +9,8 @@ export function AppHeader({ showHome = true }: { showHome?: boolean }) {
   const theme = useAppStore((state) => state.theme)
   const activeTabId = useAppStore((state) => state.activeTabId)
   const toggleTheme = useAppStore((state) => state.toggleTheme)
+  const uiMode = useAppStore((state) => state.uiMode)
+  const setUiMode = useAppStore((state) => state.setUiMode)
   const setActiveTab = useAppStore((state) => state.setActiveTab)
   const setSettingsOpen = useAppStore((state) => state.setSettingsOpen)
 
@@ -37,6 +39,15 @@ export function AppHeader({ showHome = true }: { showHome?: boolean }) {
             <span className="hidden sm:inline">{t('tabs.home')}</span>
           </button>
         ) : null}
+        <button
+          type="button"
+          onClick={() => setUiMode(uiMode === 'simple' ? 'advanced' : 'simple')}
+          className="btn btn-quiet h-9 w-9 !px-0"
+          title={uiMode === 'simple' ? t('ui.advancedMode') : t('ui.simpleMode')}
+          aria-label={uiMode === 'simple' ? t('ui.advancedMode') : t('ui.simpleMode')}
+        >
+          {uiMode === 'simple' ? <Sparkles size={16} /> : <SlidersHorizontal size={16} />}
+        </button>
         <button
           type="button"
           onClick={toggleTheme}

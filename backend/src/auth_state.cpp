@@ -209,7 +209,7 @@ void auth_state::set_service_desired_running(bool enabled) {
 }
 
 bool auth_state::set_server(std::string url, std::string invite,
-                            std::string ca, std::string& err) {
+                            std::string ca, bool enabled, std::string& err) {
   auto trim = [](std::string value) {
     while (!value.empty() &&
            (value.back() == ' ' || value.back() == '\t' ||
@@ -248,6 +248,42 @@ bool auth_state::set_server(std::string url, std::string invite,
   settings_.server_url = url;
   settings_.server_invite = invite;
   settings_.server_ca = ca;
+  settings_.server_enabled = enabled;
+  persist_locked();
+  return true;
+}
+
+bool auth_state::set_avatar(std::string avatar, std::string& err) {
+  auto trim = [](std::string value) {
+    while (!value.empty() &&
+           (value.back() == ' ' || value.back() == '\t' ||
+            value.back() == '\r' || value.back() == '\n')) {
+      value.pop_back();
+    }
+    std::size_t start = 0;
+    while (start < value.size() &&
+           (value[start] == ' ' || value[start] == '\t')) {
+      ++start;
+    }
+    return value.substr(start);
+  };
+  avatar = trim(std::move(avatar));
+  if (avatar.size() > 32768) {
+    err = "avatar is too large";
+    return false;
+  }
+  if (has_whitespace_or_control(avatar)) {
+    err = "avatar contains whitespace or control characters";
+    return false;
+  }
+  if (!avatar.empty() && avatar.rfind("preset:", 0) != 0 &&
+      (avatar.rfind("data:image/", 0) != 0 ||
+       avatar.find(";base64,") == std::string::npos)) {
+    err = "avatar must be a preset or an image data URL";
+    return false;
+  }
+  std::lock_guard<std::mutex> lock(mutex_);
+  settings_.avatar = std::move(avatar);
   persist_locked();
   return true;
 }

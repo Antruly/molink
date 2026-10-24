@@ -137,6 +137,18 @@ void save_banned_ips(const std::vector<std::string>& ips) {
   write_file(fs::path(dir) / "banned_ips", content);
 }
 
+std::string device_platform() {
+#if defined(_WIN32)
+  return "windows";
+#elif defined(__APPLE__)
+  return "macos";
+#elif defined(__linux__)
+  return "linux";
+#else
+  return "unknown";
+#endif
+}
+
 std::string config_directory() {
   const std::string override_dir = env("MOLINK_CONFIG_DIR");
   if (!override_dir.empty()) return override_dir;
