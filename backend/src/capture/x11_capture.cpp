@@ -255,6 +255,16 @@ class x11_capture final : public capture_base {
     return true;
   }
 
+  bool copy_pixels(std::vector<uint8_t>& out, int& width,
+                   int& height) override {
+    std::lock_guard<std::recursive_mutex> lock(pixels_mutex_);
+    if (frame_.empty() || width_ == 0 || height_ == 0) return false;
+    out = frame_;
+    width = width_;
+    height = height_;
+    return true;
+  }
+
  private:
   void thread_main(std::promise<std::string>& ready) {
     std::string err;
@@ -816,6 +826,7 @@ class x11_capture final : public capture_base {
   }
 
   bool capture_full(bool keyframe, std::string& err) {
+    std::lock_guard<std::recursive_mutex> pixels_lock(pixels_mutex_);
     if (!refresh_geometry(err)) return false;
 
     std::vector<uint8_t> pixels;
@@ -836,6 +847,7 @@ class x11_capture final : public capture_base {
   }
 
   bool capture_rect(const XRectangle& rect, std::string& err) {
+    std::lock_guard<std::recursive_mutex> pixels_lock(pixels_mutex_);
     if (!refresh_geometry(err)) return false;
     if (!have_previous_ ||
         frame_.size() != static_cast<std::size_t>(width_) * height_ * 4) {
@@ -984,6 +996,7 @@ class x11_capture final : public capture_base {
   std::thread thread_;
 
   std::vector<uint8_t> frame_;
+  mutable std::recursive_mutex pixels_mutex_;
   std::vector<uint8_t> previous_;
   bool have_previous_ = false;
   uint32_t seq_ = 0;

@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -119,6 +120,15 @@ class secure_capture final : public capture_base {
   }
   bool select_display(int index) override { return index == 0; }
   bool cursor(cursor_snapshot&) const override { return false; }
+  bool copy_pixels(std::vector<uint8_t>& out, int& width,
+                   int& height) override {
+    std::lock_guard<std::mutex> lock(pixels_mutex_);
+    if (previous_.empty() || width_ == 0 || height_ == 0) return false;
+    out = previous_;
+    width = width_;
+    height = height_;
+    return true;
+  }
 
  private:
   void run() {
@@ -166,6 +176,9 @@ class secure_capture final : public capture_base {
       return false;
     }
     const uint8_t* pixels = reply.data() + offset;
+    // build_changed_tiles() rewrites previous_, so a concurrent tile refresh
+    // must not copy it mid-update.
+    std::lock_guard<std::mutex> pixels_lock(pixels_mutex_);
     if (width != width_ || height != height_) {
       width_ = static_cast<uint16_t>(width);
       height_ = static_cast<uint16_t>(height);
@@ -225,6 +238,7 @@ class secure_capture final : public capture_base {
   uint16_t width_ = 0;
   uint16_t height_ = 0;
   std::vector<uint8_t> previous_;
+  mutable std::mutex pixels_mutex_;
   bool have_previous_ = false;
   uint32_t seq_ = 0;
   std::thread thread_;

@@ -179,6 +179,16 @@ class capture_source {
   /// Latest cursor shape and position, or false when the backend cannot report
   /// one (synthetic frames, missing XFixes).
   virtual bool cursor(cursor_snapshot& out) const = 0;
+
+  /// Copy the most recent full screen image as BGRA rows. Used to serve a
+  /// tile-level refresh without forcing a keyframe; backends that cannot
+  /// provide it return false and the caller falls back to a keyframe.
+  virtual bool copy_pixels(std::vector<uint8_t>& out, int& width, int& height) {
+    (void)out;
+    (void)width;
+    (void)height;
+    return false;
+  }
 };
 
 /// Shared bookkeeping for concrete sources: latest-frame slot, keyframe

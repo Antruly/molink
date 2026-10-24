@@ -1,7 +1,16 @@
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+
 #include "session_controller.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <deque>
 #include <mutex>
 #include <unordered_set>
@@ -12,6 +21,7 @@
 #include <webapp/uvcpp_web_json.h>
 
 #include "config.h"
+#include "capture/frame_encode.h"
 #include "protocol/frame_packet.h"
 #include "service_control.h"
 #include "transport/ws_transport.h"
@@ -257,6 +267,83 @@ void send_empty_frame(session_transport* transport,
                      payload);
 }
 
+
+struct refresh_rect {
+  int x = 0;
+  int y = 0;
+  int w = 0;
+  int h = 0;
+};
+
+/// Answer a tile-level refresh from the current pixels. This replaces the
+/// named rectangles without sending a full keyframe, which is what a bad link
+/// needs: it is the same size as the damaged area and does not reset the whole
+/// picture.
+bool send_tile_refresh(session_transport* transport,
+                       const std::shared_ptr<session_info>& session,
+                       const session_options& opt,
+                       const std::vector<refresh_rect>& rects,
+                       std::string& err) {
+  if (!opt.capture || rects.empty()) {
+    err = "no refresh requested";
+    return false;
+  }
+  std::vector<uint8_t> pixels;
+  int width = 0;
+  int height = 0;
+  if (!opt.capture->copy_pixels(pixels, width, height) || width <= 0 ||
+      height <= 0 ||
+      pixels.size() != static_cast<std::size_t>(width) * height * 4) {
+    err = "no pixel snapshot";
+    return false;
+  }
+  std::vector<protocol::tile_blob> tiles;
+  for (const refresh_rect& rect : rects) {
+    if (tiles.size() >= 64) break;
+    const int x = std::clamp(rect.x, 0, width - 1);
+    const int y = std::clamp(rect.y, 0, height - 1);
+    const int w = std::min(rect.w, width - x);
+    const int h = std::min(rect.h, height - y);
+    if (w <= 0 || h <= 0) continue;
+    protocol::tile_blob tile;
+    tile.x = static_cast<uint16_t>(x);
+    tile.y = static_cast<uint16_t>(y);
+    tile.w = static_cast<uint16_t>(w);
+    tile.h = static_cast<uint16_t>(h);
+    tile.data.resize(static_cast<std::size_t>(w) * h * 4);
+    for (int row = 0; row < h; ++row) {
+      std::memcpy(tile.data.data() + static_cast<std::size_t>(row) * w * 4,
+                  pixels.data() +
+                      (static_cast<std::size_t>(y + row) * width + x) * 4,
+                  static_cast<std::size_t>(w) * 4);
+    }
+    tiles.push_back(std::move(tile));
+  }
+  if (tiles.empty()) {
+    err = "refresh rectangles were empty";
+    return false;
+  }
+  protocol::frame_header header;
+  header.frame_seq = 0;
+  header.codec = static_cast<uint8_t>(protocol::codec::bgra);
+  header.flags = protocol::kFrameFlagPartial;
+  header.screen_w = static_cast<uint16_t>(width);
+  header.screen_h = static_cast<uint16_t>(height);
+  header.tile_w = 128;
+  header.tile_h = 128;
+  encode_options encoding;
+  encoding.compress = true;
+  encoding.format = tile_format::bgra;
+  encoding.effort = compression_effort::fast;
+  std::vector<uint8_t> payload;
+  if (!encode_capture_frame(header, tiles, encoding, payload, err)) {
+    return false;
+  }
+  return send_frame_payload(transport, session,
+                            protocol::kPacketFlagTileRefresh, epoch_us(),
+                            payload);
+}
+
 /// Cursor bitmap and position are sent alongside frames: they are small, change
 /// independently of screen damage, and are not part of an X11 grab.
 void maybe_send_cursor(session_transport* transport,
@@ -383,8 +470,35 @@ void send_capture_frame(session_transport* transport,
       return;
     }
     if (now_us > frame->ts_us && now_us - frame->ts_us > 1000000ULL) {
-      // A frame that waited over a second is stale; sending the backlog only
-      // adds latency. Skip to a fresh keyframe instead.
+      // The client missed this and everything after it. If it already has a
+      // picture, patch just the missed rectangles from the current pixels;
+      // that is far cheaper than a keyframe on a bad link. With no picture
+      // yet, only a keyframe can bootstrap it.
+      if (session->has_image) {
+        std::vector<refresh_rect> rects;
+        for (uint32_t s = static_cast<uint32_t>(last) + 1;
+             s <= latest->seq && rects.size() < 64; ++s) {
+          const auto missed = opt.capture->find(s);
+          if (!missed) continue;
+          protocol::parsed_frame parsed;
+          std::string parse_error;
+          if (!protocol::parse_frame_payload(missed->payload.data(),
+                                             missed->payload.size(), parsed,
+                                             parse_error)) {
+            continue;
+          }
+          for (const auto& tile : parsed.tiles) {
+            if (rects.size() >= 64) break;
+            rects.push_back({tile.x, tile.y, tile.w, tile.h});
+          }
+        }
+        std::string refresh_error;
+        if (send_tile_refresh(transport, session, opt, rects,
+                              refresh_error)) {
+          session->last_capture_seq = latest->seq;
+          return;
+        }
+      }
       session->has_image = false;
       session->last_capture_seq = -1;
       opt.capture->request_keyframe();
@@ -931,6 +1045,33 @@ void session_controller::on_text(const std::string& text) {
     if (options_.capture) options_.capture->set_active(true);
     maybe_send_cursor(transport.get(), session, options_);
     send_capture_frame(transport.get(), session, options_);
+    return;
+  }
+
+  if (type == "request-tiles") {
+    std::vector<refresh_rect> rects;
+    const auto tiles = j.find("tiles");
+    if (tiles != j.end() && tiles->is_array()) {
+      for (const auto& item : *tiles) {
+        if (rects.size() >= 64) break;
+        double x = 0;
+        double y = 0;
+        double w = 0;
+        double h = 0;
+        if (!number_field(item, "x", x) || !number_field(item, "y", y) ||
+            !number_field(item, "w", w) || !number_field(item, "h", h)) {
+          continue;
+        }
+        rects.push_back({static_cast<int>(x), static_cast<int>(y),
+                         static_cast<int>(w), static_cast<int>(h)});
+      }
+    }
+    std::string refresh_error;
+    if (!send_tile_refresh(transport.get(), session, options_, rects,
+                           refresh_error)) {
+      // The backend cannot hand out current pixels; fall back to a keyframe.
+      if (options_.capture) options_.capture->request_keyframe();
+    }
     return;
   }
 

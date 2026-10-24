@@ -1,5 +1,6 @@
 import {
   FrameFlag,
+  PacketFlag,
   PacketType,
   ProtocolError,
   codecBytesPerPixel,
@@ -126,6 +127,14 @@ export class MolinkClient {
   private pendingFrame = false
   private latestFrameSeq = -1
   private lastKeyframeRequest = 0
+  /// Last capture timestamp applied per 128 px screen cell, in microseconds.
+  /// A dropped frame only asks for the tiles no newer frame has covered.
+  private tileAppliedAt = new Map<string, number>()
+  private pendingTiles = new Map<
+    string,
+    { x: number; y: number; w: number; h: number; ts: number }
+  >()
+  private refreshTimer: number | null = null
   private pingTimer: number | null = null
   private closedByUser = false
   private hasImage = false
@@ -144,6 +153,8 @@ export class MolinkClient {
     this.pendingFrame = false
     this.latestFrameSeq = -1
     this.lastKeyframeRequest = 0
+    this.tileAppliedAt.clear()
+    this.pendingTiles.clear()
     this.frameQueue = Promise.resolve()
 
     const url = `ws://${formatHost(host)}:${port}/ws/session`
@@ -370,13 +381,34 @@ export class MolinkClient {
       if (packet.type !== PacketType.frame) return
       this.pendingFrame = false
       const frame = parseFramePayload(packet.payload)
+      if ((packet.flags & PacketFlag.tileRefresh) !== 0) {
+        if (!this.hasImage) {
+          this.requestKeyframeThrottled()
+          return
+        }
+        if (isDeflatedCodec(frame.codec)) {
+          this.frameQueue = this.frameQueue
+            .then(() =>
+              this.deliverCompressed(frame, buffer.byteLength, packet.tsUs,
+                                     true),
+            )
+            .catch((error: unknown) => {
+              this.handlers.onError?.(
+                error instanceof Error ? error.message : 'tile refresh failed',
+              )
+            })
+        } else {
+          this.deliver(frame, buffer.byteLength, packet.tsUs, true)
+        }
+        return
+      }
       const keyframe = (frame.flags & FrameFlag.keyframe) !== 0
       // A frame that spent more than a second in flight is worse than a
       // skipped one: showing it late causes visible lag. Drop it and ask for
       // a fresh keyframe instead.
       if (Date.now() - packet.tsUs / 1000 > 1000) {
         this.handlers.onFrameDropped?.()
-        this.requestKeyframeThrottled()
+        this.queueTileRefresh(frame, packet.tsUs)
         return
       }
       if (frame.frameSeq > this.latestFrameSeq) {
@@ -385,7 +417,7 @@ export class MolinkClient {
         // A newer frame is already queued; this delta would apply on the
         // wrong base image.
         this.handlers.onFrameDropped?.()
-        this.requestKeyframeThrottled()
+        this.queueTileRefresh(frame, packet.tsUs)
         return
       }
       // Count pulls that completed, even when the screen did not change. The
@@ -407,7 +439,7 @@ export class MolinkClient {
         return
       }
 
-      this.deliver(frame, buffer.byteLength)
+      this.deliver(frame, buffer.byteLength, packet.tsUs)
     } catch (error) {
       this.pendingFrame = false
       const message =
@@ -420,12 +452,13 @@ export class MolinkClient {
     frame: Frame,
     byteLength: number,
     tsUs: number,
+    refresh = false,
   ): Promise<void> {
-    if ((frame.flags & FrameFlag.keyframe) === 0) {
+    if (!refresh && (frame.flags & FrameFlag.keyframe) === 0) {
       if (frame.frameSeq < this.latestFrameSeq ||
           Date.now() - tsUs / 1000 > 1000) {
         this.handlers.onFrameDropped?.()
-        this.requestKeyframeThrottled()
+        this.queueTileRefresh(frame, tsUs)
         return
       }
     }
@@ -440,22 +473,100 @@ export class MolinkClient {
         return { ...tile, data }
       }),
     )
-    this.deliver({ ...frame, tiles }, byteLength)
+    this.deliver({ ...frame, tiles }, byteLength, tsUs, refresh)
   }
 
-  private deliver(frame: Frame, byteLength: number): void {
-    if ((frame.flags & FrameFlag.keyframe) !== 0) {
-      this.hasImage = true
-    } else if (!this.hasImage) {
-      // A delta cannot be drawn over an image that does not exist yet. The
-      // server requests a keyframe on our behalf; the next frames will carry
-      // it.
-      return
+  private deliver(frame: Frame, byteLength: number, tsUs: number,
+                  refresh = false): void {
+    if (!refresh) {
+      if ((frame.flags & FrameFlag.keyframe) !== 0) {
+        this.hasImage = true
+      } else if (!this.hasImage) {
+        // A delta cannot be drawn over an image that does not exist yet. The
+        // server requests a keyframe on our behalf; the next frames will carry
+        // it.
+        return
+      }
     }
     // A keyframe with no tiles would mean an empty screen; nothing to draw.
     if (frame.tiles.length === 0) return
 
+    this.noteApplied(frame, tsUs)
     this.handlers.onFrame?.(frame, byteLength)
+  }
+
+  private tileCellKeys(x: number, y: number, w: number, h: number): string[] {
+    const cell = 128
+    const keys: string[] = []
+    const firstX = Math.floor(x / cell)
+    const firstY = Math.floor(y / cell)
+    const lastX = Math.floor((x + Math.max(1, w) - 1) / cell)
+    const lastY = Math.floor((y + Math.max(1, h) - 1) / cell)
+    for (let cy = firstY; cy <= lastY; ++cy) {
+      for (let cx = firstX; cx <= lastX; ++cx) {
+        keys.push(`${cx},${cy}`)
+      }
+    }
+    return keys
+  }
+
+  private noteApplied(frame: Frame, tsUs: number): void {
+    for (const tile of frame.tiles) {
+      for (const key of this.tileCellKeys(tile.x, tile.y, tile.w, tile.h)) {
+        const previous = this.tileAppliedAt.get(key)
+        if (previous === undefined || tsUs > previous) {
+          this.tileAppliedAt.set(key, tsUs)
+        }
+      }
+    }
+  }
+
+  /// Queue a tile-level refresh for a dropped frame. Cells already covered by
+  /// a newer frame (greater capture timestamp) are skipped: the picture there
+  /// is newer than the dropped packet.
+  private queueTileRefresh(frame: Frame, tsUs: number): void {
+    if (!this.hasImage) {
+      this.requestKeyframeThrottled()
+      return
+    }
+    for (const tile of frame.tiles) {
+      const keys = this.tileCellKeys(tile.x, tile.y, tile.w, tile.h)
+      const stale = keys.some((key) => {
+        const applied = this.tileAppliedAt.get(key)
+        return applied === undefined || applied < tsUs
+      })
+      if (!stale) continue
+      const key = `${tile.x},${tile.y},${tile.w},${tile.h}`
+      this.pendingTiles.set(key, {
+        x: tile.x,
+        y: tile.y,
+        w: tile.w,
+        h: tile.h,
+        ts: tsUs,
+      })
+    }
+    if (this.pendingTiles.size === 0 || this.refreshTimer !== null) return
+    this.refreshTimer = window.setTimeout(() => {
+      this.refreshTimer = null
+      if (!this.isLive() || this.pendingTiles.size === 0) return
+      // Re-check right before sending: a newer frame may have covered these
+      // tiles while the mark was queued (a laggy link can deliver the mark
+      // after the replacement pixels).
+      const tiles = Array.from(this.pendingTiles.values())
+        .filter((tile) =>
+          this.tileCellKeys(tile.x, tile.y, tile.w, tile.h).some((key) => {
+            const applied = this.tileAppliedAt.get(key)
+            return applied === undefined || applied < tile.ts
+          }),
+        )
+        .slice(0, 64)
+      this.pendingTiles.clear()
+      if (tiles.length === 0) return
+      this.sendJson({
+        type: 'request-tiles',
+        tiles: tiles.map(({ x, y, w, h }) => ({ x, y, w, h })),
+      })
+    }, 200)
   }
 
   private startPing(): void {

@@ -100,6 +100,16 @@ class windows_capture final : public capture_base {
     return true;
   }
 
+  bool copy_pixels(std::vector<uint8_t>& out, int& width,
+                   int& height) override {
+    std::lock_guard<std::mutex> lock(pixels_mutex_);
+    if (previous_.empty() || width_ == 0 || height_ == 0) return false;
+    out = previous_;
+    width = width_;
+    height = height_;
+    return true;
+  }
+
   bool set_display_mode(uint16_t width, uint16_t height) override {
     const display_info info = current_display_info();
     if (info.name.empty() || width == 0 || height == 0) return false;
@@ -443,6 +453,7 @@ class windows_capture final : public capture_base {
         options_.tile_size == 0 ? 256 : options_.tile_size;
     const std::size_t stride = static_cast<std::size_t>(width_) * 4;
 
+    std::lock_guard<std::mutex> pixels_lock(pixels_mutex_);
     if (previous_.size() != pixels.size()) {
       previous_.assign(pixels.size(), 0);
       have_previous_ = false;
@@ -595,6 +606,7 @@ class windows_capture final : public capture_base {
   uint16_t width_ = 0;
   uint16_t height_ = 0;
   std::vector<uint8_t> previous_;
+  mutable std::mutex pixels_mutex_;
   bool have_previous_ = false;
   uint32_t seq_ = 0;
   std::thread thread_;

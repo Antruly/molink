@@ -87,6 +87,9 @@ enum packet_flags : uint16_t {
   kPacketFlagKeyframe = 1u << 0,
   kPacketFlagCompressed = 1u << 1,
   kPacketFlagLast = 1u << 2,
+  /// A patch frame produced in answer to `request-tiles`: its tiles replace
+  /// the named screen rectangles and do not continue the delta chain.
+  kPacketFlagTileRefresh = 1u << 3,
 };
 
 enum class codec : uint8_t {

@@ -22,6 +22,14 @@ export const PacketType = {
   pong: 0x81,
 } as const
 
+export const PacketFlag = {
+  keyframe: 1,
+  compressed: 2,
+  last: 4,
+  /** A tile patch answering request-tiles; replaces the named rectangles. */
+  tileRefresh: 8,
+} as const
+
 export const Codec = {
   bgra: 1,
   png: 2,
