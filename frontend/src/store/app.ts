@@ -55,6 +55,8 @@ export interface SessionTab {
   notice: string | null
   /// When the host must approve this session: epoch ms of the 60 s deadline.
   approvalDeadline: number | null
+  /// Epoch ms of the next automatic reconnect attempt after a disconnect.
+  retryAt: number | null
   controlEnabled: boolean
   displayIndex: number
 }
@@ -621,6 +623,7 @@ export const useAppStore = create<AppState>((set, get) => {
         error: null,
         notice: null,
         approvalDeadline: null,
+        retryAt: null,
         controlEnabled: false,
         displayIndex: 0,
       }

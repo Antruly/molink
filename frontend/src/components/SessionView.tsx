@@ -257,6 +257,23 @@ export function SessionView({
     if (tab.notice !== 'waiting_approval' || approvalLeft !== 0) return
     cancelApproval()
   }, [approvalLeft, cancelApproval, tab.notice])
+  // Countdown to the next automatic reconnect while the session is down.
+  const [retryNow, setRetryNow] = useState(0)
+  const retryLeft =
+    tab.phase === 'disconnected' && tab.retryAt && retryNow > 0
+      ? Math.max(0, Math.ceil((tab.retryAt - retryNow) / 1000))
+      : null
+  useEffect(() => {
+    if (tab.phase !== 'disconnected') return
+    const tick = () => setRetryNow(Date.now())
+    const immediate = window.setTimeout(tick, 0)
+    const timer = window.setInterval(tick, 500)
+    return () => {
+      window.clearTimeout(immediate)
+      window.clearInterval(timer)
+    }
+  }, [tab.phase, tab.retryAt])
+
   const requestAccessFromError = useCallback(() => {
     createSession(tab.host, tab.port, '', tab.label, false, true)
     closeTab(tab.id)
@@ -1268,6 +1285,38 @@ export function SessionView({
                 : t('session.waiting')}
             </div>
           )}
+
+          {tab.phase === 'disconnected' ? (
+            <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-2 rounded-xl bg-black/65 px-4 text-center">
+              <div className="text-base font-semibold text-ink">
+                {t('session.disconnected')}
+              </div>
+              {retryLeft !== null ? (
+                <div className="text-[12px] text-muted">
+                  {t('session.retryIn', { seconds: retryLeft })}
+                </div>
+              ) : null}
+              <div className="mt-1 flex gap-2">
+                <button
+                  type="button"
+                  className="btn btn-primary h-8"
+                  onClick={() => connection()?.reconnectNow()}
+                >
+                  {t('session.retryNow')}
+                </button>
+                <button
+                  type="button"
+                  className="btn h-8"
+                  onClick={() => {
+                    connection()?.disconnect()
+                    closeTab(tab.id)
+                  }}
+                >
+                  {t('session.stopRetry')}
+                </button>
+              </div>
+            </div>
+          ) : null}
 
           {quickOpen ? (
             <div

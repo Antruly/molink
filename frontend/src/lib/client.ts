@@ -11,7 +11,7 @@ import {
 } from './protocol'
 import { formatHost } from './net'
 
-export type ClientPhase = 'idle' | 'connecting' | 'live' | 'error'
+export type ClientPhase = 'idle' | 'connecting' | 'live' | 'error' | 'disconnected'
 
 export interface DisplayInfo {
   index: number
@@ -80,6 +80,8 @@ export interface ClientHandlers {
   onWireFrame?: () => void
   /** A frame was dropped because it was stale or overtaken by a newer one. */
   onFrameDropped?: () => void
+  /** All quick retries failed; the next automatic attempt is at `atMs`. */
+  onRetryScheduled?: (atMs: number) => void
 }
 
 interface ControlMessage {
@@ -134,6 +136,15 @@ export class MolinkClient {
     string,
     { x: number; y: number; w: number; h: number; ts: number }
   >()
+  private lastConnect: {
+    host: string
+    port: number
+    token: string
+    requestAccess: boolean
+  } | null = null
+  private retryAttempts = 0
+  private retryTimer: number | null = null
+  private autoRetryTimer: number | null = null
   private refreshTimer: number | null = null
   private pingTimer: number | null = null
   private closedByUser = false
@@ -148,6 +159,27 @@ export class MolinkClient {
   connect(host: string, port: number, token: string,
           requestAccess = false): void {
     this.disconnect()
+    this.stopRetryTimers()
+    this.closedByUser = false
+    this.retryAttempts = 0
+    this.lastConnect = { host, port, token, requestAccess }
+    this.openSocket()
+  }
+
+  /// Manual reconnect from the disconnected overlay.
+  reconnectNow(): void {
+    if (this.lastConnect === null) return
+    this.stopRetryTimers()
+    this.retryAttempts = 0
+    this.closedByUser = false
+    this.handlers.onPhase?.('connecting')
+    this.openSocket()
+  }
+
+  private openSocket(): void {
+    const args = this.lastConnect
+    if (args === null) return
+    const { host, port, token, requestAccess } = args
     this.closedByUser = false
     this.hasImage = false
     this.pendingFrame = false
@@ -190,11 +222,8 @@ export class MolinkClient {
     }
 
     ws.onerror = () => {
-      // The close event carries the useful detail; just report a generic
-      // failure here so the UI does not sit in "connecting" forever.
-      if (!this.closedByUser) {
-        this.handlers.onPhase?.('error', 'socket error')
-      }
+      // The close event carries the useful detail; retries are scheduled
+      // there so a failed attempt does not flash an error banner.
     }
 
     ws.onclose = (event: CloseEvent) => {
@@ -206,12 +235,54 @@ export class MolinkClient {
         return
       }
       const reason = event.reason ? `: ${event.reason}` : ''
-      this.handlers.onPhase?.('error', `closed (${event.code})${reason}`)
+      // 1000/1008 are deliberate closes (host denied access, session ended).
+      if (event.code === 1000 || event.code === 1008) {
+        this.handlers.onPhase?.('error', `closed (${event.code})${reason}`)
+        return
+      }
+      this.scheduleRetry(event.code)
+    }
+  }
+
+  /// One immediate retry, then up to two one-second retries. Only when those
+  /// all fail does the UI show a disconnect, followed by one attempt per
+  /// minute for as long as the tab stays open.
+  private scheduleRetry(code: number): void {
+    if (this.retryAttempts < 3) {
+      const delay = this.retryAttempts === 0 ? 0 : 1000
+      this.retryAttempts += 1
+      this.handlers.onPhase?.('connecting')
+      this.retryTimer = window.setTimeout(() => {
+        this.retryTimer = null
+        if (!this.closedByUser) this.openSocket()
+      }, delay)
+      return
+    }
+    const deadline = Date.now() + 60000
+    this.handlers.onPhase?.('disconnected', `closed (${code})`)
+    this.handlers.onRetryScheduled?.(deadline)
+    this.autoRetryTimer = window.setTimeout(() => {
+      this.autoRetryTimer = null
+      if (this.closedByUser) return
+      this.handlers.onPhase?.('connecting')
+      this.openSocket()
+    }, 60000)
+  }
+
+  private stopRetryTimers(): void {
+    if (this.retryTimer !== null) {
+      window.clearTimeout(this.retryTimer)
+      this.retryTimer = null
+    }
+    if (this.autoRetryTimer !== null) {
+      window.clearTimeout(this.autoRetryTimer)
+      this.autoRetryTimer = null
     }
   }
 
   disconnect(): void {
     this.closedByUser = true
+    this.stopRetryTimers()
     this.stopPing()
     const ws = this.ws
     this.ws = null
@@ -304,6 +375,8 @@ export class MolinkClient {
     switch (message.type) {
       case 'welcome':
         this.handlers.onWelcome?.(message as unknown as Welcome)
+        this.retryAttempts = 0
+        this.stopRetryTimers()
         this.handlers.onPhase?.('live')
         this.startPing()
         // Ask for the first picture immediately. WebKitGTK reports the page

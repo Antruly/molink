@@ -29,6 +29,7 @@ export interface TabPatch {
   error?: string | null
   notice?: string | null
   approvalDeadline?: number | null
+  retryAt?: number | null
   controlEnabled?: boolean
   label?: string
   displayIndex?: number
@@ -79,12 +80,21 @@ export class SessionConnection {
           })
           return
         }
+        if (phase === 'disconnected') {
+          this.sink.onPatch({
+            phase,
+            error: null,
+            notice: 'connection_lost',
+          })
+          return
+        }
         if (phase === 'live') {
           this.sink.onPatch({
             phase,
             error: null,
             notice: null,
             approvalDeadline: null,
+            retryAt: null,
           })
           this.startClipboardSync()
           this.startCongestionWatch()
@@ -134,6 +144,13 @@ export class SessionConnection {
       onCursor: (cursorShape) => this.sink.onPatch({ cursorShape }),
       onCursorPosition: (cursorPosition) =>
         this.sink.onPatch({ cursorPosition }),
+      onRetryScheduled: (atMs) => {
+        this.sink.onPatch({
+          phase: 'disconnected',
+          notice: 'connection_lost',
+          retryAt: atMs,
+        })
+      },
       onFrameDropped: () => {
         const now = performance.now()
         this.dropTimes.push(now)
@@ -204,6 +221,10 @@ export class SessionConnection {
     this.stopClipboardSync()
     this.stopCongestionWatch()
     this.client.disconnect()
+  }
+
+  reconnectNow(): void {
+    this.client.reconnectNow()
   }
 
   private startCongestionWatch(): void {
