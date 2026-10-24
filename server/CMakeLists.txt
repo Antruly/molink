@@ -51,6 +51,7 @@ add_library(molink_server_core STATIC
   src/db/database.cpp
   src/db/migrations.cpp
   src/db/repositories.cpp
+  src/db/db_executor.cpp
   src/settings.cpp
   src/security/ip.cpp
   src/security/cn_ranges.cpp
