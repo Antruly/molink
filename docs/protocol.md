@@ -568,7 +568,7 @@ molink-core [--host <addr>] [--port <n>] [--http3-port <n>] [--quic-port <n>]
 
 - 配置保存在 `~/.config/molink/settings` 的 `server_url`、`server_invite`、
   `server_enabled`，核心线程每秒轮询，修改后即时生效。`server_url` 为空且总开关开启时
-  使用内置目录 `https://molink.ssvr.top`（`MOLINK_DEFAULT_SERVER_URL`）。
+  使用内置目录 `https://molink.ssvr.top:28430`（`MOLINK_DEFAULT_SERVER_URL`）。
 - 注册得到的凭据保存在 `~/.config/molink/server.json`（`url`、`device_id`、`display_id`、
   `token`、`domain`、`domain_valid`，POSIX 下权限 0600）；重启后复用同一 ID，心跳失败
   （401/404）才重新注册。

@@ -8,7 +8,7 @@
   可切换简洁/高级模式，文件与聊天入口会在会话建立后直接打开对应面板
 - 本机头像：内置色板或上传图片（自动裁剪压缩为 96×96 WebP），随目录同步并在设备列表
   中显示；设备平台（Windows/macOS/Linux）一并同步
-- 内置设备目录：不填写服务器地址也能使用 `https://molink.ssvr.top`；新增远程 ID
+- 内置设备目录：不填写服务器地址也能使用 `https://molink.ssvr.top:28430`；新增远程 ID
   服务器总开关，自定义地址仍可覆盖内置值
 - 域组（频道）码：目录为每台设备生成唯一的 9 位随机码，可复制发给其他设备加入同一
   域组；「域组」列表只显示同码设备；码的所有者更新后旧码立即失效，旧成员显示
@@ -21,6 +21,8 @@
 - Windows 服务卡片的启动/停止合并为一个切换按钮
 - 心跳可同步名称、平台与头像；心跳省略名称时不再把已存名称覆盖为 `device`
 - 目录 HTTPS 使用严格证书与主机名校验
+- macOS 桌面包启用 OpenSSL 并随 dmg 携带 `libssl`/`libcrypto`，默认 HTTPS 目录在
+  Linux、Windows、macOS 三端均可用
 - **moLink Server 已拆分到独立仓库**
   [Antruly/molink-server](https://github.com/Antruly/molink-server)，服务端代码、
   打包与发布工作流不再留在本仓库；服务端改用该仓库自己的 `v*` 标签，版本线与

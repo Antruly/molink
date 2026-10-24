@@ -31,6 +31,17 @@ if [ -n "$UVCPP_LIB_DIR" ] && [ -d "$UVCPP_LIB_DIR" ]; then
   done
 fi
 
+# HTTPS to the directory needs OpenSSL inside libuvcpp; bundle its runtime.
+if [ -z "${OPENSSL_LIB_DIR:-}" ] && command -v brew >/dev/null 2>&1; then
+  openssl_prefix=$(brew --prefix openssl@3 2>/dev/null || true)
+  [ -n "$openssl_prefix" ] && OPENSSL_LIB_DIR="$openssl_prefix/lib"
+fi
+if [ -n "${OPENSSL_LIB_DIR:-}" ] && [ -d "$OPENSSL_LIB_DIR" ]; then
+  for pattern in 'libssl*.dylib' 'libcrypto*.dylib'; do
+    cp "$OPENSSL_LIB_DIR"/$pattern "$APP/Contents/MacOS/" 2>/dev/null || true
+  done
+fi
+
 cat > "$APP/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -65,7 +76,7 @@ if command -v otool >/dev/null 2>&1; then
     [ -f "$binary" ] || continue
     while read -r dep; do
       case "$dep" in
-        *uvcpp*|*llhttp*|*libuv*)
+        *uvcpp*|*llhttp*|*libuv*|*libssl*|*libcrypto*)
           install_name_tool -change "$dep" "@loader_path/$(basename "$dep")" \
             "$binary" 2>/dev/null || true
           ;;

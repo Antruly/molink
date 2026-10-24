@@ -8,4 +8,4 @@
 
 // Built-in directory used when the user has not configured a custom URL and
 // the remote directory switch is on.
-#define MOLINK_DEFAULT_SERVER_URL "https://molink.ssvr.top"
+#define MOLINK_DEFAULT_SERVER_URL "https://molink.ssvr.top:28430"
