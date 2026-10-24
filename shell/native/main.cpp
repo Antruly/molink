@@ -286,6 +286,53 @@ void force_child_allocate(GtkWidget* window) {
   gtk_widget_size_allocate(child, &child_allocation);
 }
 
+void log_viewport_result(GObject* source, GAsyncResult* result, gpointer) {
+  GError* error = nullptr;
+  JSCValue* value = webkit_web_view_evaluate_javascript_finish(
+      WEBKIT_WEB_VIEW(source), result, &error);
+  if (error != nullptr) {
+    g_error_free(error);
+    return;
+  }
+  if (value != nullptr) {
+    char* text = jsc_value_to_string(value);
+    if (text != nullptr) {
+      if (std::FILE* log = std::fopen("/tmp/molink-shell.log", "a")) {
+        std::fprintf(log, "viewport %s\n", text);
+        std::fclose(log);
+      }
+      g_free(text);
+    }
+    g_object_unref(value);
+  }
+}
+
+gboolean log_viewport(gpointer data) {
+  WebKitWebView* view = WEBKIT_WEB_VIEW(data);
+  GtkWidget* toplevel = gtk_widget_get_toplevel(GTK_WIDGET(view));
+  if (GTK_IS_WINDOW(toplevel)) {
+    GdkWindow* gdk_window = gtk_widget_get_window(toplevel);
+    GtkWidget* child = gtk_bin_get_child(GTK_BIN(toplevel));
+    GtkAllocation allocation = {0, 0, 0, 0};
+    if (child != nullptr) gtk_widget_get_allocation(child, &allocation);
+    if (gdk_window != nullptr) {
+      if (std::FILE* log = std::fopen("/tmp/molink-shell.log", "a")) {
+        std::fprintf(log, "window %dx%d child %dx%d\n",
+                     gdk_window_get_width(gdk_window),
+                     gdk_window_get_height(gdk_window), allocation.width,
+                     allocation.height);
+        std::fclose(log);
+      }
+    }
+  }
+  webkit_web_view_evaluate_javascript(
+      view,
+      "window.innerWidth + 'x' + window.innerHeight + ' dpr=' + "
+      "window.devicePixelRatio",
+      -1, nullptr, nullptr, nullptr, log_viewport_result, nullptr);
+  return G_SOURCE_CONTINUE;
+}
+
 void on_load_changed(WebKitWebView* view, WebKitLoadEvent event, gpointer) {
   if (event != WEBKIT_LOAD_FINISHED) return;
   // A window that the WM maximized before the page loaded can miss the
@@ -449,35 +496,52 @@ void rounded_rect_path(cairo_t* cr, double x, double y, double w, double h,
 
 bool g_window_square = false;
 
-void apply_window_shape(GtkWidget* widget) {
-  if (!gtk_widget_get_realized(widget)) return;
-  if (g_window_square || gtk_window_is_maximized(GTK_WINDOW(widget))) {
-    // Maximized and fullscreen windows must not be clipped to a rounded
-    // rectangle: a stale region hides the edges and makes the title buttons
-    // unreachable.
+/// Replace the rounded region with one covering the whole window. Resetting
+/// with NULL does not reliably drop an already installed region in GTK3, so
+/// a maximized window could stay clipped to its old size.
+void apply_square_shape(GtkWidget* widget) {
+  int width = 0;
+  int height = 0;
+  GdkWindow* gdk_window = gtk_widget_get_window(widget);
+  if (gdk_window != nullptr) {
+    width = gdk_window_get_width(gdk_window);
+    height = gdk_window_get_height(gdk_window);
+  }
+  if (width <= 0 || height <= 0) {
+    GtkAllocation allocation;
+    gtk_widget_get_allocation(widget, &allocation);
+    width = allocation.width;
+    height = allocation.height;
+  }
+  if (width <= 0 || height <= 0) {
     gtk_widget_shape_combine_region(widget, nullptr);
     return;
   }
-  GtkAllocation allocation;
-  gtk_widget_get_allocation(widget, &allocation);
-  if (allocation.width <= 0 || allocation.height <= 0) return;
-  cairo_surface_t* surface = cairo_image_surface_create(
-      CAIRO_FORMAT_A1, allocation.width, allocation.height);
-  cairo_t* cr = cairo_create(surface);
-  rounded_rect_path(cr, 0, 0, allocation.width, allocation.height, 14.0);
-  cairo_fill(cr);
-  cairo_destroy(cr);
-  cairo_region_t* region = gdk_cairo_region_create_from_surface(surface);
-  cairo_surface_destroy(surface);
-  if (region != nullptr) {
-    gtk_widget_shape_combine_region(widget, region);
-    cairo_region_destroy(region);
-  }
+  cairo_rectangle_int_t rect = {0, 0, width, height};
+  cairo_region_t* region = cairo_region_create_rectangle(&rect);
+  gtk_widget_shape_combine_region(widget, region);
+  cairo_region_destroy(region);
+}
+
+void apply_window_shape(GtkWidget* widget) {
+  if (!gtk_widget_get_realized(widget)) return;
+  // Rounded outer corners used to be installed as a shape region. Any stale
+  // region clips the whole window (the maximized window kept the region from
+  // its default size), which is far worse than square corners. Always cover
+  // the complete window instead.
+  apply_square_shape(widget);
 }
 
 gboolean on_size_allocate(GtkWidget* widget, GdkRectangle*, gpointer) {
-  if (g_window_square) {
-    gtk_widget_shape_combine_region(widget, nullptr);
+  GdkWindow* gdk_window = gtk_widget_get_window(widget);
+  const GdkWindowState state =
+      gdk_window != nullptr ? gdk_window_get_state(gdk_window)
+                            : static_cast<GdkWindowState>(0);
+  const bool square =
+      g_window_square || (state & GDK_WINDOW_STATE_MAXIMIZED) != 0 ||
+      (state & GDK_WINDOW_STATE_FULLSCREEN) != 0;
+  if (square) {
+    apply_square_shape(widget);
   } else {
     apply_window_shape(widget);
   }
@@ -493,7 +557,7 @@ gboolean on_window_state(GtkWidget* widget, GdkEventWindowState* event,
       GDK_WINDOW_STATE_MAXIMIZED | GDK_WINDOW_STATE_FULLSCREEN);
   g_window_square = (event->new_window_state & square_mask) != 0;
   if (g_window_square) {
-    gtk_widget_shape_combine_region(widget, nullptr);
+    apply_square_shape(widget);
   } else {
     apply_window_shape(widget);
   }
@@ -858,10 +922,26 @@ int main(int argc, char** argv) {
   // check is a cheap no-op when the allocation already matches.
   g_timeout_add(500,
                 [](gpointer data) -> gboolean {
-                  force_child_allocate(GTK_WIDGET(data));
+                  GtkWidget* window = GTK_WIDGET(data);
+                  // The rounded-corner shape region is sized when it is
+                  // applied. A window the WM maximizes at startup can keep the
+                  // region from its default size, clipping the maximized
+                  // window even though the WebView itself is correct. The GDK
+                  // state is authoritative here, unlike the event flags.
+                  GdkWindow* gdk_window = gtk_widget_get_window(window);
+                  if (gdk_window != nullptr) {
+                    const GdkWindowState state =
+                        gdk_window_get_state(gdk_window);
+                    if ((state & GDK_WINDOW_STATE_MAXIMIZED) != 0 ||
+                        (state & GDK_WINDOW_STATE_FULLSCREEN) != 0) {
+                      apply_square_shape(window);
+                    }
+                  }
+                  force_child_allocate(window);
                   return G_SOURCE_CONTINUE;
                 },
                 window);
+  g_timeout_add_seconds(10, log_viewport, view);
 
   if (!g_url_mode) g_timeout_add_seconds(1, check_core, nullptr);
   if (g_smoke) g_timeout_add_seconds(15, smoke_timeout, nullptr);
