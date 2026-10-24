@@ -117,7 +117,7 @@ jobs:
           cmake --build "$RUNNER_TEMP/libuvcpp/build" --config Release --parallel
           cmake --install "$RUNNER_TEMP/libuvcpp/build" --config Release
           cfg="$RUNNER_TEMP/uvcpp/include/uvcpp/uvcpp_config.h"
-          grep -q "^#define UVCPP_OPENSSL_ENABLE 1" "$cfg" || {
+          grep -qE "^#[[:space:]]*define[[:space:]]+UVCPP_OPENSSL_ENABLE[[:space:]]+1" "$cfg" || {
             echo "::error::libuvcpp was built without OpenSSL" >&2
             exit 1
           }

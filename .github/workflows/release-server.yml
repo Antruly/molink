@@ -57,7 +57,7 @@ jobs:
           cfg="$RUNNER_TEMP/uvcpp/include/uvcpp/uvcpp_config.h"
           for macro in UVCPP_OPENSSL_ENABLE UVCPP_DB_ENABLE \
                        UVCPP_DB_SQLITE_ENABLE UVCPP_DB_PGSQL_ENABLE; do
-            grep -q "^#define $macro 1" "$cfg" || {
+            grep -qE "^#[[:space:]]*define[[:space:]]+$macro[[:space:]]+1" "$cfg" || {
               echo "::error::$macro is not enabled in libuvcpp"
               exit 1
             }
@@ -158,7 +158,7 @@ jobs:
           cfg="$RUNNER_TEMP/uvcpp/include/uvcpp/uvcpp_config.h"
           for macro in UVCPP_OPENSSL_ENABLE UVCPP_DB_ENABLE \
                        UVCPP_DB_SQLITE_ENABLE UVCPP_DB_PGSQL_ENABLE; do
-            grep -q "^#define $macro 1" "$cfg" || {
+            grep -qE "^#[[:space:]]*define[[:space:]]+$macro[[:space:]]+1" "$cfg" || {
               echo "::error::$macro is not enabled in libuvcpp"
               exit 1
             }
@@ -283,7 +283,7 @@ jobs:
           cfg="$RUNNER_TEMP/uvcpp/include/uvcpp/uvcpp_config.h"
           for macro in UVCPP_OPENSSL_ENABLE UVCPP_DB_ENABLE \
                        UVCPP_DB_SQLITE_ENABLE UVCPP_DB_PGSQL_ENABLE; do
-            grep -q "^#define $macro 1" "$cfg" || {
+            grep -qE "^#[[:space:]]*define[[:space:]]+$macro[[:space:]]+1" "$cfg" || {
               echo "::error::$macro is not enabled in libuvcpp"
               exit 1
             }
