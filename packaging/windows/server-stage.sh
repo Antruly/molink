@@ -44,7 +44,12 @@ if [ -z "$OPENSSL_DIR" ]; then
   done
 fi
 if [ -n "$OPENSSL_DIR" ] && [ -d "$OPENSSL_DIR" ]; then
-  cp "$OPENSSL_DIR"/libssl-*.dll "$OPENSSL_DIR"/libcrypto-*.dll "$PKG/" 2>/dev/null || true
+  # Prefer the OpenSSL DLLs that came with the uvcpp build; only fall back to
+  # the standalone install when the uvcpp bin did not carry them. Copying both
+  # would ship two OpenSSL majors in one package.
+  if ! ls "$PKG"/libssl-*.dll >/dev/null 2>&1; then
+    cp "$OPENSSL_DIR"/libssl-*.dll "$OPENSSL_DIR"/libcrypto-*.dll "$PKG/" 2>/dev/null || true
+  fi
 fi
 # App-local VC runtime, best effort.
 for dll in vcruntime140.dll vcruntime140_1.dll msvcp140.dll; do
