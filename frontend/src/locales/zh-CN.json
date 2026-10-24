@@ -79,7 +79,15 @@
     "serverId": "服务端 ID",
     "serverOnline": "在线",
     "serverOffline": "离线",
-    "resolving": "解析中…"
+    "resolving": "解析中…",
+    "identity_name": "名称",
+    "identity_id": "ID",
+    "identity_ip": "IP",
+    "ipAddress": "IP 地址",
+    "ipDisabledHint": "IP 连接未开启，其他人暂时无法通过 IP 访问这台电脑。",
+    "enableIp": "去开启",
+    "idNotRegistered": "尚未注册到服务端",
+    "ipUnavailable": "未检测到局域网 IP"
   },
   "settings": {
     "title": "偏好设置",
@@ -149,7 +157,10 @@
     "serverOnline": "在线",
     "serverOffline": "离线",
     "serverId": "服务端 ID",
-    "serverTlsHint": "当前客户端只支持 http://。公网部署请在反向代理上终止 TLS，最后一跳只走可信内网。"
+    "serverTlsHint": "已支持 HTTPS；公网证书可留空 CA。",
+    "autoSaveHint": "开关修改会立即生效；只有计算机名称需要点“应用”。",
+    "serverCa": "自定义 CA（可选）",
+    "serverCaHint": "私有/自签 CA 的 PEM 文件路径；留空使用系统信任库。"
   },
   "session": {
     "connecting": "连接中…",

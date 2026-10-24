@@ -25,6 +25,7 @@ export interface DeviceInfo {
   host: string
   port: number
   capabilities: DeviceCapabilities
+  addresses?: string[]
   code?: AuthCode
 }
 
@@ -48,6 +49,7 @@ export interface ServerInfo {
 
 export interface ServerConfig extends ServerInfo {
   invite: string
+  ca: string
 }
 
 export interface DeviceLookup {
@@ -80,6 +82,7 @@ export interface ServerState {
   udp_port: number
   restart_required: boolean
   device_name?: string
+  allow_remote_access?: boolean
   server?: ServerInfo
 }
 
@@ -430,8 +433,9 @@ export function postServerConfig(
   token: string,
   url: string,
   invite: string,
+  ca: string,
 ): Promise<ServerConfig> {
-  const query = new URLSearchParams({ url, invite })
+  const query = new URLSearchParams({ url, invite, ca })
   return request<ServerConfig>(
     `/api/server?${query.toString()}`,
     { method: 'POST' },

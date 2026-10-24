@@ -97,6 +97,8 @@ app_settings load_settings() {
       settings.server_url = value;
     } else if (key == "server_invite") {
       settings.server_invite = value;
+    } else if (key == "server_ca") {
+      settings.server_ca = value;
     } else if (key == "long_term_code") {
       settings.long_term_code = value;
     } else if (key == "temp_mode") {
@@ -143,6 +145,7 @@ void save_settings(const app_settings& settings) {
   stream << "device_name=" << settings.device_name << "\n";
   stream << "server_url=" << settings.server_url << "\n";
   stream << "server_invite=" << settings.server_invite << "\n";
+  stream << "server_ca=" << settings.server_ca << "\n";
   stream << "long_term_code=" << settings.long_term_code << "\n";
   stream << "temp_mode=" << settings.temp_mode << "\n";
   stream << "temp_code=" << settings.temp_code << "\n";

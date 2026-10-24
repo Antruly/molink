@@ -79,7 +79,15 @@
     "serverId": "Server ID",
     "serverOnline": "Online",
     "serverOffline": "Offline",
-    "resolving": "Resolving…"
+    "resolving": "Resolving…",
+    "identity_name": "Name",
+    "identity_id": "ID",
+    "identity_ip": "IP",
+    "ipAddress": "IP address",
+    "ipDisabledHint": "IP connection is off. Enable it so others can reach this computer by IP.",
+    "enableIp": "Enable",
+    "idNotRegistered": "Not registered with a server",
+    "ipUnavailable": "No LAN address detected"
   },
   "settings": {
     "title": "Preferences",
@@ -149,7 +157,10 @@
     "serverOnline": "Online",
     "serverOffline": "Offline",
     "serverId": "Server ID",
-    "serverTlsHint": "This client supports http:// only for now. Terminate TLS in a reverse proxy for public servers and keep the last hop on a trusted network."
+    "serverTlsHint": "HTTPS is supported. Leave the CA empty for public certificates.",
+    "autoSaveHint": "Toggles apply immediately. Only the computer name needs Apply.",
+    "serverCa": "Custom CA (optional)",
+    "serverCaHint": "PEM bundle for a private/self-signed CA. Empty uses the system trust store."
   },
   "session": {
     "connecting": "Connecting…",

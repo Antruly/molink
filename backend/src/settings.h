@@ -25,6 +25,8 @@ struct app_settings {
   /// Phase-2 directory server. Empty URL disables registration.
   std::string server_url;
   std::string server_invite;
+  /// Optional PEM CA bundle used to verify an HTTPS directory.
+  std::string server_ca;
 
   /// Long-term code: at least 8 characters and must mix letters and digits.
   std::string long_term_code;

@@ -32,4 +32,7 @@ uint64_t now_ms();
 /// JSON control messages, such as the cursor bitmap.
 std::string base64_encode(const uint8_t* data, std::size_t len);
 
+/// Non-loopback IPv4 addresses of this machine, in interface order.
+std::vector<std::string> local_ipv4_addresses();
+
 }  // namespace molink

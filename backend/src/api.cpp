@@ -346,6 +346,7 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
                 deps.auth ? deps.auth->settings() : app_settings{};
             j["device_name"] = current_settings.device_name;
             j["allow_access_requests"] = current_settings.allow_access_requests;
+            j["allow_remote_access"] = current_settings.allow_remote_access;
             if (deps.server) {
               const server_status status = deps.server->status();
               uvcpp_json server;
@@ -526,6 +527,7 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
     uvcpp_json j;
     j["url"] = set.server_url;
     j["invite"] = set.server_invite;
+    j["ca"] = set.server_ca;
     j["enabled"] = status.enabled;
     j["registered"] = status.registered;
     j["online"] = status.online;
@@ -555,11 +557,12 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
              }
              const std::string* url = req.query("url");
              const std::string* invite = req.query("invite");
+             const std::string* ca = req.query("ca");
              std::string error;
-             if (!deps.auth->set_server(url != nullptr ? *url : std::string(),
-                                        invite != nullptr ? *invite
-                                                          : std::string(),
-                                        error)) {
+             if (!deps.auth->set_server(
+                     url != nullptr ? *url : std::string(),
+                     invite != nullptr ? *invite : std::string(),
+                     ca != nullptr ? *ca : std::string(), error)) {
                uvcpp_json body;
                body["code"] = "invalid_server";
                body["message"] = error;
@@ -819,6 +822,10 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
                 deps.auth ? deps.auth->view() : code_view{};
             j["device_name"] =
                 deps.auth ? deps.auth->settings().device_name : std::string();
+            j["addresses"] = uvcpp_json::array();
+            for (const std::string& address : local_ipv4_addresses()) {
+              j["addresses"].push_back(address);
+            }
             j["code"]["mode"] = code.mode;
             j["code"]["value"] = code.value;
             j["code"]["remaining"] = code.remaining;

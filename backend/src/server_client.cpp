@@ -14,6 +14,12 @@
 #include <web/uvcpp_http_request.h>
 #include <web/uvcpp_http_response.h>
 
+// The config macro comes from the web headers above. Windows dependency builds
+// may omit OpenSSL entirely, in which case HTTPS reports a clear error.
+#if UVCPP_OPENSSL_ENABLE
+#include <ssl/uvcpp_ssl_context.h>
+#endif
+
 #include "auth_state.h"
 #include "identity.h"
 
@@ -67,6 +73,7 @@ struct parsed_url {
   std::string host;
   int port = 80;
   std::string base;
+  bool tls = false;
 };
 
 bool parse_url(const std::string& raw, parsed_url& out, std::string& err) {
@@ -75,11 +82,11 @@ bool parse_url(const std::string& raw, parsed_url& out, std::string& err) {
     out.port = 80;
     rest = raw.substr(7);
   } else if (raw.rfind("https://", 0) == 0) {
-    err = "HTTPS server URLs need TLS, which this build does not support yet; "
-          "terminate TLS in a reverse proxy and use an http:// URL";
-    return false;
+    out.port = 443;
+    out.tls = true;
+    rest = raw.substr(8);
   } else {
-    err = "server URL must start with http://";
+    err = "server URL must start with http:// or https://";
     return false;
   }
   while (!rest.empty() && rest.back() == '/') rest.pop_back();
@@ -263,6 +270,23 @@ bool server_client::post(const std::string& base_url, const std::string& path,
   if (!query.empty()) target += "?" + query;
 
   uvcpp::uvcpp_http_client client;
+#if UVCPP_OPENSSL_ENABLE
+  uvcpp::uvcpp_ssl_context tls_context(uvcpp::tls_mode::CLIENT);
+  if (parsed.tls) {
+    const std::string ca_path =
+        auth_ ? trim(auth_->settings().server_ca) : std::string();
+    if (!ca_path.empty() && !tls_context.load_ca_file(ca_path)) {
+      error = "could not load the server CA file";
+      return false;
+    }
+    client.set_ssl_context(&tls_context);
+  }
+#else
+  if (parsed.tls) {
+    error = "this build has no TLS support; use an http:// server URL";
+    return false;
+  }
+#endif
   if (client.connect_wait(parsed.host.c_str(), parsed.port, kHttpTimeoutMs) !=
       0) {
     error = "could not connect to the server";
@@ -271,7 +295,16 @@ bool server_client::post(const std::string& base_url, const std::string& path,
   auto request = uvcpp::uvcpp_http_request::make_post(
       target.c_str(), "", 0, "application/json");
   uvcpp::uvcpp_http_response response;
-  const int rc = client.send_wait(request, response, kHttpTimeoutMs);
+  int rc = 0;
+#if UVCPP_OPENSSL_ENABLE
+  if (parsed.tls) {
+    rc = client.send_wait_ssl(request, response, kHttpTimeoutMs);
+  } else {
+    rc = client.send_wait(request, response, kHttpTimeoutMs);
+  }
+#else
+  rc = client.send_wait(request, response, kHttpTimeoutMs);
+#endif
   if (rc != 0) {
     error = "server request failed (" + std::to_string(rc) + ")";
     return false;

@@ -1,7 +1,20 @@
 #include "util.h"
 
+#include <algorithm>
 #include <chrono>
+#include <cstdlib>
+#include <cstring>
 #include <random>
+
+#if defined(_WIN32)
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
 
 namespace molink {
 
@@ -109,6 +122,46 @@ std::string base64_encode(const uint8_t* data, std::size_t len) {
     out.push_back(two ? kAlphabet[(v >> 6) & 0x3f] : '=');
     out.push_back('=');
   }
+  return out;
+}
+
+std::vector<std::string> local_ipv4_addresses() {
+  char hostname[256] = {};
+  if (gethostname(hostname, sizeof(hostname) - 1) != 0) return {};
+  addrinfo hints{};
+  hints.ai_family = AF_INET;
+  hints.ai_socktype = SOCK_STREAM;
+  addrinfo* result = nullptr;
+  if (getaddrinfo(hostname, nullptr, &hints, &result) != 0) return {};
+  std::vector<std::string> out;
+  for (addrinfo* entry = result; entry != nullptr; entry = entry->ai_next) {
+    if (entry->ai_addr == nullptr) continue;
+    char text[INET_ADDRSTRLEN] = {};
+    const auto* address = reinterpret_cast<const sockaddr_in*>(entry->ai_addr);
+    if (inet_ntop(AF_INET, &address->sin_addr, text, sizeof(text)) == nullptr) {
+      continue;
+    }
+    const std::string value(text);
+    if (value.rfind("127.", 0) == 0) continue;
+    if (std::find(out.begin(), out.end(), value) == out.end()) {
+      out.push_back(value);
+    }
+  }
+  freeaddrinfo(result);
+  const auto is_private = [](const std::string& value) {
+    if (value.rfind("10.", 0) == 0 || value.rfind("192.168.", 0) == 0) {
+      return true;
+    }
+    if (value.rfind("172.", 0) == 0) {
+      const int second = std::atoi(value.c_str() + 4);
+      return second >= 16 && second <= 31;
+    }
+    return false;
+  };
+  std::stable_sort(out.begin(), out.end(),
+                   [&](const std::string& a, const std::string& b) {
+                     return is_private(a) && !is_private(b);
+                   });
   return out;
 }
 

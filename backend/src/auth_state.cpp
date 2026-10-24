@@ -209,7 +209,7 @@ void auth_state::set_service_desired_running(bool enabled) {
 }
 
 bool auth_state::set_server(std::string url, std::string invite,
-                            std::string& err) {
+                            std::string ca, std::string& err) {
   auto trim = [](std::string value) {
     while (!value.empty() &&
            (value.back() == ' ' || value.back() == '\t' ||
@@ -225,6 +225,7 @@ bool auth_state::set_server(std::string url, std::string invite,
   };
   url = trim(std::move(url));
   invite = trim(std::move(invite));
+  ca = trim(std::move(ca));
   if (!url.empty()) {
     if (url.rfind("http://", 0) != 0 && url.rfind("https://", 0) != 0) {
       err = "server URL must start with http:// or https://";
@@ -239,9 +240,14 @@ bool auth_state::set_server(std::string url, std::string invite,
     err = "server invite is invalid";
     return false;
   }
+  if (ca.size() > 512 || has_whitespace_or_control(ca)) {
+    err = "server CA path is invalid";
+    return false;
+  }
   std::lock_guard<std::mutex> lock(mutex_);
   settings_.server_url = url;
   settings_.server_invite = invite;
+  settings_.server_ca = ca;
   persist_locked();
   return true;
 }

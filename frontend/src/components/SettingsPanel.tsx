@@ -78,15 +78,24 @@ function SecurityControls({
   const [customValue, setCustomValue] = useState('')
   const [note, setNote] = useState<string | null>(null)
 
-  const save = async () => {
+  const persist = async (values: {
+    allowRemote?: boolean
+    allowWeb?: boolean
+    discovery?: boolean
+    allowAccessRequests?: boolean
+    name?: string
+  }) => {
+    const nextRemote = values.allowRemote ?? allowRemote
     const ok = await onSave({
-      allowRemote,
-      allowWeb,
-      discovery: allowRemote ? discovery : false,
-      allowAccessRequests,
-      name,
+      allowRemote: nextRemote,
+      allowWeb: values.allowWeb ?? allowWeb,
+      discovery: nextRemote ? (values.discovery ?? discovery) : false,
+      allowAccessRequests:
+        values.allowAccessRequests ?? allowAccessRequests,
+      name: values.name ?? settings.device_name,
     })
     setNote(ok ? t('settings.saved') : t('error.settings_failed'))
+    return ok
   }
 
   const applyLongTerm = async (value: string) => {
@@ -123,7 +132,14 @@ function SecurityControls({
           </div>
           <Switch
             checked={allowRemote}
-            onChange={setAllowRemote}
+            onChange={(value) => {
+              setAllowRemote(value)
+              if (!value) setDiscovery(false)
+              void persist({
+                allowRemote: value,
+                discovery: value ? discovery : false,
+              })
+            }}
             label={t('settings.allowRemote')}
           />
         </div>
@@ -136,7 +152,10 @@ function SecurityControls({
           </div>
           <Switch
             checked={allowWeb}
-            onChange={setAllowWeb}
+            onChange={(value) => {
+              setAllowWeb(value)
+              void persist({ allowWeb: value })
+            }}
             label={t('settings.allowWeb')}
           />
         </div>
@@ -150,7 +169,10 @@ function SecurityControls({
           <Switch
             checked={discovery}
             disabled={!allowRemote}
-            onChange={setDiscovery}
+            onChange={(value) => {
+              setDiscovery(value)
+              void persist({ discovery: value })
+            }}
             label={t('settings.discovery')}
           />
         </div>
@@ -165,7 +187,10 @@ function SecurityControls({
           </div>
           <Switch
             checked={allowAccessRequests}
-            onChange={setAllowAccessRequests}
+            onChange={(value) => {
+              setAllowAccessRequests(value)
+              void persist({ allowAccessRequests: value })
+            }}
             label={t('settings.allowAccessRequests')}
           />
         </div>
@@ -179,8 +204,15 @@ function SecurityControls({
             className="field"
           />
         </label>
+        <div className="text-[10px] leading-relaxed text-muted">
+          {t('settings.autoSaveHint')}
+        </div>
         <div className="flex items-center gap-2">
-          <button type="button" onClick={() => void save()} className="btn">
+          <button
+            type="button"
+            onClick={() => void persist({ name })}
+            className="btn"
+          >
             {t('settings.apply')}
           </button>
           {settings.restart_required ? (
@@ -271,6 +303,7 @@ function ServerControls() {
   const token = useAppStore((state) => state.token)
   const [url, setUrl] = useState('')
   const [invite, setInvite] = useState('')
+  const [ca, setCa] = useState('')
   const [status, setStatus] = useState<ServerConfig | null>(null)
   const [note, setNote] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -285,6 +318,7 @@ function ServerControls() {
       if (!initialized.current) {
         setUrl(next.url)
         setInvite(next.invite)
+        setCa(next.ca)
         initialized.current = true
       }
     } catch {
@@ -306,7 +340,12 @@ function ServerControls() {
     setBusy(true)
     setNote(null)
     try {
-      const next = await postServerConfig(token, nextUrl.trim(), invite.trim())
+      const next = await postServerConfig(
+        token,
+        nextUrl.trim(),
+        invite.trim(),
+        ca.trim(),
+      )
       setStatus(next)
       setUrl(next.url)
       setNote(t('settings.saved'))
@@ -363,6 +402,22 @@ function ServerControls() {
           spellCheck={false}
           autoComplete="off"
         />
+      </label>
+      <label className="block">
+        <span className="mb-1 block text-[10px] uppercase tracking-[0.16em] text-muted">
+          {t('settings.serverCa')}
+        </span>
+        <input
+          value={ca}
+          onChange={(event) => setCa(event.target.value)}
+          className="field font-mono text-[12px]"
+          placeholder="/etc/ssl/private/molink-ca.pem"
+          spellCheck={false}
+          autoComplete="off"
+        />
+        <span className="mt-1 block text-[10px] text-muted">
+          {t('settings.serverCaHint')}
+        </span>
       </label>
       <div className="flex flex-wrap gap-2">
         <button

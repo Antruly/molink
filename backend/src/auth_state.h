@@ -61,7 +61,8 @@ class auth_state {
   void set_allow_access_requests(bool allow);
   void set_service_desired_running(bool enabled);
   /// Phase-2 directory: empty URL disables registration.
-  bool set_server(std::string url, std::string invite, std::string& err);
+  bool set_server(std::string url, std::string invite, std::string ca,
+                  std::string& err);
 
  private:
   bool valid_session_locked(const std::string& token) const;

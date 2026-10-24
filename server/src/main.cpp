@@ -48,6 +48,8 @@ struct config {
   std::string data_dir = "./molink-server-data";
   std::string registration_token;
   std::string public_url;
+  std::string tls_cert;
+  std::string tls_key;
   int offline_after = 90;
   bool show_help = false;
   bool show_version = false;
@@ -62,6 +64,8 @@ void print_usage() {
       "(default ./molink-server-data)\n"
       "  --registration-token <t>     require this invite value to register\n"
       "  --public-url <url>           URL advertised to clients\n"
+      "  --tls-cert <pem>             certificate chain; enables HTTPS\n"
+      "  --tls-key <pem>              private key for --tls-cert\n"
       "  --offline-after <seconds>    presence timeout (default 90)\n"
       "  --version                    print version and exit\n"
       "  --help                       print this help\n",
@@ -88,6 +92,10 @@ bool parse_args(int argc, char** argv, config& out) {
       if (!value(out.registration_token)) return false;
     } else if (arg == "--public-url") {
       if (!value(out.public_url)) return false;
+    } else if (arg == "--tls-cert") {
+      if (!value(out.tls_cert)) return false;
+    } else if (arg == "--tls-key") {
+      if (!value(out.tls_key)) return false;
     } else if (arg == "--offline-after") {
       std::string text;
       if (!value(text)) return false;
@@ -188,7 +196,27 @@ int main(int argc, char** argv) {
       .set_port(cfg.port)
       .set_server_header(std::string(kService) + "/" + kVersion)
       .set_access_log(false)
-      .set_max_body_size(64u * 1024u);
+      .set_max_body_size(64u * 1024u)
+      // HTTP/2 over TLS hangs against curl/browsers in the libuvcpp build we
+      // ship. ALPN advertises http/1.1 only until that is fixed upstream.
+      .set_http2_enabled(false);
+
+  if (!cfg.tls_cert.empty() || !cfg.tls_key.empty()) {
+    if (cfg.tls_cert.empty() || cfg.tls_key.empty()) {
+      std::fprintf(stderr,
+                   "molink-server: --tls-cert and --tls-key must be used "
+                   "together\n");
+      return 2;
+    }
+    app.enable_ssl(cfg.tls_cert, cfg.tls_key);
+    if (!app.ssl_error().empty()) {
+      std::fprintf(stderr, "molink-server: TLS setup failed: %s\n",
+                   app.ssl_error().c_str());
+      return 1;
+    }
+    std::fprintf(stderr, "molink-server: TLS enabled (%s)\n",
+                 cfg.tls_cert.c_str());
+  }
 
   app.use([](uvcpp_web_request& req, uvcpp_web_response& resp,
              uvcpp_web_next next) {
@@ -349,15 +377,20 @@ int main(int argc, char** argv) {
   if (rc != 0) {
     std::fprintf(stderr, "molink-server: cannot listen on %s:%d (libuv %d)\n",
                  cfg.host.c_str(), cfg.port, rc);
+    if (!app.ssl_error().empty()) {
+      std::fprintf(stderr, "molink-server: TLS: %s\n",
+                   app.ssl_error().c_str());
+    }
     return 1;
   }
   const int bound = app.bound_port() > 0 ? app.bound_port() : cfg.port;
   std::fprintf(stderr,
-               "moLink Server %s listening on http://%s:%d\n"
+               "moLink Server %s listening on %s://%s:%d\n"
                "  devices: %zu (%zu online)\n"
                "  data:    %s\n"
                "  invite:  %s\n",
-               kVersion, cfg.host.c_str(), bound, store.size(),
+               kVersion, app.ssl_enabled() ? "https" : "http",
+               cfg.host.c_str(), bound, store.size(),
                store.online_count(), device_file.c_str(),
                cfg.registration_token.empty() ? "(open)"
                                               : cfg.registration_token.c_str());

@@ -22,6 +22,8 @@ cmake --build server/build --parallel
 | `--data-dir` | `./molink-server-data` | `devices.json` 的目录 |
 | `--registration-token` | 空（开放） | 设置后注册必须带 `invite=<值>` |
 | `--public-url` | 空 | 返回给客户端的对外 URL |
+| `--tls-cert` | 空 | PEM 证书链；与 `--tls-key` 一起开启 HTTPS |
+| `--tls-key` | 空 | `--tls-cert` 对应的私钥 |
 | `--offline-after` | `90` | 超过多少秒没有心跳视为离线 |
 
 设备目录保存在 `devices.json`（先写临时文件再原子替换）。服务重启后设备仍然存在，
@@ -80,11 +82,22 @@ curl -X POST 'http://127.0.0.1:28430/v1/devices/unregister?id=9A937NDEZ&token=<t
 curl 'http://127.0.0.1:28430/healthz'
 ```
 
+## HTTPS
+
+```sh
+./molink-server --host 0.0.0.0 --port 28430 \
+  --tls-cert /etc/molink/server.crt --tls-key /etc/molink/server.key
+```
+
+证书链与私钥必须配对，否则启动直接失败。TLS 上目前只宣告 `http/1.1`
+（libuvcpp 的 h2 在 1.8.x 与 curl/浏览器存在挂起问题，修好后再打开 ALPN h2）。
+桌面端在设置 → 服务端里填 `https://…`；私有/自签 CA 把证书 PEM 的路径填到
+「自定义 CA」，公网证书留空使用系统信任库。
+
 ## 安全边界（v1）
 
 - 目录只负责寻址；会话仍然需要对方验证码或人工批准。
-- 当前版本建议由反向代理提供 HTTPS（`molink-server` 本身只监听 HTTP）。
-  桌面端接入服务端时也应只接受 HTTPS，除非两端都在可信内网。
+- 支持原生 HTTPS；也可以在反向代理终止 TLS。内网无 TLS 时仍建议限制访问来源。
 - 注册 token 保存在 `devices.json` 中，文件权限由运维保证；生产环境应放在仅
   `molink-server` 用户可读的目录。
 - 开放注册只做了每 IP 每小时 20 次的限制；公网部署应设置 `--registration-token`，

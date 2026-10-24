@@ -73,6 +73,7 @@ export function HomeView() {
   const historyView = useAppStore((state) => state.historyView)
   const setHistoryView = useAppStore((state) => state.setHistoryView)
   const serverState = useAppStore((state) => state.server)
+  const setSettingsOpen = useAppStore((state) => state.setSettingsOpen)
 
   const [rememberCode, setRememberCode] = useState(true)
   const [host, setHost] = useState('')
@@ -85,6 +86,30 @@ export function HomeView() {
   const [connectMode, setConnectMode] = useState<'address' | 'id'>('address')
   const [deviceId, setDeviceId] = useState('')
   const [resolving, setResolving] = useState(false)
+  const [identityChoice, setIdentityChoice] = useState<
+    'name' | 'id' | 'ip' | null
+  >(null)
+  const serverInfo = serverState?.server ?? null
+  const allowRemote = serverState?.allow_remote_access === true
+  const identityMode =
+    identityChoice ?? (serverInfo?.registered ? 'id' : 'name')
+  const localIp = device?.addresses?.[0] ?? ''
+  const identityValue =
+    identityMode === 'name'
+      ? device?.device_name || device?.device_id || ''
+      : identityMode === 'id'
+        ? serverInfo?.display_id ||
+          serverInfo?.device_id ||
+          t('home.idNotRegistered')
+        : localIp
+          ? `${localIp}:${device?.port ?? ''}`
+          : t('home.ipUnavailable')
+  const identityCopyable =
+    identityMode === 'name'
+      ? Boolean(device?.device_name || device?.device_id)
+      : identityMode === 'id'
+        ? Boolean(serverInfo?.registered)
+        : Boolean(localIp)
 
   useEffect(() => {
     if (!localMode) return
@@ -347,15 +372,94 @@ export function HomeView() {
             {device ? (
               <>
                 <div className="mt-5">
-                  <div className="text-[10px] uppercase tracking-[0.18em] text-muted">
-                    {t('home.computerName')}
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="text-[10px] uppercase tracking-[0.18em] text-muted">
+                      {identityMode === 'name'
+                        ? t('home.computerName')
+                        : identityMode === 'id'
+                          ? t('home.serverId')
+                          : t('home.ipAddress')}
+                    </div>
+                    <div className="flex items-center gap-0.5 rounded-lg border border-line bg-panel/60 p-0.5">
+                      {(['name', 'id', 'ip'] as const).map((mode) => (
+                        <button
+                          key={mode}
+                          type="button"
+                          onClick={() => setIdentityChoice(mode)}
+                          className={
+                            'rounded-md px-2 py-0.5 text-[10px] transition ' +
+                            (identityMode === mode
+                              ? 'bg-surface text-ink shadow-sm'
+                              : 'text-muted hover:text-ink')
+                          }
+                        >
+                          {t(`home.identity_${mode}`)}
+                        </button>
+                      ))}
+                    </div>
                   </div>
-                  <div className="mt-1.5 truncate text-[24px] font-semibold tracking-tight text-ink sm:text-[26px]">
-                    {device.device_name || device.device_id}
+                  <div className="mt-1.5 flex items-center gap-2">
+                    <div
+                      className={
+                        'min-w-0 flex-1 truncate text-ink ' +
+                        (identityMode === 'name'
+                          ? 'text-[24px] font-semibold tracking-tight sm:text-[26px]'
+                          : 'font-mono text-[21px] tracking-tight sm:text-[23px]')
+                      }
+                    >
+                      {identityValue}
+                    </div>
+                    {identityMode === 'id' && serverInfo?.registered ? (
+                      <span
+                        className={
+                          serverInfo.online ? 'chip chip-on' : 'chip'
+                        }
+                      >
+                        {serverInfo.online
+                          ? t('home.serverOnline')
+                          : t('home.serverOffline')}
+                      </span>
+                    ) : null}
+                    {identityCopyable ? (
+                      <button
+                        type="button"
+                        onClick={() => copy('identity', identityValue)}
+                        className="btn btn-quiet h-8 w-8 shrink-0 !px-0"
+                        title={t('home.copy')}
+                        aria-label={t('home.copy')}
+                      >
+                        {copied === 'identity' ? (
+                          <Check size={14} className="text-accent" />
+                        ) : (
+                          <Copy size={14} />
+                        )}
+                      </button>
+                    ) : null}
                   </div>
-                  <div className="mt-1 font-mono text-[11px] text-muted">
-                    {device.host}:{device.port}
-                  </div>
+                  {identityMode === 'ip' && !allowRemote ? (
+                    <div className="mt-2 flex flex-wrap items-center gap-2 rounded-lg border border-warn/35 bg-warn/10 px-3 py-2 text-[11px] text-warn">
+                      <span className="min-w-0 flex-1">
+                        {t('home.ipDisabledHint')}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setSettingsOpen(true)}
+                        className="btn h-6 shrink-0 px-2 text-[10px]"
+                      >
+                        {t('home.enableIp')}
+                      </button>
+                    </div>
+                  ) : null}
+                  {identityMode === 'id' && !serverInfo?.registered ? (
+                    <div className="mt-2 text-[11px] text-muted">
+                      {t('home.idNotRegistered')}
+                    </div>
+                  ) : null}
+                  {identityMode === 'ip' && allowRemote && !localIp ? (
+                    <div className="mt-2 text-[11px] text-warn">
+                      {t('home.ipUnavailable')}
+                    </div>
+                  ) : null}
                 </div>
 
                 {device.code ? (
@@ -469,47 +573,7 @@ export function HomeView() {
                   />
                 </div>
 
-                {serverState?.server?.registered ? (
-                  <div className="mt-3 flex flex-wrap items-center gap-2 rounded-xl border border-line-soft bg-panel/40 px-3 py-2">
-                    <Server size={12} className="text-accent" />
-                    <span className="text-[10px] uppercase tracking-[0.16em] text-muted">
-                      {t('home.serverId')}
-                    </span>
-                    <span className="font-mono text-[12px] text-ink">
-                      {serverState.server.display_id ||
-                        serverState.server.device_id}
-                    </span>
-                    <span
-                      className={
-                        serverState.server.online ? 'chip chip-on' : 'chip'
-                      }
-                    >
-                      {serverState.server.online
-                        ? t('home.serverOnline')
-                        : t('home.serverOffline')}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        copy(
-                          'server',
-                          serverState.server?.display_id ||
-                            serverState.server?.device_id ||
-                            '',
-                        )
-                      }
-                      className="ml-auto grid h-6 w-6 place-items-center rounded text-muted transition hover:bg-panel hover:text-ink"
-                      title={t('home.copy')}
-                      aria-label={t('home.copy')}
-                    >
-                      {copied === 'server' ? (
-                        <Check size={12} className="text-accent" />
-                      ) : (
-                        <Copy size={12} />
-                      )}
-                    </button>
-                  </div>
-                ) : null}
+
 
                 <div className="mt-5 flex flex-wrap items-center gap-2">
                   {localMode ? (

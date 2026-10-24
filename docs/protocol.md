@@ -572,4 +572,5 @@ molink-core [--host <addr>] [--port <n>] [--http3-port <n>] [--quic-port <n>]
 - 通过设备 ID 连接：客户端使用已配置的 server URL 请求
   `GET <server>/v1/devices?id=<ID>`，拿到 `address`/`peer_ip`/`port`/`name` 后按正常的直连
   会话流程鉴权；目录只做寻址，不转发媒体。
-- 当前核心的目录客户端只支持 `http://`；公网部署应在反向代理终止 TLS，后续版本再补客户端 TLS。
+- 目录客户端支持 `https://`：使用系统信任库，或在设置中提供 `server_ca`（PEM 路径）
+  以信任私有 CA。服务端用 `--tls-cert/--tls-key` 开启 TLS，TLS 上只宣告 HTTP/1.1。
