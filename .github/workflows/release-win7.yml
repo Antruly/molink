@@ -79,6 +79,31 @@ jobs:
             -Version $version `
             -Out "$PWD\build\package"
 
+      - name: Smoke test the packaged core
+        shell: pwsh
+        run: |
+          $exe = 'build\molink-win7-x86\molink-core.exe'
+          & $exe --version
+          if ($LASTEXITCODE -ne 0) { throw 'molink-core --version failed' }
+          $out = Join-Path $env:RUNNER_TEMP 'core.out'
+          $err = Join-Path $env:RUNNER_TEMP 'core.err'
+          $p = Start-Process $exe `
+            -ArgumentList '--host 127.0.0.1 --port 0 --no-capture --no-input --print-ready' `
+            -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
+          $ready = $false
+          for ($i = 0; $i -lt 40; $i++) {
+            Start-Sleep -Milliseconds 250
+            if ((Test-Path $out) -and ((Get-Content $out -Raw) -match '"event":"ready"')) {
+              $ready = $true
+              break
+            }
+          }
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          if (-not $ready) {
+            Get-Content $out, $err -ErrorAction SilentlyContinue
+            throw 'the packaged core did not report ready'
+          }
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
