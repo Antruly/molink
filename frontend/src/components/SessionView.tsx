@@ -449,31 +449,16 @@ export function SessionView({
 
   const normalize = (clientX: number, clientY: number) => {
     const element = surfaceRef.current
-    if (!element || !welcome) return null
-    const screenW = welcome.tiles.screen_w
-    const screenH = welcome.tiles.screen_h
-    if (screenW <= 0 || screenH <= 0) return null
-
-    let nx = 0
-    let ny = 0
-    if (displayMode === 'actual' || displayMode === 'fill') {
-      // Actual size scrolls and fill stretches, so the canvas rect itself is
-      // the image; the scroll offset is already included in that rect.
-      const canvas = element.querySelector('canvas')
-      const rect = canvas?.getBoundingClientRect()
-      if (!rect || rect.width <= 0 || rect.height <= 0) return null
-      nx = (clientX - rect.left) / rect.width
-      ny = (clientY - rect.top) / rect.height
-    } else {
-      const rect = element.getBoundingClientRect()
-      const scale = Math.min(rect.width / screenW, rect.height / screenH)
-      const drawnWidth = screenW * scale
-      const drawnHeight = screenH * scale
-      const offsetX = (rect.width - drawnWidth) / 2
-      const offsetY = (rect.height - drawnHeight) / 2
-      nx = (clientX - rect.left - offsetX) / drawnWidth
-      ny = (clientY - rect.top - offsetY) / drawnHeight
-    }
+    if (!element) return null
+    // TileCanvas sizes the canvas element to exactly the painted image (fit),
+    // the stretched area (fill) or its intrinsic size (actual), so its rect is
+    // the one rectangle that is correct in every mode. Scroll offsets in
+    // actual mode are already included in getBoundingClientRect().
+    const canvas = element.querySelector('canvas')
+    const rect = canvas?.getBoundingClientRect()
+    if (!rect || rect.width <= 0 || rect.height <= 0) return null
+    const nx = (clientX - rect.left) / rect.width
+    const ny = (clientY - rect.top) / rect.height
     if (nx < 0 || nx > 1 || ny < 0 || ny > 1) return null
     return { x: Number(nx.toFixed(5)), y: Number(ny.toFixed(5)) }
   }

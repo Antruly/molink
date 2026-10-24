@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { FrameFlag, type Frame } from '../lib/protocol'
 import { expandTile, tilePixelKind } from '../lib/tiles'
 
@@ -24,6 +24,22 @@ export function TileCanvas({
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const backRef = useRef<HTMLCanvasElement | null>(null)
+  const wrapRef = useRef<HTMLDivElement>(null)
+  // Object-fit on a canvas is unreliable in WebKitGTK; size the element
+  // explicitly so the painted image, the input mapping and the cursor overlay
+  // all use the same rectangle.
+  const [box, setBox] = useState({ width: 0, height: 0 })
+
+  useEffect(() => {
+    const element = wrapRef.current
+    if (!element) return
+    const update = () =>
+      setBox({ width: element.clientWidth, height: element.clientHeight })
+    update()
+    const observer = new ResizeObserver(update)
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [])
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -66,21 +82,42 @@ export function TileCanvas({
     context.drawImage(back, 0, 0)
   }, [frame])
 
+  if (mode === 'actual') {
+    return (
+      <canvas
+        ref={canvasRef}
+        className="block max-w-none"
+        style={
+          frame ? { width: frame.screenW, height: frame.screenH } : undefined
+        }
+        aria-label="Remote screen"
+      />
+    )
+  }
+
+  const fitScale =
+    mode === 'fit' && frame && box.width > 0 && box.height > 0
+      ? Math.min(box.width / frame.screenW, box.height / frame.screenH)
+      : 0
+  const style =
+    mode === 'fit'
+      ? {
+          width: frame ? Math.round(frame.screenW * fitScale) : 0,
+          height: frame ? Math.round(frame.screenH * fitScale) : 0,
+        }
+      : undefined
+
   return (
-    <canvas
-      ref={canvasRef}
-      className={
-        mode === 'actual'
-          ? 'block max-w-none'
-          : 'h-full w-full ' +
-            (mode === 'fill' ? 'object-fill' : 'object-contain')
-      }
-      style={
-        mode === 'actual' && frame
-          ? { width: frame.screenW, height: frame.screenH }
-          : undefined
-      }
-      aria-label="Remote screen"
-    />
+    <div
+      ref={wrapRef}
+      className="relative flex h-full w-full items-center justify-center overflow-hidden"
+    >
+      <canvas
+        ref={canvasRef}
+        className={mode === 'fill' ? 'block h-full w-full' : 'block'}
+        style={style}
+        aria-label="Remote screen"
+      />
+    </div>
   )
 }
