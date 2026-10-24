@@ -20,8 +20,8 @@
 | `molink-core` HTTP/WS 后台、令牌鉴权、默认拒绝非回环连接（安全设置可热切换） | ✅ |
 | MOLK 瓦片帧包（C++ + TS）、增量帧、关键帧恢复 | ✅ 36 项协议测试 |
 | Linux 抓屏/输入/光标/剪贴板 | ✅ X11 + XShm + XDamage · XTEST · XFixes |
-| Windows 抓屏/输入/剪贴板 | ✅ DXGI Desktop Duplication · SendInput · CF_UNICODETEXT |
-| Windows 7 壳层 | ✅ 仅导入 Win7 API；需 Win7 SP1 + WebView2 Runtime 109（最后支持 Win7 的版本） |
+| Windows 抓屏/输入/剪贴板 | ✅ DXGI Desktop Duplication（Win8+）· GDI BitBlt 回退（Win7 x86）· SendInput · CF_UNICODETEXT |
+| Windows 7 x86 客户端 | ✅ GDI 采集 + SendInput 内核、Win32/WebView2 外壳、浏览器 UI；需 Win7 SP1，原生外壳需 WebView2 Runtime 109 |
 | macOS 抓屏/输入/剪贴板 | ✅ CoreGraphics · CGEvent · NSPasteboard |
 | 设备 ID / 验证码（持久化，默认隐藏） | ✅ 令牌保存在配置目录 |
 | 本机免验证 / 远程验证码登录 | ✅ 回环免验证；非本机必须验证 |
@@ -231,6 +231,12 @@ python3 tools/bench_quality.py http://127.0.0.1:28418 --token <ready-token>
 - macOS：Apple Silicon 与 Intel 的 `.dmg`
 
 桌面端不发布 zip。
+
+Windows 7 x86（32 位）是独立预览线：推送 `win7-x86-v*` 标签触发
+`.github/workflows/release-win7.yml`，产物为 `moLink-<版本>-win7-x86.zip` 和
+`moLink-<版本>-win7-x86-setup.exe`，也可以手动触发工作流。构建方法、依赖
+（libuvcpp Win7 MinGW kit + GCC 13）和已知限制见
+[docs/win7-x86.md](docs/win7-x86.md)。
 
 服务端已拆分到独立仓库
 [Antruly/molink-server](https://github.com/Antruly/molink-server)，在该仓库推送

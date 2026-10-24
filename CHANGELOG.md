@@ -15,6 +15,9 @@
   「无此域码」
 - UI 偏好（界面模式、已保存设备、最近连接）持久化到核心的 `ui.json`，核心端口每次
   启动变化也不会丢失
+- Windows 7 x86（32 位）预览客户端：GDI 采集 + SendInput 内核、Win32/WebView2 外壳
+  与浏览器 UI 启动器、可选安全桌面服务；提供 Inno Setup 安装器与便携 zip，并新增
+  `release-win7.yml`（`win7-x86-v*` 标签）构建工作流
 
 ### Changed
 

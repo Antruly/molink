@@ -106,6 +106,33 @@ Win7 上如果服务端使用自签证书，需要把 CA PEM 放到本机并在 
 - 服务/helper（`molink-service.exe` / `molink-helper.exe`）同样用 i686 工具链
   构建，才能支持锁屏/登录页采集。
 
+## 自动化构建
+
+仓库里的 `packaging/windows/build-win7-x86.ps1` 封装了完整流程（libuvcpp full、
+core、shell、service/helper、打包、Inno Setup）：
+
+```powershell
+./packaging/windows/build-win7-x86.ps1 `
+  -Kit C:\path\libuvcpp-1.8.3-mingw32 `
+  -Gcc C:\path\i686-13.2.0-posix-dwarf-msvcrt `
+  -WebView2 C:\path\wv2 -Version 0.8.1 -Out build\package
+```
+
+`.github/workflows/release-win7.yml` 在 `win7-x86-v*` 标签或手动触发时下载
+libuvcpp kit、GCC 13、nlohmann/json 和 WebView2 SDK，调用该脚本并上传 zip 与
+安装器；标签构建还会创建对应的 Release。
+
+## 已验证状态（2026-10-25）
+
+- Win7 控制台会话：GDI 采集 1024×768、SendInput、32×32 RGBA 光标与
+  `cursor-position` 消息、真实 129 KB 关键帧。
+- 目录注册/心跳/域组（TLS）和 ID 解析通过；WS 欢迎与画面帧通过。
+- Win7 测试机没有声卡设备，欢迎消息里 `audio=false` 是预期行为。
+- 原生 WebView2 外壳已编译；测试机没有 WebView2 Runtime 109，因此用 Firefox
+  ESR 115 的浏览器 UI 验证。
+- 入站 28418 需要在管理员权限下运行 `install-firewall.cmd` 或使用安装器的
+  “允许防火墙”任务。
+
 ## 已知问题
 
 1. **kit 自带 GCC 8.1 的 `std::filesystem` 不可用**：`std::filesystem::path` 在
