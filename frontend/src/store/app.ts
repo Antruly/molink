@@ -73,6 +73,8 @@ interface AppState {
   qualityWatermark: boolean
   qualityMode: QualityMode
   settingsOpen: boolean
+  /// The native shell window is fullscreen and the app chrome is hidden.
+  immersive: boolean
   authPhase: AuthPhase
   localMode: boolean
   token: string
@@ -92,6 +94,7 @@ interface AppState {
   setQualityWatermark: (enabled: boolean) => void
   setQualityMode: (mode: QualityMode) => void
   setSettingsOpen: (open: boolean) => void
+  setImmersive: (value: boolean) => void
   boot: () => Promise<void>
   refreshState: () => Promise<void>
   authenticate: (code: string) => Promise<boolean>
@@ -237,7 +240,15 @@ export const useAppStore = create<AppState>((set, get) => {
   const remember = (host: string, port: number, label: string,
                     token: string, saveToken: boolean): void => {
     const recent: RecentConnection = { host, port, label, at: Date.now() }
-    if (saveToken && token.trim() !== '') recent.token = token.trim()
+    const previous = get().recents.find(
+      (item) => item.host === host && item.port === port,
+    )
+    if (saveToken && token.trim() !== '') {
+      recent.token = token.trim()
+    } else if (!saveToken && previous?.token) {
+      // A view-only or popout connection must not erase a saved code.
+      recent.token = previous.token
+    }
     const recents = [
       recent,
       ...get().recents.filter(
@@ -253,6 +264,7 @@ export const useAppStore = create<AppState>((set, get) => {
     qualityWatermark: readStorage(QUALITY_KEY) === '1',
     qualityMode: initialQualityMode(),
     settingsOpen: false,
+    immersive: false,
     authPhase: 'booting',
     localMode: false,
     token: '',
@@ -289,6 +301,7 @@ export const useAppStore = create<AppState>((set, get) => {
     },
 
     setSettingsOpen: (open) => set({ settingsOpen: open }),
+    setImmersive: (value) => set({ immersive: value }),
 
     boot: async () => {
       set({ authPhase: 'booting', stateError: null })

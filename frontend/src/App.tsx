@@ -44,6 +44,7 @@ export default function App() {
   const refreshState = useAppStore((state) => state.refreshState)
   const touchActivity = useAppStore((state) => state.touchActivity)
   const createSession = useAppStore((state) => state.createSession)
+  const immersive = useAppStore((state) => state.immersive)
   const created = useRef(false)
 
   const popout =
@@ -102,7 +103,10 @@ export default function App() {
   }, [authPhase, touchActivity])
 
   useEffect(() => {
-    if (!popout || authPhase !== 'ready' || created.current) return
+    // A popout only needs the remote connection parameters. Waiting for the
+    // local UI to finish booting (and to pass its own auth gate) made a
+    // remote popout show the local login page instead of the session.
+    if (!popout || created.current) return
     created.current = true
     const params = new URLSearchParams(window.location.search)
     const token = params.get('token') ?? ''
@@ -116,7 +120,7 @@ export default function App() {
       false,
       token === '',
     )
-  }, [popout, authPhase, createSession])
+  }, [popout, createSession])
 
   const ready = authPhase === 'ready'
   const active = tabs.find((tab) => tab.id === activeTabId) ?? null
@@ -124,19 +128,29 @@ export default function App() {
 
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-canvas text-ink">
-      <TitleBar />
+      {immersive ? null : <TitleBar />}
       <ResizeFrame />
       <AccessRequestDialog />
       <ServicePrompt />
 
-      {authPhase === 'booting' ? (
+      {popout ? (
+        <>
+          <main className="flex min-h-0 flex-1 flex-col">
+            {active ? (
+              <SessionView key={active.id} tab={active} popout />
+            ) : (
+              <PopoutFallback />
+            )}
+          </main>
+        </>
+      ) : authPhase === 'booting' ? (
         <BootSplash />
       ) : !ready ? (
         <AuthGate />
       ) : (
         <>
-          {popout ? null : <AppHeader showHome />}
-          {popout ? null : <TabBar />}
+          {popout || immersive ? null : <AppHeader showHome />}
+          {popout || immersive ? null : <TabBar />}
           <main className="flex min-h-0 flex-1 flex-col">
             {popout ? (
               active ? (

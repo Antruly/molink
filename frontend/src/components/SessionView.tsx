@@ -151,6 +151,7 @@ export function SessionView({
   const setControlEnabled = useAppStore((state) => state.setControlEnabled)
   const closeTab = useAppStore((state) => state.closeTab)
   const createSession = useAppStore((state) => state.createSession)
+  const setImmersive = useAppStore((state) => state.setImmersive)
 
   const welcome = tab.welcome
   const synthetic = welcome?.tiles.synthetic === true
@@ -535,19 +536,42 @@ export function SessionView({
 
   const toggleFullscreen = () => {
     const next = !isFullscreen
-    // Element fullscreen hides the app header/title bar and gives the session
-    // the whole viewport; the native action also removes the window frame and
-    // system panels when running in the desktop shell.
-    if (document.fullscreenElement) {
-      void document.exitFullscreen()
-    } else if (next) {
-      void sessionRootRef.current?.requestFullscreen().catch(() => undefined)
-    }
     if (shellInfo.enabled) {
+      // The native window is the fullscreen surface. Requesting HTML element
+      // fullscreen as well made WebKitGTK and the shell fight over the window
+      // state, which left the canvas offset after the transition.
       windowAction('fullscreen')
       setShellFullscreen(next)
+      setImmersive(next)
+    } else {
+      // A browser has no native window to toggle; the fullscreen element also
+      // hides the app chrome.
+      if (document.fullscreenElement) {
+        void document.exitFullscreen()
+      } else if (next) {
+        void sessionRootRef.current?.requestFullscreen().catch(() => undefined)
+      }
     }
+    // The window manager resizes the WebView asynchronously. Re-measure once
+    // more after the allocation has settled so the canvas and cursor overlay
+    // use the new surface size immediately.
+    window.setTimeout(() => {
+      window.dispatchEvent(new Event('resize'))
+      const element = surfaceRef.current
+      if (element) {
+        setSurfaceSize({
+          width: element.clientWidth,
+          height: element.clientHeight,
+        })
+      }
+    }, 200)
   }
+
+  // Leaving the session (tab closed, disconnect) must not leave the window in
+  // fullscreen or the chrome hidden.
+  useEffect(() => {
+    return () => setImmersive(false)
+  }, [setImmersive])
 
   const changeDisplayMode = (mode: DisplayMode) => {
     setDisplayMode(mode)
