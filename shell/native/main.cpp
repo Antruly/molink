@@ -417,12 +417,25 @@ void apply_window_shape(GtkWidget* widget) {
 /// allocation (the rest of the window stays transparent). Re-allocating it
 /// from the window's own allocation closes that gap.
 void force_child_allocate(GtkWidget* window) {
-  GtkAllocation allocation;
-  gtk_widget_get_allocation(window, &allocation);
-  if (allocation.width <= 0 || allocation.height <= 0) return;
   GtkWidget* child = gtk_bin_get_child(GTK_BIN(window));
   if (child == nullptr) return;
-  GtkAllocation child_allocation = {0, 0, allocation.width, allocation.height};
+  // gtk_widget_get_allocation() can still report the pre-maximize size at
+  // this point; the GdkWindow already has the size the WM gave us.
+  int width = 0;
+  int height = 0;
+  GdkWindow* gdk_window = gtk_widget_get_window(window);
+  if (gdk_window != nullptr) {
+    width = gdk_window_get_width(gdk_window);
+    height = gdk_window_get_height(gdk_window);
+  }
+  if (width <= 0 || height <= 0) {
+    GtkAllocation allocation;
+    gtk_widget_get_allocation(window, &allocation);
+    width = allocation.width;
+    height = allocation.height;
+  }
+  if (width <= 0 || height <= 0) return;
+  GtkAllocation child_allocation = {0, 0, width, height};
   gtk_widget_size_allocate(child, &child_allocation);
 }
 
@@ -453,12 +466,14 @@ gboolean on_window_state(GtkWidget* widget, GdkEventWindowState* event,
   gtk_widget_queue_draw(widget);
   // Let the WM finish the configure first, then make sure the WebView covers
   // the new client area even if GTK skipped the child reallocation.
-  g_timeout_add(150,
-                [](gpointer data) -> gboolean {
-                  force_child_allocate(GTK_WIDGET(data));
-                  return G_SOURCE_REMOVE;
-                },
-                widget);
+  for (guint delay : {150u, 500u}) {
+    g_timeout_add(delay,
+                  [](gpointer data) -> gboolean {
+                    force_child_allocate(GTK_WIDGET(data));
+                    return G_SOURCE_REMOVE;
+                  },
+                  widget);
+  }
   return FALSE;
 }
 
