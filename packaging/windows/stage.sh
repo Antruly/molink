@@ -47,5 +47,10 @@ fi
 for dll in "$(dirname "$CORE")"/*.dll; do
   [ -f "$dll" ] && cp "$dll" "$PKG/"
 done
+# OpenSSL runtime, when libuvcpp was built with TLS.
+for dll in "/c/Program Files/OpenSSL-Win64/bin"/libssl-*.dll \
+           "/c/Program Files/OpenSSL-Win64/bin"/libcrypto-*.dll; do
+  [ -f "$dll" ] && cp "$dll" "$PKG/"
+done
 
 echo "staged: $(ls "$PKG" | tr '\n' ' ')"

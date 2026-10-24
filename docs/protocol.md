@@ -222,7 +222,7 @@
   "session_id": 1,
   "protocol": 1,
   "service": "moLink Core",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "transport": "websocket",
   "tiles": {
     "codec": "deflate-bgra",
@@ -461,7 +461,7 @@ X-MoLink-Token: <session_token>
 {
   "status": "ok",
   "service": "moLink Core",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "protocol": 1,
   "pid": 12345,
   "uptime_ms": 2032,
@@ -529,7 +529,7 @@ molink-core [--host <addr>] [--port <n>] [--http3-port <n>] [--quic-port <n>]
 `--print-ready` 在开始监听后向 stdout 输出一行 JSON，壳层据此得到端口与令牌：
 
 ```json
-{"event":"ready","service":"moLink Core","version":"0.7.0","protocol":1,
+{"event":"ready","service":"moLink Core","version":"0.8.0","protocol":1,
  "pid":12345,"host":"127.0.0.1","port":28418,"token":"<32 hex>",
  "client_token":"<32 hex>","session_endpoint":"/ws/session",
  "transport":"websocket",

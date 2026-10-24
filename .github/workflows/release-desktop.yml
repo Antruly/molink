@@ -19,7 +19,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake libgtk-3-dev libwebkit2gtk-4.1-dev \
-            librsvg2-dev patchelf libuv1-dev curl rpm
+            librsvg2-dev patchelf libuv1-dev libssl-dev curl rpm
 
       - uses: pnpm/action-setup@v4
         with:
@@ -42,6 +42,7 @@ jobs:
           ./packaging/clone-retry.sh --depth 1 --branch "$REF" "${{ vars.UVCPP_REPO }}" "$RUNNER_TEMP/libuvcpp"
           cmake -S "$RUNNER_TEMP/libuvcpp" -B "$RUNNER_TEMP/libuvcpp/build" \
             -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
+            -DUVCPP_ENABLE_OPENSSL=ON \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/uvcpp"
           cmake --build "$RUNNER_TEMP/libuvcpp/build" --parallel
@@ -82,6 +83,10 @@ jobs:
           cache: pnpm
           cache-dependency-path: frontend/pnpm-lock.yaml
 
+      - name: Install OpenSSL
+        shell: pwsh
+        run: choco install openssl -y --no-progress
+
       - name: Build libuvcpp
         shell: bash
         run: |
@@ -93,6 +98,8 @@ jobs:
           ./packaging/clone-retry.sh --depth 1 --branch "$REF" "${{ vars.UVCPP_REPO }}" "$RUNNER_TEMP/libuvcpp"
           cmake -S "$RUNNER_TEMP/libuvcpp" -B "$RUNNER_TEMP/libuvcpp/build" \
             -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
+            -DUVCPP_ENABLE_OPENSSL=ON \
+            -DOPENSSL_ROOT_DIR="C:/Program Files/OpenSSL-Win64" \
             -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/uvcpp"
           cmake --build "$RUNNER_TEMP/libuvcpp/build" --config Release --parallel
           cmake --install "$RUNNER_TEMP/libuvcpp/build" --config Release

@@ -6,7 +6,7 @@ set -euo pipefail
 trap 'rm -rf "${WORK:-}"' EXIT
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
-VERSION=${VERSION:-0.7.0}
+VERSION=${VERSION:-0.8.0}
 ARCH=${ARCH:-$(dpkg --print-architecture)}
 # Stage in a real POSIX filesystem: the source tree may live on a mount that
 # ignores chmod, and dpkg-deb requires DEBIAN to be exactly 0755.
@@ -65,7 +65,7 @@ Package: molink
 Version: $VERSION
 Architecture: $ARCH
 Maintainer: moLink Contributors <molink@example.invalid>
-Depends: libgtk-3-0t64 | libgtk-3-0, libwebkit2gtk-4.1-0, libx11-6, libxext6, libxtst6, libxfixes3, libxdamage1, libxrender1, libxi6, libxkbcommon0, zlib1g, libuv1t64 | libuv1, libsqlite3-0
+Depends: libgtk-3-0t64 | libgtk-3-0, libwebkit2gtk-4.1-0, libx11-6, libxext6, libxtst6, libxfixes3, libxdamage1, libxrender1, libxi6, libxkbcommon0, zlib1g, libuv1t64 | libuv1, libsqlite3-0, libssl3t64 | libssl3
 Section: net
 Priority: optional
 Description: Web-first remote desktop

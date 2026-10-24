@@ -2,7 +2,7 @@
 
 跨平台远程桌面。Web 优先，一套后台 + 浏览器壳层，桌面端直连，移动端经服务端中转。
 
-> 版本 0.7.0 · MIT · 协议版本 1
+> 版本 0.8.0 · MIT · 协议版本 1
 
 ![主页（亮色）](docs/screenshots/home-light.png)
 ![会话页（合成测试帧）](docs/screenshots/session-light.png)
@@ -33,7 +33,8 @@
 | 瓦片 zlib 压缩（codec 5） | ✅ 真实桌面实测 94 → 7.4 Mbps |
 | Linux Wayland / PipeWire | ⏳ 回退合成帧 |
 | H.264 / AV1 + WebCodecs | ⏳ |
-| UDP 直连、WebRTC、P2P、服务端、移动端 | ⏳ 二阶段 |
+| 设备目录 / 按 ID 连接（moLink Server） | ✅ 注册/心跳/在线状态/HTTPS；桌面端已接入 |
+| 中继 / TURN、WebRTC/P2P、UDP 直连、移动端 | ⏳ 二阶段后续 |
 
 ## 架构
 
@@ -118,9 +119,9 @@ cmake --build shell/native/build --parallel
 生成 Linux 安装包：
 
 ```bash
-./packaging/linux/build-deb.sh       # build/package/molink_0.7.0_amd64.deb
-./packaging/linux/build-appimage.sh  # build/package/moLink-0.7.0-x86_64.AppImage
-./packaging/linux/build-rpm.sh       # build/package/molink-0.7.0-1.x86_64.rpm
+./packaging/linux/build-deb.sh       # build/package/molink_0.8.0_amd64.deb
+./packaging/linux/build-appimage.sh  # build/package/moLink-0.8.0-x86_64.AppImage
+./packaging/linux/build-rpm.sh       # build/package/molink-0.8.0-1.x86_64.rpm
 ```
 
 Windows（需 WebView2 SDK、Inno Setup 6 与 NSIS）与 macOS（`.app` + `.dmg`）的构建步骤见

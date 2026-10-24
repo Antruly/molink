@@ -3,7 +3,7 @@
 !include "MUI2.nsh"
 
 !ifndef VERSION
-  !define VERSION "0.7.0"
+  !define VERSION "0.8.0"
 !endif
 !ifndef PKG_DIR
   !error "PKG_DIR must point at the staged package directory"

@@ -4,7 +4,7 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
-VERSION=${VERSION:-0.7.0}
+VERSION=${VERSION:-0.8.0}
 WORK=${WORK_DIR:-$(mktemp -d /tmp/molink-rpm.XXXXXX)}
 RPMBUILD="$WORK/rpmbuild"
 OUT=${OUT_DIR:-$ROOT/build/package}
@@ -56,7 +56,7 @@ Release: 1
 Summary: Web-first remote desktop
 License: MIT
 BuildArch: x86_64
-Requires: gtk3, webkit2gtk4.1, libX11, libXtst, libXfixes, libXdamage, zlib, libuv, sqlite-libs
+Requires: gtk3, webkit2gtk4.1, libX11, libXtst, libXfixes, libXdamage, zlib, libuv, sqlite-libs, openssl-libs
 
 %description
 moLink captures the screen, streams tiled frames over a local WebSocket and

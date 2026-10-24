@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.8.0] — 2026-10-24
 
 ### Added
 
@@ -16,6 +16,9 @@
 - 服务端支持原生 HTTPS（`--tls-cert/--tls-key`，TLS 上只宣告 HTTP/1.1），桌面端支持
   `https://` 服务端地址与自定义 CA（设置 → 服务端 → 自定义 CA）
 - 安全设置开关改为即时生效，只有计算机名称修改需要点“应用”
+- 发布包启用 OpenSSL：Linux deb/rpm 声明 libssl 依赖，AppImage 打包 libssl/libcrypto，
+  Windows 安装包/便携版附带 libssl/libcrypto DLL；桌面客户端可使用 HTTPS 服务端
+  （macOS 暂未启用，避免 dmg 的 OpenSSL 运行时捆绑）
 
 ### Fixed
 

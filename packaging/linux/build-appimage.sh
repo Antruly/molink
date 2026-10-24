@@ -4,7 +4,7 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
-VERSION=${VERSION:-0.7.0}
+VERSION=${VERSION:-0.8.0}
 BUILD=${BUILD_DIR:-$ROOT/build/appimage}
 APPDIR="$BUILD/AppDir"
 TOOLS="$ROOT/build/tools"
@@ -31,6 +31,11 @@ if [ -n "$UVCPP_LIB_DIR" ] && [ -d "$UVCPP_LIB_DIR" ]; then
     cp -P "$UVCPP_LIB_DIR"/$pattern "$APPDIR/usr/lib/" 2>/dev/null || true
   done
 fi
+# libuvcpp links OpenSSL when TLS is enabled; keep the AppImage self-contained.
+OPENSSL_LIB_DIR=$(pkg-config --variable=libdir openssl 2>/dev/null || echo /usr/lib/x86_64-linux-gnu)
+for pattern in 'libssl.so*' 'libcrypto.so*'; do
+  cp -P "$OPENSSL_LIB_DIR"/$pattern "$APPDIR/usr/lib/" 2>/dev/null || true
+done
 cp "$ROOT/shell/assets/icons/icon.png" "$APPDIR/molink.png"
 cp "$ROOT/shell/assets/icons/icon.png" "$APPDIR/usr/share/molink/molink.png"
 cp "$ROOT/shell/assets/icons/icon.png" "$APPDIR/usr/share/icons/hicolor/256x256/apps/molink.png"
