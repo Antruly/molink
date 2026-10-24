@@ -381,6 +381,7 @@ export function FileTransferPanel({
 
   return (
     <div
+      data-local-input="true"
       className="absolute inset-y-0 right-0 z-40 flex w-[min(94vw,380px)] flex-col border-l border-line bg-surface/95 shadow-2xl backdrop-blur-md"
       onPointerDown={(event) => event.stopPropagation()}
       onPointerUp={(event) => event.stopPropagation()}

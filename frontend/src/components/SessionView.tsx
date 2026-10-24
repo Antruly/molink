@@ -61,6 +61,56 @@ function formatBandwidth(bytesPerSecond: number): string {
   return `${bytesPerSecond} B/s`
 }
 
+/// Keys typed into local UI (chat, settings, forms) must stay local. Panels
+/// that contain local controls mark themselves with `data-local-input` so a
+/// focused button inside them is covered too.
+function isLocalInputTarget(target: EventTarget | null): boolean {
+  const element = target as HTMLElement | null
+  if (element === null || typeof element.closest !== 'function') return false
+  const tag = element.tagName
+  if (
+    tag === 'INPUT' ||
+    tag === 'TEXTAREA' ||
+    tag === 'SELECT' ||
+    element.isContentEditable
+  ) {
+    return true
+  }
+  return element.closest('[data-local-input]') !== null
+}
+
+type OrientationLockApi = {
+  lock?: (orientation: string) => Promise<void>
+  unlock?: () => void
+}
+
+/// Mobile fullscreen should be landscape. The API is best-effort: it needs an
+/// active fullscreen element and is missing on iOS Safari, where the request
+/// simply stays a no-op.
+function lockLandscapeOrientation(): void {
+  try {
+    const orientation = window.screen
+      ?.orientation as unknown as OrientationLockApi | undefined
+    if (orientation && typeof orientation.lock === 'function') {
+      void orientation.lock('landscape').catch(() => undefined)
+    }
+  } catch {
+    // Orientation locking is optional.
+  }
+}
+
+function unlockScreenOrientation(): void {
+  try {
+    const orientation = window.screen
+      ?.orientation as unknown as OrientationLockApi | undefined
+    if (orientation && typeof orientation.unlock === 'function') {
+      orientation.unlock()
+    }
+  } catch {
+    // Ignore.
+  }
+}
+
 /// `KeyboardEvent.code` is reliable on physical keyboards but mobile virtual
 /// keyboards often report `Unidentified`; fall back to the printable key.
 function keyToCode(key: string): string {
@@ -227,9 +277,22 @@ export function SessionView({
     moved: boolean
   } | null>(null)
   const quickSuppressClick = useRef(false)
+  // The fullscreen floating toolbar has its own position so dragging it does
+  // not move the compact quick handle used outside fullscreen.
+  const [fullPos, setFullPos] = useState<{ x: number; y: number } | null>(null)
+  const fullDrag = useRef<{
+    offsetX: number
+    offsetY: number
+    startX: number
+    startY: number
+    moved: boolean
+  } | null>(null)
   const [mobilePos, setMobilePos] = useState<{ x: number; y: number } | null>(
     null,
   )
+  // The touch toolbar lives behind an edge badge instead of covering the
+  // remote picture all the time.
+  const [mobileToolsOpen, setMobileToolsOpen] = useState(false)
   const mobileDockRef = useRef<HTMLDivElement>(null)
   const mobileDrag = useRef<{
     offsetX: number
@@ -739,7 +802,9 @@ export function SessionView({
     if (next) {
       // Session fullscreen is the remote picture alone. The native window is
       // also fullscreen so no OS border or taskbar is visible; the in-page
-      // chrome (toolbar, tab bar) is hidden by `immersive`.
+      // chrome (toolbar, tab bar) is hidden by `immersive`. On touch devices
+      // the toolbar collapses to its edge badge.
+      setMobileToolsOpen(false)
       setImmersive(true)
       if (shellInfo.enabled) setWindowFullscreen(true)
       else
@@ -780,6 +845,21 @@ export function SessionView({
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
   }, [isFullscreen, quickOpen, tab.controlEnabled, toggleFullscreen])
+
+  // Mobile fullscreen means landscape. The lock has to wait for the
+  // fullscreen transition; iOS Safari does not implement it and the request
+  // stays a no-op there.
+  useEffect(() => {
+    if (!isFullscreen) {
+      unlockScreenOrientation()
+      return
+    }
+    if (!touchDevice) return
+    const timer = window.setTimeout(lockLandscapeOrientation, 250)
+    return () => window.clearTimeout(timer)
+  }, [isFullscreen, touchDevice])
+
+  useEffect(() => () => unlockScreenOrientation(), [])
 
   // Leaving the session (tab closed, disconnect) must not leave the window in
   // fullscreen or the chrome hidden.
@@ -848,6 +928,52 @@ export function SessionView({
     window.setTimeout(() => {
       quickSuppressClick.current = false
     }, 0)
+  }
+
+  const fullHandleDown = (event: ReactPointerEvent<HTMLElement>) => {
+    const surface = surfaceRef.current
+    const bar = quickBarRef.current
+    if (!surface || !bar) return
+    event.preventDefault()
+    event.stopPropagation()
+    const rect = surface.getBoundingClientRect()
+    const barRect = bar.getBoundingClientRect()
+    const position = fullPos ?? {
+      x: barRect.left - rect.left,
+      y: barRect.top - rect.top,
+    }
+    fullDrag.current = {
+      offsetX: event.clientX - rect.left - position.x,
+      offsetY: event.clientY - rect.top - position.y,
+      startX: event.clientX,
+      startY: event.clientY,
+      moved: false,
+    }
+    event.currentTarget.setPointerCapture(event.pointerId)
+  }
+
+  const fullHandleMove = (event: ReactPointerEvent<HTMLElement>) => {
+    const drag = fullDrag.current
+    const surface = surfaceRef.current
+    const bar = quickBarRef.current
+    if (!drag || !surface || !bar) return
+    if (
+      !drag.moved &&
+      Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) > 4
+    ) {
+      drag.moved = true
+    }
+    const rect = surface.getBoundingClientRect()
+    const maxX = Math.max(4, rect.width - bar.offsetWidth - 4)
+    const maxY = Math.max(4, rect.height - bar.offsetHeight - 4)
+    setFullPos({
+      x: Math.min(maxX, Math.max(4, event.clientX - rect.left - drag.offsetX)),
+      y: Math.min(maxY, Math.max(4, event.clientY - rect.top - drag.offsetY)),
+    })
+  }
+
+  const fullHandleUp = () => {
+    fullDrag.current = null
   }
 
   const toggleQuickOpen = () => {
@@ -1161,6 +1287,10 @@ export function SessionView({
         : keyToCode(event.key)
     const down = (event: KeyboardEvent) => {
       if (event.repeat || event.isComposing) return
+      if (isLocalInputTarget(event.target)) return
+      // Settings and other local dialogs keep their shortcuts (Esc closes
+      // them) even when focus happens to sit on the page background.
+      if (useAppStore.getState().settingsOpen) return
       const code = codeFor(event)
       if (!code) return
       event.preventDefault()
@@ -1171,15 +1301,14 @@ export function SessionView({
       if (event.isComposing) return
       const code = codeFor(event)
       if (!code) return
+      // A remote key may be released after focus moved into a local field;
+      // still release it so the remote does not keep it held down.
+      if (isLocalInputTarget(event.target) && !keys.has(code)) return
       event.preventDefault()
       keys.delete(code)
       connection()?.sendInput({ k: 'key', code, down: false })
     }
-    window.addEventListener('keydown', down)
-    window.addEventListener('keyup', up)
-    return () => {
-      window.removeEventListener('keydown', down)
-      window.removeEventListener('keyup', up)
+    const releaseAll = () => {
       for (const code of keys) {
         connection()?.sendInput({ k: 'key', code, down: false })
       }
@@ -1188,9 +1317,43 @@ export function SessionView({
         connection()?.sendInput({ k: 'button', button, down: false })
       }
       buttons.clear()
+    }
+    // Capture phase: a focused local widget or a stopPropagation() elsewhere
+    // in the page must not swallow remote keys. The target guard above keeps
+    // chat/settings typing local.
+    window.addEventListener('keydown', down, true)
+    window.addEventListener('keyup', up, true)
+    window.addEventListener('blur', releaseAll)
+    return () => {
+      window.removeEventListener('keydown', down, true)
+      window.removeEventListener('keyup', up, true)
+      window.removeEventListener('blur', releaseAll)
+      releaseAll()
       setControlEnabled(tab.id, false)
     }
   }, [tab.controlEnabled, tab.id, setControlEnabled, connection])
+
+  // Keyboard capture is global, but focusing the surface when control starts
+  // (or when the window regains focus) keeps the remote page the active
+  // target and avoids keys landing on the surrounding chrome.
+  useEffect(() => {
+    if (!tab.controlEnabled) return
+    const focusSurface = () => {
+      const surface = surfaceRef.current
+      if (!surface) return
+      const active = document.activeElement
+      if (active === null || active === document.body) {
+        surface.focus({ preventScroll: true })
+      }
+    }
+    focusSurface()
+    const timer = window.setTimeout(focusSurface, 100)
+    window.addEventListener('focus', focusSurface)
+    return () => {
+      window.clearTimeout(timer)
+      window.removeEventListener('focus', focusSurface)
+    }
+  }, [tab.controlEnabled, tab.id])
 
   const copyFromRemote = () => {
     setActionError(null)
@@ -1655,10 +1818,26 @@ export function SessionView({
             quickOpen ? (
             <div
               ref={quickBarRef}
-              className="pointer-events-auto absolute left-1/2 top-3 z-40 flex max-w-[96vw] -translate-x-1/2 items-center gap-0.5 overflow-x-auto rounded-full border border-white/10 bg-black/70 px-2 py-1.5 text-white shadow-2xl backdrop-blur-md"
+              className={
+                'pointer-events-auto absolute z-40 flex max-w-[96vw] items-center gap-0.5 overflow-x-auto rounded-full border border-white/10 bg-black/70 px-2 py-1.5 text-white shadow-2xl backdrop-blur-md ' +
+                (fullPos ? '' : 'left-1/2 top-3 -translate-x-1/2')
+              }
+              style={fullPos ? { left: fullPos.x, top: fullPos.y } : undefined}
               onPointerDown={(event) => event.stopPropagation()}
               onPointerUp={(event) => event.stopPropagation()}
             >
+              <button
+                type="button"
+                onPointerDown={fullHandleDown}
+                onPointerMove={fullHandleMove}
+                onPointerUp={fullHandleUp}
+                onPointerCancel={fullHandleUp}
+                className="grid shrink-0 cursor-move place-items-center rounded-full px-1.5 py-1.5 text-white/50 transition hover:bg-white/10 hover:text-white"
+                title={t('session.moveToolbar')}
+                aria-label={t('session.moveToolbar')}
+              >
+                <GripHorizontal size={13} />
+              </button>
               <button
                 type="button"
                 onClick={toggleFullscreen}
@@ -1706,6 +1885,21 @@ export function SessionView({
                   <option value="auto">{t('session.qualityAuto')}</option>
                 </select>
               </label>
+              <button
+                type="button"
+                onClick={() => setQualityWatermark(!qualityWatermark)}
+                className={
+                  'shrink-0 rounded-full px-2.5 py-1.5 text-[11px] transition ' +
+                  (qualityWatermark
+                    ? 'bg-white/15 text-white'
+                    : 'text-white/50 hover:bg-white/10')
+                }
+                title={t('settings.watermark')}
+                aria-label={t('settings.watermark')}
+                aria-pressed={qualityWatermark}
+              >
+                <Activity size={13} />
+              </button>
               {inputAvailable ? (
                 <button
                   type="button"
@@ -1932,7 +2126,7 @@ export function SessionView({
                     setQualityMode(event.target.value as QualityMode)
                   }
                   aria-label={t('session.quality')}
-                  className="h-7 bg-transparent text-[11px] text-ink outline-none"
+                  className="h-7 bg-transparent text-[11px] text-ink outline-none [&>option]:bg-surface [&>option]:text-ink"
                 >
                   <option value="turbo">{t('session.qualityTurbo')}</option>
                   <option value="smooth">{t('session.qualitySmooth')}</option>
@@ -1966,7 +2160,7 @@ export function SessionView({
                       connection()?.setDisplay(Number(event.target.value))
                     }
                     aria-label={t('session.display')}
-                    className="h-7 max-w-[8rem] bg-transparent text-[11px] text-ink outline-none"
+                    className="h-7 max-w-[8rem] bg-transparent text-[11px] text-ink outline-none [&>option]:bg-surface [&>option]:text-ink"
                   >
                     {displays.map((display) => (
                       <option key={display.index} value={display.index}>
@@ -1995,7 +2189,7 @@ export function SessionView({
                       }
                     }}
                     aria-label={t('session.resolution')}
-                    className="h-7 bg-transparent text-[11px] text-ink outline-none"
+                    className="h-7 bg-transparent text-[11px] text-ink outline-none [&>option]:bg-surface [&>option]:text-ink"
                   >
                     {[
                       `${tab.frame?.screenW ?? welcome.tiles.screen_w}x${
@@ -2038,6 +2232,7 @@ export function SessionView({
 
           {callPhase !== 'idle' ? (
             <div
+              data-local-input="true"
               className="pointer-events-auto absolute left-3 top-14 z-30 flex max-w-[calc(100%-1.5rem)] items-center gap-2 rounded-full border border-line bg-surface/95 px-3 py-1.5 text-[11px] shadow-lg backdrop-blur"
               onPointerDown={(event) => event.stopPropagation()}
               onPointerUp={(event) => event.stopPropagation()}
@@ -2113,12 +2308,12 @@ export function SessionView({
 
           <div className="pointer-events-none absolute left-3 top-3 flex flex-wrap gap-1.5">
             {qualityWatermark && welcome ? (
-              <span className="rounded-md border border-line bg-surface/80 px-2 py-1 font-mono text-[10px] text-muted backdrop-blur">
+              <span className="rounded-md border border-white/15 bg-black/65 px-2 py-1 font-mono text-[10px] text-white/85 backdrop-blur">
                 {welcome.tiles.screen_w}×{welcome.tiles.screen_h}
               </span>
             ) : null}
             {qualityWatermark && welcome ? (
-              <span className="rounded-md border border-line bg-surface/80 px-2 py-1 font-mono text-[10px] uppercase text-muted backdrop-blur">
+              <span className="rounded-md border border-white/15 bg-black/65 px-2 py-1 font-mono text-[10px] uppercase text-white/85 backdrop-blur">
                 {codecLabel}
               </span>
             ) : null}
@@ -2135,7 +2330,7 @@ export function SessionView({
           </div>
 
           {qualityWatermark ? (
-            <div className="pointer-events-none absolute bottom-3 right-3 flex items-center gap-2 rounded-md border border-line bg-surface/75 px-2.5 py-1 font-mono text-[10px] text-muted backdrop-blur">
+            <div className="pointer-events-none absolute bottom-3 right-3 flex items-center gap-2 rounded-md border border-white/15 bg-black/65 px-2.5 py-1 font-mono text-[10px] text-white/80 backdrop-blur">
               <span className="text-accent">{tab.stats.fps} fps</span>
               <span>{latency}</span>
               <span>{formatBandwidth(tab.stats.bytesPerSec)}</span>
@@ -2144,6 +2339,7 @@ export function SessionView({
           ) : null}
 
           {touchDevice && inputAvailable ? (
+            mobileToolsOpen ? (
             <div
               ref={mobileDockRef}
               className={
@@ -2155,6 +2351,7 @@ export function SessionView({
               }
             >
               <div
+                data-local-input="true"
                 className="pointer-events-auto flex items-center gap-1 rounded-full border border-line bg-surface/90 p-1.5 shadow-lg backdrop-blur"
                 onPointerDown={(event) => event.stopPropagation()}
                 onPointerUp={(event) => event.stopPropagation()}
@@ -2191,6 +2388,15 @@ export function SessionView({
                   <Keyboard size={14} />
                   {t('session.virtualKeyboard')}
                 </button>
+                <button
+                  type="button"
+                  onClick={() => setMobileToolsOpen(false)}
+                  className="grid h-8 w-7 place-items-center text-muted transition hover:text-ink"
+                  title={t('session.mobileToolsHide')}
+                  aria-label={t('session.mobileToolsHide')}
+                >
+                  <X size={14} />
+                </button>
               </div>
               {virtualMouse ? (
                 <div className="pointer-events-none max-w-[70vw] rounded-md border border-line bg-surface/85 px-2 py-1 text-center text-[10px] leading-relaxed text-muted backdrop-blur">
@@ -2198,6 +2404,19 @@ export function SessionView({
                 </div>
               ) : null}
             </div>
+            ) : (
+              <button
+                type="button"
+                data-local-input="true"
+                onClick={() => setMobileToolsOpen(true)}
+                className="pointer-events-auto absolute right-0 top-1/2 z-30 flex h-14 w-9 -translate-y-1/2 items-center justify-center rounded-l-xl border border-r-0 border-line bg-surface/90 text-muted shadow-lg backdrop-blur transition hover:bg-panel hover:text-ink"
+                title={t('session.mobileTools')}
+                aria-label={t('session.mobileTools')}
+                aria-expanded={false}
+              >
+                <Settings2 size={15} />
+              </button>
+            )
           ) : null}
 
           {touchDevice ? (

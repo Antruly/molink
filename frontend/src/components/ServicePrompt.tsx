@@ -90,7 +90,10 @@ export function ServicePrompt() {
   }
 
   return (
-    <div className="fixed inset-0 z-[60] grid place-items-center bg-black/45 p-4 backdrop-blur-sm">
+    <div
+      data-local-input="true"
+      className="fixed inset-0 z-[60] grid place-items-center bg-black/45 p-4 backdrop-blur-sm"
+    >
       <div className="w-[min(92vw,30rem)] rounded-2xl border border-line bg-surface p-5 shadow-2xl">
         <div className="flex items-start gap-3">
           <ShieldCheck size={22} className="mt-0.5 shrink-0 text-accent" />

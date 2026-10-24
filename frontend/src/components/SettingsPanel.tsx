@@ -514,6 +514,7 @@ export function SettingsPanel() {
 
   return (
     <div
+      data-local-input="true"
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-4 backdrop-blur-sm"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) setOpen(false)

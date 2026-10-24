@@ -12,7 +12,10 @@ export function AccessRequestDialog() {
   if (requests.length === 0) return null
 
   return (
-    <div className="fixed inset-x-0 top-4 z-50 mx-auto w-[min(92vw,28rem)] space-y-2">
+    <div
+      data-local-input="true"
+      className="fixed inset-x-0 top-4 z-50 mx-auto w-[min(92vw,28rem)] space-y-2"
+    >
       {requests.map((request) => (
         <div
           key={request.id}

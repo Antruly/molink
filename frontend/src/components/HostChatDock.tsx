@@ -43,6 +43,7 @@ export function HostChatDock() {
   const openRef = useRef(false)
   const listRef = useRef<HTMLDivElement>(null)
   const pollRef = useRef<() => Promise<void>>(async () => {})
+  const ringingRef = useRef(false)
 
   useEffect(() => {
     openRef.current = open
@@ -100,7 +101,48 @@ export function HostChatDock() {
     return () => window.clearInterval(timer)
   }, [call?.state, call?.started_ms])
 
-  if (!localMode || immersive) return null
+  // A ringing call must reach the person at this machine even when they are
+  // in an immersive session or another app has focus. Flash the title and use
+  // a system notification when the browser allows it; the in-page card below
+  // is always shown as the fallback.
+  useEffect(() => {
+    const ringing = call?.state === 'ringing'
+    if (ringing === ringingRef.current) return
+    ringingRef.current = ringing
+    if (!ringing) return
+    const original = document.title
+    let flip = false
+    const timer = window.setInterval(() => {
+      document.title = flip
+        ? original
+        : `📞 ${t('call.incoming')} · moLink`
+      flip = !flip
+    }, 900)
+    if ('Notification' in window) {
+      try {
+        if (Notification.permission === 'granted') {
+          const notification = new Notification(t('call.incoming'), {
+            body: t('call.incomingBody'),
+            tag: 'molink-incoming-call',
+          })
+          notification.onclick = () => {
+            window.focus()
+            notification.close()
+          }
+        } else if (Notification.permission === 'default') {
+          void Notification.requestPermission()
+        }
+      } catch {
+        // Notifications are optional; the card and title still work.
+      }
+    }
+    return () => {
+      window.clearInterval(timer)
+      document.title = original
+    }
+  }, [call?.state, t])
+
+  if (!localMode) return null
 
   const callAction = async (action: 'accept' | 'decline' | 'end') => {
     if (!token) return
@@ -138,7 +180,15 @@ export function HostChatDock() {
   return (
     <>
       {call && call.state !== 'idle' ? (
-        <div className="fixed right-4 top-20 z-40 w-[min(92vw,340px)] rounded-2xl border border-accent/40 bg-surface/95 p-3 shadow-2xl backdrop-blur">
+        <div
+          data-local-input="true"
+          className={
+            'fixed z-50 w-[min(92vw,340px)] rounded-2xl border bg-surface/95 p-3 shadow-2xl backdrop-blur ' +
+            (immersive
+              ? 'left-1/2 top-4 -translate-x-1/2 border-accent/60 ring-4 ring-accent/20'
+              : 'right-4 top-20 border-accent/40')
+          }
+        >
           <div className="flex items-center gap-2">
             <span className="grid h-8 w-8 place-items-center rounded-full bg-accent-soft text-accent">
               <Phone size={15} />
@@ -199,7 +249,10 @@ export function HostChatDock() {
         </div>
       ) : null}
       {open ? (
-        <div className="fixed bottom-4 right-4 z-30 flex h-[440px] w-[min(92vw,340px)] flex-col overflow-hidden rounded-2xl border border-line bg-surface/95 shadow-2xl backdrop-blur">
+        <div
+          data-local-input="true"
+          className="fixed bottom-4 right-4 z-50 flex h-[440px] w-[min(92vw,340px)] flex-col overflow-hidden rounded-2xl border border-line bg-surface/95 shadow-2xl backdrop-blur"
+        >
           <div className="flex h-10 shrink-0 items-center gap-2 border-b border-line-soft px-3">
             <MessageSquare size={14} className="text-accent" />
             <span className="text-[12px] font-medium">{t('chat.title')}</span>
@@ -288,11 +341,12 @@ export function HostChatDock() {
       ) : (
         <button
           type="button"
+          data-local-input="true"
           onClick={() => {
             setUnread(0)
             setOpen(true)
           }}
-          className="fixed bottom-4 right-4 z-30 grid h-12 w-12 place-items-center rounded-full border border-line bg-surface text-accent shadow-xl transition hover:border-accent/50 hover:bg-panel"
+          className="fixed bottom-4 right-4 z-50 grid h-12 w-12 place-items-center rounded-full border border-line bg-surface text-accent shadow-xl transition hover:border-accent/50 hover:bg-panel"
           title={t('chat.title')}
           aria-label={t('chat.title')}
         >

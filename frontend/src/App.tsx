@@ -172,7 +172,7 @@ export default function App() {
             )}
           </main>
           <SettingsPanel />
-          {popout || immersive ? null : <HostChatDock />}
+          {popout ? null : <HostChatDock />}
         </>
       )}
     </div>

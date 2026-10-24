@@ -194,10 +194,38 @@ function writeStorage(key: string, value: string): void {
   }
 }
 
-function initialTheme(): Theme {
+/// The core listens on an ephemeral port, so every launch is a new origin and
+/// localStorage starts empty. Cookies ignore the port, so a small set of
+/// preferences is mirrored there to survive a restart.
+function readCookie(name: string): string {
+  try {
+    const prefix = `${name}=`
+    for (const part of document.cookie.split(';')) {
+      const entry = part.trim()
+      if (entry.startsWith(prefix)) {
+        return decodeURIComponent(entry.slice(prefix.length))
+      }
+    }
+  } catch {
+    // Cookies can be blocked; the in-memory default still works.
+  }
+  return ''
+}
+
+function writeCookie(name: string, value: string): void {
+  try {
+    document.cookie = `${name}=${encodeURIComponent(
+      value,
+    )}; path=/; max-age=31536000; SameSite=Lax`
+  } catch {
+    // Ignore blocked cookies.
+  }
+}
+
+export function initialTheme(): Theme {
   const forced = new URLSearchParams(window.location.search).get('theme')
   if (forced === 'light' || forced === 'dark') return forced
-  const saved = readStorage(THEME_KEY)
+  const saved = readStorage(THEME_KEY) || readCookie('molink_theme')
   if (saved === 'light' || saved === 'dark') return saved
   return window.matchMedia?.('(prefers-color-scheme: light)').matches
     ? 'light'
@@ -318,12 +346,14 @@ export const useAppStore = create<AppState>((set, get) => {
 
     setTheme: (theme) => {
       writeStorage(THEME_KEY, theme)
+      writeCookie('molink_theme', theme)
       set({ theme })
     },
 
     toggleTheme: () => {
       const theme = get().theme === 'dark' ? 'light' : 'dark'
       writeStorage(THEME_KEY, theme)
+      writeCookie('molink_theme', theme)
       set({ theme })
     },
 

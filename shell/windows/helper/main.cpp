@@ -318,7 +318,10 @@ std::string handle_line(const std::string& line, std::vector<uint8_t>& frame,
       INPUT input{};
       input.type = INPUT_MOUSE;
       input.mi.dwFlags = MOUSEEVENTF_WHEEL;
-      input.mi.mouseData = static_cast<DWORD>(dy * WHEEL_DELTA);
+      // The wire protocol says dy > 0 scrolls down, while Win32 treats a
+      // positive wheel delta as scrolling up. Keep this in step with
+      // backend/src/input/windows_input.cpp.
+      input.mi.mouseData = static_cast<DWORD>(-dy * WHEEL_DELTA);
       SendInput(1, &input, sizeof(input));
     }
     if (dx != 0) {
