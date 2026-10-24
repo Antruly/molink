@@ -122,6 +122,8 @@ export class MolinkClient {
   private ws: WebSocket | null = null
   private handlers: Partial<ClientHandlers> = {}
   private pendingFrame = false
+  private latestFrameSeq = -1
+  private lastKeyframeRequest = 0
   private pingTimer: number | null = null
   private closedByUser = false
   private hasImage = false
@@ -138,6 +140,8 @@ export class MolinkClient {
     this.closedByUser = false
     this.hasImage = false
     this.pendingFrame = false
+    this.latestFrameSeq = -1
+    this.lastKeyframeRequest = 0
     this.frameQueue = Promise.resolve()
 
     const url = `ws://${formatHost(host)}:${port}/ws/session`
@@ -364,13 +368,31 @@ export class MolinkClient {
       if (packet.type !== PacketType.frame) return
       this.pendingFrame = false
       const frame = parseFramePayload(packet.payload)
+      const keyframe = (frame.flags & FrameFlag.keyframe) !== 0
+      // A frame that spent more than a second in flight is worse than a
+      // skipped one: showing it late causes visible lag. Drop it and ask for
+      // a fresh keyframe instead.
+      if (Date.now() - packet.tsUs / 1000 > 1000) {
+        this.requestKeyframeThrottled()
+        return
+      }
+      if (frame.frameSeq > this.latestFrameSeq) {
+        this.latestFrameSeq = frame.frameSeq
+      } else if (!keyframe) {
+        // A newer frame is already queued; this delta would apply on the
+        // wrong base image.
+        this.requestKeyframeThrottled()
+        return
+      }
       // Count pulls that completed, even when the screen did not change. The
       // auto quality controller uses this as a congestion signal.
       this.handlers.onWireFrame?.()
 
       if (isDeflatedCodec(frame.codec)) {
         this.frameQueue = this.frameQueue
-          .then(() => this.deliverCompressed(frame, buffer.byteLength))
+          .then(() =>
+            this.deliverCompressed(frame, buffer.byteLength, packet.tsUs),
+          )
           .catch((error: unknown) => {
             this.handlers.onError?.(
               error instanceof Error
@@ -393,7 +415,15 @@ export class MolinkClient {
   private async deliverCompressed(
     frame: Frame,
     byteLength: number,
+    tsUs: number,
   ): Promise<void> {
+    if ((frame.flags & FrameFlag.keyframe) === 0) {
+      if (frame.frameSeq < this.latestFrameSeq ||
+          Date.now() - tsUs / 1000 > 1000) {
+        this.requestKeyframeThrottled()
+        return
+      }
+    }
     const bytesPerPixel = codecBytesPerPixel(frame.codec)
     if (bytesPerPixel === 0) throw new Error('unsupported deflate codec')
     const tiles = await Promise.all(
@@ -431,6 +461,14 @@ export class MolinkClient {
     }
     ping()
     this.pingTimer = window.setInterval(ping, 3000)
+  }
+
+  /// Coalesces keyframe requests while stale frames are being dropped.
+  private requestKeyframeThrottled(): void {
+    const now = performance.now()
+    if (now - this.lastKeyframeRequest < 300) return
+    this.lastKeyframeRequest = now
+    this.requestKeyframe()
   }
 
   private stopPing(): void {

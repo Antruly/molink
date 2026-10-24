@@ -367,11 +367,24 @@ void send_capture_frame(session_transport* transport,
     return;
   }
 
+  const uint64_t now_us = static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::microseconds>(
+          std::chrono::system_clock::now().time_since_epoch())
+          .count());
   for (uint32_t seq = static_cast<uint32_t>(last) + 1; seq <= latest->seq;
        ++seq) {
     const std::shared_ptr<const captured_frame> frame = opt.capture->find(seq);
     if (!frame) {
       // Evicted from history. Resynchronize from a fresh keyframe.
+      session->has_image = false;
+      session->last_capture_seq = -1;
+      opt.capture->request_keyframe();
+      send_empty_frame(transport, session, latest->width, latest->height, false);
+      return;
+    }
+    if (now_us > frame->ts_us && now_us - frame->ts_us > 1000000ULL) {
+      // A frame that waited over a second is stale; sending the backlog only
+      // adds latency. Skip to a fresh keyframe instead.
       session->has_image = false;
       session->last_capture_seq = -1;
       opt.capture->request_keyframe();
