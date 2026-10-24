@@ -57,6 +57,7 @@ add_library(molink_server_core STATIC
   src/security/cn_ranges.cpp
   src/security/rate_limiter.cpp
   src/auth/password.cpp
+  src/auth/auth_service.cpp
 )
 target_include_directories(molink_server_core PUBLIC src)
 target_link_libraries(molink_server_core PUBLIC
@@ -86,6 +87,10 @@ if(BUILD_TESTING)
   add_executable(molink-server-repository-test tests/repository_test.cpp)
   target_link_libraries(molink-server-repository-test PRIVATE molink_server_core)
   add_test(NAME server-repositories COMMAND molink-server-repository-test)
+
+  add_executable(molink-server-auth-test tests/auth_test.cpp)
+  target_link_libraries(molink-server-auth-test PRIVATE molink_server_core)
+  add_test(NAME server-auth COMMAND molink-server-auth-test)
 endif()
 
 # libuvcpp's shared library needs libllhttp from its own directory and carries
@@ -97,7 +102,8 @@ if(UNIX AND NOT APPLE)
     string(APPEND _uvp_rpath ":${_uvp_prefix}/lib")
   endif()
   foreach(_exe molink-server molink-server-foundation-test
-          molink-server-unit-test molink-server-repository-test)
+          molink-server-unit-test molink-server-repository-test
+          molink-server-auth-test)
     if(TARGET ${_exe})
       target_link_options(${_exe} PRIVATE "LINKER:--disable-new-dtags"
                                            "LINKER:-rpath,${_uvp_rpath}")
