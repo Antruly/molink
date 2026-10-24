@@ -34,7 +34,12 @@ export function AuthGate() {
     setBusy(true)
     const ok = await authenticate(code.trim())
     setBusy(false)
-    if (!ok) setCode('')
+    if (!ok) {
+      // Keep the entered code so a typo can be corrected instead of retyped.
+      const input = document.getElementById('auth-code') as HTMLInputElement | null
+      input?.focus()
+      input?.select()
+    }
   }
 
   const errorText = stateError
@@ -97,6 +102,7 @@ export function AuthGate() {
             </span>
             <div className="relative">
               <input
+                id="auth-code"
                 value={code}
                 onChange={(event) => setCode(event.target.value)}
                 type={show ? 'text' : 'password'}

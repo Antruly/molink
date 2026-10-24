@@ -130,8 +130,21 @@ std::string desktop_json() {
 // GDI binds the screen DC to the desktop the thread first uses. After a
 // Winlogon <-> Default switch the old thread's DC is stale, so capture again
 // on a fresh thread that binds to the current input desktop.
+/// A remote viewer should never see a black screen because the monitor went to
+/// sleep. Throttled: capture runs up to 8 times a second.
+void ensure_display_awake() {
+  static std::atomic<uint64_t> last{0};
+  const uint64_t now = GetTickCount64();
+  if (now - last.load() < 5000) return;
+  last.store(now);
+  SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED |
+                          ES_SYSTEM_REQUIRED);
+  SendNotifyMessageW(HWND_BROADCAST, WM_SYSCOMMAND, SC_MONITORPOWER, -1);
+}
+
 bool capture_on_thread(std::vector<uint8_t>& out, int& width, int& height,
                        std::string& err) {
+  ensure_display_awake();
   HDC screen = GetDC(nullptr);
   if (screen == nullptr) {
     err = "GetDC failed";

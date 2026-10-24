@@ -41,6 +41,11 @@
     "code": "验证码",
     "rememberCode": "在本机保存此授权码（仅浏览器本地）",
     "connect": "连接",
+    "requestAccess": "发送远程请求",
+    "requestAccessHint": "无需验证码：由被控端确认本次连接（60 秒内有效）",
+    "connectSaved": "点击直接连接（使用已保存的验证码）",
+    "prefillHint": "填入表单（没有保存的验证码）",
+    "prefill": "填入表单",
     "useLocalCode": "使用本机验证码",
     "idNote": "同网络内可直接连接；通过设备 ID 连接需要 moLink Server（二阶段）。",
     "recent": "最近连接",
@@ -143,6 +148,9 @@
     "qualityHigh": "清晰",
     "qualityAuto": "自适应",
     "waitingApproval": "等待被控端同意…",
+    "cancelRequest": "取消请求",
+    "requestAccess": "发送远程请求",
+    "ctrlAltDel": "Ctrl+Alt+Del",
     "resolution": "分辨率"
   },
   "stats": {

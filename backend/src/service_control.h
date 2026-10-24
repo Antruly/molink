@@ -23,6 +23,9 @@ bool running_in_console_session();
 bool start_session_service(std::string& err);
 bool stop_session_service(std::string& err);
 bool restart_session_service(std::string& err);
+/// Generate the Secure Attention Sequence (Ctrl+Alt+Del). Windows only; the
+/// SYSTEM service performs it because a normal user process cannot.
+bool send_secure_attention(std::string& err);
 /// Run `molink-service.exe --install` / `--uninstall` with UAC. Returns false
 /// when the helper is missing or the user cancels the prompt.
 bool install_session_service(std::string& err);

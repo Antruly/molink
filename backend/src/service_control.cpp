@@ -164,6 +164,44 @@ bool restart_session_service(std::string& err) {
 #endif
 }
 
+bool send_secure_attention(std::string& err) {
+#if defined(_WIN32)
+  HANDLE pipe = CreateFileW(L"\\\\.\\pipe\\molink-session",
+                            GENERIC_READ | GENERIC_WRITE, 0, nullptr,
+                            OPEN_EXISTING, 0, nullptr);
+  if (pipe == INVALID_HANDLE_VALUE) {
+    err = "the session service is not running";
+    return false;
+  }
+  DWORD mode = PIPE_READMODE_MESSAGE;
+  SetNamedPipeHandleState(pipe, &mode, nullptr, nullptr);
+  const char command[] = "sas";
+  DWORD written = 0;
+  if (!WriteFile(pipe, command, 3, &written, nullptr)) {
+    err = "could not ask the service for Ctrl+Alt+Del";
+    CloseHandle(pipe);
+    return false;
+  }
+  char buffer[256] = {};
+  DWORD read = 0;
+  ReadFile(pipe, buffer, sizeof(buffer) - 1, &read, nullptr);
+  CloseHandle(pipe);
+  if (read == 0) {
+    err = "the session service did not reply";
+    return false;
+  }
+  const std::string reply(buffer, read);
+  if (reply.find("\"ok\":true") == std::string::npos) {
+    err = "Ctrl+Alt+Del was rejected: " + reply;
+    return false;
+  }
+  return true;
+#else
+  (void)err;
+  return false;
+#endif
+}
+
 bool install_session_service(std::string& err) {
 #if defined(_WIN32)
   return run_elevated(L"runas", "--install", err);

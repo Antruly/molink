@@ -53,6 +53,8 @@ export interface SessionTab {
   stats: Stats
   error: string | null
   notice: string | null
+  /// When the host must approve this session: epoch ms of the 60 s deadline.
+  approvalDeadline: number | null
   controlEnabled: boolean
   displayIndex: number
 }
@@ -604,6 +606,7 @@ export const useAppStore = create<AppState>((set, get) => {
         stats: EMPTY_STATS,
         error: null,
         notice: null,
+        approvalDeadline: null,
         controlEnabled: false,
         displayIndex: 0,
       }

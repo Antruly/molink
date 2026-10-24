@@ -1,6 +1,8 @@
 #include "capture/capture.h"
 
 #if defined(_WIN32)
+#include <windows.h>
+
 #include "capture/windows_secure_capture.h"
 #include "service_control.h"
 #endif
@@ -10,6 +12,22 @@
 #include <utility>
 
 namespace molink {
+
+void set_display_awake(bool awake) {
+#if defined(_WIN32)
+  if (awake) {
+    SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED |
+                            ES_SYSTEM_REQUIRED);
+    // ES_DISPLAY_REQUIRED only prevents a sleep; the monitor may already be
+    // off. A monitor-power -1 broadcast turns it back on.
+    SendNotifyMessageW(HWND_BROADCAST, WM_SYSCOMMAND, SC_MONITORPOWER, -1);
+  } else {
+    SetThreadExecutionState(ES_CONTINUOUS);
+  }
+#else
+  (void)awake;
+#endif
+}
 
 const char* quality_mode_name(quality_mode mode) {
   switch (mode) {

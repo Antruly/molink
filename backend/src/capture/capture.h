@@ -183,6 +183,10 @@ class capture_source {
 
 /// Shared bookkeeping for concrete sources: latest-frame slot, keyframe
 /// request flag, running flag.
+/// Keep the local display awake while a remote viewer is connected, and wake a
+/// monitor that already powered off. No-op on platforms without an equivalent.
+void set_display_awake(bool awake);
+
 class capture_base : public capture_source {
  public:
   explicit capture_base(int fps = 15) : target_fps_(clamp_fps(fps)) {}
@@ -190,7 +194,10 @@ class capture_base : public capture_source {
   std::shared_ptr<const captured_frame> latest() const override;
   std::shared_ptr<const captured_frame> find(uint32_t seq) const override;
   void request_keyframe() override { keyframe_requested_.store(true); }
-  void set_active(bool active) override { active_.store(active); }
+  void set_active(bool active) override {
+    active_.store(active);
+    set_display_awake(active);
+  }
   void set_target_fps(int fps) override { target_fps_.store(clamp_fps(fps)); }
   int target_fps() const { return target_fps_.load(); }
   void set_quality(quality_mode mode) override { quality_.store(mode); }

@@ -10,6 +10,7 @@ import {
   Keyboard,
   Monitor,
   RefreshCw,
+  SquarePen,
   Trash2,
   Wifi,
 } from 'lucide-react'
@@ -75,7 +76,7 @@ export function HomeView() {
   const rememberRecent = useAppStore((state) => state.rememberRecent)
 
   const [deviceIdInput, setDeviceIdInput] = useState('')
-  const [rememberCode, setRememberCode] = useState(false)
+  const [rememberCode, setRememberCode] = useState(true)
   const [host, setHost] = useState('')
   const [port, setPort] = useState(params.get('port') ?? '28418')
   const [code, setCode] = useState('')
@@ -210,8 +211,32 @@ export function HomeView() {
     setHost(recent.host)
     setPort(String(recent.port))
     setCode(recent.token ?? '')
+    // Saving is on by default; a saved entry stays opted in when re-opened.
+    setRememberCode(true)
     setError(null)
     document.getElementById('connect-code')?.focus()
+  }
+
+  /// A history entry with a saved code connects directly; one without a code
+  /// only fills the form so the user can type the current code.
+  const connectRecent = (recent: RecentConnection) => {
+    if (recent.token) {
+      startConnection(recent.host, recent.port, recent.token, recent.label, true)
+      return
+    }
+    prefillFromRecent(recent)
+  }
+
+  const requestAccess = () => {
+    const targetHost = host.trim()
+    const targetPort = Number(port)
+    if (!targetHost || !Number.isFinite(targetPort) || targetPort <= 0) {
+      setError('invalid_endpoint')
+      return
+    }
+    setError(null)
+    // An empty code asks the host user to approve this session.
+    startConnection(targetHost, targetPort, '', targetHost)
   }
 
   const errorText = error
@@ -600,6 +625,14 @@ export function HomeView() {
               <button type="submit" className="btn btn-primary">
                 {t('home.connect')}
               </button>
+              <button
+                type="button"
+                onClick={requestAccess}
+                className="btn"
+                title={t('home.requestAccessHint')}
+              >
+                {t('home.requestAccess')}
+              </button>
             </div>
           </form>
 
@@ -631,8 +664,13 @@ export function HomeView() {
                 >
                   <button
                     type="button"
-                    onClick={() => prefillFromRecent(recent)}
+                    onClick={() => connectRecent(recent)}
                     className="min-w-0 flex-1 text-left"
+                    title={
+                      recent.token
+                        ? t('home.connectSaved')
+                        : t('home.prefillHint')
+                    }
                   >
                     <div className="truncate text-[13px] text-ink">
                       {recent.label}
@@ -643,7 +681,17 @@ export function HomeView() {
                       </span>
                       <span>·</span>
                       <span>{relativeTime(recent.at, i18n.language)}</span>
+                      {recent.token ? <span className="text-accent/80">•</span> : null}
                     </div>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => prefillFromRecent(recent)}
+                    className="grid h-7 w-7 place-items-center rounded-md text-muted/60 transition hover:bg-panel hover:text-ink"
+                    aria-label={t('home.prefill')}
+                    title={t('home.prefill')}
+                  >
+                    <SquarePen size={13} />
                   </button>
                   <button
                     type="button"

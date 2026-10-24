@@ -41,6 +41,11 @@
     "code": "Verification code",
     "rememberCode": "Remember this code on this device",
     "connect": "Connect",
+    "requestAccess": "Request access",
+    "requestAccessHint": "No code needed: the host approves this session (valid for 60 s)",
+    "connectSaved": "Click to connect with the saved code",
+    "prefillHint": "Fill the form (no saved code)",
+    "prefill": "Fill form",
     "useLocalCode": "Use this device's code",
     "idNote": "Direct connections work on the same network. Connecting by device ID needs moLink Server (phase 2).",
     "recent": "Recent connections",
@@ -143,6 +148,9 @@
     "qualityHigh": "Quality",
     "qualityAuto": "Auto",
     "waitingApproval": "Waiting for the host to approve…",
+    "cancelRequest": "Cancel request",
+    "requestAccess": "Request access",
+    "ctrlAltDel": "Ctrl+Alt+Del",
     "resolution": "Resolution"
   },
   "stats": {

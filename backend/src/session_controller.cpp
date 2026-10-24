@@ -13,6 +13,7 @@
 
 #include "config.h"
 #include "protocol/frame_packet.h"
+#include "service_control.h"
 #include "transport/ws_transport.h"
 #include "util.h"
 #include "version.h"
@@ -146,6 +147,17 @@ input_injector::status inject_one(input_injector& input, const uvcpp_json& event
     return input_injector::status::rejected;
   }
   const std::string kind = string_field(event, "k");
+
+  if (kind == "sas") {
+    // Ctrl+Alt+Del cannot be synthesized with SendInput; the SYSTEM service
+    // generates it (SoftwareSASGeneration policy).
+    std::string sas_error;
+    if (!send_secure_attention(sas_error)) {
+      err = sas_error;
+      return input_injector::status::rejected;
+    }
+    return input_injector::status::ok;
+  }
 
   if (kind == "move") {
     double x = 0;

@@ -26,6 +26,7 @@ export interface TabPatch {
   stats?: Stats
   error?: string | null
   notice?: string | null
+  approvalDeadline?: number | null
   controlEnabled?: boolean
   label?: string
   displayIndex?: number
@@ -65,12 +66,18 @@ export class SessionConnection {
             phase,
             error: detail ?? 'connection failed',
             notice: null,
+            approvalDeadline: null,
             frame: null,
           })
           return
         }
         if (phase === 'live') {
-          this.sink.onPatch({ phase, error: null, notice: null })
+          this.sink.onPatch({
+            phase,
+            error: null,
+            notice: null,
+            approvalDeadline: null,
+          })
           this.startClipboardSync()
           return
         }
@@ -81,6 +88,7 @@ export class SessionConnection {
           phase: 'connecting',
           error: null,
           notice: 'waiting_approval',
+          approvalDeadline: Date.now() + 60_000,
         })
       },
       onWelcome: (welcome) => {

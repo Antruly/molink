@@ -150,6 +150,7 @@ export function SessionView({
   const setQualityMode = useAppStore((state) => state.setQualityMode)
   const setControlEnabled = useAppStore((state) => state.setControlEnabled)
   const closeTab = useAppStore((state) => state.closeTab)
+  const createSession = useAppStore((state) => state.createSession)
 
   const welcome = tab.welcome
   const synthetic = welcome?.tiles.synthetic === true
@@ -227,6 +228,36 @@ export function SessionView({
     () => sessionConnection(tab.id),
     [tab.id],
   )
+
+  // The host has 60 s to approve an access request; show the remaining time
+  // and let the requester cancel instead of waiting forever.
+  const [approvalNow, setApprovalNow] = useState(0)
+  const approvalLeft =
+    tab.notice === 'waiting_approval' && tab.approvalDeadline && approvalNow > 0
+      ? Math.max(0, Math.ceil((tab.approvalDeadline - approvalNow) / 1000))
+      : null
+  useEffect(() => {
+    if (tab.notice !== 'waiting_approval') return
+    const tick = () => setApprovalNow(Date.now())
+    const immediate = window.setTimeout(tick, 0)
+    const timer = window.setInterval(tick, 500)
+    return () => {
+      window.clearTimeout(immediate)
+      window.clearInterval(timer)
+    }
+  }, [tab.notice])
+  const cancelApproval = useCallback(() => {
+    connection()?.disconnect()
+    closeTab(tab.id)
+  }, [connection, closeTab, tab.id])
+  useEffect(() => {
+    if (tab.notice !== 'waiting_approval' || approvalLeft !== 0) return
+    cancelApproval()
+  }, [approvalLeft, cancelApproval, tab.notice])
+  const requestAccessFromError = useCallback(() => {
+    createSession(tab.host, tab.port, '', tab.label, false, true)
+    closeTab(tab.id)
+  }, [closeTab, createSession, tab.host, tab.label, tab.port, tab.id])
 
   useEffect(() => {
     const points = touchPoints.current
@@ -1051,6 +1082,21 @@ export function SessionView({
             <span className="chip">{t('session.inputUnavailable')}</span>
           )}
 
+          {inputAvailable ? (
+            <button
+              type="button"
+              onClick={() => connection()?.sendInput({ k: 'sas' })}
+              className="btn"
+              title={t('session.ctrlAltDel')}
+              aria-label={t('session.ctrlAltDel')}
+            >
+              <Keyboard size={14} />
+              <span className="hidden md:inline">
+                {t('session.ctrlAltDel')}
+              </span>
+            </button>
+          ) : null}
+
           {popout ? (
             <button
               type="button"
@@ -1076,10 +1122,22 @@ export function SessionView({
       </div>
 
       {tab.error || actionError ? (
-        <div className="border-b border-danger/30 bg-danger/10 px-4 py-2 text-[12px] text-danger">
-          {tab.error
-            ? String(t(`error.${tab.error}`, { defaultValue: tab.error }))
-            : actionError}
+        <div className="flex flex-wrap items-center gap-2 border-b border-danger/30 bg-danger/10 px-4 py-2 text-[12px] text-danger">
+          <span className="min-w-0 flex-1">
+            {tab.error
+              ? String(t(`error.${tab.error}`, { defaultValue: tab.error }))
+              : actionError}
+          </span>
+          {tab.error && /token|unauth|auth|invalid/i.test(tab.error) ? (
+            <button
+              type="button"
+              onClick={requestAccessFromError}
+              className="btn h-7 px-2 text-[11px]"
+              title={t('home.requestAccessHint')}
+            >
+              {t('session.requestAccess')}
+            </button>
+          ) : null}
         </div>
       ) : null}
 
@@ -1140,7 +1198,25 @@ export function SessionView({
               <Radio size={15} className="animate-pulse text-accent" />
               {tab.phase === 'connecting'
                 ? tab.notice === 'waiting_approval'
-                  ? t('session.waitingApproval')
+                  ? (
+                    <span className="flex flex-col items-center gap-2">
+                      <span className="flex items-center gap-2">
+                        <Radio size={15} className="animate-pulse text-accent" />
+                        {t('session.waitingApproval')}
+                        {approvalLeft !== null
+                          ? ` · ${approvalLeft}s`
+                          : ''}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={cancelApproval}
+                        className="btn h-7 px-2 text-[11px]"
+                      >
+                        <X size={12} />
+                        {t('session.cancelRequest')}
+                      </button>
+                    </span>
+                  )
                   : t('session.connecting')
                 : t('session.waiting')}
             </div>

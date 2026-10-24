@@ -214,6 +214,25 @@ std::string handle_command(HANDLE pipe, const std::string& line) {
   std::string command;
   input >> command;
   if (command == "sessions") return session_json();
+  if (command == "sas") {
+    // SendInput cannot generate Ctrl+Alt+Del; only a service can, and only
+    // when the SoftwareSASGeneration policy allows it.
+    HMODULE sas = LoadLibraryW(L"sas.dll");
+    if (sas == nullptr) {
+      return R"({"ok":false,"error":"sas_dll_unavailable"})";
+    }
+    typedef BOOL(WINAPI * send_sas_fn)(BOOL);
+    send_sas_fn send = reinterpret_cast<send_sas_fn>(
+        GetProcAddress(sas, "SendSAS"));
+    const BOOL sent = send != nullptr && send(FALSE);
+    const DWORD code = sent ? 0 : GetLastError();
+    FreeLibrary(sas);
+    if (!sent) {
+      return R"({"ok":false,"error":"send_sas_failed","code":)" +
+             std::to_string(code) + "}";
+    }
+    return R"({"ok":true})";
+  }
   if ((command == "kick" || command == "switch" ||
        command == "secure-start" || command == "secure-stop") &&
       !client_is_elevated(pipe)) {
@@ -522,6 +541,32 @@ bool install_service() {
                          SERVICE_NO_CHANGE, target.c_str(), nullptr, nullptr,
                          nullptr, nullptr, nullptr, L"moLink session helper");
   }
+  // Allow services (this one and no other caller class) to generate the
+  // secure attention sequence, which is how the app's Ctrl+Alt+Del button
+  // reaches the lock screen. Existing values 2/3 are left alone.
+  HKEY policy = nullptr;
+  if (RegCreateKeyExW(
+          HKEY_LOCAL_MACHINE,
+          L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System",
+          0, nullptr, 0, KEY_QUERY_VALUE | KEY_SET_VALUE, nullptr, &policy,
+          nullptr) == ERROR_SUCCESS) {
+    DWORD value = 0;
+    DWORD size = sizeof(value);
+    DWORD type = 0;
+    const LSTATUS queried =
+        RegQueryValueExW(policy, L"SoftwareSASGeneration", nullptr, &type,
+                         reinterpret_cast<LPBYTE>(&value), &size);
+    if (queried != ERROR_SUCCESS || type != REG_DWORD || value == 0) {
+      value = 1;
+      if (RegSetValueExW(policy, L"SoftwareSASGeneration", 0, REG_DWORD,
+                         reinterpret_cast<const BYTE*>(&value),
+                         sizeof(value)) == ERROR_SUCCESS) {
+        log_line("enabled SoftwareSASGeneration for services");
+      }
+    }
+    RegCloseKey(policy);
+  }
+
   // Let the interactive user start/stop the service from the app without an
   // elevation prompt every time. Install and uninstall still require admin.
   PSECURITY_DESCRIPTOR descriptor = nullptr;
