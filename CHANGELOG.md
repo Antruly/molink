@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.6.22] — 2026-10-24
+
+### Fixed
+
+- 启动即最大化时，WebView 的 allocation 已经正确但**页面 viewport 仍是旧尺寸**：页面加载完成后
+  显式做一次“高度减一像素再恢复”的 resize，强制 WebKit 重新计算 viewport
+- 每 500ms 校验 `GdkWindow` 与 WebView 的实际尺寸，不一致就修正，并写
+  `/tmp/molink-shell.log` 便于定位
+
 ## [0.6.21] — 2026-10-24
 
 ### Fixed

@@ -6,7 +6,7 @@ set -euo pipefail
 trap 'rm -rf "${WORK:-}"' EXIT
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
-VERSION=${VERSION:-0.6.21}
+VERSION=${VERSION:-0.6.22}
 ARCH=${ARCH:-$(dpkg --print-architecture)}
 # Stage in a real POSIX filesystem: the source tree may live on a mount that
 # ignores chmod, and dpkg-deb requires DEBIAN to be exactly 0755.

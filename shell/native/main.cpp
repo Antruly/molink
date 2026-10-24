@@ -274,6 +274,14 @@ void force_child_allocate(GtkWidget* window) {
     height = allocation.height;
   }
   if (width <= 0 || height <= 0) return;
+  GtkAllocation current;
+  gtk_widget_get_allocation(child, &current);
+  if (current.width == width && current.height == height) return;
+  if (std::FILE* log = std::fopen("/tmp/molink-shell.log", "a")) {
+    std::fprintf(log, "reallocate webview %dx%d -> %dx%d\n", current.width,
+                 current.height, width, height);
+    std::fclose(log);
+  }
   GtkAllocation child_allocation = {0, 0, width, height};
   gtk_widget_size_allocate(child, &child_allocation);
 }
@@ -286,7 +294,24 @@ void on_load_changed(WebKitWebView* view, WebKitLoadEvent event, gpointer) {
   if (GTK_IS_WINDOW(toplevel)) {
     g_timeout_add(100,
                   [](gpointer data) -> gboolean {
-                    force_child_allocate(GTK_WIDGET(data));
+                    GtkWidget* window = GTK_WIDGET(data);
+                    GtkWidget* child = gtk_bin_get_child(GTK_BIN(window));
+                    GdkWindow* gdk_window = gtk_widget_get_window(window);
+                    if (child == nullptr || gdk_window == nullptr) {
+                      return G_SOURCE_REMOVE;
+                    }
+                    const int width = gdk_window_get_width(gdk_window);
+                    const int height = gdk_window_get_height(gdk_window);
+                    if (width <= 0 || height <= 1) return G_SOURCE_REMOVE;
+                    // The child allocation may already be correct while the
+                    // page viewport is still the pre-maximize size (the
+                    // WebView was created before the WM resized the window).
+                    // Allocate one pixel less and then the real size so
+                    // WebKit always sees a resize after the page is loaded.
+                    GtkAllocation bump = {0, 0, width, height - 1};
+                    gtk_widget_size_allocate(child, &bump);
+                    GtkAllocation final_allocation = {0, 0, width, height};
+                    gtk_widget_size_allocate(child, &final_allocation);
                     return G_SOURCE_REMOVE;
                   },
                   toplevel);
@@ -828,6 +853,15 @@ int main(int argc, char** argv) {
   webkit_web_view_load_uri(WEBKIT_WEB_VIEW(view), url.c_str());
   gtk_widget_show_all(window);
   apply_window_shape(window);
+  // Safety net for the paths that never deliver another size-allocate to the
+  // WebView (notably a window the WM restores maximized at startup). The
+  // check is a cheap no-op when the allocation already matches.
+  g_timeout_add(500,
+                [](gpointer data) -> gboolean {
+                  force_child_allocate(GTK_WIDGET(data));
+                  return G_SOURCE_CONTINUE;
+                },
+                window);
 
   if (!g_url_mode) g_timeout_add_seconds(1, check_core, nullptr);
   if (g_smoke) g_timeout_add_seconds(15, smoke_timeout, nullptr);
