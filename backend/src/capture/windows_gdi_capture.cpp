@@ -114,12 +114,14 @@ class gdi_capture final : public capture_base {
   bool select_display(int index) override { return index == 0; }
 
   bool copy_pixels(std::vector<uint8_t>& out, int& width, int& height) override {
+    // Serve the last encoded view, not the live DIB: the capture thread may be
+    // halfway through the next BitBlt, and clients ask for pixels to refresh
+    // the image they already have. `previous_` is exactly that image.
     std::lock_guard<std::mutex> lock(pixels_mutex_);
-    if (bits_ == nullptr || width_ == 0 || height_ == 0) return false;
-    const std::size_t bytes =
-        static_cast<std::size_t>(width_) * height_ * 4;
-    out.assign(static_cast<const uint8_t*>(bits_),
-               static_cast<const uint8_t*>(bits_) + bytes);
+    if (width_ == 0 || height_ == 0) return false;
+    const std::size_t bytes = static_cast<std::size_t>(width_) * height_ * 4;
+    if (previous_.size() != bytes) return false;
+    out = previous_;
     width = width_;
     height = height_;
     return true;
