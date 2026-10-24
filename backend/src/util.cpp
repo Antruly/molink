@@ -9,6 +9,12 @@ bool is_loopback_host(const std::string& host) {
   return host == "127.0.0.1" || host == "::1" || host == "localhost";
 }
 
+std::string format_url_host(const std::string& host) {
+  if (host.empty()) return "127.0.0.1";
+  if (host.front() == '[' && host.back() == ']') return host;
+  return host.find(':') != std::string::npos ? "[" + host + "]" : host;
+}
+
 bool is_loopback_peer(const std::string& peer) {
   return peer == "127.0.0.1" || peer == "::1" ||
          peer == "::ffff:127.0.0.1" || peer == "localhost";

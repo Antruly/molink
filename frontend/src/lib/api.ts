@@ -1,3 +1,5 @@
+import { formatHost } from './net'
+
 export interface DeviceCapabilities {
   screen_capture: boolean
   input_injection: boolean
@@ -97,7 +99,7 @@ const clientToken = params.get('client') ?? ''
 export function coreBaseUrl(): string {
   const host = params.get('host')
   const port = params.get('port')
-  if (host && port) return `http://${host}:${port}`
+  if (host && port) return `http://${formatHost(host)}:${port}`
   if (window.location.port && window.location.port !== '1420') {
     return window.location.origin
   }

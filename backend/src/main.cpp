@@ -106,8 +106,8 @@ void print_usage() {
   std::cout
       << "molink-core " MOLINK_VERSION "\n\n"
       << "Usage: molink-core [options]\n\n"
-      << "  --host <addr>        bind address (default 127.0.0.1; use 0.0.0.0\n"
-      << "                       for LAN access)\n"
+      << "  --host <addr>        bind address (default 0.0.0.0; use 127.0.0.1/::1\n"
+      << "                       for local-only access)\n"
       << "  --port <n>           web/API/WS port (default 28418; 0 = ephemeral)\n"
       << "  --http3-port <n>     HTTP/3 QUIC web port (default 28419; reserved)\n"
       << "  --quic-port <n>      direct QUIC data port (default 28420; reserved)\n"
@@ -401,13 +401,15 @@ int main(int argc, char** argv) {
   std::signal(SIGINT, on_signal);
   std::signal(SIGTERM, on_signal);
 
+  // libuvcpp's start() returns once the loop is running; the stop below must
+  // wait for the shutdown path, or it would stop the service we just started.
   const int rc = app.start();
-  stop_session_service(service_error);
   if (rc != 0) {
     // Stop capture before returning: its thread owns a joinable std::thread,
     // and unwinding past it would call std::terminate.
     capture->stop();
-    std::cerr << "molink-core: failed to listen on " << cfg.host << ":"
+    std::cerr << "molink-core: failed to listen on "
+              << format_url_host(cfg.host) << ":"
               << cfg.port << " (libuv error " << rc << ")\n";
     return 1;
   }
@@ -447,10 +449,11 @@ int main(int argc, char** argv) {
                 capture_opts.tile_size, capture_opts.change_threshold);
   } else {
     std::cerr << MOLINK_CORE_SERVICE << " " MOLINK_VERSION << " listening on "
-              << cfg.host << ":" << port << "\n"
-              << "  session: ws://" << cfg.host << ":" << port
+              << format_url_host(cfg.host) << ":" << port << "\n"
+              << "  session: ws://" << format_url_host(cfg.host) << ":" << port
               << "/ws/session\n"
-              << "  health:  http://" << cfg.host << ":" << port
+              << "  health:  http://" << format_url_host(cfg.host) << ":"
+              << port
               << "/healthz\n"
               << "  capture: " << capture_note << "\n"
               << "  tiles:   " << capture_opts.tile_size << " px"
@@ -480,6 +483,10 @@ int main(int argc, char** argv) {
   discovery->set_enabled(false);
   capture->stop();
   clipboard.reset();
+  // Stop the helper only on a real exit. It is started above when the user
+  // asked for it, and the app's own lifetime defines when it is no longer
+  // needed.
+  stop_session_service(service_error);
   app.stop();
   app.join();
   return 0;

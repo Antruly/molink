@@ -193,8 +193,8 @@ bool parse_args(int argc, char** argv, core_config& cfg, std::string& err) {
   // page; verification is enforced separately. Naming a specific non-loopback
   // address still needs --allow-remote, which keeps scripts from exposing an
   // interface by accident. Repeating the default 0.0.0.0 is allowed.
-  if (cfg.host_explicit && !cfg.allow_remote &&
-      cfg.host != "0.0.0.0" && !is_loopback_host(cfg.host)) {
+  if (cfg.host_explicit && !cfg.allow_remote && cfg.host != "0.0.0.0" &&
+      cfg.host != "::" && !is_loopback_host(cfg.host)) {
     err = "--host " + cfg.host +
           " is not loopback; pass --allow-remote to confirm";
     return false;

@@ -433,6 +433,11 @@ void stop_service_handle(SC_HANDLE service) {
   }
 }
 
+void install_error(const wchar_t* stage, DWORD code) {
+  std::fwprintf(stderr, L"molink-service: %ls failed (error %lu)\n", stage,
+                code);
+}
+
 bool install_service() {
   const std::wstring source = module_path();
   const std::size_t slash = source.find_last_of(L"\\/");
@@ -461,7 +466,10 @@ bool install_service() {
   CreateDirectoryW(install_dir.c_str(), nullptr);
   const std::wstring target = install_dir + L"\\molink-service.exe";
   if (_wcsicmp(source.c_str(), target.c_str()) != 0) {
-    if (!CopyFileW(source.c_str(), target.c_str(), FALSE)) return false;
+    if (!CopyFileW(source.c_str(), target.c_str(), FALSE)) {
+      install_error(L"CopyFile", GetLastError());
+      return false;
+    }
     if (slash != std::wstring::npos) {
       const std::wstring helper_src = source.substr(0, slash + 1) +
                                       L"molink-helper.exe";
@@ -470,38 +478,66 @@ bool install_service() {
     }
   }
   SC_HANDLE manager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CREATE_SERVICE);
-  if (manager == nullptr) return false;
+  if (manager == nullptr) {
+    install_error(L"OpenSCManager", GetLastError());
+    return false;
+  }
   SC_HANDLE service = CreateServiceW(
       manager, kServiceName, L"moLink session helper",
       SERVICE_ALL_ACCESS, SERVICE_WIN32_OWN_PROCESS, SERVICE_DEMAND_START,
       SERVICE_ERROR_NORMAL, target.c_str(), nullptr, nullptr, nullptr, nullptr,
       nullptr);
-  if (service == nullptr && GetLastError() == ERROR_SERVICE_EXISTS) {
-    service = OpenServiceW(manager, kServiceName, SERVICE_ALL_ACCESS);
-    if (service != nullptr) {
-      ChangeServiceConfigW(service, SERVICE_NO_CHANGE, SERVICE_DEMAND_START,
-                           SERVICE_NO_CHANGE, target.c_str(), nullptr, nullptr,
-                           nullptr, nullptr, nullptr, L"moLink session helper");
+  bool update_config = true;
+  if (service == nullptr) {
+    const DWORD create_error = GetLastError();
+    if (create_error != ERROR_SERVICE_EXISTS) {
+      install_error(L"CreateService", create_error);
+    } else {
+      // Installs up to 0.6.11 restrict the DACL to enumerate/start/stop for
+      // administrators as well as interactive users, so SERVICE_ALL_ACCESS
+      // and even SERVICE_CHANGE_CONFIG are denied. Ask for the full set
+      // first, then fall back to the rights those installs grant. The binary
+      // path is fixed, so skipping the config rewrite is harmless.
+      service = OpenServiceW(manager, kServiceName,
+                             SERVICE_CHANGE_CONFIG | SERVICE_START |
+                                 SERVICE_QUERY_STATUS);
+      if (service == nullptr) {
+        service = OpenServiceW(manager, kServiceName,
+                               SERVICE_START | SERVICE_QUERY_STATUS);
+        update_config = false;
+      }
+      if (service == nullptr) {
+        install_error(L"OpenService", GetLastError());
+      }
     }
   }
   if (service == nullptr) {
     CloseServiceHandle(manager);
     return false;
   }
+  if (update_config) {
+    ChangeServiceConfigW(service, SERVICE_NO_CHANGE, SERVICE_DEMAND_START,
+                         SERVICE_NO_CHANGE, target.c_str(), nullptr, nullptr,
+                         nullptr, nullptr, nullptr, L"moLink session helper");
+  }
   // Let the interactive user start/stop the service from the app without an
   // elevation prompt every time. Install and uninstall still require admin.
   PSECURITY_DESCRIPTOR descriptor = nullptr;
   if (ConvertStringSecurityDescriptorToSecurityDescriptorW(
-          L"D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCLCSWRPWPDTLOCRRC;;;BA)"
-          L"(A;;CCLCSWRPWPDTLOCRRC;;;IU)",
+          L"D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;CCLCSWRPWPDTLOCRRC;;;IU)",
           SDDL_REVISION_1, &descriptor, nullptr)) {
     SetServiceObjectSecurity(service, DACL_SECURITY_INFORMATION, descriptor);
     LocalFree(descriptor);
   }
-  StartServiceW(service, 0, nullptr);
+  bool started = StartServiceW(service, 0, nullptr) != 0;
+  if (!started) {
+    const DWORD start_error = GetLastError();
+    started = start_error == ERROR_SERVICE_ALREADY_RUNNING;
+    if (!started) install_error(L"StartService", start_error);
+  }
   CloseServiceHandle(service);
   CloseServiceHandle(manager);
-  return true;
+  return started;
 }
 
 bool uninstall_service() {

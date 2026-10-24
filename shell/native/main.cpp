@@ -37,6 +37,7 @@ pid_t g_core_pid = -1;
 bool g_smoke = false;
 bool g_smoke_done = false;
 int g_exit_code = 0;
+std::string g_core_host;
 
 // Single-instance guard: the first shell listens on a per-user Unix socket;
 // later launches send "show" and exit. Pop-outs (--url) and smoke tests are
@@ -131,6 +132,18 @@ bool json_string(const std::string& json, const char* key, std::string& out) {
   return true;
 }
 
+std::string url_host(const std::string& host) {
+  if (host.empty()) return "127.0.0.1";
+  if (host.front() == '[' && host.back() == ']') return host;
+  return host.find(':') != std::string::npos ? "[" + host + "]" : host;
+}
+
+std::string ui_host() {
+  if (g_core_host.empty() || g_core_host == "0.0.0.0") return "127.0.0.1";
+  if (g_core_host == "::") return "::1";
+  return g_core_host;
+}
+
 bool start_core(const std::string& core, const std::string& web_root, int& port,
                 std::string& token, std::string& client_token,
                 std::string& err) {
@@ -140,6 +153,10 @@ bool start_core(const std::string& core, const std::string& web_root, int& port,
   if (!web_root.empty()) {
     args.push_back("--web-root");
     args.push_back(web_root);
+  }
+  if (!g_core_host.empty()) {
+    args.push_back("--host");
+    args.push_back(g_core_host);
   }
 
   std::vector<char*> argv;
@@ -639,6 +656,8 @@ int main(int argc, char** argv) {
       g_smoke = true;
     } else if (std::strcmp(argv[i], "--url") == 0 && i + 1 < argc) {
       g_url_override = argv[++i];
+    } else if (std::strcmp(argv[i], "--host") == 0 && i + 1 < argc) {
+      g_core_host = argv[++i];
     }
   }
   g_url_mode = !g_url_override.empty();
@@ -688,8 +707,9 @@ int main(int argc, char** argv) {
       return 1;
     }
 
-    url = "http://127.0.0.1:" + std::to_string(port) + "/?host=";
-    url += "127.0.0.1&port=" + std::to_string(port);
+    const std::string host = ui_host();
+    url = "http://" + url_host(host) + ":" + std::to_string(port) + "/?host=";
+    url += host + "&port=" + std::to_string(port);
     url += "&shell=1&platform=linux";
     if (!client_token.empty()) url += "&client=" + client_token;
   }
@@ -720,10 +740,11 @@ int main(int argc, char** argv) {
   webkit_settings_set_javascript_can_open_windows_automatically(settings, TRUE);
   gtk_container_add(GTK_CONTAINER(window), view);
 
-  static const char kOrigin[] = "http://127.0.0.1:";
+  static const std::string origin =
+      "http://" + url_host(ui_host()) + ":";
   g_signal_connect(view, "permission-request",
                    G_CALLBACK(on_permission_request),
-                   const_cast<char*>(kOrigin));
+                   const_cast<char*>(origin.c_str()));
   g_signal_connect(view, "create", G_CALLBACK(on_create_web_view), nullptr);
   g_signal_connect(view, "load-changed", G_CALLBACK(on_load_changed), nullptr);
   g_signal_connect(view, "load-failed", G_CALLBACK(on_load_failed), nullptr);

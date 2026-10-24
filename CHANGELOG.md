@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.6.12] — 2026-10-24
+
+### Fixed
+
+- Windows 服务在 moLink 启动约 1 秒后自动停止：`app.start()` 启动事件循环后立即返回，紧随其后的
+  `stop_session_service` 被当成启动路径执行；现在只在真正退出时停止服务
+- 覆盖安装后服务不再自动启动：旧版安装把服务 DACL 限制为启动/停止/查询，`--install` 以
+  `SERVICE_ALL_ACCESS` / `SERVICE_CHANGE_CONFIG` 打开服务会被拒绝并返回 1；升级安装改用最小权限打开，
+  新建服务时给管理员完全控制
+- 服务安装/启动失败时输出具体阶段和 Win32 错误码，便于定位
+
+### Added
+
+- IPv6：前端与桌面壳拼 URL 时为 IPv6 字面量加方括号（`client.ts`、`api.ts`、Linux/Windows 壳层）
+- `--host ::` 与 `0.0.0.0` 一样视为通配地址，不再要求 `--allow-remote`
+- 桌面壳（Linux/Windows）新增 `--host`，转发给核心并用于窗口 URL
+
 ## [0.6.11] — 2026-10-24
 
 ### Added

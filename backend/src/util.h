@@ -15,6 +15,9 @@ bool is_loopback_host(const std::string& host);
 /// IPv4-mapped IPv6 form libuv reports on dual-stack sockets.
 bool is_loopback_peer(const std::string& peer);
 
+/// Host part for a URL: IPv6 literals need brackets.
+std::string format_url_host(const std::string& host);
+
 /// Uppercase base32-ish alphabet without I/L/O/0/1, so a session id can be read
 /// aloud or typed from a screenshot without ambiguity.
 std::string make_session_public_id();

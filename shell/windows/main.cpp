@@ -52,6 +52,7 @@ RECT g_restore_rect{};
 std::wstring g_url;
 std::wstring g_origin;
 std::wstring g_url_override;
+std::wstring g_core_host;
 bool g_url_mode = false;
 bool g_quitting = false;
 bool g_tray_added = false;
@@ -190,6 +191,18 @@ bool json_string(const std::string& json, const char* key, std::string& out) {
   return true;
 }
 
+std::wstring url_host_w(const std::wstring& host) {
+  if (host.empty()) return L"127.0.0.1";
+  if (host.front() == L'[' && host.back() == L']') return host;
+  return host.find(L':') != std::wstring::npos ? L"[" + host + L"]" : host;
+}
+
+std::wstring ui_host_w() {
+  if (g_core_host.empty() || g_core_host == L"0.0.0.0") return L"127.0.0.1";
+  if (g_core_host == L"::") return L"::1";
+  return g_core_host;
+}
+
 bool start_core(const std::wstring& core, const std::wstring& web_root, int& port,
                 std::string& token, std::string& client_token,
                 std::wstring& error) {
@@ -215,6 +228,9 @@ bool start_core(const std::wstring& core, const std::wstring& web_root, int& por
                          L"\" --print-ready --parent-pid " +
                          std::to_wstring(GetCurrentProcessId());
   if (!web_root.empty()) command += L" --web-root \"" + web_root + L"\"";
+  if (!g_core_host.empty()) {
+    command += L" --host \"" + g_core_host + L"\"";
+  }
 
   PROCESS_INFORMATION process{};
   const BOOL started = CreateProcessW(
@@ -812,13 +828,15 @@ int run(HINSTANCE instance) {
     return 1;
   }
 
-  g_url = L"http://127.0.0.1:" + std::to_wstring(port) +
-          L"/?host=127.0.0.1&port=" + std::to_wstring(port) +
+  const std::wstring host = ui_host_w();
+  const std::wstring authority = url_host_w(host);
+  g_url = L"http://" + authority + L":" + std::to_wstring(port) +
+          L"/?host=" + host + L"&port=" + std::to_wstring(port) +
           L"&shell=1&platform=windows";
   if (!client_token.empty()) {
     g_url += L"&client=" + widen(client_token);
   }
-  g_origin = L"http://127.0.0.1:" + std::to_wstring(port);
+  g_origin = L"http://" + authority + L":" + std::to_wstring(port);
   }
 
   SetCurrentProcessExplicitAppUserModelID(L"com.molink.desktop");
@@ -926,6 +944,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int) {
         g_smoke = true;
       } else if (wcscmp(argv[i], L"--url") == 0 && i + 1 < argc) {
         g_url_override = argv[++i];
+      } else if (wcscmp(argv[i], L"--host") == 0 && i + 1 < argc) {
+        g_core_host = argv[++i];
       }
     }
     LocalFree(argv);

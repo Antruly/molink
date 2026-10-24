@@ -8,6 +8,7 @@ import {
   parseFramePayload,
   type Frame,
 } from './protocol'
+import { formatHost } from './net'
 
 export type ClientPhase = 'idle' | 'connecting' | 'live' | 'error'
 
@@ -139,7 +140,7 @@ export class MolinkClient {
     this.pendingFrame = false
     this.frameQueue = Promise.resolve()
 
-    const url = `ws://${host}:${port}/ws/session`
+    const url = `ws://${formatHost(host)}:${port}/ws/session`
     this.handlers.onPhase?.('connecting')
 
     let ws: WebSocket
