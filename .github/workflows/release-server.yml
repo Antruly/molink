@@ -291,6 +291,14 @@ jobs:
             }
           done
 
+      - name: Install libuv into the prefix
+        shell: bash
+        run: |
+          ./packaging/clone-retry.sh --depth 1 https://github.com/libuv/libuv.git "$RUNNER_TEMP/libuv"
+          cmake -S "$RUNNER_TEMP/libuv" -B "$RUNNER_TEMP/libuv/build" \
+            -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/uvcpp" -DBUILD_TESTING=OFF
+          cmake --build "$RUNNER_TEMP/libuv/build" --parallel --target install
+
       - name: Build molink-server and UI
         shell: bash
         run: |
