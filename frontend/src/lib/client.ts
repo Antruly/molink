@@ -77,6 +77,8 @@ export interface ClientHandlers {
   onAccessRequested?: (id: number) => void
   /** Every FRAME packet, including empty "nothing changed" responses. */
   onWireFrame?: () => void
+  /** A frame was dropped because it was stale or overtaken by a newer one. */
+  onFrameDropped?: () => void
 }
 
 interface ControlMessage {
@@ -373,6 +375,7 @@ export class MolinkClient {
       // skipped one: showing it late causes visible lag. Drop it and ask for
       // a fresh keyframe instead.
       if (Date.now() - packet.tsUs / 1000 > 1000) {
+        this.handlers.onFrameDropped?.()
         this.requestKeyframeThrottled()
         return
       }
@@ -381,6 +384,7 @@ export class MolinkClient {
       } else if (!keyframe) {
         // A newer frame is already queued; this delta would apply on the
         // wrong base image.
+        this.handlers.onFrameDropped?.()
         this.requestKeyframeThrottled()
         return
       }
@@ -420,6 +424,7 @@ export class MolinkClient {
     if ((frame.flags & FrameFlag.keyframe) === 0) {
       if (frame.frameSeq < this.latestFrameSeq ||
           Date.now() - tsUs / 1000 > 1000) {
+        this.handlers.onFrameDropped?.()
         this.requestKeyframeThrottled()
         return
       }

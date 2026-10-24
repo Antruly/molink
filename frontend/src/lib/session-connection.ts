@@ -15,6 +15,8 @@ export interface Stats {
   latencyMs: number | null
   bytesPerSec: number
   frames: number
+  /** Frames dropped as stale or overtaken in the last second. */
+  dropped: number
 }
 
 export interface TabPatch {
@@ -43,6 +45,7 @@ const emptyStats = (): Stats => ({
   latencyMs: null,
   bytesPerSec: 0,
   frames: 0,
+  dropped: 0,
 })
 
 /// One tab's WebSocket connection plus its one-second statistics windows.
@@ -57,6 +60,11 @@ export class SessionConnection {
   private clipboardTimer: number | null = null
   private lastClipboard = ''
   private clipboardFailures = 0
+  private dropTimes: number[] = []
+  private presetFps = 0
+  private congested = false
+  private lastDropAt = 0
+  private congestionTimer: number | null = null
 
   constructor(private readonly sink: SessionSink) {
     this.client.setHandlers({
@@ -79,6 +87,7 @@ export class SessionConnection {
             approvalDeadline: null,
           })
           this.startClipboardSync()
+          this.startCongestionWatch()
           return
         }
         this.sink.onPatch({ phase })
@@ -125,6 +134,17 @@ export class SessionConnection {
       onCursor: (cursorShape) => this.sink.onPatch({ cursorShape }),
       onCursorPosition: (cursorPosition) =>
         this.sink.onPatch({ cursorPosition }),
+      onFrameDropped: () => {
+        const now = performance.now()
+        this.dropTimes.push(now)
+        this.lastDropAt = now
+        if (!this.congested) {
+          // Backlog: cut the host capture rate so new frames do not queue up
+          // behind the ones we are already dropping.
+          this.congested = true
+          this.client.setCaptureFps(8)
+        }
+      },
       onClipboard: (text) => {
         // Remember what we just wrote so the poll does not echo it back.
         this.lastClipboard = text
@@ -143,20 +163,28 @@ export class SessionConnection {
     while (this.byteWindow.length > 0 && now - this.byteWindow[0]!.t > 1000) {
       this.byteWindow.shift()
     }
+    while (this.dropTimes.length > 0 && now - this.dropTimes[0]! > 1000) {
+      this.dropTimes.shift()
+    }
     return {
       fps: this.frameTimes.length,
       wireFps: this.packetTimes.length,
       latencyMs: this.latency,
       bytesPerSec: this.byteWindow.reduce((sum, item) => sum + item.n, 0),
       frames: this.frames,
+      dropped: this.dropTimes.length,
     }
   }
 
   connect(host: string, port: number, token: string,
           requestAccess = false): void {
     this.stopClipboardSync()
+    this.stopCongestionWatch()
     this.lastClipboard = ''
     this.clipboardFailures = 0
+    this.dropTimes = []
+    this.congested = false
+    this.lastDropAt = 0
     this.frameTimes = []
     this.packetTimes = []
     this.byteWindow = []
@@ -174,7 +202,25 @@ export class SessionConnection {
 
   disconnect(): void {
     this.stopClipboardSync()
+    this.stopCongestionWatch()
     this.client.disconnect()
+  }
+
+  private startCongestionWatch(): void {
+    this.stopCongestionWatch()
+    this.congestionTimer = window.setInterval(() => {
+      if (!this.congested) return
+      if (performance.now() - this.lastDropAt <= 5000) return
+      this.congested = false
+      this.client.setCaptureFps(this.presetFps > 0 ? this.presetFps : 15)
+    }, 1000)
+  }
+
+  private stopCongestionWatch(): void {
+    if (this.congestionTimer !== null) {
+      window.clearInterval(this.congestionTimer)
+      this.congestionTimer = null
+    }
   }
 
   private startClipboardSync(): void {
@@ -219,7 +265,8 @@ export class SessionConnection {
   }
 
   setCaptureFps(fps: number): void {
-    this.client.setCaptureFps(fps)
+    this.presetFps = fps
+    this.client.setCaptureFps(this.congested ? Math.min(fps, 8) : fps)
   }
 
   setQuality(mode: string, fps?: number): void {

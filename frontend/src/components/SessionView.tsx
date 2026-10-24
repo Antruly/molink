@@ -408,7 +408,8 @@ export function SessionView({
       let candidate: ResolvedQuality = 'balanced'
       if (
         (latency !== null && latency > 220) ||
-        (wireFps > 0 && wireFps < 7)
+        (wireFps > 0 && wireFps < 7) ||
+        stats.dropped > 0
       ) {
         candidate = 'smooth'
       } else if (

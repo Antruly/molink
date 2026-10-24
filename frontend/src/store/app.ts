@@ -150,6 +150,7 @@ const EMPTY_STATS: Stats = {
   latencyMs: null,
   bytesPerSec: 0,
   frames: 0,
+  dropped: 0,
 }
 
 function readStorage(key: string): string {
