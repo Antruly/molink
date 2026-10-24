@@ -23,6 +23,10 @@ backend/cmake-build-*/
 .idea/
 *.swp
 
+# moLink Server 本地数据
+molink-server-data/
+server-data/
+
 # 本地配置与密钥
 .env
 .env.local
