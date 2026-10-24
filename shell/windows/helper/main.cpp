@@ -17,6 +17,7 @@
 #include <functional>
 #include <mutex>
 #include <thread>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -46,14 +47,31 @@ std::string utf8(const wchar_t* text) {
   return out;
 }
 
+std::string object_name(HANDLE object) {
+  wchar_t name[256] = {};
+  DWORD needed = 0;
+  if (object == nullptr ||
+      !GetUserObjectInformationW(object, UOI_NAME, name, sizeof(name),
+                                 &needed)) {
+    return "?";
+  }
+  return utf8(name);
+}
+
 bool open_input_desktop(std::string& err) {
+  log_line("start: station=" +
+           object_name(GetProcessWindowStation()) + " thread-desktop=" +
+           object_name(GetThreadDesktop(GetCurrentThreadId())));
   g_desktop = OpenInputDesktop(0, FALSE, DESKTOP_READOBJECTS |
                                              DESKTOP_WRITEOBJECTS |
                                              DESKTOP_SWITCHDESKTOP);
   if (g_desktop == nullptr) {
+    const DWORD code = GetLastError();
+    log_line("OpenInputDesktop failed: " + std::to_string(code));
     err = "OpenInputDesktop failed";
     return false;
   }
+  log_line("input desktop=" + object_name(g_desktop));
   if (!SetThreadDesktop(g_desktop)) {
     err = "SetThreadDesktop failed";
     return false;
@@ -66,7 +84,10 @@ bool refresh_input_desktop() {
   HDESK current = OpenInputDesktop(0, FALSE, DESKTOP_READOBJECTS |
                                              DESKTOP_WRITEOBJECTS |
                                              DESKTOP_SWITCHDESKTOP);
-  if (current == nullptr) return false;
+  if (current == nullptr) {
+    log_line("OpenInputDesktop failed: " + std::to_string(GetLastError()));
+    return false;
+  }
   if (g_desktop == nullptr) {
     g_desktop = current;
     return SetThreadDesktop(current) != 0;
@@ -84,8 +105,8 @@ bool refresh_input_desktop() {
   }
   if (!SetThreadDesktop(current)) {
     CloseDesktop(current);
-    log_line(std::string("SetThreadDesktop failed for ") +
-             utf8(new_name));
+    log_line(std::string("SetThreadDesktop failed for ") + utf8(new_name) +
+             ": " + std::to_string(GetLastError()));
     return false;
   }
   CloseDesktop(g_desktop);
@@ -106,8 +127,11 @@ std::string desktop_json() {
   return buffer;
 }
 
-bool capture(std::vector<uint8_t>& out, int& width, int& height,
-             std::string& err) {
+// GDI binds the screen DC to the desktop the thread first uses. After a
+// Winlogon <-> Default switch the old thread's DC is stale, so capture again
+// on a fresh thread that binds to the current input desktop.
+bool capture_on_thread(std::vector<uint8_t>& out, int& width, int& height,
+                       std::string& err) {
   HDC screen = GetDC(nullptr);
   if (screen == nullptr) {
     err = "GetDC failed";
@@ -125,8 +149,17 @@ bool capture(std::vector<uint8_t>& out, int& width, int& height,
     return false;
   }
   HGDIOBJ old = SelectObject(memory, bitmap);
-  const bool blitted = BitBlt(memory, 0, 0, width, height, screen, 0, 0,
-                              SRCCOPY | CAPTUREBLT) != 0;
+  bool blitted = BitBlt(memory, 0, 0, width, height, screen, 0, 0,
+                        SRCCOPY | CAPTUREBLT) != 0;
+  if (!blitted) {
+    const DWORD capture_error = GetLastError();
+    // CAPTUREBLT is not supported on the secure desktop; plain SRCCOPY works.
+    blitted = BitBlt(memory, 0, 0, width, height, screen, 0, 0, SRCCOPY) != 0;
+    if (!blitted) {
+      err = "BitBlt failed: " + std::to_string(capture_error) + "/" +
+            std::to_string(GetLastError());
+    }
+  }
   BITMAPINFO info{};
   info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
   info.bmiHeader.biWidth = width;
@@ -143,10 +176,48 @@ bool capture(std::vector<uint8_t>& out, int& width, int& height,
   DeleteDC(memory);
   ReleaseDC(nullptr, screen);
   if (!blitted || lines != height) {
+    if (blitted && lines != height) {
+      log_line("GetDIBits returned " + std::to_string(lines) + " of " +
+               std::to_string(height) + " lines");
+    }
     err = "BitBlt/GetDIBits failed";
     return false;
   }
   return true;
+}
+
+bool capture(std::vector<uint8_t>& out, int& width, int& height,
+             std::string& err) {
+  if (capture_on_thread(out, width, height, err)) return true;
+  bool ok = false;
+  std::string second_error;
+  std::thread retry([&] {
+    HDESK desktop = OpenInputDesktop(0, FALSE,
+                                     DESKTOP_READOBJECTS |
+                                         DESKTOP_WRITEOBJECTS |
+                                         DESKTOP_SWITCHDESKTOP);
+    if (desktop == nullptr) {
+      second_error = "OpenInputDesktop failed";
+      return;
+    }
+    if (!SetThreadDesktop(desktop)) {
+      second_error = "SetThreadDesktop failed";
+      CloseDesktop(desktop);
+      return;
+    }
+    ok = capture_on_thread(out, width, height, second_error);
+    CloseDesktop(desktop);
+  });
+  retry.join();
+  if (!ok) {
+    err = second_error.empty() ? err : second_error;
+    static std::atomic<uint64_t> last_log{0};
+    const uint64_t now = GetTickCount64();
+    if (now - last_log.exchange(now) > 10000) {
+      log_line("capture failed: " + err);
+    }
+  }
+  return ok;
 }
 
 void send_key(WORD vk, bool down) {
@@ -292,17 +363,28 @@ void pipe_loop(std::atomic<bool>& running) {
     if (connected) {
       std::vector<char> buffer(64 * 1024);
       DWORD read = 0;
-      if (ReadFile(pipe, buffer.data(),
-                   static_cast<DWORD>(buffer.size() - 1), &read, nullptr) &&
-          read > 0) {
+      const BOOL read_ok =
+          ReadFile(pipe, buffer.data(), static_cast<DWORD>(buffer.size() - 1),
+                   &read, nullptr);
+      if (!read_ok || read == 0) {
+        log_line("pipe read failed: " + std::to_string(GetLastError()) +
+                 " bytes=" + std::to_string(read));
+      } else {
         buffer[read] = '\0';
+        const std::string command(buffer.data(), read);
         int width = 0;
         int height = 0;
         const std::string reply =
-            handle_line(std::string(buffer.data(), read), frame, width, height);
+            handle_line(command, frame, width, height);
         DWORD written = 0;
-        WriteFile(pipe, reply.data(), static_cast<DWORD>(reply.size()),
-                  &written, nullptr);
+        if (!WriteFile(pipe, reply.data(), static_cast<DWORD>(reply.size()),
+                       &written, nullptr)) {
+          log_line("pipe write failed: " + std::to_string(GetLastError()) +
+                   " bytes=" + std::to_string(reply.size()));
+        }
+        // DisconnectNamedPipe discards messages the client has not read yet.
+        // Flush waits for the read to drain, so the reply is never lost.
+        FlushFileBuffers(pipe);
         if (reply.find("\"quit\":true") != std::string::npos) {
           running.store(false);
         }
@@ -346,6 +428,7 @@ void input_pipe_loop(std::atomic<bool>& running) {
         DWORD written = 0;
         WriteFile(pipe, reply.data(), static_cast<DWORD>(reply.size()),
                   &written, nullptr);
+        FlushFileBuffers(pipe);
         if (reply.find("\"quit\":true") != std::string::npos) {
           running.store(false);
         }

@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.6.13] — 2026-10-24
+
+### Fixed
+
+- 锁屏/登录页画面一直出不来：helper 写完回复后立即 `DisconnectNamedPipe`，消息型管道里尚未被客户端读取的数据会被丢弃
+  （`info` 读到 0 字节），核心因此回退到 DXGI。现在写入后调用 `FlushFileBuffers`，等客户端读完再断开；helper 的采集/输入
+  管道和 service 控制管道都做了同样处理
+- Winlogon 桌面抓屏失败：安全桌面不支持 `CAPTUREBLT`，`BitBlt` 返回错误；改为失败后用 `SRCCOPY` 重试
+- 桌面切换后抓屏失败：GDI 屏幕 DC 绑定在线程首次使用的桌面上，Winlogon ↔ Default 切换后原线程 `BitBlt` 会
+  `ACCESS_DENIED`；失败时在新线程绑定当前输入桌面重试
+- helper 日志补充启动时的 window station/线程桌面、输入桌面、桌面切换和抓屏失败原因（失败日志 10 秒节流）
+
 ## [0.6.12] — 2026-10-24
 
 ### Fixed

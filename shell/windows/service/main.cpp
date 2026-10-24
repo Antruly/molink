@@ -341,6 +341,8 @@ void pipe_server() {
         DWORD written = 0;
         WriteFile(pipe, reply.data(), static_cast<DWORD>(reply.size()),
                   &written, nullptr);
+        // A disconnect discards messages the client has not read yet.
+        FlushFileBuffers(pipe);
       }
     }
     DisconnectNamedPipe(pipe);
