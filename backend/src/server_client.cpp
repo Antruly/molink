@@ -228,6 +228,7 @@ bool server_client::load_credentials(const std::string& url) {
 void server_client::save_credentials(const std::string& url) {
   const std::string path = credentials_path();
   if (path.empty()) return;
+  std::lock_guard<std::mutex> credentials_lock(credentials_mutex_);
   json document;
   {
     std::lock_guard<std::mutex> lock(mutex_);

@@ -99,6 +99,9 @@ class server_client {
   std::atomic<bool> running_{false};
   std::atomic<bool> reconfigure_{false};
   mutable std::mutex mutex_;
+  /// Serialises server.json writes: the UI thread rotates a domain while the
+  /// worker may save a heartbeat, and both use the same temporary file.
+  std::mutex credentials_mutex_;
   server_status status_;
   std::string token_;
   std::string active_url_;
