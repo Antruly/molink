@@ -9,9 +9,13 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <shellapi.h>
+#include <shlobj.h>
 
 #include <cstring>
+#include <filesystem>
 #include <string>
+#include <vector>
 
 namespace molink {
 namespace {
@@ -88,6 +92,88 @@ class windows_clipboard final : public clipboard_service {
       CloseClipboard();
     }
     if (callback) callback(std::move(text));
+  }
+
+  void request_files(files_callback callback) override {
+    std::vector<clipboard_file> files;
+    if (OpenClipboard(nullptr)) {
+      if (IsClipboardFormatAvailable(CF_HDROP)) {
+        HANDLE data = GetClipboardData(CF_HDROP);
+        if (data != nullptr) {
+          HDROP drop = static_cast<HDROP>(data);
+          const UINT count = DragQueryFileW(drop, 0xFFFFFFFFu, nullptr, 0);
+          for (UINT i = 0; i < count; ++i) {
+            const UINT length = DragQueryFileW(drop, i, nullptr, 0);
+            if (length == 0) continue;
+            std::wstring path(length + 1, L'\0');
+            if (DragQueryFileW(drop, i, path.data(), length + 1) == 0) continue;
+            path.resize(length);
+            clipboard_file file;
+            file.path = to_utf8(path.c_str());
+            const std::filesystem::path fs_path(path);
+            const std::wstring name = fs_path.filename().wstring();
+            file.name = to_utf8(name.c_str());
+            std::error_code ec;
+            const auto size = std::filesystem::file_size(fs_path, ec);
+            if (!ec) file.size = size;
+            files.push_back(std::move(file));
+          }
+        }
+      }
+      CloseClipboard();
+    }
+    if (callback) callback(std::move(files));
+  }
+
+  bool set_files(const std::vector<std::string>& paths) override {
+    std::vector<std::wstring> wide;
+    wide.reserve(paths.size());
+    for (const std::string& path : paths) {
+      std::wstring converted = to_wide(path);
+      if (!converted.empty()) wide.push_back(std::move(converted));
+    }
+    if (wide.empty()) return false;
+    std::size_t characters = 1;  // final list terminator
+    for (const std::wstring& path : wide) characters += path.size() + 1;
+    const std::size_t bytes =
+        sizeof(DROPFILES) + characters * sizeof(wchar_t);
+    bool applied = false;
+    for (int attempt = 0; attempt < 5; ++attempt) {
+      if (!OpenClipboard(nullptr)) {
+        Sleep(10);
+        continue;
+      }
+      EmptyClipboard();
+      HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, bytes);
+      if (memory != nullptr) {
+        auto* drop = static_cast<DROPFILES*>(GlobalLock(memory));
+        if (drop != nullptr) {
+          ZeroMemory(drop, sizeof(DROPFILES));
+          drop->pFiles = sizeof(DROPFILES);
+          drop->fWide = TRUE;
+          auto* cursor = reinterpret_cast<wchar_t*>(
+              reinterpret_cast<BYTE*>(drop) + sizeof(DROPFILES));
+          for (const std::wstring& path : wide) {
+            std::memcpy(cursor, path.c_str(),
+                        path.size() * sizeof(wchar_t));
+            cursor += path.size();
+            *cursor++ = L'\0';
+          }
+          *cursor = L'\0';
+          GlobalUnlock(memory);
+          if (SetClipboardData(CF_HDROP, memory) != nullptr) {
+            applied = true;
+          } else {
+            GlobalFree(memory);
+          }
+        } else {
+          GlobalFree(memory);
+        }
+      }
+      CloseClipboard();
+      return applied;
+    }
+    return applied;
   }
 };
 

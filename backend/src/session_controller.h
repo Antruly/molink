@@ -8,9 +8,14 @@
 #include <thread>
 
 #include "access_requests.h"
+#include "audio/audio.h"
+#include "audio/voice.h"
 #include "auth_state.h"
+#include "call_hub.h"
 #include "capture/capture.h"
+#include "chat_hub.h"
 #include "clipboard/clipboard.h"
+#include "file_transfer.h"
 #include "input/input.h"
 #include "lock_state.h"
 #include "network_settings.h"
@@ -38,10 +43,15 @@ struct session_options {
   std::shared_ptr<lock_state> lock;
   std::shared_ptr<access_request_registry> access_requests;
   std::shared_ptr<network_settings> network;
+  std::shared_ptr<chat_hub> chat;
+  std::shared_ptr<audio_hub> audio;
+  std::shared_ptr<call_hub> call;
+  std::shared_ptr<voice_engine> voice;
   std::shared_ptr<std::atomic<int>> bound_port;
   bool http2_available = false;
   int tile_size = 0;
   std::string device_id;
+  std::string device_name;
   /// Hop a callback onto the app loop (used for clipboard results, which are
   /// produced on the clipboard thread).
   std::function<void(std::function<void()>)> post;
@@ -68,6 +78,19 @@ class session_controller final
   void on_binary(const uint8_t* data, std::size_t len);
   void on_close(int code, const std::string& reason);
   void send_welcome_message();
+  /// Sends the chat history and starts receiving new messages. Called once the
+  /// session has authenticated.
+  void attach_chat();
+  void chat_history();
+  void attach_call();
+  void on_call_event(const call_snapshot& snapshot, const std::string& event);
+  void start_voice();
+  void stop_voice();
+  void send_voice(std::vector<uint8_t> pcm);
+  void send_json_string(const std::string& text);
+  void send_file_chunk(uint32_t id, uint64_t offset, const uint8_t* data,
+                       std::size_t len);
+  void send_audio(std::vector<uint8_t> pcm);
   /// Called from the local approval dialog (through the request registry).
   void approve_access_request();
   void deny_access_request();
@@ -76,6 +99,11 @@ class session_controller final
   std::weak_ptr<session_transport> transport_;
   std::weak_ptr<session_info> session_;
   session_options options_;
+  std::unique_ptr<file_transfer> files_;
+  int chat_subscription_ = 0;
+  int audio_subscription_ = 0;
+  int call_subscription_ = 0;
+  bool voice_active_ = false;
 };
 
 /// Sends keepalive pings and reaps sessions that never authenticated or went

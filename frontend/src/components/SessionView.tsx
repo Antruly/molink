@@ -1,19 +1,29 @@
 import {
   Activity,
+  ClipboardCheck,
   ClipboardCopy,
   ClipboardPaste,
+  ClipboardX,
   ExternalLink,
+  FolderOpen,
   Gauge,
   GripHorizontal,
   Hand,
   Keyboard,
   LogOut,
   Maximize2,
+  MessageSquare,
+  Mic,
+  MicOff,
   Minimize2,
   Monitor,
   MousePointer2,
+  Phone,
+  PhoneOff,
   Radio,
   Settings2,
+  Volume2,
+  VolumeX,
   X,
 } from 'lucide-react'
 import {
@@ -35,6 +45,11 @@ import {
 } from '../store/app'
 import { RemoteCursor } from './RemoteCursor'
 import { TileCanvas, type DisplayMode } from './TileCanvas'
+import { ChatPanel } from './ChatPanel'
+import { FileTransferPanel } from './FileTransferPanel'
+import type { ChatMessage } from '../lib/client'
+import { PcmPlayer } from '../lib/audio'
+import { VoiceCall } from '../lib/voice'
 
 function formatBandwidth(bytesPerSecond: number): string {
   if (bytesPerSecond >= 1024 * 1024) {
@@ -86,6 +101,11 @@ function keyToCode(key: string): string {
     ArrowDown: 'ArrowDown',
   }
   return named[key] ?? ''
+}
+
+function formatCallTime(seconds: number): string {
+  const minutes = Math.floor(seconds / 60)
+  return `${minutes}:${String(seconds % 60).padStart(2, '0')}`
 }
 
 function touchPrimary(): boolean {
@@ -154,6 +174,9 @@ export function SessionView({
   const closeTab = useAppStore((state) => state.closeTab)
   const createSession = useAppStore((state) => state.createSession)
   const setImmersive = useAppStore((state) => state.setImmersive)
+  const setWindowFullscreen = useAppStore((state) => state.setWindowFullscreen)
+  const setClipboardEnabled = useAppStore((state) => state.setClipboardEnabled)
+  const immersive = useAppStore((state) => state.immersive)
 
   const welcome = tab.welcome
   const synthetic = welcome?.tiles.synthetic === true
@@ -171,8 +194,26 @@ export function SessionView({
   const [virtualMouse, setVirtualMouse] = useState(false)
   const [displayMode, setDisplayMode] = useState<DisplayMode>('fit')
   const [elementFullscreen, setElementFullscreen] = useState(false)
-  const [shellFullscreen, setShellFullscreen] = useState(false)
-  const isFullscreen = elementFullscreen || shellFullscreen
+  const isFullscreen = elementFullscreen || immersive
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
+  const [chatOpen, setChatOpen] = useState(false)
+  const [chatUnread, setChatUnread] = useState(0)
+  const chatOpenRef = useRef(false)
+  const [filesOpen, setFilesOpen] = useState(false)
+  const [audioOn, setAudioOn] = useState(false)
+  const [audioVolume, setAudioVolume] = useState(0.8)
+  const playerRef = useRef<PcmPlayer | null>(null)
+  const audioAvailable = welcome?.audio === true && welcome.audio_format != null
+  const [callPhase, setCallPhase] = useState<'idle' | 'ringing' | 'active'>(
+    'idle',
+  )
+  const [callStartedAt, setCallStartedAt] = useState<number | null>(null)
+  const [callMuted, setCallMuted] = useState(false)
+  const [callNotice, setCallNotice] = useState<string | null>(null)
+  const [hostMic, setHostMic] = useState(true)
+  const [callSeconds, setCallSeconds] = useState(0)
+  const voiceRef = useRef<VoiceCall | null>(null)
+  const callAvailable = welcome?.call === true
   const [quickOpen, setQuickOpen] = useState(false)
   const [quickPos, setQuickPos] = useState<{ x: number; y: number } | null>(null)
   const quickBarRef = useRef<HTMLDivElement>(null)
@@ -328,11 +369,127 @@ export function SessionView({
   }, [tab.phase, tab.id, connection, pullMs])
 
   useEffect(() => {
-    const update = () => setElementFullscreen(document.fullscreenElement !== null)
+    const update = () => {
+      const active = document.fullscreenElement !== null
+      setElementFullscreen(active)
+      // In a browser the Fullscreen API is the only fullscreen surface; Esc
+      // must also bring the app chrome back.
+      if (!active && !shellInfo.enabled) setImmersive(false)
+    }
     document.addEventListener('fullscreenchange', update)
-    update()
+    setElementFullscreen(document.fullscreenElement !== null)
     return () => document.removeEventListener('fullscreenchange', update)
-  }, [])
+  }, [setImmersive])
+
+  useEffect(() => {
+    chatOpenRef.current = chatOpen
+    if (chatOpen) setChatUnread(0)
+  }, [chatOpen])
+
+  useEffect(() => {
+    const active = connection()
+    if (!active) return
+    active.requestChatHistory()
+    return active.addListener((event) => {
+      if (event.kind === 'chat-history') {
+        setChatMessages(event.messages)
+      } else if (event.kind === 'chat') {
+        setChatMessages((previous) =>
+          [...previous, event.message].slice(-200),
+        )
+        if (!chatOpenRef.current) setChatUnread((count) => count + 1)
+      } else if (event.kind === 'audio') {
+        playerRef.current?.push(event.data)
+      } else if (event.kind === 'voice') {
+        voiceRef.current?.pushRemote(event.data)
+      } else if (event.kind === 'call') {
+        handleCallEvent(event)
+      }
+    })
+  }, [connection])
+
+  useEffect(() => {
+    return () => {
+      playerRef.current?.stop()
+      playerRef.current = null
+      sessionConnection(tab.id)?.stopAudio()
+    }
+  }, [tab.id])
+
+  useEffect(() => {
+    if (callPhase !== 'active' || callStartedAt === null) return
+    const timer = window.setInterval(() => {
+      setCallSeconds(Math.floor((Date.now() - callStartedAt) / 1000))
+    }, 1000)
+    return () => window.clearInterval(timer)
+  }, [callPhase, callStartedAt])
+
+  useEffect(() => {
+    return () => {
+      voiceRef.current?.stop()
+      voiceRef.current = null
+      sessionConnection(tab.id)?.hangupCall()
+    }
+  }, [tab.id])
+
+  function stopVoiceCall() {
+    voiceRef.current?.stop()
+    voiceRef.current = null
+    setCallPhase('idle')
+    setCallStartedAt(null)
+    setCallMuted(false)
+    setCallSeconds(0)
+  }
+
+  function handleCallEvent(event: {
+    action: string
+    hostMicrophone?: boolean
+    startedMs?: number
+    message?: string
+  }) {
+    if (event.action === 'ringing') {
+      setCallPhase('ringing')
+      setCallNotice(null)
+    } else if (event.action === 'accepted') {
+      setCallPhase('active')
+      setCallStartedAt(event.startedMs ?? Date.now())
+      setCallSeconds(0)
+      setCallNotice(null)
+      setHostMic(event.hostMicrophone !== false)
+      const voice = new VoiceCall()
+      voiceRef.current = voice
+      const activeConnection = connection()
+      void voice
+        .start((pcm) => activeConnection?.sendVoice(pcm))
+        .then((result) => {
+          if (!result.mic) setCallNotice('no_mic')
+        })
+    } else if (event.action === 'declined') {
+      stopVoiceCall()
+      setCallNotice('declined')
+    } else if (event.action === 'ended') {
+      stopVoiceCall()
+    } else if (event.action === 'audio_error') {
+      setCallNotice('audio_error')
+    }
+  }
+
+  const startVoiceCall = () => {
+    connection()?.inviteCall()
+    setCallPhase('ringing')
+    setCallNotice(null)
+  }
+
+  const hangupVoiceCall = () => {
+    connection()?.hangupCall()
+    stopVoiceCall()
+  }
+
+  const toggleCallMute = () => {
+    const next = !callMuted
+    setCallMuted(next)
+    voiceRef.current?.setMuted(next)
+  }
 
   // The expanded quick bar collapses when focus or the pointer moves outside.
   useEffect(() => {
@@ -549,23 +706,49 @@ export function SessionView({
     keyboardRef.current?.focus()
   }
 
-  const toggleFullscreen = () => {
+  const toggleAudio = () => {
+    if (audioOn) {
+      playerRef.current?.stop()
+      playerRef.current = null
+      setAudioOn(false)
+      connection()?.stopAudio()
+      return
+    }
+    const format = welcome?.audio_format
+    if (!format) return
+    const player = new PcmPlayer(
+      format.sample_rate || 48000,
+      format.channels || 2,
+      audioVolume,
+    )
+    void player.start().then(() => {
+      playerRef.current = player
+      setAudioOn(true)
+      connection()?.startAudio()
+    })
+  }
+
+  const changeAudioVolume = (value: number) => {
+    setAudioVolume(value)
+    playerRef.current?.setVolume(value)
+  }
+
+  const toggleFullscreen = useCallback(() => {
     const next = !isFullscreen
-    if (shellInfo.enabled) {
-      // The native window is the fullscreen surface. Requesting HTML element
-      // fullscreen as well made WebKitGTK and the shell fight over the window
-      // state, which left the canvas offset after the transition.
-      windowAction('fullscreen')
-      setShellFullscreen(next)
-      setImmersive(next)
+    if (next) {
+      // Session fullscreen is the remote picture alone. The native window is
+      // also fullscreen so no OS border or taskbar is visible; the in-page
+      // chrome (toolbar, tab bar) is hidden by `immersive`.
+      setImmersive(true)
+      if (shellInfo.enabled) setWindowFullscreen(true)
+      else
+        void sessionRootRef.current
+          ?.requestFullscreen()
+          .catch(() => undefined)
     } else {
-      // A browser has no native window to toggle; the fullscreen element also
-      // hides the app chrome.
-      if (document.fullscreenElement) {
-        void document.exitFullscreen()
-      } else if (next) {
-        void sessionRootRef.current?.requestFullscreen().catch(() => undefined)
-      }
+      setImmersive(false)
+      if (shellInfo.enabled) setWindowFullscreen(false)
+      else if (document.fullscreenElement) void document.exitFullscreen()
     }
     // The window manager resizes the WebView asynchronously. Re-measure once
     // more after the allocation has settled so the canvas and cursor overlay
@@ -580,13 +763,33 @@ export function SessionView({
         })
       }
     }, 200)
-  }
+  }, [isFullscreen, setImmersive, setWindowFullscreen])
+
+  // Esc leaves immersive mode, unless input control is on: then Esc belongs
+  // to the remote application.
+  useEffect(() => {
+    // While the floating toolbar is open Esc dismisses it first, exactly like
+    // the quick bar outside fullscreen.
+    if (!isFullscreen || quickOpen || tab.controlEnabled) return
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      toggleFullscreen()
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [isFullscreen, quickOpen, tab.controlEnabled, toggleFullscreen])
 
   // Leaving the session (tab closed, disconnect) must not leave the window in
   // fullscreen or the chrome hidden.
   useEffect(() => {
-    return () => setImmersive(false)
-  }, [setImmersive])
+    return () => {
+      if (useAppStore.getState().immersive) {
+        setImmersive(false)
+        setWindowFullscreen(false)
+      }
+    }
+  }, [setImmersive, setWindowFullscreen])
 
   const changeDisplayMode = (mode: DisplayMode) => {
     setDisplayMode(mode)
@@ -1033,7 +1236,13 @@ export function SessionView({
 
   return (
     <div ref={sessionRootRef} className="flex min-h-0 flex-1 flex-col">
-      <div className="flex flex-wrap items-center gap-2 border-b border-line-soft px-4 py-2.5">
+      <div
+        className={
+          isFullscreen
+            ? 'hidden'
+            : 'flex flex-wrap items-center gap-2 border-b border-line-soft px-4 py-2.5'
+        }
+      >
         <div className="min-w-0">
           <div className="flex items-center gap-2">
             <span
@@ -1050,7 +1259,7 @@ export function SessionView({
           </div>
           <div className="mt-0.5 truncate font-mono text-[11px] text-muted">
             {tab.host}:{tab.port}
-            {welcome?.device_id ? ` · ${welcome.device_id}` : ''}
+            {welcome?.device_name ? ` · ${welcome.device_name}` : ''}
           </div>
         </div>
 
@@ -1068,7 +1277,35 @@ export function SessionView({
             <>
               <button
                 type="button"
+                onClick={() =>
+                  setClipboardEnabled(tab.id, !tab.clipboardEnabled)
+                }
+                className={
+                  'btn h-8 w-8 !px-0 ' +
+                  (tab.clipboardEnabled ? 'text-accent' : 'btn-quiet')
+                }
+                title={
+                  tab.clipboardEnabled
+                    ? t('session.clipboardOff')
+                    : t('session.clipboardOn')
+                }
+                aria-label={
+                  tab.clipboardEnabled
+                    ? t('session.clipboardOff')
+                    : t('session.clipboardOn')
+                }
+                aria-pressed={tab.clipboardEnabled}
+              >
+                {tab.clipboardEnabled ? (
+                  <ClipboardCheck size={14} />
+                ) : (
+                  <ClipboardX size={14} />
+                )}
+              </button>
+              <button
+                type="button"
                 onClick={copyFromRemote}
+                disabled={!tab.clipboardEnabled}
                 className="btn btn-quiet h-8 w-8 !px-0"
                 title={t('session.clipboardGet')}
                 aria-label={t('session.clipboardGet')}
@@ -1078,6 +1315,7 @@ export function SessionView({
               <button
                 type="button"
                 onClick={sendToRemote}
+                disabled={!tab.clipboardEnabled}
                 className="btn btn-quiet h-8 w-8 !px-0"
                 title={t('session.clipboardSet')}
                 aria-label={t('session.clipboardSet')}
@@ -1086,6 +1324,75 @@ export function SessionView({
               </button>
             </>
           ) : null}
+
+          {audioAvailable ? (
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={toggleAudio}
+                className={
+                  'btn h-8 w-8 !px-0 ' +
+                  (audioOn ? 'text-accent' : 'btn-quiet')
+                }
+                title={
+                  audioOn ? t('session.audioOff') : t('session.audioOn')
+                }
+                aria-label={
+                  audioOn ? t('session.audioOff') : t('session.audioOn')
+                }
+                aria-pressed={audioOn}
+              >
+                {audioOn ? <Volume2 size={14} /> : <VolumeX size={14} />}
+              </button>
+              {audioOn ? (
+                <input
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  value={audioVolume}
+                  onChange={(event) =>
+                    changeAudioVolume(Number(event.target.value))
+                  }
+                  className="hidden h-1 w-16 cursor-pointer sm:block"
+                  style={{ accentColor: 'var(--accent)' }}
+                  aria-label={t('session.audioVolume')}
+                />
+              ) : null}
+            </div>
+          ) : null}
+
+          <button
+            type="button"
+            onClick={() => setFilesOpen(true)}
+            className={
+              'btn h-8 gap-1 px-2 text-[11px] ' +
+              (filesOpen ? 'text-accent' : 'btn-quiet')
+            }
+            title={t('session.files')}
+            aria-label={t('session.files')}
+          >
+            <FolderOpen size={14} />
+            <span className="hidden lg:inline">{t('session.files')}</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setChatOpen(true)}
+            className={
+              'relative btn h-8 gap-1 px-2 text-[11px] ' +
+              (chatOpen ? 'text-accent' : 'btn-quiet')
+            }
+            title={t('session.chat')}
+            aria-label={t('session.chat')}
+          >
+            <MessageSquare size={14} />
+            <span className="hidden lg:inline">{t('session.chat')}</span>
+            {chatUnread > 0 && !chatOpen ? (
+              <span className="absolute -right-0.5 -top-0.5 grid h-4 min-w-4 place-items-center rounded-full bg-accent px-1 text-[9px] font-semibold text-on-accent">
+                {chatUnread > 9 ? '9+' : chatUnread}
+              </span>
+            ) : null}
+          </button>
 
           <button
             type="button"
@@ -1155,8 +1462,13 @@ export function SessionView({
           {popout ? (
             <button
               type="button"
-              onClick={() => window.close()}
-              className="btn btn-quiet h-8 w-8 !px-0"
+              onClick={() => {
+                // WebKitGTK ignores window.close() for a window it created;
+                // only the shell can actually destroy it.
+                if (shellInfo.enabled) windowAction('close')
+                else window.close()
+              }}
+              className="btn btn-quiet h-8 w-8 !px-0 hover:!border-danger/50 hover:!text-danger"
               title={t('session.closeWindow')}
               aria-label={t('session.closeWindow')}
             >
@@ -1177,7 +1489,12 @@ export function SessionView({
       </div>
 
       {tab.error || actionError ? (
-        <div className="flex flex-wrap items-center gap-2 border-b border-danger/30 bg-danger/10 px-4 py-2 text-[12px] text-danger">
+        <div
+          className={
+            (isFullscreen ? 'hidden' : 'flex flex-wrap items-center gap-2') +
+            ' border-b border-danger/30 bg-danger/10 px-4 py-2 text-[12px] text-danger'
+          }
+        >
           <span className="min-w-0 flex-1">
             {tab.error
               ? String(t(`error.${tab.error}`, { defaultValue: tab.error }))
@@ -1205,7 +1522,13 @@ export function SessionView({
         </div>
       ) : null}
 
-      <div className="flex min-h-0 flex-1 items-center justify-center p-3 sm:p-4">
+      <div
+        className={
+          isFullscreen
+            ? 'flex min-h-0 flex-1'
+            : 'flex min-h-0 flex-1 items-center justify-center p-3 sm:p-4'
+        }
+      >
         <div
           ref={surfaceRef}
           tabIndex={-1}
@@ -1220,11 +1543,17 @@ export function SessionView({
             if (tab.controlEnabled) event.preventDefault()
           }}
           className={
-            'relative h-full w-full touch-none select-none rounded-xl border bg-black/70 outline-none transition ' +
-            (displayMode === 'actual'
-              ? 'overflow-auto '
-              : 'flex items-center justify-center overflow-hidden ') +
-            (tab.controlEnabled ? 'border-accent/45' : 'border-line')
+            'relative h-full w-full touch-none select-none outline-none transition ' +
+            (isFullscreen
+              ? 'bg-black ' +
+                (displayMode === 'actual'
+                  ? 'overflow-auto'
+                  : 'overflow-hidden')
+              : 'rounded-xl border bg-black/70 ' +
+                (displayMode === 'actual'
+                  ? 'overflow-auto '
+                  : 'flex items-center justify-center overflow-hidden ') +
+                (tab.controlEnabled ? 'border-accent/45' : 'border-line'))
           }
         >
           {tab.frame ? (
@@ -1318,7 +1647,217 @@ export function SessionView({
             </div>
           ) : null}
 
-          {quickOpen ? (
+          {isFullscreen ? (
+            quickOpen ? (
+            <div
+              ref={quickBarRef}
+              className="pointer-events-auto absolute left-1/2 top-3 z-40 flex max-w-[96vw] -translate-x-1/2 items-center gap-0.5 overflow-x-auto rounded-full border border-white/10 bg-black/70 px-2 py-1.5 text-white shadow-2xl backdrop-blur-md"
+              onPointerDown={(event) => event.stopPropagation()}
+              onPointerUp={(event) => event.stopPropagation()}
+            >
+              <button
+                type="button"
+                onClick={toggleFullscreen}
+                className="shrink-0 rounded-full bg-white/10 px-2.5 py-1.5 text-[11px] font-medium transition hover:bg-white/20"
+                title={t('session.exitFullscreen')}
+              >
+                <span className="flex items-center gap-1.5">
+                  <Minimize2 size={13} />
+                  {t('session.exitFullscreen')}
+                </span>
+              </button>
+              <span className="mx-1 h-4 w-px shrink-0 bg-white/15" />
+              {(['fit', 'actual', 'fill'] as DisplayMode[]).map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  onClick={() => changeDisplayMode(mode)}
+                  className={
+                    'shrink-0 rounded-full px-2.5 py-1.5 text-[11px] transition ' +
+                    (displayMode === mode
+                      ? 'bg-white/15 text-white'
+                      : 'text-white/70 hover:bg-white/10')
+                  }
+                >
+                  {t(`session.${mode}`)}
+                </button>
+              ))}
+              <span className="mx-1 h-4 w-px shrink-0 bg-white/15" />
+              <label className="flex shrink-0 items-center gap-1 rounded-full px-1.5">
+                <Gauge size={12} className="text-white/60" />
+                <select
+                  value={qualityMode}
+                  onChange={(event) =>
+                    setQualityMode(event.target.value as QualityMode)
+                  }
+                  aria-label={t('session.quality')}
+                  className="h-7 bg-transparent text-[11px] text-white outline-none [&>option]:text-black"
+                >
+                  <option value="turbo">{t('session.qualityTurbo')}</option>
+                  <option value="smooth">{t('session.qualitySmooth')}</option>
+                  <option value="balanced">
+                    {t('session.qualityBalanced')}
+                  </option>
+                  <option value="quality">{t('session.qualityHigh')}</option>
+                  <option value="auto">{t('session.qualityAuto')}</option>
+                </select>
+              </label>
+              {inputAvailable ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const next = !tab.controlEnabled
+                    setControlEnabled(tab.id, next)
+                    if (!next) setVirtualMouse(false)
+                  }}
+                  className={
+                    'shrink-0 rounded-full px-2.5 py-1.5 text-[11px] transition ' +
+                    (tab.controlEnabled
+                      ? 'bg-accent text-on-accent'
+                      : 'text-white/70 hover:bg-white/10')
+                  }
+                  title={
+                    tab.controlEnabled
+                      ? t('session.stopControl')
+                      : t('session.startControl')
+                  }
+                >
+                  <span className="flex items-center gap-1.5">
+                    {tab.controlEnabled ? (
+                      <Hand size={13} />
+                    ) : (
+                      <MousePointer2 size={13} />
+                    )}
+                    <span className="hidden sm:inline">
+                      {tab.controlEnabled
+                        ? t('session.stopControl')
+                        : t('session.startControl')}
+                    </span>
+                  </span>
+                </button>
+              ) : null}
+              {clipboardAvailable ? (
+                <button
+                  type="button"
+                  onClick={() =>
+                    setClipboardEnabled(tab.id, !tab.clipboardEnabled)
+                  }
+                  className={
+                    'shrink-0 rounded-full px-2.5 py-1.5 text-[11px] transition ' +
+                    (tab.clipboardEnabled
+                      ? 'bg-white/15 text-white'
+                      : 'text-white/50 hover:bg-white/10')
+                  }
+                  title={
+                    tab.clipboardEnabled
+                      ? t('session.clipboardOff')
+                      : t('session.clipboardOn')
+                  }
+                >
+                  {tab.clipboardEnabled ? (
+                    <ClipboardCheck size={13} />
+                  ) : (
+                    <ClipboardX size={13} />
+                  )}
+                </button>
+              ) : null}
+              {audioAvailable ? (
+                <div className="flex shrink-0 items-center gap-1 pl-1">
+                  <button
+                    type="button"
+                    onClick={toggleAudio}
+                    className={
+                      'rounded-full px-2.5 py-1.5 text-[11px] transition ' +
+                      (audioOn
+                        ? 'bg-white/15 text-white'
+                        : 'text-white/50 hover:bg-white/10')
+                    }
+                    title={
+                      audioOn ? t('session.audioOff') : t('session.audioOn')
+                    }
+                  >
+                    {audioOn ? (
+                      <Volume2 size={13} />
+                    ) : (
+                      <VolumeX size={13} />
+                    )}
+                  </button>
+                  {audioOn ? (
+                    <input
+                      type="range"
+                      min={0}
+                      max={1}
+                      step={0.05}
+                      value={audioVolume}
+                      onChange={(event) =>
+                        changeAudioVolume(Number(event.target.value))
+                      }
+                      className="h-1 w-14 cursor-pointer"
+                      style={{ accentColor: '#5eead4' }}
+                      aria-label={t('session.audioVolume')}
+                    />
+                  ) : null}
+                </div>
+              ) : null}
+              <button
+                type="button"
+                onClick={() => {
+                  setChatOpen(true)
+                  setFilesOpen(false)
+                }}
+                className="relative shrink-0 rounded-full px-2.5 py-1.5 text-[11px] text-white/80 transition hover:bg-white/10"
+                title={t('session.chat')}
+              >
+                <MessageSquare size={13} />
+                {chatUnread > 0 && !chatOpen ? (
+                  <span className="absolute -right-0.5 -top-0.5 grid h-4 min-w-4 place-items-center rounded-full bg-accent px-1 text-[9px] font-semibold text-on-accent">
+                    {chatUnread > 9 ? '9+' : chatUnread}
+                  </span>
+                ) : null}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setFilesOpen(true)
+                  setChatOpen(false)
+                }}
+                className="shrink-0 rounded-full px-2.5 py-1.5 text-[11px] text-white/80 transition hover:bg-white/10"
+                title={t('session.files')}
+              >
+                <FolderOpen size={13} />
+              </button>
+              {inputAvailable ? (
+                <button
+                  type="button"
+                  onClick={() => connection()?.sendInput({ k: 'sas' })}
+                  className="shrink-0 rounded-full px-2.5 py-1.5 text-[11px] text-white/80 transition hover:bg-white/10"
+                  title={t('session.ctrlAltDelHint')}
+                >
+                  <Keyboard size={13} />
+                </button>
+              ) : null}
+              <span className="mx-1 h-4 w-px shrink-0 bg-white/15" />
+              <button
+                type="button"
+                onClick={() => closeTab(tab.id)}
+                className="shrink-0 rounded-full px-2.5 py-1.5 text-[11px] text-red-300 transition hover:bg-red-500/20"
+                title={t('session.disconnect')}
+              >
+                <LogOut size={13} />
+              </button>
+            </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setQuickOpen(true)}
+                className="pointer-events-auto absolute left-1/2 top-3 z-40 grid h-9 w-9 -translate-x-1/2 place-items-center rounded-full border border-white/15 bg-black/60 text-white/70 shadow-lg backdrop-blur transition hover:text-white"
+                title={t('session.quickActions')}
+                aria-label={t('session.quickActions')}
+              >
+                <Settings2 size={15} />
+              </button>
+            )
+          ) : quickOpen ? (
             <div
               ref={quickBarRef}
               className="pointer-events-auto absolute left-1/2 top-3 z-30 flex max-w-[94vw] -translate-x-1/2 items-center gap-1 overflow-x-auto rounded-full border border-line bg-surface/95 p-1 shadow-lg backdrop-blur"
@@ -1492,6 +2031,81 @@ export function SessionView({
             </button>
           )}
 
+          {callPhase !== 'idle' ? (
+            <div
+              className="pointer-events-auto absolute left-3 top-14 z-30 flex max-w-[calc(100%-1.5rem)] items-center gap-2 rounded-full border border-line bg-surface/95 px-3 py-1.5 text-[11px] shadow-lg backdrop-blur"
+              onPointerDown={(event) => event.stopPropagation()}
+              onPointerUp={(event) => event.stopPropagation()}
+            >
+              <span
+                className={
+                  callPhase === 'active' ? 'text-accent' : 'text-warn'
+                }
+              >
+                {callPhase === 'active' ? (
+                  <Phone size={13} />
+                ) : (
+                  <PhoneOff size={13} />
+                )}
+              </span>
+              <span className="whitespace-nowrap">
+                {callPhase === 'ringing'
+                  ? t('call.calling')
+                  : `${t('call.inCall')} ${formatCallTime(callSeconds)}`}
+              </span>
+              {callPhase === 'active' ? (
+                <button
+                  type="button"
+                  onClick={toggleCallMute}
+                  className={
+                    'grid h-6 w-6 place-items-center rounded-full transition hover:bg-panel ' +
+                    (callMuted ? 'text-danger' : 'text-muted hover:text-ink')
+                  }
+                  title={callMuted ? t('call.unmute') : t('call.mute')}
+                  aria-label={callMuted ? t('call.unmute') : t('call.mute')}
+                >
+                  {callMuted ? <MicOff size={13} /> : <Mic size={13} />}
+                </button>
+              ) : null}
+              {callNotice ? (
+                <span className="whitespace-nowrap text-warn">
+                  {t(`call.${callNotice}`)}
+                </span>
+              ) : null}
+              {hostMic === false && callPhase === 'active' ? (
+                <span className="hidden whitespace-nowrap text-warn sm:inline">
+                  {t('call.hostNoMic')}
+                </span>
+              ) : null}
+              <button
+                type="button"
+                onClick={hangupVoiceCall}
+                className="flex items-center gap-1 rounded-full bg-danger/15 px-2 py-1 text-danger transition hover:bg-danger/25"
+                title={t('call.hangup')}
+              >
+                <PhoneOff size={12} />
+                {t('call.hangup')}
+              </button>
+            </div>
+          ) : null}
+
+          <ChatPanel
+            open={chatOpen}
+            onClose={() => setChatOpen(false)}
+            messages={chatMessages}
+            onSend={(text) => connection()?.sendChat(text)}
+            remoteLabel={tab.label}
+            callAvailable={callAvailable}
+            callPhase={callPhase}
+            onCall={startVoiceCall}
+          />
+
+          <FileTransferPanel
+            open={filesOpen}
+            onClose={() => setFilesOpen(false)}
+            connection={connection() ?? null}
+          />
+
           <div className="pointer-events-none absolute left-3 top-3 flex flex-wrap gap-1.5">
             {qualityWatermark && welcome ? (
               <span className="rounded-md border border-line bg-surface/80 px-2 py-1 font-mono text-[10px] text-muted backdrop-blur">
@@ -1614,7 +2228,13 @@ export function SessionView({
         </div>
       </div>
 
-      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-line-soft px-4 py-2 text-[11px] text-muted/85">
+      <div
+        className={
+          isFullscreen
+            ? 'hidden'
+            : 'flex flex-wrap items-center justify-between gap-2 border-t border-line-soft px-4 py-2 text-[11px] text-muted/85'
+        }
+      >
         <span>{synthetic ? t('session.synthetic') : t('session.direct')}</span>
         <span>
           {tab.controlEnabled

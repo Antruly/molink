@@ -2,6 +2,7 @@ import { Home, Moon, Settings2, Sun } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useAppStore } from '../store/app'
 import { Logo } from './Logo'
+import { UpdateNotice } from './UpdateNotice'
 
 export function AppHeader({ showHome = true }: { showHome?: boolean }) {
   const { t } = useTranslation()
@@ -24,6 +25,7 @@ export function AppHeader({ showHome = true }: { showHome?: boolean }) {
       </div>
 
       <div className="ml-auto flex items-center gap-1.5">
+        <UpdateNotice />
         {showHome && activeTabId !== 'home' ? (
           <button
             type="button"

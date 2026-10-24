@@ -14,8 +14,12 @@
 #include <webapp/uvcpp_web_json.h>
 
 #include "api.h"
+#include "audio/audio.h"
+#include "audio/voice.h"
 #include "auth_state.h"
+#include "call_hub.h"
 #include "capture/capture.h"
+#include "chat_hub.h"
 #include "clipboard/clipboard.h"
 #include "config.h"
 #include "discovery.h"
@@ -215,6 +219,20 @@ int main(int argc, char** argv) {
 
   auto registry = std::make_shared<session_registry>();
   auto access_requests = std::make_shared<access_request_registry>();
+  auto chat = std::make_shared<chat_hub>();
+  std::string audio_error;
+  std::unique_ptr<audio_source> audio_source = make_audio_source(audio_error);
+  std::shared_ptr<audio_hub> audio;
+  if (audio_source) {
+    audio = std::make_shared<audio_hub>(std::move(audio_source));
+    const audio_format format = audio->format();
+    std::fprintf(stderr, "molink: audio loopback %d Hz, %d channel(s)\n",
+                 format.sample_rate, format.channels);
+  }
+  auto call = std::make_shared<call_hub>();
+  std::string voice_error;
+  std::shared_ptr<voice_engine> voice(make_voice_engine(voice_error));
+  if (voice) call->set_host_microphone(voice->microphone_available());
   const uint64_t started_ms = now_ms();
 
   capture_options capture_opts;
@@ -330,6 +348,7 @@ int main(int argc, char** argv) {
   }
   session_opts.clipboard = clipboard;
   session_opts.device_id = identity.device_id;
+  session_opts.device_name = auth->settings().device_name;
   session_opts.lock = lock;
 
   uvcpp::uvcpp_web_app app;
@@ -375,6 +394,8 @@ int main(int argc, char** argv) {
   deps.client_token = client_token;
   deps.auth = auth;
   deps.access_requests = access_requests;
+  deps.chat = chat;
+  deps.call = call;
   deps.lock = lock;
   deps.network = network;
   deps.config = cfg;
@@ -383,6 +404,10 @@ int main(int argc, char** argv) {
   deps.tile_size = capture_opts.tile_size;
   deps.change_threshold = capture_opts.change_threshold;
   session_opts.network = network;
+  session_opts.chat = chat;
+  session_opts.audio = audio;
+  session_opts.call = call;
+  session_opts.voice = voice;
   session_opts.bound_port = bound_port;
   session_opts.http2_available = deps.http2_available;
   session_opts.tile_size = capture_opts.tile_size;

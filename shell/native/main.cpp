@@ -741,6 +741,10 @@ void on_script_message(WebKitUserContentManager*, WebKitJavascriptResult* result
     } else {
       gtk_window_maximize(GTK_WINDOW(window));
     }
+  } else if (action == "fullscreen-on") {
+    gtk_window_fullscreen(GTK_WINDOW(window));
+  } else if (action == "fullscreen-off") {
+    gtk_window_unfullscreen(GTK_WINDOW(window));
   } else if (action == "fullscreen") {
     GdkWindow* gdk_window = gtk_widget_get_window(window);
     const bool fullscreen =
@@ -750,6 +754,16 @@ void on_script_message(WebKitUserContentManager*, WebKitJavascriptResult* result
       gtk_window_unfullscreen(GTK_WINDOW(window));
     } else {
       gtk_window_fullscreen(GTK_WINDOW(window));
+    }
+  } else if (action.rfind("open-url:", 0) == 0 ||
+             action.rfind("update-url:", 0) == 0) {
+    // Linux packages need the user's package manager, so both actions open
+    // the download in the system browser.
+    const std::size_t colon = action.find(':');
+    const std::string url = action.substr(colon + 1);
+    if (!url.empty()) {
+      gtk_show_uri_on_window(GTK_WINDOW(window), url.c_str(),
+                             GDK_CURRENT_TIME, nullptr);
     }
   } else if (action == "close") {
     if (g_url_mode) {
@@ -878,6 +892,9 @@ int main(int argc, char** argv) {
   webkit_settings_set_enable_fullscreen(settings, TRUE);
   webkit_settings_set_javascript_can_access_clipboard(settings, TRUE);
   webkit_settings_set_javascript_can_open_windows_automatically(settings, TRUE);
+  // getUserMedia for voice calls. The permission handler above only allows
+  // requests from the core's origin.
+  webkit_settings_set_enable_media_stream(settings, TRUE);
   gtk_container_add(GTK_CONTAINER(window), view);
 
   static const std::string origin =

@@ -505,6 +505,118 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
              resp.status(204).end();
            });
 
+  // Chat between the person at this machine and a controlling client. The
+  // local UI polls for new messages; the session websocket carries the other
+  // side. Both use the same shared log.
+  app.get("/api/chat",
+          [deps](uvcpp_web_request& req, uvcpp_web_response& resp,
+                 uvcpp_web_next) {
+            if (!is_loopback_peer(req.peer_ip()) || !deps.chat) {
+              resp.status(403).json_str(R"({"code":"loopback_only"})");
+              resp.end();
+              return;
+            }
+            uint64_t since = 0;
+            if (const std::string* value = req.query("since")) {
+              try {
+                since = std::stoull(*value);
+              } catch (...) {
+                since = 0;
+              }
+            }
+            uvcpp_json list = uvcpp_json::array();
+            for (const chat_message& message : deps.chat->history(since)) {
+              uvcpp_json item;
+              item["id"] = message.id;
+              item["from"] = message.from;
+              item["text"] = message.text;
+              item["ts"] = message.ts_ms;
+              list.push_back(std::move(item));
+            }
+            uvcpp_json j;
+            j["messages"] = std::move(list);
+            j["cursor"] = deps.chat->cursor();
+            resp.set_header("Cache-Control", "no-store").json(j);
+            resp.end();
+          });
+
+  app.post("/api/chat",
+           [deps](uvcpp_web_request& req, uvcpp_web_response& resp,
+                  uvcpp_web_next) {
+             if (!is_loopback_peer(req.peer_ip()) || !deps.chat) {
+               resp.status(403).json_str(R"({"code":"loopback_only"})");
+               resp.end();
+               return;
+             }
+             const std::string* value = req.query("text");
+             const std::string text = value != nullptr ? *value : std::string();
+             if (text.empty() || text.size() > 4096) {
+               resp.status(400).json_str(
+                   R"({"code":"bad_chat","message":"text must be 1..4096 bytes"})");
+               resp.end();
+               return;
+             }
+             deps.chat->post("host", text);
+             resp.status(204).end();
+           });
+
+  // Voice call control for the person at this machine (the host UI polls).
+  app.get("/api/call",
+          [deps](uvcpp_web_request& req, uvcpp_web_response& resp,
+                 uvcpp_web_next) {
+            if (!is_loopback_peer(req.peer_ip()) || !deps.call) {
+              resp.status(403).json_str(R"({"code":"loopback_only"})");
+              resp.end();
+              return;
+            }
+            const call_snapshot state = deps.call->snapshot();
+            uvcpp_json j;
+            j["state"] = state.phase == call_phase::idle
+                             ? "idle"
+                             : (state.phase == call_phase::ringing ? "ringing"
+                                                                   : "active");
+            j["started_ms"] = state.started_ms;
+            j["host_microphone"] = state.host_microphone;
+            resp.set_header("Cache-Control", "no-store").json(j);
+            resp.end();
+          });
+
+  app.post("/api/call",
+           [deps](uvcpp_web_request& req, uvcpp_web_response& resp,
+                  uvcpp_web_next) {
+             if (!is_loopback_peer(req.peer_ip()) || !deps.call) {
+               resp.status(403).json_str(R"({"code":"loopback_only"})");
+               resp.end();
+               return;
+             }
+             const std::string* value = req.query("action");
+             const std::string action =
+                 value != nullptr ? *value : std::string();
+             std::string err;
+             bool ok = false;
+             if (action == "accept") {
+               ok = deps.call->accept(err);
+             } else if (action == "decline") {
+               ok = deps.call->decline();
+             } else if (action == "end") {
+               ok = deps.call->end();
+             } else {
+               resp.status(400).json_str(
+                   R"({"code":"bad_call_action","message":"accept, decline or end"})");
+               resp.end();
+               return;
+             }
+             if (!ok) {
+               uvcpp_json body;
+               body["code"] = "call_failed";
+               body["message"] = err;
+               resp.status(409).json(body);
+               resp.end();
+               return;
+             }
+             resp.status(204).end();
+           });
+
   app.post("/api/ui-state",
            [deps](uvcpp_web_request& req, uvcpp_web_response& resp,
                   uvcpp_web_next) {

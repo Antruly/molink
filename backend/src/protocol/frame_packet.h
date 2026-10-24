@@ -78,6 +78,12 @@ enum class packet_type : uint8_t {
   ack = 0x03,        ///< JSON control payload
   input = 0x10,      ///< JSON input event batch (pointer/key)
   clipboard = 0x11,  ///< JSON clipboard payload
+  /// File transfer bytes: u32 transfer id, u32 reserved, u64 offset, data.
+  file_data = 0x12,
+  /// Raw interleaved PCM for the format advertised in the welcome message.
+  audio = 0x13,
+  /// Voice-call PCM: 48 kHz mono little-endian 16-bit, both directions.
+  voice = 0x14,
   control = 0x7f,    ///< JSON control payload, session-scoped
   ping = 0x80,       ///< empty payload
   pong = 0x81,       ///< empty payload

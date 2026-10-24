@@ -24,6 +24,7 @@
 #include <shobjidl.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#include <urlmon.h>
 
 #include <WebView2.h>
 
@@ -32,6 +33,7 @@
 #include <filesystem>
 #include <iterator>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -63,6 +65,7 @@ HANDLE g_instance_mutex = nullptr;
 
 void spawn_self(const std::wstring& uri);
 void toggle_fullscreen(HWND window);
+void start_update(const std::wstring& url);
 
 void fail_box(const wchar_t* message) {
   MessageBoxW(g_window, message, L"moLink", MB_ICONERROR | MB_OK);
@@ -338,6 +341,18 @@ class WebMessageHandler final
       else ShowWindow(g_window, SW_MAXIMIZE);
     } else if (action == L"fullscreen") {
       toggle_fullscreen(g_window);
+    } else if (action == L"fullscreen-on") {
+      if (!g_fullscreen) toggle_fullscreen(g_window);
+    } else if (action == L"fullscreen-off") {
+      if (g_fullscreen) toggle_fullscreen(g_window);
+    } else if (action.rfind(L"open-url:", 0) == 0) {
+      const std::wstring url = action.substr(9);
+      if (!url.empty()) {
+        ShellExecuteW(g_window, L"open", url.c_str(), nullptr, nullptr,
+                      SW_SHOWNORMAL);
+      }
+    } else if (action.rfind(L"update-url:", 0) == 0) {
+      start_update(action.substr(11));
     } else if (action == L"drag") {
       ReleaseCapture();
       SendMessageW(g_window, WM_NCLBUTTONDOWN, HTCAPTION, 0);
@@ -450,6 +465,57 @@ class NavigationHandler final
   std::atomic<ULONG> refs_{1};
 };
 
+/// Grants the microphone to the locally served UI so voice calls work in the
+/// Windows shell. Nothing else is auto-granted.
+class PermissionHandler final
+    : public ICoreWebView2PermissionRequestedEventHandler {
+ public:
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override {
+    if (ppv == nullptr) return E_POINTER;
+    if (riid == IID_IUnknown ||
+        riid == IID_ICoreWebView2PermissionRequestedEventHandler) {
+      *ppv =
+          static_cast<ICoreWebView2PermissionRequestedEventHandler*>(this);
+      AddRef();
+      return S_OK;
+    }
+    *ppv = nullptr;
+    return E_NOINTERFACE;
+  }
+  ULONG STDMETHODCALLTYPE AddRef() override { return ++refs_; }
+  ULONG STDMETHODCALLTYPE Release() override {
+    const ULONG refs = --refs_;
+    if (refs == 0) delete this;
+    return refs;
+  }
+
+  HRESULT STDMETHODCALLTYPE Invoke(
+      ICoreWebView2*,
+      ICoreWebView2PermissionRequestedEventArgs* args) override {
+    if (args == nullptr) return S_OK;
+    COREWEBVIEW2_PERMISSION_KIND kind =
+        COREWEBVIEW2_PERMISSION_KIND_UNKNOWN_PERMISSION;
+    args->get_PermissionKind(&kind);
+    if (kind != COREWEBVIEW2_PERMISSION_KIND_MICROPHONE) return S_OK;
+    LPWSTR raw = nullptr;
+    args->get_Uri(&raw);
+    bool local = false;
+    if (raw != nullptr) {
+      const std::wstring uri(raw);
+      local = uri.rfind(L"http://127.0.0.1", 0) == 0 ||
+              uri.rfind(L"http://localhost", 0) == 0;
+      CoTaskMemFree(raw);
+    }
+    if (local) {
+      args->put_State(COREWEBVIEW2_PERMISSION_STATE_ALLOW);
+    }
+    return S_OK;
+  }
+
+ private:
+  std::atomic<ULONG> refs_{1};
+};
+
 class ControllerHandler final
     : public ICoreWebView2CreateCoreWebView2ControllerCompletedHandler {
  public:
@@ -499,6 +565,7 @@ class ControllerHandler final
       g_webview->add_NavigationCompleted(new NavigationHandler(), &token);
       g_webview->add_WebMessageReceived(new WebMessageHandler(), &token);
       g_webview->add_NewWindowRequested(new NewWindowHandler(), &token);
+      g_webview->add_PermissionRequested(new PermissionHandler(), &token);
       g_webview->Navigate(g_url.c_str());
     }
     return S_OK;
@@ -573,6 +640,27 @@ void toggle_fullscreen(HWND window) {
   }
 }
 
+
+// Downloads the release installer and launches it elevated. The installer
+// closes this app through Restart Manager (same session), replaces the files
+// and restarts the session service. Failures are silent; the UI always offers
+// a manual download as well.
+void start_update(const std::wstring& url) {
+  if (url.empty()) return;
+  std::thread([url] {
+    wchar_t temp[MAX_PATH] = {};
+    if (GetTempPathW(MAX_PATH, temp) == 0) return;
+    const std::wstring file = std::wstring(temp) + L"molink-update.exe";
+    DeleteFileW(file.c_str());
+    if (FAILED(URLDownloadToFileW(nullptr, url.c_str(), file.c_str(), 0,
+                                  nullptr))) {
+      return;
+    }
+    ShellExecuteW(nullptr, L"runas", file.c_str(),
+                  L"/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS=service",
+                  nullptr, SW_SHOWNORMAL);
+  }).detach();
+}
 
 std::wstring exe_path() {
   wchar_t buffer[32768];
@@ -730,7 +818,9 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
         GetClientRect(window, &bounds);
         g_controller->put_Bounds(bounds);
       }
-      if (IsZoomed(window) || IsIconic(window)) {
+      // Fullscreen is a monitor-sized popup, not a zoomed window, but it must
+      // be square just like a maximized one.
+      if (g_fullscreen || IsZoomed(window) || IsIconic(window)) {
         SetWindowRgn(window, nullptr, TRUE);
       } else {
         RECT client;

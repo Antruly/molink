@@ -3,8 +3,10 @@ import {
   PacketFlag,
   PacketType,
   ProtocolError,
+  PROTOCOL_VERSION,
   codecBytesPerPixel,
   decodePacket,
+  encodePacket,
   isDeflatedCodec,
   parseFramePayload,
   type Frame,
@@ -47,6 +49,14 @@ export interface Welcome {
   input_backend?: string
   clipboard?: boolean
   clipboard_backend?: string
+  audio?: boolean
+  audio_format?: {
+    sample_rate: number
+    channels: number
+    bits: number
+  }
+  call?: boolean
+  device_name?: string
   device_id?: string
 }
 
@@ -65,6 +75,60 @@ export interface CursorPosition {
   visible: boolean
 }
 
+export interface ChatMessage {
+  id: number
+  from: 'remote' | 'host' | string
+  text: string
+  ts: number
+}
+
+export interface FileEntry {
+  name: string
+  dir: boolean
+  size: number
+  mtime: number
+}
+
+/// One file on the host's Explorer clipboard (CF_HDROP).
+export interface ClipboardFileEntry {
+  name: string
+  path: string
+  size: number
+}
+
+export interface FileMessage {
+  action: string
+  ok?: boolean
+  id?: number
+  name?: string
+  size?: number
+  dir?: string
+  path?: string
+  root?: string
+  chunk?: number
+  count?: number
+  entries?: FileEntry[]
+  message?: string
+}
+
+export type SessionEvent =
+  | { kind: 'chat'; message: ChatMessage }
+  | { kind: 'chat-history'; messages: ChatMessage[] }
+  | { kind: 'file'; message: FileMessage }
+  | { kind: 'file-chunk'; id: number; offset: number; data: Uint8Array }
+  | { kind: 'clipboard-files'; files: ClipboardFileEntry[] }
+  | { kind: 'audio'; data: Uint8Array }
+  | {
+      kind: 'call'
+      action: string
+      hostMicrophone?: boolean
+      startedMs?: number
+      message?: string
+    }
+  | { kind: 'voice'; data: Uint8Array }
+
+export type SessionEventListener = (event: SessionEvent) => void
+
 export interface ClientHandlers {
   onPhase: (phase: ClientPhase, detail?: string) => void
   onWelcome: (welcome: Welcome) => void
@@ -74,6 +138,7 @@ export interface ClientHandlers {
   onCursor: (shape: CursorShape) => void
   onCursorPosition: (position: CursorPosition) => void
   onClipboard: (text: string) => void
+  onSessionEvent?: (event: SessionEvent) => void
   onDisplay?: (index: number) => void
   onAccessRequested?: (id: number) => void
   /** Every FRAME packet, including empty "nothing changed" responses. */
@@ -101,6 +166,21 @@ interface ControlMessage {
   visible?: boolean
   text?: string
   index?: number
+  action?: string
+  ok?: boolean
+  from?: string
+  ts?: number
+  name?: string
+  size?: number
+  dir?: string
+  path?: string
+  root?: string
+  chunk?: number
+  entries?: FileEntry[]
+  messages?: ChatMessage[]
+  files?: ClipboardFileEntry[]
+  host_microphone?: boolean
+  started_ms?: number
 }
 
 function decodeBase64(text: string): Uint8Array | null {
@@ -343,8 +423,84 @@ export class MolinkClient {
     this.sendJson({ type: 'clipboard', action: 'get' })
   }
 
+  requestClipboardFiles(): void {
+    if (!this.isLive()) return
+    this.sendJson({ type: 'clipboard', action: 'files' })
+  }
+
+  startAudio(): void {
+    if (!this.isLive()) return
+    this.sendJson({ type: 'audio', action: 'start' })
+  }
+
+  stopAudio(): void {
+    if (!this.isLive()) return
+    this.sendJson({ type: 'audio', action: 'stop' })
+  }
+
+  inviteCall(): void {
+    if (!this.isLive()) return
+    this.sendJson({ type: 'call', action: 'invite' })
+  }
+
+  hangupCall(): void {
+    if (!this.isLive()) return
+    this.sendJson({ type: 'call', action: 'hangup' })
+  }
+
+  sendVoice(data: Uint8Array): void {
+    if (!this.isLive() || this.ws === null) return
+    const packet = encodePacket({
+      version: PROTOCOL_VERSION,
+      type: PacketType.voice,
+      flags: 0,
+      session: 0,
+      seq: 0,
+      tsUs: Date.now() * 1000,
+      payload: data,
+    })
+    this.ws.send(packet)
+  }
+
   setClipboard(text: string): void {
     this.sendJson({ type: 'clipboard', action: 'set', text })
+  }
+
+  requestChatHistory(): void {
+    this.sendJson({ type: 'chat', action: 'history' })
+  }
+
+  sendChat(text: string): void {
+    if (!this.isLive()) return
+    this.sendJson({ type: 'chat', action: 'send', text })
+  }
+
+  sendFileAction(
+    action: string,
+    extra: Record<string, unknown> = {},
+  ): void {
+    if (!this.isLive()) return
+    this.sendJson({ type: 'file', action, ...extra })
+  }
+
+  sendFileChunk(id: number, offset: number, data: Uint8Array): void {
+    if (!this.isLive() || this.ws === null) return
+    const payload = new Uint8Array(16 + data.byteLength)
+    const view = new DataView(payload.buffer)
+    view.setUint32(0, id, true)
+    view.setUint32(4, 0, true)
+    view.setBigUint64(8, BigInt(offset), true)
+    payload.set(data, 16)
+    const packet = encodePacket({
+      version: PROTOCOL_VERSION,
+      type: PacketType.fileData,
+      flags: 0,
+      session: 0,
+      seq: 0,
+      tsUs: Date.now() * 1000,
+      payload,
+    })
+    this.ws.send(packet)
   }
 
   /** Real-time clipboard update; the core forwards it to other sessions. */
@@ -437,8 +593,50 @@ export class MolinkClient {
         })
         break
       case 'clipboard':
+        if (message.action === 'files') {
+          this.handlers.onSessionEvent?.({
+            kind: 'clipboard-files',
+            files: message.files ?? [],
+          })
+        } else {
+          this.handlers.onClipboard?.(message.text ?? '')
+        }
+        break
       case 'clipboard-sync':
         this.handlers.onClipboard?.(message.text ?? '')
+        break
+      case 'chat':
+        if (message.action === 'history') {
+          this.handlers.onSessionEvent?.({
+            kind: 'chat-history',
+            messages: (message.messages ?? []) as ChatMessage[],
+          })
+        } else if (message.action === 'message' && message.text) {
+          this.handlers.onSessionEvent?.({
+            kind: 'chat',
+            message: {
+              id: message.id ?? 0,
+              from: message.from ?? 'remote',
+              text: message.text,
+              ts: message.ts ?? Date.now(),
+            },
+          })
+        }
+        break
+      case 'file':
+        this.handlers.onSessionEvent?.({
+          kind: 'file',
+          message: message as unknown as FileMessage,
+        })
+        break
+      case 'call':
+        this.handlers.onSessionEvent?.({
+          kind: 'call',
+          action: message.action ?? '',
+          hostMicrophone: message.host_microphone,
+          startedMs: message.started_ms,
+          message: message.message,
+        })
         break
       case 'error':
         this.handlers.onError?.(message.message ?? message.code ?? 'error')
@@ -451,6 +649,37 @@ export class MolinkClient {
   private handleBinary(buffer: ArrayBuffer): void {
     try {
       const packet = decodePacket(buffer)
+      if (packet.type === PacketType.audio) {
+        this.handlers.onSessionEvent?.({
+          kind: 'audio',
+          data: packet.payload,
+        })
+        return
+      }
+      if (packet.type === PacketType.voice) {
+        this.handlers.onSessionEvent?.({
+          kind: 'voice',
+          data: packet.payload,
+        })
+        return
+      }
+      if (packet.type === PacketType.fileData) {
+        const payload = packet.payload
+        if (payload.byteLength >= 16) {
+          const view = new DataView(
+            payload.buffer,
+            payload.byteOffset,
+            payload.byteLength,
+          )
+          this.handlers.onSessionEvent?.({
+            kind: 'file-chunk',
+            id: view.getUint32(0, true),
+            offset: Number(view.getBigUint64(8, true)),
+            data: payload.subarray(16),
+          })
+        }
+        return
+      }
       if (packet.type !== PacketType.frame) return
       this.pendingFrame = false
       const frame = parseFramePayload(packet.payload)

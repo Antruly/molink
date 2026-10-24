@@ -41,6 +41,7 @@ struct clipboard_sync_state {
   std::unordered_set<std::string> seen;
   std::deque<std::string> order;
   std::atomic<bool> fetch_pending{false};
+  std::atomic<bool> files_pending{false};
 };
 
 clipboard_sync_state g_clipboard_sync;
@@ -574,9 +575,20 @@ void send_welcome(session_transport* transport, const session_info& session,
   j["tiles"]["synthetic"] = opt.capture ? !opt.capture->is_real() : true;
   j["input"] = opt.input != nullptr && opt.input->available();
   j["input_backend"] = opt.input ? opt.input->backend() : "none";
+  j["call"] = opt.voice != nullptr;
+  if (opt.audio && opt.audio->available()) {
+    const audio_format format = opt.audio->format();
+    j["audio"] = true;
+    j["audio_format"]["sample_rate"] = format.sample_rate;
+    j["audio_format"]["channels"] = format.channels;
+    j["audio_format"]["bits"] = format.bits;
+  } else {
+    j["audio"] = false;
+  }
   j["clipboard"] = opt.clipboard != nullptr && opt.clipboard->available();
   j["clipboard_backend"] = opt.clipboard ? opt.clipboard->backend() : "none";
   j["device_id"] = opt.device_id;
+  j["device_name"] = opt.device_name;
   send_json(transport, j);
 }
 
@@ -614,6 +626,16 @@ bool session_controller::start(const std::string* initial_token) {
   // Install handlers before the first message so a fast client cannot race its
   // hello. The weak capture keeps the controller from owning its transport.
   std::weak_ptr<session_controller> weak = weak_from_this();
+  files_ = std::make_unique<file_transfer>(
+      [weak](std::string text) {
+        if (auto self = weak.lock()) self->send_json_string(text);
+      },
+      [weak](uint32_t id, uint64_t offset, const uint8_t* data,
+             std::size_t len) {
+        if (auto self = weak.lock()) {
+          self->send_file_chunk(id, offset, data, len);
+        }
+      });
   transport->set_handlers(
       [weak](const std::string& text) {
         if (auto self = weak.lock()) self->on_text(text);
@@ -675,7 +697,162 @@ void session_controller::send_welcome_message() {
   std::shared_ptr<session_info> session = session_.lock();
   if (transport && session) {
     send_welcome(transport.get(), *session, options_);
+    attach_chat();
+    attach_call();
   }
+}
+
+void session_controller::attach_call() {
+  if (!options_.call || call_subscription_ != 0) return;
+  std::weak_ptr<session_controller> weak = weak_from_this();
+  call_subscription_ = options_.call->subscribe(
+      [weak](const call_snapshot& snapshot, const std::string& event) {
+        if (auto self = weak.lock()) self->on_call_event(snapshot, event);
+      });
+}
+
+void session_controller::on_call_event(const call_snapshot& snapshot,
+                                       const std::string& event) {
+  std::shared_ptr<session_info> session = session_.lock();
+  if (!session || snapshot.session_id != session->id) return;
+  uvcpp_json j;
+  j["type"] = "call";
+  j["action"] = event;
+  j["host_microphone"] = snapshot.host_microphone;
+  j["started_ms"] = snapshot.started_ms;
+  send_json_string(uvcpp_json_dump(j));
+  if (event == "accepted") {
+    start_voice();
+  } else if (event == "ended" || event == "declined") {
+    stop_voice();
+  }
+}
+
+void session_controller::start_voice() {
+  if (voice_active_ || !options_.voice) return;
+  std::weak_ptr<session_controller> weak = weak_from_this();
+  auto post = options_.post;
+  std::string error;
+  voice_active_ = options_.voice->start(
+      [weak, post](std::vector<uint8_t> pcm) {
+        auto deliver = [weak, pcm = std::move(pcm)]() mutable {
+          if (auto self = weak.lock()) self->send_voice(std::move(pcm));
+        };
+        if (post) {
+          post(std::move(deliver));
+        } else {
+          deliver();
+        }
+      },
+      error);
+  if (!voice_active_) {
+    uvcpp_json j;
+    j["type"] = "call";
+    j["action"] = "audio_error";
+    j["message"] = error;
+    send_json_string(uvcpp_json_dump(j));
+  }
+}
+
+void session_controller::stop_voice() {
+  if (!voice_active_) return;
+  if (options_.voice) options_.voice->stop();
+  voice_active_ = false;
+}
+
+void session_controller::send_voice(std::vector<uint8_t> pcm) {
+  std::shared_ptr<session_transport> transport = transport_.lock();
+  if (!transport || !transport->is_open() || pcm.empty()) return;
+  std::vector<uint8_t> out;
+  std::string error;
+  if (protocol::encode_packet_into(
+          out, static_cast<uint8_t>(protocol::packet_type::voice), 0, 0, 0,
+          epoch_us(), pcm.data(), pcm.size(), error)) {
+    transport->send_binary(out.data(), out.size());
+  }
+}
+
+void session_controller::send_json_string(const std::string& text) {
+  std::shared_ptr<session_transport> transport = transport_.lock();
+  if (transport && transport->is_open()) transport->send_text(text);
+}
+
+void session_controller::send_file_chunk(uint32_t id, uint64_t offset,
+                                         const uint8_t* data,
+                                         std::size_t len) {
+  std::shared_ptr<session_transport> transport = transport_.lock();
+  if (!transport || !transport->is_open()) return;
+  std::vector<uint8_t> payload(16 + len);
+  std::memcpy(payload.data(), &id, sizeof(id));
+  std::memset(payload.data() + 4, 0, 4);
+  std::memcpy(payload.data() + 8, &offset, sizeof(offset));
+  if (len != 0) std::memcpy(payload.data() + 16, data, len);
+  std::vector<uint8_t> out;
+  std::string err;
+  if (protocol::encode_packet_into(
+          out, static_cast<uint8_t>(protocol::packet_type::file_data), 0, 0, 0,
+          epoch_us(), payload.data(), payload.size(), err)) {
+    transport->send_binary(out.data(), out.size());
+  }
+}
+
+void session_controller::send_audio(std::vector<uint8_t> pcm) {
+  std::shared_ptr<session_transport> transport = transport_.lock();
+  if (!transport || !transport->is_open() || pcm.empty()) return;
+  std::vector<uint8_t> out;
+  std::string err;
+  if (protocol::encode_packet_into(
+          out, static_cast<uint8_t>(protocol::packet_type::audio), 0, 0, 0,
+          epoch_us(), pcm.data(), pcm.size(), err)) {
+    transport->send_binary(out.data(), out.size());
+  }
+}
+
+void session_controller::attach_chat() {
+  if (!options_.chat || chat_subscription_ != 0) return;
+  chat_history();
+  std::weak_ptr<session_transport> transport = transport_;
+  auto post = options_.post;
+  chat_subscription_ = options_.chat->subscribe(
+      [transport, post](const chat_message& message) {
+        uvcpp_json item;
+        item["type"] = "chat";
+        item["action"] = "message";
+        item["id"] = message.id;
+        item["from"] = message.from;
+        item["text"] = message.text;
+        item["ts"] = message.ts_ms;
+        const std::string body = uvcpp_json_dump(item);
+        auto deliver = [transport, body] {
+          if (auto open = transport.lock(); open && open->is_open()) {
+            open->send_text(body);
+          }
+        };
+        if (post) {
+          post(std::move(deliver));
+        } else {
+          deliver();
+        }
+      });
+}
+
+void session_controller::chat_history() {
+  if (!options_.chat) return;
+  const std::vector<chat_message> history = options_.chat->history(0);
+  uvcpp_json j;
+  j["type"] = "chat";
+  j["action"] = "history";
+  uvcpp_json messages = uvcpp_json::array();
+  for (const chat_message& message : history) {
+    uvcpp_json item;
+    item["id"] = message.id;
+    item["from"] = message.from;
+    item["text"] = message.text;
+    item["ts"] = message.ts_ms;
+    messages.push_back(std::move(item));
+  }
+  j["messages"] = std::move(messages);
+  send_json_string(uvcpp_json_dump(j));
 }
 
 void session_controller::approve_access_request() {
@@ -1004,6 +1181,33 @@ void session_controller::on_text(const std::string& text) {
       return;
     }
     const std::string action = string_field(j, "action");
+    if (action == "files") {
+      // Current Explorer file list. Clients use the transfer channel to pull
+      // the contents; this only describes what is on the clipboard.
+      auto target = transport;
+      auto post = options_.post;
+      options_.clipboard->request_files(
+          [target, post](std::vector<clipboard_file> files) {
+            uvcpp_json list = uvcpp_json::array();
+            for (const clipboard_file& file : files) {
+              uvcpp_json item;
+              item["name"] = file.name;
+              item["path"] = file.path;
+              item["size"] = file.size;
+              list.push_back(std::move(item));
+            }
+            uvcpp_json out;
+            out["type"] = "clipboard";
+            out["action"] = "files";
+            out["files"] = std::move(list);
+            if (!post) {
+              send_json(target.get(), out);
+              return;
+            }
+            post([target, out] { send_json(target.get(), out); });
+          });
+      return;
+    }
     if (action == "set") {
       std::string text_value = string_field(j, "text");
       constexpr std::size_t kMaxText = 192 * 1024;
@@ -1080,6 +1284,151 @@ void session_controller::on_text(const std::string& text) {
     return;
   }
 
+  if (type == "call") {
+    if (!require_auth()) return;
+    if (!options_.call) {
+      send_error(transport.get(), "call_unavailable",
+                 "voice calls are unavailable on this host");
+      return;
+    }
+    const std::string action = string_field(j, "action");
+    if (action == "invite") {
+      std::string call_error;
+      if (!options_.call->invite(session->id, call_error)) {
+        send_error(transport.get(), "call_busy", call_error);
+      }
+    } else if (action == "hangup") {
+      options_.call->hangup(session->id);
+    }
+    return;
+  }
+
+  if (type == "audio") {
+    if (!require_auth()) return;
+    const std::string action = string_field(j, "action");
+    if (!options_.audio || !options_.audio->available()) {
+      send_error(transport.get(), "audio_unavailable",
+                 "audio capture is unavailable on this host");
+      return;
+    }
+    if (action == "start") {
+      if (audio_subscription_ != 0) return;
+      std::weak_ptr<session_controller> weak = weak_from_this();
+      auto post = options_.post;
+      std::string audio_error;
+      audio_subscription_ = options_.audio->subscribe(
+          [weak, post](std::vector<uint8_t> pcm) {
+            auto deliver = [weak, pcm = std::move(pcm)]() mutable {
+              if (auto self = weak.lock()) self->send_audio(std::move(pcm));
+            };
+            if (post) {
+              post(std::move(deliver));
+            } else {
+              deliver();
+            }
+          },
+          audio_error);
+      if (audio_subscription_ == 0) {
+        send_error(transport.get(), "audio_failed", audio_error);
+        return;
+      }
+      const audio_format format = options_.audio->format();
+      uvcpp_json reply;
+      reply["type"] = "audio";
+      reply["action"] = "started";
+      reply["sample_rate"] = format.sample_rate;
+      reply["channels"] = format.channels;
+      reply["bits"] = format.bits;
+      send_json(transport.get(), reply);
+    } else if (action == "stop") {
+      if (audio_subscription_ != 0 && options_.audio) {
+        options_.audio->unsubscribe(audio_subscription_);
+        audio_subscription_ = 0;
+      }
+      uvcpp_json reply;
+      reply["type"] = "audio";
+      reply["action"] = "stopped";
+      send_json(transport.get(), reply);
+    }
+    return;
+  }
+
+  if (type == "chat") {
+    if (!require_auth()) return;
+    const std::string action = string_field(j, "action");
+    if (action == "history") {
+      chat_history();
+    } else if (action == "send") {
+      const std::string text = string_field(j, "text");
+      if (text.empty() || text.size() > 4096) {
+        send_error(transport.get(), "bad_chat",
+                   "chat text must be 1..4096 bytes");
+        return;
+      }
+      if (options_.chat) options_.chat->post("remote", text);
+    }
+    return;
+  }
+
+  if (type == "file") {
+    if (!require_auth()) return;
+    if (!files_) return;
+    const std::string action = string_field(j, "action");
+    uint32_t id = 0;
+    if (const auto it = j.find("id");
+        it != j.end() && it->is_number()) {
+      id = static_cast<uint32_t>(it->get<uint64_t>());
+    }
+    if (action == "offer") {
+      uint64_t size = 0;
+      if (const auto it = j.find("size");
+          it != j.end() && it->is_number()) {
+        size = it->get<uint64_t>();
+      }
+      files_->offer(string_field(j, "name"), size);
+    } else if (action == "complete") {
+      files_->complete(id);
+    } else if (action == "cancel") {
+      files_->cancel(id);
+    } else if (action == "browse") {
+      files_->browse(string_field(j, "path"));
+    } else if (action == "request") {
+      files_->request(string_field(j, "path"));
+    } else if (action == "pull") {
+      files_->pull(id);
+    } else if (action == "clipboard-set") {
+      // RDP-style paste: put the referenced remote files on the host's
+      // clipboard so Explorer can paste them.
+      std::vector<std::string> requested;
+      if (const auto it = j.find("paths");
+          it != j.end() && it->is_array()) {
+        for (const auto& item : *it) {
+          if (item.is_string()) requested.push_back(item.get<std::string>());
+        }
+      }
+      const std::vector<std::string> resolved = files_->resolve_files(requested);
+      const bool applied =
+          options_.clipboard && options_.clipboard->available() &&
+          !resolved.empty() && options_.clipboard->set_files(resolved);
+      uvcpp_json out;
+      out["type"] = "file";
+      out["action"] = "clipboard";
+      out["ok"] = applied;
+      out["count"] = applied ? static_cast<int>(resolved.size()) : 0;
+      if (!applied) {
+        out["message"] =
+            options_.clipboard && options_.clipboard->available()
+                ? "no valid files to copy"
+                : "the host clipboard does not support file lists";
+      }
+      send_json(transport.get(), out);
+    } else {
+      send_error(transport.get(), "bad_file_action",
+                 "unknown file action: " + action);
+    }
+    return;
+  }
+
   if (type == "bye") {
     transport->close(transport_close::normal, "client said bye");
     return;
@@ -1150,6 +1499,30 @@ void session_controller::on_binary(const uint8_t* data, std::size_t len) {
       }
       break;
     }
+    case protocol::packet_type::voice: {
+      if (!session->authenticated || !voice_active_ || !options_.voice) break;
+      options_.voice->play(pkt.payload.data(), pkt.payload.size());
+      break;
+    }
+    case protocol::packet_type::file_data: {
+      if (!session->authenticated || !files_) {
+        send_error(transport.get(), "unauthorized",
+                   "send a hello message with a valid token");
+        break;
+      }
+      if (pkt.payload.size() < 16) {
+        send_error(transport.get(), "bad_packet",
+                   "file chunk header is truncated");
+        break;
+      }
+      uint32_t id = 0;
+      uint64_t offset = 0;
+      std::memcpy(&id, pkt.payload.data(), sizeof(id));
+      std::memcpy(&offset, pkt.payload.data() + 8, sizeof(offset));
+      files_->chunk(id, offset, pkt.payload.data() + 16,
+                    pkt.payload.size() - 16);
+      break;
+    }
     case protocol::packet_type::input:
       send_error(transport.get(), "not_implemented",
                  "input injection is not implemented");
@@ -1164,6 +1537,21 @@ void session_controller::on_binary(const uint8_t* data, std::size_t len) {
 void session_controller::on_close(int code, const std::string& reason) {
   std::shared_ptr<session_info> session = session_.lock();
   if (!session) return;
+  if (chat_subscription_ != 0 && options_.chat) {
+    options_.chat->unsubscribe(chat_subscription_);
+    chat_subscription_ = 0;
+  }
+  if (audio_subscription_ != 0 && options_.audio) {
+    options_.audio->unsubscribe(audio_subscription_);
+    audio_subscription_ = 0;
+  }
+  if (call_subscription_ != 0 && options_.call) {
+    options_.call->unsubscribe(call_subscription_);
+    call_subscription_ = 0;
+  }
+  if (options_.call) options_.call->hangup(session->id);
+  stop_voice();
+  if (files_) files_->close_all();
   if (session->access_request_id != 0 && options_.access_requests) {
     options_.access_requests->remove(session->access_request_id);
   }
@@ -1249,6 +1637,45 @@ void session_supervisor::run() {
                 out["text"] = text;
                 out["hash"] = hash;
                 out["chain"] = device;
+                send_json(peer.transport.get(), out);
+              }
+            });
+          });
+    }
+
+    // Explorer file lists use CF_HDROP, not text. Describe them whenever the
+    // list changes; a client downloads the contents over the file channel.
+    if (options_.clipboard && options_.clipboard->available() &&
+        registry_->has_authenticated() &&
+        !g_clipboard_sync.files_pending.exchange(true)) {
+      auto registry_ref = registry_;
+      auto post = options_.post;
+      options_.clipboard->request_files(
+          [registry_ref, post](std::vector<clipboard_file> files) {
+            g_clipboard_sync.files_pending.store(false);
+            if (files.empty()) return;
+            std::string key;
+            for (const clipboard_file& file : files) {
+              key += file.path;
+              key += '\n';
+            }
+            if (!clipboard_take_hash("files:" + clipboard_hash(key))) return;
+            if (!post) return;
+            post([registry_ref, files] {
+              uvcpp_json list = uvcpp_json::array();
+              for (const clipboard_file& file : files) {
+                uvcpp_json item;
+                item["name"] = file.name;
+                item["path"] = file.path;
+                item["size"] = file.size;
+                list.push_back(std::move(item));
+              }
+              for (const session_info& peer : registry_ref->snapshot()) {
+                if (!peer.authenticated || !peer.transport) continue;
+                uvcpp_json out;
+                out["type"] = "clipboard";
+                out["action"] = "files";
+                out["files"] = list;
                 send_json(peer.transport.get(), out);
               }
             });

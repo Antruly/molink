@@ -72,6 +72,12 @@ endif()
 set(MOLINK_CORE_SOURCES
   src/main.cpp
   src/api.cpp
+  src/chat_hub.cpp
+  src/file_transfer.cpp
+  src/call_hub.cpp
+  src/audio/audio.cpp
+  src/audio/windows_audio.cpp
+  src/audio/windows_voice.cpp
   src/capture/capture.cpp
   src/capture/synthetic_capture.cpp
   src/capture/x11_capture.cpp
@@ -124,7 +130,7 @@ if(MOLINK_BUILD_CORE)
 
   if(WIN32)
     target_link_libraries(molink-core PRIVATE
-      d3d11 dxgi dxguid gdi32 user32 ole32 ws2_32 advapi32 shell32)
+      d3d11 dxgi dxguid gdi32 user32 ole32 uuid ws2_32 advapi32 shell32)
   endif()
   if(APPLE)
     target_link_libraries(molink-core PRIVATE

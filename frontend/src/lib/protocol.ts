@@ -17,6 +17,12 @@ export const PacketType = {
   ack: 0x03,
   input: 0x10,
   clipboard: 0x11,
+  /** u32 transfer id, u32 reserved, u64 offset, then raw file bytes. */
+  fileData: 0x12,
+  /** Interleaved PCM in the format advertised by the welcome message. */
+  audio: 0x13,
+  /** Voice-call PCM: 48 kHz mono little-endian 16-bit, both directions. */
+  voice: 0x14,
   control: 0x7f,
   ping: 0x80,
   pong: 0x81,

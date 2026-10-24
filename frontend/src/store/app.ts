@@ -33,11 +33,19 @@ import {
   type Stats,
   type TabPatch,
 } from '../lib/session-connection'
+import {
+  setWindowFullscreen as setNativeFullscreen,
+  shellInfo,
+} from '../lib/shell'
 
 export type Theme = 'light' | 'dark'
 export type AuthPhase = 'booting' | 'login' | 'locked' | 'ready'
 /// "auto" is resolved in the client into one of the three concrete presets.
 export type QualityMode = 'turbo' | 'smooth' | 'balanced' | 'quality' | 'auto'
+/// A control session starts with input enabled; a view-only session starts
+/// with it off. The session toolbar can still change it later.
+export type SessionMode = 'control' | 'view'
+export type HistoryView = 'cards' | 'list'
 
 export interface SessionTab {
   id: string
@@ -58,6 +66,8 @@ export interface SessionTab {
   /// Epoch ms of the next automatic reconnect attempt after a disconnect.
   retryAt: number | null
   controlEnabled: boolean
+  mode: SessionMode
+  clipboardEnabled: boolean
   displayIndex: number
 }
 
@@ -75,8 +85,13 @@ interface AppState {
   qualityWatermark: boolean
   qualityMode: QualityMode
   settingsOpen: boolean
+  /// The native shell window is fullscreen but the app chrome stays visible.
+  /// This is the title bar's fullscreen control, not session immersive mode.
+  windowFullscreen: boolean
   /// The native shell window is fullscreen and the app chrome is hidden.
   immersive: boolean
+  historyView: HistoryView
+  preferredMode: SessionMode
   authPhase: AuthPhase
   localMode: boolean
   token: string
@@ -96,7 +111,10 @@ interface AppState {
   setQualityWatermark: (enabled: boolean) => void
   setQualityMode: (mode: QualityMode) => void
   setSettingsOpen: (open: boolean) => void
+  setWindowFullscreen: (value: boolean) => void
   setImmersive: (value: boolean) => void
+  setHistoryView: (view: HistoryView) => void
+  setPreferredMode: (mode: SessionMode) => void
   boot: () => Promise<void>
   refreshState: () => Promise<void>
   authenticate: (code: string) => Promise<boolean>
@@ -135,17 +153,22 @@ interface AppState {
     label?: string,
     saveToken?: boolean,
     requestAccess?: boolean,
+    mode?: SessionMode,
   ) => string
   closeTab: (id: string) => void
   setActiveTab: (id: string) => void
   setControlEnabled: (id: string, enabled: boolean) => void
+  setClipboardEnabled: (id: string, enabled: boolean) => void
   forgetRecent: (at: number) => void
+  relabelRecent: (host: string, port: number, label: string) => void
 }
 
 const THEME_KEY = 'molink.theme'
 const QUALITY_KEY = 'molink.quality'
 const QUALITY_MODE_KEY = 'molink.qualityMode'
 const RECENT_KEY = 'molink.recents'
+const HISTORY_VIEW_KEY = 'molink.historyView'
+const MODE_KEY = 'molink.sessionMode'
 const EMPTY_STATS: Stats = {
   fps: 0,
   wireFps: 0,
@@ -192,6 +215,14 @@ function initialQualityMode(): QualityMode {
     return saved
   }
   return 'auto'
+}
+
+function initialHistoryView(): HistoryView {
+  return readStorage(HISTORY_VIEW_KEY) === 'list' ? 'list' : 'cards'
+}
+
+function initialSessionMode(): SessionMode {
+  return readStorage(MODE_KEY) === 'view' ? 'view' : 'control'
 }
 
 function initialRecents(): RecentConnection[] {
@@ -267,7 +298,10 @@ export const useAppStore = create<AppState>((set, get) => {
     qualityWatermark: readStorage(QUALITY_KEY) === '1',
     qualityMode: initialQualityMode(),
     settingsOpen: false,
+    windowFullscreen: false,
     immersive: false,
+    historyView: initialHistoryView(),
+    preferredMode: initialSessionMode(),
     authPhase: 'booting',
     localMode: false,
     token: '',
@@ -304,7 +338,29 @@ export const useAppStore = create<AppState>((set, get) => {
     },
 
     setSettingsOpen: (open) => set({ settingsOpen: open }),
+
+    setWindowFullscreen: (value) => {
+      if (shellInfo.enabled) {
+        setNativeFullscreen(value)
+      } else if (value) {
+        void document.documentElement.requestFullscreen?.().catch(() => undefined)
+      } else if (document.fullscreenElement) {
+        void document.exitFullscreen().catch(() => undefined)
+      }
+      set({ windowFullscreen: value })
+    },
+
     setImmersive: (value) => set({ immersive: value }),
+
+    setHistoryView: (view) => {
+      writeStorage(HISTORY_VIEW_KEY, view)
+      set({ historyView: view })
+    },
+
+    setPreferredMode: (mode) => {
+      writeStorage(MODE_KEY, mode)
+      set({ preferredMode: mode })
+    },
 
     boot: async () => {
       set({ authPhase: 'booting', stateError: null })
@@ -605,7 +661,8 @@ export const useAppStore = create<AppState>((set, get) => {
     },
 
     createSession: (host, port, token, label, saveToken = false,
-                    requestAccess = false) => {
+                    requestAccess = false,
+                    mode = get().preferredMode) => {
       const id = `session-${nextId++}`
       const trimmedToken = token.trim()
       const tab: SessionTab = {
@@ -624,7 +681,9 @@ export const useAppStore = create<AppState>((set, get) => {
         notice: null,
         approvalDeadline: null,
         retryAt: null,
-        controlEnabled: false,
+        controlEnabled: mode === 'control',
+        mode,
+        clipboardEnabled: true,
         displayIndex: 0,
       }
       set((state) => ({
@@ -634,7 +693,14 @@ export const useAppStore = create<AppState>((set, get) => {
       get().syncUiState()
 
       const connection = new SessionConnection({
-        onPatch: (patch) => patchTab(id, patch),
+        onPatch: (patch) => {
+          patchTab(id, patch)
+          // Once the peer reports its computer name, use it in history too
+          // instead of the address that was typed before connecting.
+          if (patch.welcome?.device_name) {
+            get().relabelRecent(tab.host, port, patch.welcome.device_name)
+          }
+        },
         onClipboard: (text) => {
           if (!navigator.clipboard?.writeText) {
             patchTab(id, { error: 'clipboard_unavailable' })
@@ -681,8 +747,27 @@ export const useAppStore = create<AppState>((set, get) => {
     setControlEnabled: (id, enabled) =>
       patchTab(id, { controlEnabled: enabled }),
 
+    setClipboardEnabled: (id, enabled) => {
+      patchTab(id, { clipboardEnabled: enabled })
+      runtimes.get(id)?.setClipboardEnabled(enabled)
+    },
+
     forgetRecent: (at) => {
       const recents = get().recents.filter((item) => item.at !== at)
+      writeStorage(RECENT_KEY, JSON.stringify(recents))
+      set({ recents })
+    },
+
+    relabelRecent: (host, port, label) => {
+      let changed = false
+      const recents = get().recents.map((item) => {
+        if (item.host === host && item.port === port && item.label !== label) {
+          changed = true
+          return { ...item, label }
+        }
+        return item
+      })
+      if (!changed) return
       writeStorage(RECENT_KEY, JSON.stringify(recents))
       set({ recents })
     },

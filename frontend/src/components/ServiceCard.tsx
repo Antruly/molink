@@ -63,7 +63,7 @@ export function ServiceCard() {
       : t('service.stopped')
 
   return (
-    <div className="mb-5 flex flex-wrap items-center gap-3 rounded-xl border border-line bg-panel/60 px-4 py-3">
+    <div className="flex flex-wrap items-center gap-3 rounded-xl border border-line bg-panel/50 px-4 py-3">
       <Server size={18} className="shrink-0 text-accent" />
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2">

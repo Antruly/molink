@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next'
 import { AppHeader } from './components/AppHeader'
 import { AuthGate } from './components/AuthGate'
 import { HomeView } from './components/HomeView'
+import { HostChatDock } from './components/HostChatDock'
 import { Logo } from './components/Logo'
 import { AccessRequestDialog } from './components/AccessRequestDialog'
 import { ServicePrompt } from './components/ServicePrompt'
@@ -171,6 +172,7 @@ export default function App() {
             )}
           </main>
           <SettingsPanel />
+          {popout || immersive ? null : <HostChatDock />}
         </>
       )}
     </div>

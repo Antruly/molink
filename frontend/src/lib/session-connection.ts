@@ -3,6 +3,8 @@ import {
   type ClientPhase,
   type CursorPosition,
   type CursorShape,
+  type SessionEvent,
+  type SessionEventListener,
   type Welcome,
 } from './client'
 import type { Frame } from './protocol'
@@ -31,6 +33,7 @@ export interface TabPatch {
   approvalDeadline?: number | null
   retryAt?: number | null
   controlEnabled?: boolean
+  clipboardEnabled?: boolean
   label?: string
   displayIndex?: number
 }
@@ -66,6 +69,8 @@ export class SessionConnection {
   private congested = false
   private lastDropAt = 0
   private congestionTimer: number | null = null
+  private clipboardEnabled = true
+  private readonly listeners = new Set<SessionEventListener>()
 
   constructor(private readonly sink: SessionSink) {
     this.client.setHandlers({
@@ -111,10 +116,13 @@ export class SessionConnection {
         })
       },
       onWelcome: (welcome) => {
+        // The computer name is the user-facing identity. The device ID is a
+        // phase-2 server registration concept and is only a fallback.
+        const label = welcome.device_name || welcome.device_id
         this.sink.onPatch({
           welcome,
           displayIndex: welcome.display_index ?? 0,
-          ...(welcome.device_id ? { label: welcome.device_id } : {}),
+          ...(label ? { label } : {}),
         })
       },
       onDisplay: (index) => this.sink.onPatch({ displayIndex: index }),
@@ -163,11 +171,32 @@ export class SessionConnection {
         }
       },
       onClipboard: (text) => {
+        if (!this.clipboardEnabled) return
         // Remember what we just wrote so the poll does not echo it back.
         this.lastClipboard = text
         this.sink.onClipboard(text)
       },
+      onSessionEvent: (event: SessionEvent) => {
+        for (const listener of this.listeners) listener(event)
+      },
     })
+  }
+
+  /// Chat, files and other session-scoped events. Returns an unsubscribe.
+  addListener(listener: SessionEventListener): () => void {
+    this.listeners.add(listener)
+    return () => this.listeners.delete(listener)
+  }
+
+  /// Text clipboard sync is a privacy-sensitive feature; the floating toolbar
+  /// exposes it as a per-session switch.
+  setClipboardEnabled(enabled: boolean): void {
+    this.clipboardEnabled = enabled
+    if (!enabled) {
+      this.stopClipboardSync()
+      return
+    }
+    this.startClipboardSync()
   }
 
   private snapshot(now = performance.now()): Stats {
@@ -246,6 +275,7 @@ export class SessionConnection {
 
   private startClipboardSync(): void {
     this.stopClipboardSync()
+    if (!this.clipboardEnabled) return
     const clipboard = navigator.clipboard
     if (!clipboard?.readText) return
     const poll = () => {
@@ -306,7 +336,50 @@ export class SessionConnection {
     this.client.requestClipboard()
   }
 
+  requestClipboardFiles(): void {
+    this.client.requestClipboardFiles()
+  }
+
+  startAudio(): void {
+    this.client.startAudio()
+  }
+
+  stopAudio(): void {
+    this.client.stopAudio()
+  }
+
+  inviteCall(): void {
+    this.client.inviteCall()
+  }
+
+  hangupCall(): void {
+    this.client.hangupCall()
+  }
+
+  sendVoice(pcm: Uint8Array): void {
+    this.client.sendVoice(pcm)
+  }
+
   setClipboard(text: string): void {
     this.client.setClipboard(text)
+  }
+
+  sendChat(text: string): void {
+    this.client.sendChat(text)
+  }
+
+  requestChatHistory(): void {
+    this.client.requestChatHistory()
+  }
+
+  sendFileAction(
+    action: string,
+    extra: Record<string, unknown> = {},
+  ): void {
+    this.client.sendFileAction(action, extra)
+  }
+
+  sendFileChunk(id: number, offset: number, data: Uint8Array): void {
+    this.client.sendFileChunk(id, offset, data)
   }
 }

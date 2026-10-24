@@ -35,7 +35,7 @@ if(MINGW)
   target_include_directories(moLink PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/compat")
   target_compile_options(moLink PRIVATE -fms-extensions)
 endif()
-target_link_libraries(moLink PRIVATE user32 gdi32 ole32 oleaut32 shell32)
+target_link_libraries(moLink PRIVATE user32 gdi32 ole32 oleaut32 shell32 urlmon)
 
 add_custom_command(TARGET moLink POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_if_different

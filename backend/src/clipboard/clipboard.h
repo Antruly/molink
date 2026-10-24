@@ -1,10 +1,19 @@
 #pragma once
 
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace molink {
+
+/// One entry of the clipboard's file list (CF_HDROP on Windows).
+struct clipboard_file {
+  std::string name;
+  std::string path;
+  uint64_t size = 0;
+};
 
 /// Text clipboard synchronization with the local display.
 ///
@@ -27,6 +36,14 @@ class clipboard_service {
   /// Ask the current owner for text. Calls back with an empty string when the
   /// clipboard is empty or the owner does not answer.
   virtual void request_text(text_callback callback) = 0;
+
+  /// File clipboard (Explorer Ctrl+C). Backends without it return an empty
+  /// list and refuse set_files.
+  using files_callback = std::function<void(std::vector<clipboard_file>)>;
+  virtual void request_files(files_callback callback) {
+    if (callback) callback({});
+  }
+  virtual bool set_files(const std::vector<std::string>&) { return false; }
 };
 
 /// nullptr when the build has no X11 support or no display is reachable.

@@ -349,3 +349,47 @@ export async function postLockTimeout(
   )
   return result.lock_timeout
 }
+
+export interface ChatEntry {
+  id: number
+  from: 'remote' | 'host' | string
+  text: string
+  ts: number
+}
+
+export interface ChatResult {
+  messages: ChatEntry[]
+  cursor: number
+}
+
+/// Host-side chat log. Loopback only; the session websocket carries the other
+/// direction for a controlling client.
+export function fetchChat(token: string, since: number): Promise<ChatResult> {
+  return request<ChatResult>(`/api/chat?since=${since}`, {}, token)
+}
+
+export function postChat(token: string, text: string): Promise<void> {
+  const query = new URLSearchParams({ text })
+  return request<void>(`/api/chat?${query.toString()}`, { method: 'POST' }, token)
+}
+
+export interface CallState {
+  state: 'idle' | 'ringing' | 'active'
+  started_ms: number
+  host_microphone: boolean
+}
+
+export function fetchCall(token: string): Promise<CallState> {
+  return request<CallState>('/api/call', {}, token)
+}
+
+export function postCall(
+  token: string,
+  action: 'accept' | 'decline' | 'end',
+): Promise<void> {
+  return request<void>(
+    `/api/call?action=${action}`,
+    { method: 'POST' },
+    token,
+  )
+}

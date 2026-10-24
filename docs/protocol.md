@@ -49,6 +49,9 @@
 | `0x03` | `ACK` | JSON |
 | `0x10` | `INPUT` | JSON 输入事件批（当前回 `not_implemented`） |
 | `0x11` | `CLIPBOARD` | JSON |
+| `0x12` | `FILE_DATA` | `u32 id` + `u32 保留` + `u64 offset` + 文件字节 |
+| `0x13` | `AUDIO` | 交错 little-endian 16-bit PCM（格式见 welcome） |
+| `0x14` | `VOICE` | 语音通话 PCM：48 kHz 单声道 little-endian 16-bit |
 | `0x7F` | `CONTROL` | 会话级 JSON 控制 |
 | `0x80` | `PING` | 空 |
 | `0x81` | `PONG` | 空 |
@@ -219,7 +222,7 @@
   "session_id": 1,
   "protocol": 1,
   "service": "moLink Core",
-  "version": "0.6.32",
+  "version": "0.7.0",
   "transport": "websocket",
   "tiles": {
     "codec": "deflate-bgra",
@@ -368,7 +371,53 @@ X11 的屏幕抓取**不包含鼠标光标**，服务端单独发送形状与位
 |---|---:|---|
 | 心跳间隔 | 15 s | 服务端发 `ping`；客户端应回 `pong` |
 | 鉴权超时 | 5 s | 未 hello 的连接以 `1008` 关闭 |
-| 空闲回收 | 45 s | 无任何消息的连接以 `1001 "idle timeout"` 关闭 |
+| 空闲回收 | 5 min | 无任何消息的连接以 `1001 "idle timeout"` 关闭 |
+
+### 4.9 聊天、文件与音频
+
+以下消息都要求会话已鉴权（hello 成功或初始 token 有效）。
+
+**聊天**
+
+- 客户端 → 核心：`{"type":"chat","action":"send","text":"..."}`（1–4096 字节）
+- 核心 → 所有会话与主机 UI：`{"type":"chat","action":"message","id":N,"from":"remote|host","text":"...","ts":epoch_ms}`
+- 客户端请求历史：`{"type":"chat","action":"history"}` → `{"type":"chat","action":"history","messages":[...]}`
+- 主机 UI 通过 `GET /api/chat?since=N` 轮询、`POST /api/chat?text=...` 回复（仅回环）。
+
+**文件传输**
+
+- 上传：`{"type":"file","action":"offer","name":"a.txt","size":123}` →
+  `{"type":"file","action":"accept","id":N,"chunk":262144,"dir":"..."}`；随后用包类型
+  `0x12` 按 offset 顺序发送数据，最后 `{"action":"complete","id":N}` →
+  `{"action":"done","id":N,"path":"..."}`。文件保存在远程主机 `~/Downloads/moLink`。
+- 浏览：`{"action":"browse","path":""}` → `{"action":"listing","path":"...","root":"...","entries":[{"name":"a","dir":false,"size":1,"mtime":0}]}`；
+  空路径表示主目录，路径被限制在主目录内（含符号链接解析）。
+- 下载：`{"action":"request","path":"..."}` → `{"action":"sending","id":N,"name":"a","size":123}`；
+  每收到一块后发送 `{"action":"pull","id":N}` 拉取下一块，核心用 `0x12` 回传，最后
+  `{"action":"eof","id":N}`。分块 256 KiB。
+- 远程剪贴板：`{"type":"clipboard","action":"files"}` 查询当前文件列表；主机剪贴板变化时核心
+  主动推送 `{"type":"clipboard","action":"files","files":[{"name","path","size"}]}`。
+  `{"type":"file","action":"clipboard-set","paths":[...]}` 把远程文件放进主机剪贴板
+  （Windows `CF_HDROP`），回复 `{"type":"file","action":"clipboard","ok":true,"count":N}`。
+
+**音频**
+
+- 客户端 → 核心：`{"type":"audio","action":"start"}` / `{"type":"audio","action":"stop"}`；
+  start 回复 `{"type":"audio","action":"started","sample_rate":48000,"channels":2,"bits":16}`。
+- welcome 中 `audio` 表示能力，`audio_format` 给出 `sample_rate` / `channels` / `bits`。
+  核心用包类型 `0x13` 发送交错 16-bit PCM。当前实现为 Windows WASAPI 回环采集；其他平台
+  `audio=false`。
+
+**语音通话（不含视频）**
+
+- 客户端发起：`{"type":"call","action":"invite"}`；核心回推事件
+  `{"type":"call","action":"ringing|accepted|declined|ended|audio_error","host_microphone":bool,"started_ms":epoch_ms}`。
+- 主机端通过 `GET /api/call` 轮询状态（`idle|ringing|active`），用
+  `POST /api/call?action=accept|decline|end` 接听/拒绝/挂断（仅回环）。
+- 客户端挂断：`{"type":"call","action":"hangup"}`。
+- 通话音频使用包类型 `0x14`，载荷为 48 kHz 单声道 little-endian 16-bit PCM；
+  客户端发麦克风，主机发本机麦克风。welcome 的 `call` 表示该主机是否支持通话。
+  当前实现为 Windows WASAPI；其他平台 `call=false`。
 
 ---
 
@@ -412,7 +461,7 @@ X-MoLink-Token: <session_token>
 {
   "status": "ok",
   "service": "moLink Core",
-  "version": "0.6.32",
+  "version": "0.7.0",
   "protocol": 1,
   "pid": 12345,
   "uptime_ms": 2032,
@@ -480,7 +529,7 @@ molink-core [--host <addr>] [--port <n>] [--http3-port <n>] [--quic-port <n>]
 `--print-ready` 在开始监听后向 stdout 输出一行 JSON，壳层据此得到端口与令牌：
 
 ```json
-{"event":"ready","service":"moLink Core","version":"0.6.32","protocol":1,
+{"event":"ready","service":"moLink Core","version":"0.7.0","protocol":1,
  "pid":12345,"host":"127.0.0.1","port":28418,"token":"<32 hex>",
  "client_token":"<32 hex>","session_endpoint":"/ws/session",
  "transport":"websocket",
