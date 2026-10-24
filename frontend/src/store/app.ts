@@ -40,8 +40,18 @@ import {
 
 export type Theme = 'light' | 'dark'
 export type AuthPhase = 'booting' | 'login' | 'locked' | 'ready'
-/// "auto" is resolved in the client into one of the three concrete presets.
-export type QualityMode = 'turbo' | 'smooth' | 'balanced' | 'quality' | 'auto'
+/// "auto" is resolved in the client into a concrete preset plus a frame rate.
+/// ultra/lossless use the raw BGRA preset (15/30 fps); game is the lossy
+/// frame-rate-first preset (60 fps).
+export type QualityMode =
+  | 'turbo'
+  | 'smooth'
+  | 'balanced'
+  | 'quality'
+  | 'ultra'
+  | 'lossless'
+  | 'game'
+  | 'auto'
 /// A control session starts with input enabled; a view-only session starts
 /// with it off. The session toolbar can still change it later.
 export type SessionMode = 'control' | 'view'
@@ -235,9 +245,13 @@ export function initialTheme(): Theme {
 function initialQualityMode(): QualityMode {
   const saved = readStorage(QUALITY_MODE_KEY)
   if (
+    saved === 'turbo' ||
     saved === 'smooth' ||
     saved === 'balanced' ||
     saved === 'quality' ||
+    saved === 'ultra' ||
+    saved === 'lossless' ||
+    saved === 'game' ||
     saved === 'auto'
   ) {
     return saved

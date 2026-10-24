@@ -193,18 +193,12 @@ const QUALITY_PROFILES: Record<
   smooth: { fps: 30, pullMs: 33 },
   balanced: { fps: 20, pullMs: 50 },
   quality: { fps: 15, pullMs: 66 },
-}
-
-/// Auto may drop to the lossy preset without also raising the frame rate:
-/// when the link is already struggling, more frames would make it worse.
-const AUTO_PROFILES: Record<
-  ResolvedQuality,
-  { fps: number; pullMs: number }
-> = {
-  turbo: { fps: 5, pullMs: 200 },
-  smooth: { fps: 15, pullMs: 60 },
-  balanced: { fps: 20, pullMs: 50 },
-  quality: { fps: 15, pullMs: 66 },
+  // Raw BGRA, no zlib. The frame rate is the only difference between the two
+  // lossless tiers: 15 fps keeps the bandwidth sane, 30 fps shows motion.
+  ultra: { fps: 15, pullMs: 66 },
+  lossless: { fps: 30, pullMs: 33 },
+  // Lossy 16-bit colour with fast zlib, frame rate first.
+  game: { fps: 60, pullMs: 16 },
 }
 
 export function SessionView({
@@ -301,15 +295,17 @@ export function SessionView({
     startY: number
   } | null>(null)
   const [autoTier, setAutoTier] = useState<ResolvedQuality>('balanced')
+  const [autoFps, setAutoFps] = useState(15)
   const sessionRootRef = useRef<HTMLDivElement>(null)
   const panPointer = useRef<{ x: number; y: number } | null>(null)
   const statsRef = useRef(tab.stats)
   const autoModeRef = useRef<QualityMode>('balanced')
   const autoRef = useRef<{
-    candidate: ResolvedQuality | null
+    tier: ResolvedQuality | null
+    fps: number
     streak: number
     lastChange: number
-  }>({ candidate: null, streak: 0, lastChange: 0 })
+  }>({ tier: null, fps: 0, streak: 0, lastChange: 0 })
   const keyboardRef = useRef<HTMLTextAreaElement>(null)
   const virtualPos = useRef({ x: 0.5, y: 0.5 })
   const touchPoints = useRef(new Map<number, { x: number; y: number }>())
@@ -327,10 +323,12 @@ export function SessionView({
 
   const resolvedMode: ResolvedQuality =
     qualityMode === 'auto' ? autoTier : qualityMode
+  const autoProfile = {
+    fps: autoFps,
+    pullMs: Math.max(16, Math.round(1000 / Math.max(1, autoFps))),
+  }
   const activeProfile =
-    qualityMode === 'auto'
-      ? AUTO_PROFILES[resolvedMode]
-      : QUALITY_PROFILES[resolvedMode]
+    qualityMode === 'auto' ? autoProfile : QUALITY_PROFILES[resolvedMode]
   const pullMs = activeProfile.pullMs
 
   const connection = useCallback(
@@ -621,8 +619,10 @@ export function SessionView({
     activeProfile.fps,
   ])
 
-  // Auto: pick a preset from RTT, the completed pull rate and throughput. Two
-  // consecutive agreeing samples and a 3 s dwell keep it from oscillating.
+  // Auto: the link decides both the preset and the frame rate. Weak samples
+  // lower the rate first and then the image tier; healthy samples raise the
+  // tier first and then the rate, capped at 30 fps (15 fps is the resting
+  // point). Two agreeing samples and a 3 s dwell prevent oscillation.
   useEffect(() => {
     if (tab.phase !== 'live' || qualityMode !== 'auto') {
       // Remember the preset we left so re-entering auto starts fresh.
@@ -631,7 +631,7 @@ export function SessionView({
     }
     if (autoModeRef.current !== qualityMode) {
       autoModeRef.current = qualityMode
-      autoRef.current = { candidate: null, streak: 0, lastChange: 0 }
+      autoRef.current = { tier: null, fps: 0, streak: 0, lastChange: 0 }
     }
     const timer = window.setInterval(() => {
       // A hidden window does not pull frames, so it must not drive the
@@ -642,47 +642,79 @@ export function SessionView({
       const wireFps = stats.wireFps
       const bandwidth = stats.bytesPerSec
 
-      // Throughput on its own is not a problem: a busy screen on a healthy
-      // link can move a lot of bytes. Latency and the rate at which pull
-      // requests complete are the signals that say the link is falling behind.
-      let candidate: ResolvedQuality = 'balanced'
-      if (
+      // Compare the completed pull rate with the rate we asked for, so a
+      // deliberately low target is not mistaken for a struggling link.
+      const expected = Math.max(1, autoFps)
+      const underrunning =
+        wireFps > 0 && wireFps < Math.max(3, expected * 0.5)
+      const bad =
         (latency !== null && latency > 220) ||
-        (wireFps > 0 && wireFps < 7) ||
+        underrunning ||
         stats.dropped > 0
-      ) {
-        candidate = 'smooth'
-      } else if (
+      const good =
         latency !== null &&
         latency < 90 &&
-        wireFps >= 12 &&
-        bandwidth < 16 * 1024 * 1024
-      ) {
-        candidate = 'quality'
+        stats.dropped === 0 &&
+        wireFps >= Math.min(12, expected)
+
+      const order: ResolvedQuality[] = [
+        'turbo',
+        'smooth',
+        'balanced',
+        'quality',
+      ]
+      let tier = resolvedMode
+      let fps = autoFps
+      if (bad) {
+        if (fps > 5) {
+          fps = Math.max(5, fps - 5)
+        } else {
+          const index = order.indexOf(resolvedMode)
+          if (index > 0) {
+            tier = order[index - 1]
+            fps = 15
+          } else {
+            tier = 'turbo'
+            fps = 5
+          }
+        }
+      } else if (good) {
+        const index = order.indexOf(resolvedMode)
+        if (
+          index >= 0 &&
+          index < order.length - 1 &&
+          bandwidth < 12 * 1024 * 1024
+        ) {
+          tier = order[index + 1]
+        } else if (fps < 30 && bandwidth < 20 * 1024 * 1024) {
+          fps = Math.min(30, fps + 5)
+        }
       }
 
       const state = autoRef.current
-      if (candidate === resolvedMode) {
-        state.candidate = null
+      if (tier === resolvedMode && fps === autoFps) {
+        state.tier = null
         state.streak = 0
         return
       }
-      if (state.candidate === candidate) {
+      if (state.tier === tier && state.fps === fps) {
         state.streak += 1
       } else {
-        state.candidate = candidate
+        state.tier = tier
+        state.fps = fps
         state.streak = 1
       }
       const now = performance.now()
       if (state.streak >= 2 && now - state.lastChange >= 3000) {
         state.lastChange = now
-        state.candidate = null
+        state.tier = null
         state.streak = 0
-        setAutoTier(candidate)
+        setAutoTier(tier)
+        setAutoFps(fps)
       }
     }, 1000)
     return () => window.clearInterval(timer)
-  }, [tab.phase, tab.id, qualityMode, resolvedMode])
+  }, [tab.phase, tab.id, qualityMode, resolvedMode, autoFps])
 
   useEffect(() => {
     const element = surfaceRef.current
@@ -1752,6 +1784,37 @@ export function SessionView({
                   mode={displayMode}
                 />
               ) : null}
+              <div className="pointer-events-none absolute left-3 top-3 flex flex-wrap gap-1.5">
+                {qualityWatermark && welcome ? (
+                  <span className="rounded-md border border-white/15 bg-black/65 px-2 py-1 font-mono text-[10px] text-white/85 backdrop-blur">
+                    {welcome.tiles.screen_w}×{welcome.tiles.screen_h}
+                  </span>
+                ) : null}
+                {qualityWatermark && welcome ? (
+                  <span className="rounded-md border border-white/15 bg-black/65 px-2 py-1 font-mono text-[10px] uppercase text-white/85 backdrop-blur">
+                    {codecLabel}
+                  </span>
+                ) : null}
+                {syntheticLabel ? (
+                  <span className="rounded-md border border-warn/40 bg-warn/10 px-2 py-1 font-mono text-[10px] text-warn backdrop-blur">
+                    {syntheticLabel}
+                  </span>
+                ) : null}
+                {tab.controlEnabled ? (
+                  <span className="rounded-md border border-accent/50 bg-accent-soft px-2 py-1 font-mono text-[10px] text-accent backdrop-blur">
+                    {t('session.controlOn')}
+                  </span>
+                ) : null}
+              </div>
+
+              {qualityWatermark ? (
+                <div className="pointer-events-none absolute bottom-3 right-3 flex items-center gap-2 rounded-md border border-white/15 bg-black/65 px-2.5 py-1 font-mono text-[10px] text-white/80 backdrop-blur">
+                  <span className="text-accent">{tab.stats.fps} fps</span>
+                  <span>{latency}</span>
+                  <span>{formatBandwidth(tab.stats.bytesPerSec)}</span>
+                  <span className="text-muted/60">{codecLabel}</span>
+                </div>
+              ) : null}
             </div>
           ) : (
             <div className="absolute inset-0 flex items-center justify-center gap-2 text-sm text-muted">
@@ -1882,6 +1945,9 @@ export function SessionView({
                     {t('session.qualityBalanced')}
                   </option>
                   <option value="quality">{t('session.qualityHigh')}</option>
+                  <option value="ultra">{t('session.qualityUltra')}</option>
+                  <option value="lossless">{t('session.qualityLossless')}</option>
+                  <option value="game">{t('session.qualityGame')}</option>
                   <option value="auto">{t('session.qualityAuto')}</option>
                 </select>
               </label>
@@ -2132,6 +2198,9 @@ export function SessionView({
                   <option value="smooth">{t('session.qualitySmooth')}</option>
                   <option value="balanced">{t('session.qualityBalanced')}</option>
                   <option value="quality">{t('session.qualityHigh')}</option>
+                  <option value="ultra">{t('session.qualityUltra')}</option>
+                  <option value="lossless">{t('session.qualityLossless')}</option>
+                  <option value="game">{t('session.qualityGame')}</option>
                   <option value="auto">{t('session.qualityAuto')}</option>
                 </select>
               </label>
@@ -2306,37 +2375,6 @@ export function SessionView({
             connection={connection() ?? null}
           />
 
-          <div className="pointer-events-none absolute left-3 top-3 flex flex-wrap gap-1.5">
-            {qualityWatermark && welcome ? (
-              <span className="rounded-md border border-white/15 bg-black/65 px-2 py-1 font-mono text-[10px] text-white/85 backdrop-blur">
-                {welcome.tiles.screen_w}×{welcome.tiles.screen_h}
-              </span>
-            ) : null}
-            {qualityWatermark && welcome ? (
-              <span className="rounded-md border border-white/15 bg-black/65 px-2 py-1 font-mono text-[10px] uppercase text-white/85 backdrop-blur">
-                {codecLabel}
-              </span>
-            ) : null}
-            {syntheticLabel ? (
-              <span className="rounded-md border border-warn/40 bg-warn/10 px-2 py-1 font-mono text-[10px] text-warn backdrop-blur">
-                {syntheticLabel}
-              </span>
-            ) : null}
-            {tab.controlEnabled ? (
-              <span className="rounded-md border border-accent/50 bg-accent-soft px-2 py-1 font-mono text-[10px] text-accent backdrop-blur">
-                {t('session.controlOn')}
-              </span>
-            ) : null}
-          </div>
-
-          {qualityWatermark ? (
-            <div className="pointer-events-none absolute bottom-3 right-3 flex items-center gap-2 rounded-md border border-white/15 bg-black/65 px-2.5 py-1 font-mono text-[10px] text-white/80 backdrop-blur">
-              <span className="text-accent">{tab.stats.fps} fps</span>
-              <span>{latency}</span>
-              <span>{formatBandwidth(tab.stats.bytesPerSec)}</span>
-              <span className="text-muted/60">{codecLabel}</span>
-            </div>
-          ) : null}
 
           {touchDevice && inputAvailable ? (
             mobileToolsOpen ? (

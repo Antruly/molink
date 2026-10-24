@@ -216,7 +216,10 @@
     "clipboardOff": "关闭剪贴板同步",
     "audioOn": "开启远程声音",
     "audioOff": "关闭远程声音",
-    "audioVolume": "音量"
+    "audioVolume": "音量",
+    "qualityUltra": "超清",
+    "qualityLossless": "无损",
+    "qualityGame": "游戏"
   },
   "stats": {
     "fps": "帧率",

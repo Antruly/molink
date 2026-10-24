@@ -1016,7 +1016,7 @@ void session_controller::on_text(const std::string& text) {
 
   auto apply_fps = [&](int fps) {
     if (fps < 1) fps = 1;
-    if (fps > 30) fps = 30;
+    if (fps > 60) fps = 60;
     options_.capture->set_target_fps(fps);
     return fps;
   };
@@ -1052,7 +1052,7 @@ void session_controller::on_text(const std::string& text) {
     quality_mode mode = options_.capture->quality();
     if (!mode_name.empty() && !quality_mode_from_name(mode_name, mode)) {
       send_error(transport.get(), "bad_quality",
-                 "mode must be turbo, smooth, balanced or quality");
+                 "mode must be turbo, smooth, balanced, quality, ultra, lossless, raw or game");
       return;
     }
     const auto fps_it = j.find("fps");

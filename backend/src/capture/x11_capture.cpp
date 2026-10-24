@@ -923,7 +923,7 @@ class x11_capture final : public capture_base {
                         tiles);
 
     encode_options encoding;
-    encoding.compress = options_.compress;
+    encoding.compress = options_.compress && quality_compress();
     encoding.format = quality_format();
     encoding.effort = quality_effort();
 

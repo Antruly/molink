@@ -43,6 +43,8 @@ const char* quality_mode_name(quality_mode mode) {
       return "quality";
     case quality_mode::turbo:
       return "turbo";
+    case quality_mode::raw:
+      return "raw";
     case quality_mode::balanced:
     default:
       return "balanced";
@@ -64,6 +66,23 @@ bool quality_mode_from_name(const std::string& name, quality_mode& out) {
   }
   if (name == "turbo") {
     out = quality_mode::turbo;
+    return true;
+  }
+  // "超清" and "无损" keep original BGRA pixels with zlib (lossless); the
+  // client chooses the frame rate (15 vs 30). "游戏" prioritises frame rate
+  // over colour bits. "raw" stays available for clients that want no zlib at
+  // all, but the UI does not expose it because a 1080p 30 fps raw stream is
+  // far beyond a normal LAN.
+  if (name == "raw") {
+    out = quality_mode::raw;
+    return true;
+  }
+  if (name == "ultra" || name == "lossless") {
+    out = quality_mode::quality;
+    return true;
+  }
+  if (name == "game") {
+    out = quality_mode::smooth;
     return true;
   }
   return false;
@@ -107,6 +126,15 @@ quality_profile quality_profile_for(quality_mode mode) {
       profile.format = tile_format::gray8;
       profile.effort = compression_effort::fast;
       profile.minimum_change_threshold = 24;
+      break;
+    case quality_mode::raw:
+      // Original BGRA pixels, deliberately not deflated. Useful on a fast
+      // local link and for the "lossless" presets where the client trades
+      // bandwidth for the least possible encode latency.
+      profile.format = tile_format::bgra;
+      profile.effort = compression_effort::fast;
+      profile.compress = false;
+      profile.maximum_change_threshold = 1;
       break;
     case quality_mode::balanced:
     default:

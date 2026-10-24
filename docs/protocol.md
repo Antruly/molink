@@ -151,10 +151,14 @@
 | `smooth`（流畅） | `rgb565` | 固定 1 | 至少 16 | 优先帧率与包体积；16 位色，丢弃细小的颜色差异 |
 | `balanced`（平衡，默认） | `bgra` | 自适应 | 使用配置值（默认 4） | 无损，和旧版本行为一致 |
 | `quality`（清晰） | `bgra` | 3/6/9 | 最多 1 | 优先画质，加大压缩力度 |
+| `raw`（原画不压缩） | `bgra` | 关闭 | 最多 1 | 预留：客户端可显式请求；1080p/30fps 的裸 BGRA 流量远超普通局域网，UI 不暴露 |
+| `game`（游戏） | `rgb565` | 固定 1 | 至少 16 | 60fps 优先，允许有损；等价于 `smooth` |
 
-预设是**主机全局**的，与采集帧率相同：一个会话切换会影响同一主机上的所有会话。
-`auto` 不是 wire 协议的一部分，由客户端根据 RTT、拉帧完成率和吞吐量在三个具体
-预设之间切换，并带迟滞。
+`ultra`（超清）和 `lossless`（无损）映射到 `quality`：BGRA 原画 + zlib（无损，
+不是不压缩），客户端用保留的 `fps` 区分 15fps 与 30fps；`game` 映射到 `smooth`
+（16 位色 + 快速 zlib）。`raw` 只保留给显式请求不压缩的客户端。预设是**主机全局**的，与采集帧率相同：一个会话切换会影响同一主机
+上的所有会话。`auto` 不是 wire 协议的一部分，由客户端根据 RTT、拉帧完成率和吞吐量
+动态调整帧率（最高 30，稳定在 15 左右）和画质预设，并带迟滞。
 
 ---
 
@@ -243,7 +247,7 @@
 `backend` 取值：`x11-shm`、`x11`、`synthetic`。`synthetic: true` 表示当前是合成测试帧，
 不是真实屏幕。`codec` 反映当前帧实际使用的编码（`bgra`、`deflate-bgra`、`rgb24`、
 `rgb565`、`deflate-rgb24` 或 `deflate-rgb565`）；`quality` 是当前画质预设
-（`smooth`/`balanced`/`quality`）；`input` 表示本机是否支持输入注入；
+（`smooth`/`balanced`/`quality`/`raw`）；`input` 表示本机是否支持输入注入；
 `clipboard` 表示本机是否支持剪贴板同步。
 
 **客户端 → 服务端**
@@ -256,8 +260,8 @@
 | `pong` | `t` | 回应服务端心跳 |
 | `request-frame` | — | 请求一帧。服务端返回自上次以来所有未送达的帧；无变化时返回 0 瓦片帧 |
 | `request-keyframe` | — | 请求下一个捕获帧标记为关键帧（客户端丢失基准时使用） |
-| `capture-fps` | `fps` (1..30) | 调整主机的采集帧率（全局）；服务端回 `capture-fps` |
-| `quality` | `mode`（`smooth`/`balanced`/`quality`），可选 `fps` | 切换主机的编码预设（全局）；`fps` 同时调整采集帧率（为兼容旧客户端保留）。服务端回 `quality`，带实际生效的 `mode` 与 `format` |
+| `capture-fps` | `fps` (1..60) | 调整主机的采集帧率（全局）；服务端回 `capture-fps` |
+| `quality` | `mode`（`smooth`/`balanced`/`quality`/`ultra`/`lossless`/`raw`/`game`），可选 `fps` | 切换主机的编码预设（全局）；`fps` 同时调整采集帧率（为兼容旧客户端保留）。服务端回 `quality`，带实际生效的 `mode` 与 `format` |
 | `display` | `index` | 切换被控端显示器（全局）；服务端回 `display` 并发送新关键帧 |
 | `input` | `events[]` | 指针/键盘事件；需要已鉴权，见 §4.3 |
 | `bye` | — | 正常关闭 |

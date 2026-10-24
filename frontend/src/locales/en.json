@@ -216,7 +216,10 @@
     "clipboardOff": "Disable clipboard sync",
     "audioOn": "Enable remote audio",
     "audioOff": "Disable remote audio",
-    "audioVolume": "Volume"
+    "audioVolume": "Volume",
+    "qualityUltra": "Ultra",
+    "qualityLossless": "Lossless",
+    "qualityGame": "Game"
   },
   "stats": {
     "fps": "FPS",

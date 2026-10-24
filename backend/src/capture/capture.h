@@ -20,11 +20,14 @@ enum class quality_mode : uint8_t {
   balanced,  ///< lossless BGRA with the adaptive zlib policy
   quality,   ///< lossless BGRA, best zlib effort
   turbo,     ///< 8-bit grayscale, coarse changes, low frame rate
+  raw,       ///< lossless BGRA without zlib (the client picks the frame rate)
 };
 
 struct quality_profile {
   tile_format format = tile_format::bgra;
   compression_effort effort = compression_effort::balanced;
+  /// False for the "lossless" preset: send original BGRA tiles untouched.
+  bool compress = true;
   /// Raise the configured change threshold to at least this value (0 = leave).
   int minimum_change_threshold = 0;
   /// Lower a non-zero change threshold to at most this value (0 = leave).
@@ -221,6 +224,9 @@ class capture_base : public capture_source {
   }
   compression_effort quality_effort() const {
     return quality_profile_for(quality_.load()).effort;
+  }
+  bool quality_compress() const {
+    return quality_profile_for(quality_.load()).compress;
   }
   /// Apply the preset's bounds to the configured change threshold.
   int quality_change_threshold(int configured) const;
