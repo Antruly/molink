@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.15] — 2026-10-24
+
+### Fixed
+
+- Windows MSVC 构建失败：`capture.cpp` 为显示器保活引入 `windows.h` 后，`min`/`max` 宏把
+  `std::max` / `std::min` 展开坏（C2589）；定义 `NOMINMAX` 后再包含
+
 ## [0.6.14] — 2026-10-24
 
 ### Added
