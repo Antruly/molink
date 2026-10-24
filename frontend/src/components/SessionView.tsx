@@ -258,6 +258,22 @@ export function SessionView({
     createSession(tab.host, tab.port, '', tab.label, false, true)
     closeTab(tab.id)
   }, [closeTab, createSession, tab.host, tab.label, tab.port, tab.id])
+  const reconnect = useCallback(() => {
+    connection()?.connect(tab.host, tab.port, tab.token, tab.token === '')
+  }, [connection, tab.host, tab.port, tab.token])
+
+  // A background tab is throttled and may miss frames; resync as soon as it
+  // becomes visible again instead of waiting for the next pull.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible') return
+      if (tab.phase !== 'live') return
+      connection()?.requestKeyframe()
+      connection()?.requestFrame()
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => document.removeEventListener('visibilitychange', onVisible)
+  }, [connection, tab.phase])
 
   useEffect(() => {
     const points = touchPoints.current
@@ -1128,6 +1144,15 @@ export function SessionView({
               ? String(t(`error.${tab.error}`, { defaultValue: tab.error }))
               : actionError}
           </span>
+          {tab.error ? (
+            <button
+              type="button"
+              onClick={reconnect}
+              className="btn h-7 px-2 text-[11px]"
+            >
+              {t('session.reconnect')}
+            </button>
+          ) : null}
           {tab.error && /token|unauth|auth|invalid/i.test(tab.error) ? (
             <button
               type="button"

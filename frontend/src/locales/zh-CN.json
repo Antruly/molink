@@ -149,6 +149,7 @@
     "qualityAuto": "自适应",
     "waitingApproval": "等待被控端同意…",
     "cancelRequest": "取消请求",
+    "reconnect": "重新连接",
     "requestAccess": "发送远程请求",
     "ctrlAltDel": "Ctrl+Alt+Del",
     "resolution": "分辨率"

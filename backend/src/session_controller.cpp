@@ -912,6 +912,10 @@ void session_controller::on_text(const std::string& text) {
   }
 
   if (type == "request-frame") {
+    // A polling client is proof that someone is watching. Ensure the capture
+    // thread is awake even if the periodic registry check has not run yet;
+    // otherwise the first request can be answered with empty frames only.
+    if (options_.capture) options_.capture->set_active(true);
     maybe_send_cursor(transport.get(), session, options_);
     send_capture_frame(transport.get(), session, options_);
     return;

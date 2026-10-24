@@ -149,6 +149,7 @@
     "qualityAuto": "Auto",
     "waitingApproval": "Waiting for the host to approve…",
     "cancelRequest": "Cancel request",
+    "reconnect": "Reconnect",
     "requestAccess": "Request access",
     "ctrlAltDel": "Ctrl+Alt+Del",
     "resolution": "Resolution"

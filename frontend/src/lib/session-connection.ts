@@ -210,6 +210,10 @@ export class SessionConnection {
     this.client.requestFrame()
   }
 
+  requestKeyframe(): void {
+    this.client.requestKeyframe()
+  }
+
   sendInput(payload: Record<string, unknown>): void {
     this.client.sendInput(payload)
   }

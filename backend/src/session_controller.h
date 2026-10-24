@@ -28,7 +28,10 @@ struct session_options {
   std::string version = "0.0.0";
   int heartbeat_ms = 15000;
   int hello_timeout_ms = 5000;
-  int idle_close_ms = 45000;
+  // Background browser tabs throttle timers to about once a minute, so a
+  // 45 s idle close dropped otherwise healthy sessions. Five minutes leaves
+  // room for a throttled ping while still reaping abandoned tabs.
+  int idle_close_ms = 300000;
   std::shared_ptr<capture_source> capture;
   std::shared_ptr<input_injector> input;
   std::shared_ptr<clipboard_service> clipboard;
