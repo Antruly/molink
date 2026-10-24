@@ -401,11 +401,59 @@ std::wstring module_path() {
   return path;
 }
 
+void stop_service_handle(SC_HANDLE service) {
+  SERVICE_STATUS_PROCESS status{};
+  DWORD bytes = 0;
+  if (!QueryServiceStatusEx(service, SC_STATUS_PROCESS_INFO,
+                            reinterpret_cast<LPBYTE>(&status),
+                            sizeof(status), &bytes)) {
+    return;
+  }
+  if (status.dwCurrentState == SERVICE_RUNNING) {
+    SERVICE_STATUS stopped{};
+    ControlService(service, SERVICE_CONTROL_STOP, &stopped);
+  }
+  for (int attempt = 0; attempt < 50; ++attempt) {
+    if (!QueryServiceStatusEx(service, SC_STATUS_PROCESS_INFO,
+                              reinterpret_cast<LPBYTE>(&status),
+                              sizeof(status), &bytes)) {
+      return;
+    }
+    if (status.dwCurrentState == SERVICE_STOPPED) return;
+    if (status.dwCurrentState == SERVICE_STOP_PENDING &&
+        status.dwProcessId != 0) {
+      HANDLE process = OpenProcess(PROCESS_TERMINATE, FALSE,
+                                   status.dwProcessId);
+      if (process != nullptr) {
+        TerminateProcess(process, 0);
+        CloseHandle(process);
+      }
+    }
+    Sleep(100);
+  }
+}
+
 bool install_service() {
   const std::wstring source = module_path();
   const std::size_t slash = source.find_last_of(L"\\/");
   const std::wstring install_dir = program_data_service_dir();
   if (source.empty() || install_dir.empty()) return false;
+  // An overwrite install must not try to replace a binary that is still
+  // mapped by the running service. Stop it (and terminate a stuck StopPending
+  // process) before copying.
+  {
+    SC_HANDLE manager =
+        OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+    if (manager != nullptr) {
+      SC_HANDLE existing = OpenServiceW(manager, kServiceName,
+                                        SERVICE_STOP | SERVICE_QUERY_STATUS);
+      if (existing != nullptr) {
+        stop_service_handle(existing);
+        CloseServiceHandle(existing);
+      }
+      CloseServiceHandle(manager);
+    }
+  }
   const std::size_t parent_cut = install_dir.find_last_of(L"\\");
   if (parent_cut != std::wstring::npos) {
     CreateDirectoryW(install_dir.substr(0, parent_cut).c_str(), nullptr);
@@ -450,6 +498,7 @@ bool install_service() {
     SetServiceObjectSecurity(service, DACL_SECURITY_INFORMATION, descriptor);
     LocalFree(descriptor);
   }
+  StartServiceW(service, 0, nullptr);
   CloseServiceHandle(service);
   CloseServiceHandle(manager);
   return true;
@@ -458,13 +507,14 @@ bool install_service() {
 bool uninstall_service() {
   SC_HANDLE manager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
   if (manager == nullptr) return false;
-  SC_HANDLE service = OpenServiceW(manager, kServiceName, DELETE | SERVICE_STOP);
+  SC_HANDLE service = OpenServiceW(manager, kServiceName,
+                                   DELETE | SERVICE_STOP |
+                                       SERVICE_QUERY_STATUS);
   if (service == nullptr) {
     CloseServiceHandle(manager);
     return false;
   }
-  SERVICE_STATUS status{};
-  ControlService(service, SERVICE_CONTROL_STOP, &status);
+  stop_service_handle(service);
   const bool ok = DeleteService(service) != 0;
   CloseServiceHandle(service);
   CloseServiceHandle(manager);

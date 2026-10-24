@@ -202,6 +202,12 @@ void auth_state::set_allow_access_requests(bool allow) {
   persist_locked();
 }
 
+void auth_state::set_service_desired_running(bool enabled) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  settings_.service_desired_running = enabled;
+  persist_locked();
+}
+
 void auth_state::update_access(bool allow_remote_access, bool allow_web_client,
                                bool discovery_enabled,
                                const std::string& device_name) {

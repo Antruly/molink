@@ -227,7 +227,11 @@ int main(int argc, char** argv) {
   // Start the optional session service first: it launches the secure-desktop
   // helper, which start_capture() may prefer over DXGI.
   std::string service_error;
-  start_session_service(service_error);
+  if (auth->settings().service_desired_running) {
+    start_session_service(service_error);
+  } else {
+    stop_session_service(service_error);
+  }
   std::string capture_note;
   std::shared_ptr<capture_source> capture =
       start_capture(capture_opts, !cfg.no_capture, capture_note);

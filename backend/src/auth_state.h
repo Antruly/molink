@@ -59,6 +59,7 @@ class auth_state {
   /// Toggle the no-code approval flow without touching the other access
   /// switches. Defaults to enabled.
   void set_allow_access_requests(bool allow);
+  void set_service_desired_running(bool enabled);
 
  private:
   bool valid_session_locked(const std::string& token) const;

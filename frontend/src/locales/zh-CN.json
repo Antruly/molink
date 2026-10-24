@@ -213,6 +213,10 @@
     "uninstall": "卸载",
     "refresh": "刷新",
     "actionFailed": "服务操作失败，可能需要管理员权限。",
-    "panelHint": "安装后启动/停止不需要提权；安装/卸载会弹出 UAC。"
+    "panelHint": "安装后启动/停止不需要提权；安装/卸载会弹出 UAC。",
+    "homeTitle": "后台服务",
+    "homeHint": "安装后可支持锁屏/登录页远程和 Windows 会话切换。启动/停止状态会被记住，下次启动沿用。",
+    "desiredOn": "下次启动自动开启",
+    "desiredOff": "下次启动保持关闭"
   }
 }

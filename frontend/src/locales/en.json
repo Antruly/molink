@@ -213,6 +213,10 @@
     "uninstall": "Uninstall",
     "refresh": "Refresh",
     "actionFailed": "Service action failed. Administrator rights may be required.",
-    "panelHint": "Start/stop needs no elevation after installation. Install/uninstall opens a UAC prompt."
+    "panelHint": "Start/stop needs no elevation after installation. Install/uninstall opens a UAC prompt.",
+    "homeTitle": "Background service",
+    "homeHint": "Install for lock/login-screen remote control and Windows session switching. Start/stop is remembered and reused on the next launch.",
+    "desiredOn": "auto-start on launch",
+    "desiredOff": "stays off on launch"
   }
 }

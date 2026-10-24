@@ -89,6 +89,8 @@ app_settings load_settings() {
       settings.discovery_enabled = parse_bool(value, false);
     } else if (key == "allow_access_requests") {
       settings.allow_access_requests = parse_bool(value, true);
+    } else if (key == "service_desired_running") {
+      settings.service_desired_running = parse_bool(value, true);
     } else if (key == "device_name") {
       if (!value.empty()) settings.device_name = value;
     } else if (key == "long_term_code") {
@@ -132,6 +134,8 @@ void save_settings(const app_settings& settings) {
          << "\n";
   stream << "allow_access_requests="
          << (settings.allow_access_requests ? 1 : 0) << "\n";
+  stream << "service_desired_running="
+         << (settings.service_desired_running ? 1 : 0) << "\n";
   stream << "device_name=" << settings.device_name << "\n";
   stream << "long_term_code=" << settings.long_term_code << "\n";
   stream << "temp_mode=" << settings.temp_mode << "\n";

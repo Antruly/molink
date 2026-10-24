@@ -17,6 +17,9 @@ struct app_settings {
   /// Let a remote peer ask the local user for access when it has no code.
   /// The local user still has to approve every request.
   bool allow_access_requests = true;
+  /// User preference for the optional Windows service. Persisted so a manual
+  /// stop survives restarts; an overwrite install must not force it on.
+  bool service_desired_running = true;
   std::string device_name;
 
   /// Long-term code: at least 8 characters and must mix letters and digits.

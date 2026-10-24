@@ -278,6 +278,7 @@ export interface ServiceStatus {
   available: boolean
   installed: boolean
   running: boolean
+  desired: boolean
   error?: string
 }
 

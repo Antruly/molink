@@ -17,6 +17,7 @@ import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { claimFirstWindow, openSessionWindow } from '../lib/windows'
 import { useAppStore, type RecentConnection } from '../store/app'
+import { ServiceCard } from './ServiceCard'
 
 const params = new URLSearchParams(window.location.search)
 
@@ -608,6 +609,8 @@ export function HomeView() {
           </div>
         </section>
       </div>
+
+      <ServiceCard />
 
       <div className="mt-5 grid gap-5 lg:grid-cols-2">
         <section className="card p-5 sm:p-6">

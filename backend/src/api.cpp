@@ -769,8 +769,8 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
            });
 
   app.get("/api/service/status",
-          [](uvcpp_web_request& req, uvcpp_web_response& resp,
-             uvcpp_web_next) {
+          [deps](uvcpp_web_request& req, uvcpp_web_response& resp,
+                 uvcpp_web_next) {
             if (!is_loopback_peer(req.peer_ip())) {
               resp.status(403).json_str(R"({"code":"loopback_only"})");
               resp.end();
@@ -781,13 +781,17 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
             j["available"] = status.available;
             j["installed"] = status.installed;
             j["running"] = status.running;
+            j["desired"] =
+                deps.auth ? deps.auth->settings().service_desired_running
+                          : true;
             if (!status.error.empty()) j["error"] = status.error;
             resp.set_header("Cache-Control", "no-store").json(j);
             resp.end();
           });
 
-  auto service_action = [](uvcpp_web_request& req, uvcpp_web_response& resp,
-                           const char* action) {
+  auto service_action = [deps](uvcpp_web_request& req,
+                               uvcpp_web_response& resp,
+                               const char* action) {
     if (!is_loopback_peer(req.peer_ip())) {
       resp.status(403).json_str(R"({"code":"loopback_only"})");
       resp.end();
@@ -806,6 +810,11 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
       ok = stop_session_service(err);
     } else if (what == "restart") {
       ok = restart_session_service(err);
+    }
+    if (what == "start" || what == "install" || what == "restart") {
+      if (deps.auth) deps.auth->set_service_desired_running(true);
+    } else if (what == "stop" || what == "uninstall") {
+      if (deps.auth) deps.auth->set_service_desired_running(false);
     }
     uvcpp_json j;
     j["ok"] = ok;
