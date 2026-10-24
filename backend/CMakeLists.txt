@@ -88,6 +88,7 @@ set(MOLINK_CORE_SOURCES
   src/capture/synthetic_capture.cpp
   src/capture/x11_capture.cpp
   src/capture/windows_capture.cpp
+  src/capture/windows_gdi_capture.cpp
   src/capture/windows_secure_capture.cpp
   src/capture/frame_encode.cpp
   src/clipboard/x11_clipboard.cpp
@@ -138,6 +139,11 @@ if(MOLINK_BUILD_CORE)
   if(WIN32)
     target_link_libraries(molink-core PRIVATE
       d3d11 dxgi dxguid gdi32 user32 ole32 uuid ws2_32 advapi32 shell32)
+    if(MINGW)
+      # WASAPI format GUIDs (KSDATAFORMAT_SUBTYPE_*) live in ksguid on MinGW;
+      # MSVC pulls them in through the SDK's default libraries.
+      target_link_libraries(molink-core PRIVATE ksguid)
+    endif()
   endif()
   if(MINGW AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
      CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)

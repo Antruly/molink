@@ -277,6 +277,11 @@ std::unique_ptr<capture_source> make_x11_capture(const capture_options& options)
 std::unique_ptr<capture_source> make_windows_capture(
     const capture_options& options);
 
+/// BitBlt fallback for Windows 7, which predates DXGI Desktop Duplication.
+/// Returns nullptr when the build does not target Windows.
+std::unique_ptr<capture_source> make_windows_gdi_capture(
+    const capture_options& options);
+
 /// Returns nullptr when the build does not target macOS.
 std::unique_ptr<capture_source> make_macos_capture(
     const capture_options& options);

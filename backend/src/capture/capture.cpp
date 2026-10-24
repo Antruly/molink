@@ -255,8 +255,21 @@ std::shared_ptr<capture_source> start_capture(const capture_options& options,
         note = "capture: " + windows->backend();
         return windows;
       }
-      note = "windows capture unavailable: " + err + "; using synthetic frames";
+      note = "windows capture unavailable: " + err;
     }
+    // Windows 7 predates DXGI Desktop Duplication; BitBlt still captures the
+    // composited desktop there.
+    std::unique_ptr<capture_source> gdi = make_windows_gdi_capture(options);
+    if (gdi) {
+      std::string err;
+      if (gdi->start(err)) {
+        note = "capture: " + gdi->backend();
+        return gdi;
+      }
+      note += note.empty() ? "gdi capture unavailable: " + err
+                           : "; gdi capture unavailable: " + err;
+    }
+    if (!note.empty()) note += "; using synthetic frames";
 #elif defined(__APPLE__)
     std::unique_ptr<capture_source> macos = make_macos_capture(options);
     if (macos) {
