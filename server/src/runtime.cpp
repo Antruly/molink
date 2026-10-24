@@ -1,9 +1,12 @@
 #include "runtime.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
 #include <thread>
+
+#include <uvcpp/uvcpp_threadpool.h>
 
 #include "admin_api.h"
 #include "admin_ui.h"
@@ -38,6 +41,11 @@ server_runtime::server_runtime(server_config config)
 server_runtime::~server_runtime() { shutdown(); }
 
 bool server_runtime::initialize(std::string& error) {
+  // Database work and password hashing share libuv's thread pool; size it
+  // before the first submission (the warning is emitted otherwise).
+  uvcpp::uvcpp_set_threadpool_size(
+      std::max(8, config_.database.pool_max * 2 + 4));
+
   std::error_code ec;
   std::filesystem::create_directories(config_.data_dir, ec);
   if (ec) {

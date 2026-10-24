@@ -1,6 +1,7 @@
 # Node / 前端
 node_modules/
 frontend/dist/
+server/ui/dist/
 .pnpm-store/
 
 # C++ 构建

@@ -1032,6 +1032,37 @@ void register_admin_routes(uvcpp::uvcpp_web_app& app, server_runtime& runtime,
                        });
           });
 
+  app.post("/api/admin/users/:id/password",
+           [&runtime](uvcpp::uvcpp_web_request& request,
+                      uvcpp::uvcpp_web_response& response,
+                      uvcpp::uvcpp_web_next next) {
+             json body;
+             std::string error;
+             if (!parse_json_body(request, body, error)) {
+               send_error(response, 400, "bad_request", error);
+               return;
+             }
+             const std::string* id_param = request.param("id");
+             const std::string id = id_param == nullptr ? std::string() : *id_param;
+             const std::string new_password = body_string(body, "new_password");
+             with_admin(runtime, request, response, next, 3, true,
+                        [&runtime, id, new_password](
+                            uvcpp::uvcpp_db_client& client,
+                            const admin_user& actor, const session_record&,
+                            http_reply& reply) {
+                          auth_error error;
+                          if (!runtime.auth().reset_password(
+                                  client, runtime.db().dialect(), id,
+                                  new_password, error)) {
+                            reply_auth_error(reply, error);
+                            return;
+                          }
+                          append_audit(runtime, client, actor,
+                                       "user.password", id);
+                          reply.status = 204;
+                        });
+           });
+
   app.post("/api/admin/me/password",
            [&runtime](uvcpp::uvcpp_web_request& request,
                       uvcpp::uvcpp_web_response& response,
