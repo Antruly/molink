@@ -152,6 +152,7 @@
     "reconnect": "重新连接",
     "requestAccess": "发送远程请求",
     "ctrlAltDel": "Ctrl+Alt+Del",
+    "ctrlAltDelHint": "发送 Ctrl+Alt+Del（安全界面会忽略模拟输入，需要在本机按键退出）",
     "resolution": "分辨率"
   },
   "stats": {

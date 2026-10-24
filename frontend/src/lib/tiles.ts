@@ -93,18 +93,18 @@ export function expandTile(
       const v = src[i]
       out[i] =
         0xff000000 |
-        (EXPAND5[v >> 11] << 16) |
+        (EXPAND5[v & 0x1f] << 16) |
         (EXPAND6[(v >> 5) & 0x3f] << 8) |
-        EXPAND5[v & 0x1f]
+        EXPAND5[v >> 11]
     }
   } else {
     for (let i = 0, j = 0; i < pixels; i += 1, j += 2) {
       const v = data[j] | (data[j + 1] << 8)
       out[i] =
         0xff000000 |
-        (EXPAND5[v >> 11] << 16) |
+        (EXPAND5[v & 0x1f] << 16) |
         (EXPAND6[(v >> 5) & 0x3f] << 8) |
-        EXPAND5[v & 0x1f]
+        EXPAND5[v >> 11]
     }
   }
   return rgba

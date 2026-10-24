@@ -1123,7 +1123,7 @@ export function SessionView({
               type="button"
               onClick={() => connection()?.sendInput({ k: 'sas' })}
               className="btn"
-              title={t('session.ctrlAltDel')}
+              title={t('session.ctrlAltDelHint')}
               aria-label={t('session.ctrlAltDel')}
             >
               <Keyboard size={14} />

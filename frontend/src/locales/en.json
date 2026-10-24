@@ -152,6 +152,7 @@
     "reconnect": "Reconnect",
     "requestAccess": "Request access",
     "ctrlAltDel": "Ctrl+Alt+Del",
+    "ctrlAltDelHint": "Send Ctrl+Alt+Del (the secure screen ignores synthetic input; use the local keyboard to leave it)",
     "resolution": "Resolution"
   },
   "stats": {
