@@ -74,6 +74,11 @@ target_link_libraries(molink_server_core PUBLIC
   OpenSSL::Crypto
   Threads::Threads
 )
+# libuvcpp's exported target links bare `uv`/`llhttp` names; make the prefix's
+# lib directory visible even when it is not a default linker path (macOS ARM).
+if(DEFINED _uvp_prefix AND EXISTS "${_uvp_prefix}/lib")
+  target_link_directories(molink_server_core PUBLIC "${_uvp_prefix}/lib")
+endif()
 if(WIN32)
   # windows.h must not define min/max or pull in winsock.h before winsock2.h.
   target_compile_definitions(molink_server_core PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
