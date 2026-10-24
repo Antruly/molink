@@ -25,6 +25,7 @@
 #include <cstdio>
 #include <iterator>
 #include <sstream>
+#include <fstream>
 #include <string>
 #include <thread>
 
@@ -36,6 +37,33 @@ HANDLE g_stop_event = nullptr;
 PROCESS_INFORMATION g_helper{};
 std::atomic<bool> g_running{true};
 constexpr wchar_t kServiceName[] = L"moLinkSession";
+constexpr wchar_t kLogPath[] = L"C:\\ProgramData\\moLink\\service\\service.log";
+
+void log_line(const std::string& message) {
+  std::ofstream out(kLogPath, std::ios::app);
+  if (out) out << message << "\n";
+}
+
+bool enable_privilege(const wchar_t* name) {
+  HANDLE token = nullptr;
+  if (!OpenProcessToken(GetCurrentProcess(),
+                        TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token)) {
+    return false;
+  }
+  LUID luid{};
+  bool ok = false;
+  if (LookupPrivilegeValueW(nullptr, name, &luid)) {
+    TOKEN_PRIVILEGES privileges{};
+    privileges.PrivilegeCount = 1;
+    privileges.Privileges[0].Luid = luid;
+    privileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    ok = AdjustTokenPrivileges(token, FALSE, &privileges,
+                               sizeof(privileges), nullptr, nullptr) != 0 &&
+         GetLastError() == ERROR_SUCCESS;
+  }
+  CloseHandle(token);
+  return ok;
+}
 constexpr wchar_t kPipeName[] = L"\\\\.\\pipe\\molink-session";
 
 std::string wide_to_utf8(const wchar_t* text) {
@@ -137,7 +165,13 @@ bool launch_helper(std::string& err) {
     err = "DuplicateTokenEx failed";
     return false;
   }
-  SetTokenInformation(token, TokenSessionId, &session, sizeof(session));
+  if (!SetTokenInformation(token, TokenSessionId, &session,
+                           sizeof(session))) {
+    log_line("SetTokenInformation failed: " +
+             std::to_string(GetLastError()));
+    CloseHandle(token);
+    return false;
+  }
   wchar_t path[MAX_PATH * 4] = {};
   GetModuleFileNameW(nullptr, path, static_cast<DWORD>(std::size(path)));
   std::wstring helper(path);
@@ -147,11 +181,26 @@ bool launch_helper(std::string& err) {
            L"molink-helper.exe";
   STARTUPINFOW startup{};
   startup.cb = sizeof(startup);
-  startup.lpDesktop = const_cast<wchar_t*>(L"winsta0\\default");
-  const BOOL created = CreateProcessAsUserW(
-      token, helper.c_str(), nullptr, nullptr, nullptr, FALSE,
-      CREATE_NEW_PROCESS_GROUP | CREATE_UNICODE_ENVIRONMENT, nullptr, nullptr,
-      &startup, &g_helper);
+  const wchar_t* desktops[] = {L"winsta0\\Winlogon",
+                               L"winsta0\\default"};
+  BOOL created = FALSE;
+  for (const wchar_t* desktop : desktops) {
+    startup.lpDesktop = const_cast<wchar_t*>(desktop);
+    created = CreateProcessAsUserW(
+        token, helper.c_str(), nullptr, nullptr, nullptr, FALSE,
+        CREATE_NEW_PROCESS_GROUP | CREATE_UNICODE_ENVIRONMENT, nullptr, nullptr,
+        &startup, &g_helper);
+    if (created) {
+      log_line(std::string("helper launched on ") +
+               std::string(desktop, desktop + wcslen(desktop)) +
+               " pid=" + std::to_string(g_helper.dwProcessId) +
+               " session=" + std::to_string(session));
+      break;
+    }
+    log_line(std::string("CreateProcessAsUser failed on ") +
+             std::string(desktop, desktop + wcslen(desktop)) +
+             " error=" + std::to_string(GetLastError()));
+  }
   CloseHandle(token);
   if (!created) {
     err = "CreateProcessAsUser failed";
@@ -248,6 +297,20 @@ void report_running() {
   SetServiceStatus(g_status, &g_service_status);
 }
 
+void poke_pipe(const wchar_t* name) {
+  for (int attempt = 0; attempt < 40; ++attempt) {
+    HANDLE pipe = CreateFileW(name, GENERIC_READ | GENERIC_WRITE, 0, nullptr,
+                              OPEN_EXISTING, 0, nullptr);
+    if (pipe != INVALID_HANDLE_VALUE) {
+      DWORD written = 0;
+      WriteFile(pipe, "quit", 4, &written, nullptr);
+      CloseHandle(pipe);
+      return;
+    }
+    Sleep(50);
+  }
+}
+
 void pipe_server() {
   SECURITY_ATTRIBUTES attributes{};
   attributes.nLength = sizeof(attributes);
@@ -296,11 +359,21 @@ void WINAPI service_main(DWORD, wchar_t**) {
   SetServiceStatus(g_status, &g_service_status);
   g_stop_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
   report_running();
+  log_line("service started");
+  enable_privilege(L"SeTcbPrivilege");
+  enable_privilege(L"SeAssignPrimaryTokenPrivilege");
+  enable_privilege(L"SeIncreaseQuotaPrivilege");
   std::string helper_error;
-  launch_helper(helper_error);
+  if (!launch_helper(helper_error)) {
+    log_line("helper launch failed: " + helper_error);
+  }
   std::thread pipe_thread(pipe_server);
   WaitForSingleObject(g_stop_event, INFINITE);
   g_running.store(false);
+  // ConnectNamedPipe blocks indefinitely; poke both servers so their loops
+  // can observe running=false and the service can leave StopPending.
+  poke_pipe(kPipeName);
+  poke_pipe(L"\\\\.\\pipe\\molink-secure-input");
   pipe_thread.join();
   if (g_helper.hProcess != nullptr) {
     TerminateProcess(g_helper.hProcess, 0);
@@ -309,6 +382,7 @@ void WINAPI service_main(DWORD, wchar_t**) {
     g_helper = PROCESS_INFORMATION{};
   }
   if (g_stop_event != nullptr) CloseHandle(g_stop_event);
+  log_line("service stopped");
   g_service_status.dwCurrentState = SERVICE_STOPPED;
   SetServiceStatus(g_status, &g_service_status);
 }

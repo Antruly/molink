@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.6.10] — 2026-10-24
+
+### Fixed
+
+- 服务停止卡在 StopPending：`ConnectNamedPipe` 永久阻塞导致线程无法 join，之后 StartService 再也起不来；停止时主动连接两个管道并发送 quit 唤醒
+- 服务启动 helper 前启用 `SeTcbPrivilege` / `SeAssignPrimaryTokenPrivilege` / `SeIncreaseQuotaPrivilege`，并优先尝试 `winsta0\Winlogon`（登录页）再回退 `winsta0\default`
+- 服务/helper 写日志到 `%ProgramData%\moLink\service\{service,helper}.log`，便于定位锁屏问题
+- 0.6.9 的独立输入管道（`molink-secure-input`）一并包含
+
 ## [0.6.9] — 2026-10-24
 
 ### Fixed

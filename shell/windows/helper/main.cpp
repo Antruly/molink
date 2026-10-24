@@ -13,6 +13,7 @@
 #include <sddl.h>
 
 #include <atomic>
+#include <fstream>
 #include <functional>
 #include <mutex>
 #include <thread>
@@ -27,6 +28,13 @@ HDESK g_desktop = nullptr;
 constexpr wchar_t kPipeName[] = L"\\\\.\\pipe\\molink-secure";
 constexpr wchar_t kInputPipeName[] = L"\\\\.\\pipe\\molink-secure-input";
 std::mutex g_desktop_mutex;
+constexpr wchar_t kLogPath[] =
+    L"C:\\ProgramData\\moLink\\service\\helper.log";
+
+void log_line(const std::string& message) {
+  std::ofstream out(kLogPath, std::ios::app);
+  if (out) out << message << "\n";
+}
 
 std::string utf8(const wchar_t* text) {
   if (text == nullptr) return {};
@@ -76,10 +84,13 @@ bool refresh_input_desktop() {
   }
   if (!SetThreadDesktop(current)) {
     CloseDesktop(current);
+    log_line(std::string("SetThreadDesktop failed for ") +
+             utf8(new_name));
     return false;
   }
   CloseDesktop(g_desktop);
   g_desktop = current;
+  log_line("desktop -> " + utf8(new_name));
   return true;
 }
 
@@ -182,6 +193,10 @@ std::string handle_line(const std::string& line, std::vector<uint8_t>& frame,
       return R"({"ok":true})";
     }
     return R"({"ok":false,"error":"bad move"})";
+  }
+  if (line.rfind("button ", 0) == 0 || line.rfind("key ", 0) == 0 ||
+      line.rfind("text ", 0) == 0) {
+    log_line("cmd " + line.substr(0, 80));
   }
   if (line.rfind("button ", 0) == 0) {
     int button = 0;
@@ -349,9 +364,11 @@ void input_pipe_loop(std::atomic<bool>& running) {
 int wmain() {
   std::string err;
   if (!open_input_desktop(err)) {
+    log_line("open_input_desktop failed: " + err);
     std::fprintf(stderr, "molink-helper: %s\n", err.c_str());
     return 1;
   }
+  log_line("helper started, desktop=" + desktop_json());
   std::atomic<bool> running{true};
   std::thread input_thread(input_pipe_loop, std::ref(running));
   pipe_loop(running);
