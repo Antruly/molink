@@ -2,7 +2,7 @@
 
 跨平台远程桌面。Web 优先，一套后台 + 浏览器壳层，桌面端直连，移动端经服务端中转。
 
-> 版本 0.8.0 · MIT · 协议版本 1
+> 版本 0.8.1 · MIT · 协议版本 1
 
 ![主页（亮色）](docs/screenshots/home-light.png)
 ![会话页（合成测试帧）](docs/screenshots/session-light.png)
@@ -50,7 +50,9 @@
 - **传输抽象**：`transport/session_transport.h` 定义文本/二进制/关闭/对端信息接口；`session_controller` 只依赖该接口，WebSocket 是第一个实现。后续接 TCP/QUIC 时新增一个 transport 实现和监听器即可，会话状态机、鉴权、帧回放、输入和剪贴板逻辑都不用改。
 - **frontend/**：React 19 + TypeScript + Vite + Tailwind 4 + Zustand + react-i18next。
 - **shell/**：三个平台各自的原生壳层（Linux GTK/WebKitGTK、Windows WebView2、macOS WKWebView），启动并监管 `molink-core`，加载核心托管的前端。
-- **server/**：设备目录与管理服务已实现（0.2.0，见 [docs/server.md](docs/server.md)）；移动端仍在二阶段。
+- **moLink Server**：设备目录与管理服务位于独立仓库
+  [Antruly/molink-server](https://github.com/Antruly/molink-server)（当前 0.2.1），
+  使用自己的 `v*` 标签发布；本仓库只包含桌面端与移动端。移动端仍在二阶段。
 
 ## 目录
 
@@ -119,9 +121,9 @@ cmake --build shell/native/build --parallel
 生成 Linux 安装包：
 
 ```bash
-./packaging/linux/build-deb.sh       # build/package/molink_0.8.0_amd64.deb
-./packaging/linux/build-appimage.sh  # build/package/moLink-0.8.0-x86_64.AppImage
-./packaging/linux/build-rpm.sh       # build/package/molink-0.8.0-1.x86_64.rpm
+./packaging/linux/build-deb.sh       # build/package/molink_0.8.1_amd64.deb
+./packaging/linux/build-appimage.sh  # build/package/moLink-0.8.1-x86_64.AppImage
+./packaging/linux/build-rpm.sh       # build/package/molink-0.8.1-1.x86_64.rpm
 ```
 
 Windows（需 WebView2 SDK、Inno Setup 6 与 NSIS）与 macOS（`.app` + `.dmg`）的构建步骤见
@@ -230,15 +232,18 @@ python3 tools/bench_quality.py http://127.0.0.1:28418 --token <ready-token>
 
 桌面端不发布 zip。
 
-服务端使用独立的标签线：推送 `server-v*` 触发
-`.github/workflows/release-server.yml`，构建三平台服务端安装包：
+服务端已拆分到独立仓库
+[Antruly/molink-server](https://github.com/Antruly/molink-server)，在该仓库推送
+`v*` 标签即可构建三平台安装包，版本线与桌面端完全独立：
 
 - Linux：`.deb`、`.rpm`、`.tar.gz`（deb/rpm 自动注册 systemd 服务）
 - Windows：Inno Setup 安装器（可选安装为 Windows 服务）+ `.zip`
 - macOS：未签名 `.pkg`（LaunchDaemon）+ `.tar.gz`
 
-服务端的部署、配置、安全与升级见 [docs/server.md](docs/server.md)，第三阶段分布式
-设计见 [docs/server-distributed.md](docs/server-distributed.md)。
+服务端的部署、配置、安全与升级见该仓库的
+[docs/server.md](https://github.com/Antruly/molink-server/blob/main/docs/server.md)，
+第三阶段分布式设计见
+[docs/server-distributed.md](https://github.com/Antruly/molink-server/blob/main/docs/server-distributed.md)。
 
 ## 发布状态
 

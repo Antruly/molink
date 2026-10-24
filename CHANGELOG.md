@@ -1,32 +1,30 @@
 # Changelog
 
-## [Server 0.2.0] — 2026-10-25
-
-服务端使用独立版本线与 `server-v*` 标签。
+## [0.8.1] — 2026-10-25
 
 ### Added
 
-- 设备目录迁入数据库：默认 SQLite（WAL、连接池、事务化迁移），可选 PostgreSQL
-  （运行时加载 libpq）；旧 `devices.json` 首次启动自动导入并保留原文件
-- Web 管理控制台（独立 SPA）：首次初始化、登录、仪表盘、设备、管理员、安全策略、
-  封禁、审计与设置；亮/暗主题，随服务端 `web-admin` 目录发布
-- 多账户与角色（admin / operator / viewer）；HttpOnly 会话 Cookie + CSRF 双提交、
-  Origin 校验、PBKDF2-HMAC-SHA256（600000 轮）、最后一个管理员保护
-- IP 来源策略：私有 / 中国大陆 / 海外 + 自定义允许/拒绝 CIDR；内置 APNIC 中国
-  IPv4 表；默认仅私有 + 中国大陆
-- 请求限速（设备 API、注册、心跳、查询、管理 API）、登录失败阶梯与临时封禁；
-  受信代理 `X-Forwarded-For`；审计事件
-- 设备 API 与管理面分端口（28430 / 127.0.0.1:28431），管理面可选 TLS 或反向代理
-- 三平台打包：Linux deb/rpm/tar.gz + systemd（安装即启用）、Windows 安装器/zip +
-  可选 Windows 服务、macOS 未签名 pkg/tar.gz + LaunchDaemon
-- 独立 `release-server.yml` 发布工作流；libuvcpp 以 DB + OpenSSL + PostgreSQL
-  运行时加载构建，并在 CI 中断言这些开关确实生效
+- 简洁模式主页：本机卡片 + 连接面板 + 历史/已保存/域组/局域网设备列表；标题栏与设置
+  可切换简洁/高级模式，文件与聊天入口会在会话建立后直接打开对应面板
+- 本机头像：内置色板或上传图片（自动裁剪压缩为 96×96 WebP），随目录同步并在设备列表
+  中显示；设备平台（Windows/macOS/Linux）一并同步
+- 内置设备目录：不填写服务器地址也能使用 `https://molink.ssvr.top`；新增远程 ID
+  服务器总开关，自定义地址仍可覆盖内置值
+- 域组（频道）码：目录为每台设备生成唯一的 9 位随机码，可复制发给其他设备加入同一
+  域组；「域组」列表只显示同码设备；码的所有者更新后旧码立即失效，旧成员显示
+  「无此域码」
+- UI 偏好（界面模式、已保存设备、最近连接）持久化到核心的 `ui.json`，核心端口每次
+  启动变化也不会丢失
 
-### Known limitations
+### Changed
 
-- macOS pkg 未签名/未公证；Windows 包在干净系统上可能需要 VC++ Redistributable
-- 中国 IPv6 段未内置；公网 IPv6 按海外处理
-- 分布式/多节点管理与中继属于第三阶段（Pro），见 `docs/server-distributed.md`
+- Windows 服务卡片的启动/停止合并为一个切换按钮
+- 心跳可同步名称、平台与头像；心跳省略名称时不再把已存名称覆盖为 `device`
+- 目录 HTTPS 使用严格证书与主机名校验
+- **moLink Server 已拆分到独立仓库**
+  [Antruly/molink-server](https://github.com/Antruly/molink-server)，服务端代码、
+  打包与发布工作流不再留在本仓库；服务端改用该仓库自己的 `v*` 标签，版本线与
+  桌面端解耦
 
 ## [0.8.0] — 2026-10-24
 

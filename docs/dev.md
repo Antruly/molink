@@ -3,7 +3,7 @@
 > 版本：0.2（架构基线 + 仓库/CI/发布）
 > 定位：Web 优先的跨平台远程控制软件。一套后台逻辑 + 浏览器壳层，桌面端直连，移动端经服务端中转，二阶段引入 ID 服务器与 P2P。
 > 命名：**moLink**（小写 m，大写 L）。对外品牌名写作 `moLink`，二进制/包名/目录使用小写 `molink`。
-> 许可证：**MIT**。代码仓库仅此一份，第一阶段发布桌面三平台安装包，第二阶段发布服务端与移动端。
+> 许可证：**MIT**。桌面端与移动端在本仓库发布；服务端自 0.2.1 起拆分到独立仓库 `molink-server`，拥有独立的版本线与发布流程。
 
 ---
 
@@ -92,7 +92,7 @@ text
 | 阶段 | 范围 | Release 资产 |
 |---|---|---|
 | **一阶段** | 桌面三平台直连 + 局域网 Web 预览 | Windows `.exe`/`.msi`，Linux `.AppImage`/`.deb`，macOS `.dmg`；**不发布 zip** |
-| **二阶段** | 服务端 + 移动端 | 服务端独立 `server-v*` 标签：Linux `.deb`/`.rpm`/`.tar.gz`（systemd）、Windows 安装器 + `.zip`（可选服务）、macOS `.pkg`/`.tar.gz`（launchd）；Android `.apk`/`.aab`，iOS `.ipa` |
+| **二阶段** | 服务端 + 移动端 | 服务端在独立仓库 `molink-server` 发布（自有 `v*` 标签）：Linux `.deb`/`.rpm`/`.tar.gz`（systemd）、Windows 安装器 + `.zip`（可选服务）、macOS `.pkg`/`.tar.gz`（launchd）；Android `.apk`/`.aab`，iOS `.ipa` |
 
 **“不发布 zip”的含义**：Release 资产中不上传任何 `.zip` 格式的桌面客户端包。Windows 使用 Inno Setup `.exe` 安装包与免安装单文件 `.exe`，Linux 使用 AppImage（可执行单文件）和 `.deb`，macOS 使用 `.dmg`。二阶段服务端例外，允许 zip 作为便捷分发形态。
 
@@ -120,7 +120,6 @@ molink/
 ├── shell/                         # Tauri 壳层（桌面）
 │   └── src-tauri/
 ├── backend/                       # molink-core（C++）
-├── server/                        # moLink Server（二阶段）
 ├── docs/
 ├── README.md
 ├── LICENSE
@@ -433,8 +432,8 @@ macOS	x64	.dmg	一阶段	macos-latest
 macOS	Arm64	.dmg	一阶段	macos-latest
 Android	arm64-v8a 等	.apk + .aab	二阶段	ubuntu-latest
 iOS	arm64	.ipa（TestFlight 或 Ad Hoc）	二阶段	macos-latest
-服务端	x64	.deb / .rpm / .tar.gz；.exe + .zip；.pkg / .tar.gz	二阶段	对应平台（server-v*）
-源代码仓库仅此一份，所有发布均从同一仓库的标签构建。第一阶段 Release 不包含移动端和服务端资产；第二阶段在同一个 Release 流程中追加，或按标签前缀区分（v* 同时触发桌面与移动端，服务端可用 server-v* 独立触发）。
+服务端	x64	.deb / .rpm / .tar.gz；.exe + .zip；.pkg / .tar.gz	二阶段	独立仓库 `molink-server`（v*）
+桌面端与移动端从本仓库的标签构建；服务端已拆分到独立仓库 `molink-server`，使用该仓库自己的 `v*` 标签与发布工作流，避免两套版本线互相牵连。第一阶段 Release 不包含移动端资产。
 
 8. 关键工程决策与风险
 决策/风险	处理

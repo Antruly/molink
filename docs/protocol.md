@@ -563,16 +563,26 @@ molink-core [--host <addr>] [--port <n>] [--http3-port <n>] [--quic-port <n>]
 ## 8. 二阶段设备目录（moLink Server）
 
 桌面核心在设置中配置 `server_url` / `server_invite` 后，会向目录服务注册并每 30 秒发送心跳；
-服务端 API 见 `server/README.md`。核心侧行为：
+服务端 API 见独立仓库
+[Antruly/molink-server](https://github.com/Antruly/molink-server)。核心侧行为：
 
-- 配置保存在 `~/.config/molink/settings` 的 `server_url`、`server_invite`，核心线程每秒轮询，
-  修改后即时生效。
-- 注册得到的凭据保存在 `~/.config/molink/server.json`（`url`、`device_id`、`display_id`、`token`，
-  POSIX 下权限 0600）；重启后复用同一 ID，心跳失败（401/404）才重新注册。
-- `GET /api/server`（仅回环）：`url`、`invite`、`enabled`、`registered`、`online`、
-  `device_id`、`display_id`、`last_error`。
-- `POST /api/server?url=&invite=`（仅回环）：保存配置并触发重新注册。
-- `GET /api/state` 增加 `device_name` 与 `server` 对象（字段同上，但不含 token/invite）。
+- 配置保存在 `~/.config/molink/settings` 的 `server_url`、`server_invite`、
+  `server_enabled`，核心线程每秒轮询，修改后即时生效。`server_url` 为空且总开关开启时
+  使用内置目录 `https://molink.ssvr.top`（`MOLINK_DEFAULT_SERVER_URL`）。
+- 注册得到的凭据保存在 `~/.config/molink/server.json`（`url`、`device_id`、`display_id`、
+  `token`、`domain`、`domain_valid`，POSIX 下权限 0600）；重启后复用同一 ID，心跳失败
+  （401/404）才重新注册。
+- `GET /api/server`（仅回环）：`url`、`custom_url`、`default_url`、`using_default`、
+  `invite`、`enabled`、`registered`、`online`、`device_id`、`display_id`、`domain`、
+  `domain_valid`、`last_error`。
+- `POST /api/server?url=&invite=&enabled=`（仅回环）：保存配置并触发重新注册；`enabled`
+  独立于自定义 URL，可只关远程目录而保留地址。
+- `POST /api/domain`（仅回环，JSON `{action, code?}`）：`join` 加入他设备的域组码，
+  `rotate` 让目录为本机签发新码（本机是旧码所有者时旧码立即失效）。
+- `GET /api/domain/devices`（仅回环）：返回同域组设备列表；码已失效时返回
+  `unknown_domain`。
+- `GET /api/state` 增加 `device_name`、`avatar`、`platform` 与 `server` 对象（字段同上，
+  但不含 token/invite）。
 - 通过设备 ID 连接：客户端使用已配置的 server URL 请求
   `GET <server>/v1/devices?id=<ID>`，拿到 `address`/`peer_ip`/`port`/`name` 后按正常的直连
   会话流程鉴权；目录只做寻址，不转发媒体。

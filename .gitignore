@@ -1,7 +1,6 @@
 # Node / 前端
 node_modules/
 frontend/dist/
-server/ui/dist/
 .pnpm-store/
 
 # C++ 构建
@@ -23,10 +22,6 @@ backend/cmake-build-*/
 .vscode/
 .idea/
 *.swp
-
-# moLink Server 本地数据
-molink-server-data/
-server-data/
 
 # 本地配置与密钥
 .env
