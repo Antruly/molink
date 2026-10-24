@@ -99,9 +99,9 @@ var
   I: Integer;
 begin
   Result := False;
-  if RegGetSubkeyNames(HKLM, 'SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients', Names) then
+  if RegGetSubkeyNames(HKLM, 'SOFTWARE\Microsoft\EdgeUpdate\Clients', Names) then
     for I := 0 to GetArrayLength(Names) - 1 do begin
-      if RegValueExists(HKLM, 'SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\' + Names[I], 'pv') then begin
+      if RegValueExists(HKLM, 'SOFTWARE\Microsoft\EdgeUpdate\Clients\' + Names[I], 'pv') then begin
         Result := True;
         Exit;
       end;
