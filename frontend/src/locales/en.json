@@ -182,9 +182,9 @@
     "stunServer": "STUN server",
     "stunServerHint": "Used for ICE across NATs. Leave empty for the built-in stun.miwifi.com:3478; enter none to disable STUN.",
     "encryptRemote": "Encrypt ID-server sessions",
-    "encryptRemoteHint": "On by default. Sessions through the ID server/relay get end-to-end encryption; the relay only forwards ciphertext.",
+    "encryptRemoteHint": "On by default; restart moLink after changing it. ID-server/relay sessions currently encrypt the outer WSS only.",
     "encryptLan": "Encrypt LAN sessions",
-    "encryptLanHint": "Off by default. When on, LAN connections use a self-signed HTTPS/WSS certificate and the peer must accept it."
+    "encryptLanHint": "Off by default; restart moLink after changing it. When on, LAN connections use a self-signed HTTPS/WSS certificate the peer must accept."
   },
   "session": {
     "connecting": "Connecting…",

@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.9.18] — 2026-10-26
+
+### Fixed
+
+- 0.9.17 的 Windows 发布包实际没有启用加密：CI 里 Chocolatey 把 OpenSSL 装到
+  `C:\Program Files\OpenSSL`，而构建只查找 `C:\Program Files\OpenSSL-Win64`，
+  `find_package(OpenSSL)` 失败后核心静默退化为“加密不可用”。现在 CI 会先探测已装
+  路径，否则固定安装 OpenSSL 3.5.x 到 `C:\OpenSSL-Win64`，再作为
+  `OPENSSL_ROOT_DIR` 传给核心；与 libuvcpp 归档里的 `libssl-3-x64.dll` /
+  `libcrypto-3-x64.dll` 匹配。
+- macOS 的 core 构建现在把 Homebrew `openssl@3` 前缀传给后端 CMake，dmg 里的
+  设备证书/TLS 不再被静默禁用。
+- 设置里的两个加密开关补充“修改后需要重启 moLink”的提示。
+
 ## [0.9.17] — 2026-10-26
 
 ### Added

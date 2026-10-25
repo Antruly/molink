@@ -3,13 +3,24 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
-VERSION=${VERSION:-0.9.17}
+VERSION=${VERSION:-0.9.18}
 ARCH=${ARCH:-$(uname -m)}
 BUILD=${BUILD_DIR:-$ROOT/build/macos}
 APP="$BUILD/moLink.app"
 
 echo "== build core, frontend and shell"
-cmake -S "$ROOT/backend" -B "$ROOT/backend/build" -DCMAKE_BUILD_TYPE=Release >/dev/null
+# The per-device certificate support links OpenSSL. Discover the Homebrew keg
+# before configuring the core; the same prefix is copied into the bundle below.
+if [ -z "${OPENSSL_LIB_DIR:-}" ] && command -v brew >/dev/null 2>&1; then
+  openssl_prefix=$(brew --prefix openssl@3 2>/dev/null || true)
+  [ -n "$openssl_prefix" ] && OPENSSL_LIB_DIR="$openssl_prefix/lib"
+fi
+OPENSSL_ROOT_ARG=""
+if [ -n "${OPENSSL_LIB_DIR:-}" ]; then
+  OPENSSL_ROOT_ARG="-DOPENSSL_ROOT_DIR=${OPENSSL_LIB_DIR%/lib}"
+fi
+cmake -S "$ROOT/backend" -B "$ROOT/backend/build" -DCMAKE_BUILD_TYPE=Release \
+  ${OPENSSL_ROOT_ARG:+"$OPENSSL_ROOT_ARG"} >/dev/null
 cmake --build "$ROOT/backend/build" --parallel
 (cd "$ROOT/frontend" && pnpm install --frozen-lockfile >/dev/null && pnpm build >/dev/null)
 cmake -S "$ROOT/shell/macos" -B "$ROOT/shell/macos/build" -DCMAKE_BUILD_TYPE=Release >/dev/null

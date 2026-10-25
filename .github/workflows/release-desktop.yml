@@ -102,10 +102,30 @@ jobs:
       - name: Ensure OpenSSL 3
         shell: pwsh
         run: |
-          $root = 'C:\Program Files\OpenSSL-Win64'
-          if (!(Test-Path "$root\include\openssl\ssl.h")) {
-            choco install openssl --no-progress -y
+          # Pin OpenSSL 3.5.x: the libuvcpp archive stages libssl-3-x64.dll /
+          # libcrypto-3-x64.dll, and molink-core links those. The Shining Light
+          # installer puts the development files under C:\OpenSSL-Win64.
+          $roots = @('C:\OpenSSL-Win64', 'C:\Program Files\OpenSSL-Win64', 'C:\Program Files\OpenSSL')
+          function Find-OpenSsl {
+            $roots | Where-Object { Test-Path "$_\include\openssl\ssl.h" } | Select-Object -First 1
           }
+          $root = Find-OpenSsl
+          if (-not $root) {
+            $url = 'https://slproweb.com/download/Win64OpenSSL-3_5_1.exe'
+            $exe = Join-Path $env:RUNNER_TEMP 'Win64OpenSSL-3_5_1.exe'
+            try {
+              Invoke-WebRequest -Uri $url -OutFile $exe -UseBasicParsing
+              Start-Process -FilePath $exe -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',"/DIR=C:\OpenSSL-Win64" -Wait
+            } catch {
+              Write-Warning "OpenSSL 3.5.1 install failed: $_"
+            }
+            $root = Find-OpenSsl
+          }
+          if (-not $root) {
+            choco install openssl --no-progress -y
+            $root = Find-OpenSsl
+          }
+          if (-not $root) { throw 'OpenSSL development files were not installed' }
           "OPENSSL_ROOT_DIR=$root" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Build core
