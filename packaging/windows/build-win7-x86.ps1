@@ -1,17 +1,24 @@
 # Build the Windows 7 x86 (32-bit) client from the libuvcpp Win7 MinGW kit.
 #
 #   build-win7-x86.ps1 -Kit C:\path\libuvcpp-1.8.3-mingw32 `
+#                      -UvcppPrefix C:\path\uvcpp-win7-x86-mingw32 `
 #                      -Gcc C:\path\i686-13.2.0-posix-dwarf-msvcrt `
 #                      -WebView2 C:\path\wv2 -Version 0.8.1
 #
-# The kit supplies libuv/OpenSSL/zlib/llhttp and a GCC 8.1 that is too old for
-# molink's std::filesystem use, so -Gcc must point at a newer i686 toolchain
-# (mingw-builds 13.2 msvcrt is what the release uses). The script builds the
-# libuvcpp full/webapp profile (once) and then core, shell, service and helper.
+# -Kit supplies cmake/make and the zlib static library; its GCC 8.1 is too old
+# for molink's std::filesystem use, so -Gcc must point at a newer i686
+# toolchain (mingw-builds 13.2 msvcrt is what the release uses).
+#
+# -UvcppPrefix points at the 1.8.5+ Win7 x86 release archive, which already
+# carries the full/webapp profile (libuvcpp.dll + import library + headers).
+# OpenSSL/zlib/libuv/llhttp are statically linked into libuvcpp.dll, so the
+# only extra library molink needs is zlib (its own tile compressor). Without
+# -UvcppPrefix the script falls back to building libuvcpp from the 1.8.3 kit.
 param(
   [Parameter(Mandatory = $true)][string]$Kit,
   [Parameter(Mandatory = $true)][string]$Gcc,
   [Parameter(Mandatory = $true)][string]$WebView2,
+  [string]$UvcppPrefix = "",
   [string]$Repo = "",
   [string]$Version = "0.8.1",
   [string]$Out = ""
@@ -27,6 +34,7 @@ if (-not $Out) {
 $Kit = (Resolve-Path $Kit).Path
 $Gcc = (Resolve-Path $Gcc).Path
 $WebView2 = (Resolve-Path $WebView2).Path
+if ($UvcppPrefix) { $UvcppPrefix = (Resolve-Path $UvcppPrefix).Path }
 New-Item -ItemType Directory -Force $Out | Out-Null
 
 $cmake = Join-Path $Kit 'deps\cmake\bin\cmake.exe'
@@ -64,7 +72,7 @@ function Invoke-CMake([string]$Source, [string]$Build, [string[]]$Extra) {
 }
 
 Write-Host '== libuvcpp full (web + WebApp) for Win7 x86'
-if (-not (Test-Path "$Kit\out\gcc13\bin\libuvcpp.dll")) {
+if (-not $UvcppPrefix -and -not (Test-Path "$Kit\out\gcc13\bin\libuvcpp.dll")) {
   if (-not (Test-Path "$Kit\deps\nlohmann\CMakeLists.txt")) {
     throw 'The kit needs deps\nlohmann for the full profile (see tools or pack it manually).'
   }
@@ -95,20 +103,34 @@ if (-not (Test-Path "$Kit\out\gcc13\bin\libuvcpp.dll")) {
   & $cmake --install "$Kit\build-gcc13-full"
   if ($LASTEXITCODE -ne 0) { throw 'libuvcpp install failed' }
 }
-# uvcpp's CMake target links bare `uv`; expose the kit's import lib/headers.
-$uc = Join-Path $Kit 'out\gcc13'
-Copy-Item (Join-Path $Kit 'deps\libuv\lib\libuv.dll.a') (Join-Path $uc 'lib') -Force
-Copy-Item (Join-Path $Kit 'deps\libuv\bin\libuv.dll') (Join-Path $uc 'bin') -Force
-Copy-Item -Recurse -Force (Join-Path $Kit 'deps\libuv\include\*') (Join-Path $uc 'include')
+if (-not $UvcppPrefix) {
+  # uvcpp's CMake target links bare `uv`; expose the kit's import lib/headers.
+  $uc = Join-Path $Kit 'out\gcc13'
+  Copy-Item (Join-Path $Kit 'deps\libuv\lib\libuv.dll.a') (Join-Path $uc 'lib') -Force
+  Copy-Item (Join-Path $Kit 'deps\libuv\bin\libuv.dll') (Join-Path $uc 'bin') -Force
+  Copy-Item -Recurse -Force (Join-Path $Kit 'deps\libuv\include\*') (Join-Path $uc 'include')
+}
 
 Write-Host '== molink-core'
-Invoke-CMake (Join-Path $Repo 'backend') (Join-Path $Repo 'build-win7x86-gcc13') @(
-  "-Duvcpp_DIR=$($ucPrefixF)/lib/cmake/uvcpp",
-  "-DCMAKE_PREFIX_PATH=$($ucPrefixF);$kitF/deps/libuv;$kitF/deps/zlib;$kitF/deps/openssl",
-  '-DMOLINK_CXX_STANDARD=17',
-  "-DZLIB_INCLUDE_DIR=$kitF/deps/zlib/include",
-  "-DZLIB_LIBRARY=$kitF/deps/zlib/lib/libzlibstatic.a"
-)
+if ($UvcppPrefix) {
+  $uvcppPrefixF = To-CMakePath $UvcppPrefix
+  $coreFlags = @(
+    "-DMOLINK_UVCPP_PREFIX=$uvcppPrefixF",
+    "-DCMAKE_PREFIX_PATH=$uvcppPrefixF;$kitF/deps/zlib",
+    '-DMOLINK_CXX_STANDARD=17',
+    "-DZLIB_INCLUDE_DIR=$kitF/deps/zlib/include",
+    "-DZLIB_LIBRARY=$kitF/deps/zlib/lib/libzlibstatic.a"
+  )
+} else {
+  $coreFlags = @(
+    "-Duvcpp_DIR=$($ucPrefixF)/lib/cmake/uvcpp",
+    "-DCMAKE_PREFIX_PATH=$($ucPrefixF);$kitF/deps/libuv;$kitF/deps/zlib;$kitF/deps/openssl",
+    '-DMOLINK_CXX_STANDARD=17',
+    "-DZLIB_INCLUDE_DIR=$kitF/deps/zlib/include",
+    "-DZLIB_LIBRARY=$kitF/deps/zlib/lib/libzlibstatic.a"
+  )
+}
+Invoke-CMake (Join-Path $Repo 'backend') (Join-Path $Repo 'build-win7x86-gcc13') $coreFlags
 
 Write-Host '== moLink shell'
 Invoke-CMake (Join-Path $Repo 'shell\windows') (Join-Path $Repo 'build-win7x86-shell') @(

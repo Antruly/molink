@@ -42,29 +42,31 @@ jobs:
           Invoke-WebRequest -Uri $url -OutFile wv2.zip
           Expand-Archive wv2.zip -DestinationPath wv2
 
-      # The 1.8.3 source kit is still needed: the newer Win7 x86 binaries
-      # (uvcpp-win7-x86-mingw32.zip) ship without the WebApp module
-      # (UVCPP_WEBAPP_ENABLE=0), and molink-core needs it. The build script
-      # compiles the full profile from this kit with GCC 13.
-      - name: Fetch the libuvcpp Win7 MinGW kit
+      # The 1.8.3 kit still supplies cmake/make and the zlib static library
+      # (molink compresses tiles itself); the 1.8.5 Win7 x86 release already
+      # ships the full/webapp libuvcpp.dll, so it is no longer rebuilt from
+      # source. GCC 13 i686 remains the compiler.
+      - name: Fetch the libuvcpp 1.8.3 deps kit
         shell: pwsh
         run: |
           $url = 'https://github.com/Antruly/libuvcpp/releases/download/v1.8.3/uvcpp-kit-1.8.3-mingw32.zip'
           Invoke-WebRequest -Uri $url -OutFile kit.zip
           Expand-Archive kit.zip -DestinationPath kit
 
-      - name: Fetch GCC 13 i686 and nlohmann/json
+      - name: Fetch the libuvcpp 1.8.5 Win7 x86 release
+        shell: pwsh
+        run: |
+          $url = 'https://github.com/Antruly/libuvcpp/releases/download/v1.8.5/uvcpp-win7-x86-mingw32.zip'
+          Invoke-WebRequest -Uri $url -OutFile uvcpp185.zip
+          Expand-Archive uvcpp185.zip -DestinationPath uvcpp185
+
+      - name: Fetch GCC 13 i686
         shell: pwsh
         run: |
           choco install 7zip -y --no-progress
           $url = 'https://github.com/niXman/mingw-builds-binaries/releases/download/13.2.0-rt_v11-rev1/i686-13.2.0-release-posix-dwarf-msvcrt-rt_v11-rev1.7z'
           Invoke-WebRequest -Uri $url -OutFile gcc13.7z
           & 'C:\Program Files\7-Zip\7z.exe' x gcc13.7z -ogcc13 -y | Out-Null
-          $url = 'https://github.com/nlohmann/json/archive/refs/tags/v3.11.3.zip'
-          Invoke-WebRequest -Uri $url -OutFile nlohmann.zip
-          Expand-Archive nlohmann.zip -DestinationPath nlohmann
-          New-Item -ItemType Directory -Force 'kit\libuvcpp-1.8.3-mingw32\deps\nlohmann' | Out-Null
-          Copy-Item -Recurse -Force 'nlohmann\json-3.11.3\*' 'kit\libuvcpp-1.8.3-mingw32\deps\nlohmann\'
 
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress
@@ -78,6 +80,7 @@ jobs:
           }
           ./packaging/windows/build-win7-x86.ps1 `
             -Kit "$PWD\kit\libuvcpp-1.8.3-mingw32" `
+            -UvcppPrefix "$PWD\uvcpp185" `
             -Gcc "$PWD\gcc13\mingw32" `
             -WebView2 "$PWD\wv2" `
             -Version $version `

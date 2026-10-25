@@ -12,11 +12,26 @@ Windows 客户端使用同一套协议和目录。
   [niXman mingw-builds](https://github.com/niXman/mingw-builds-binaries)
   的 `i686-13.2.0-release-posix-dwarf-msvcrt`（msvcrt 运行时，Win7 友好）。
 - `nlohmann/json` 头文件：可以复用 `deps/nlohmann_json` 源码树，或把
-  `nlohmann/` 放进 libuvcpp 的安装前缀。
+  `nlohmann/` 放进 libuvcpp 的安装前缀（只在源码构建 libuvcpp 时需要）。
 
-## 构建 libuvcpp（full profile）
+## 推荐：直接用 1.8.5 预编译包
 
-full = web + WebApp（moLink 需要 WebApp；kit 的 `prebuilt/` 只是 web profile）。
+1.8.5 起 `uvcpp-win7-x86-mingw32.zip` 已包含 WebApp
+（`UVCPP_WEBAPP_ENABLE=1`），以及 `bin/libuvcpp.dll`、`lib/libuvcpp.dll.a` 和全部
+头文件；libuv/OpenSSL/zlib/llhttp 都静态链进了 `libuvcpp.dll`。配置时传
+`-DMOLINK_UVCPP_PREFIX=<解压目录>` 就不再编译 libuvcpp。
+
+例外是 zlib：molink-core 自己直接调用 `compress2`（`backend/src/compression.cpp`），
+而 1.8.5 包只有 `include/zlib.h`、没有 zlib 库，所以仍从 1.8.3 kit 的 `deps/zlib`
+取 `libzlibstatic.a`（纯 C，ABI 无关），并传 `ZLIB_LIBRARY` / `ZLIB_INCLUDE_DIR`。
+OpenSSL 不需要，客户端没有直接调用。
+
+`packaging/windows/build-win7-x86.ps1 -Kit <1.8.3 kit> -UvcppPrefix <1.8.5 kit> ...`
+封装了这条路径；不传 `-UvcppPrefix` 时回退到下面的源码构建。
+
+## 构建 libuvcpp（full profile，1.8.5 之前的回退路径）
+
+full = web + WebApp（moLink 需要 WebApp；1.8.3 kit 的 `prebuilt/` 只是 web profile）。
 
 ```powershell
 $KIT = 'C:\path\to\libuvcpp-1.8.3-mingw32'

@@ -31,6 +31,8 @@
 
 - CI 与发布工作流直接下载 libuvcpp 预编译包（`UVCPP_VERSION`，默认 1.8.5），
   不再为 Linux / Windows 从源码构建，缩短构建时间；macOS 仍从源码构建
+- Win7 x86 改用 1.8.5 的 `uvcpp-win7-x86-mingw32.zip`（已含 WebApp），不再从
+  1.8.3 源码重建 libuvcpp；zlib 仍取 1.8.3 kit 的静态库（molink 自己调用 zlib）
 
 ## [0.8.1] — 2026-10-25
 

@@ -254,8 +254,8 @@ python3 tools/bench_quality.py http://127.0.0.1:28418 --token <ready-token>
 Windows 7 x86（32 位）是独立预览线：推送 `win7-x86-v*` 标签触发
 `.github/workflows/release-win7.yml`，产物为 `moLink-<版本>-win7-x86.zip` 和
 `moLink-<版本>-win7-x86-setup.exe`，也可以手动触发工作流。构建方法、依赖
-（libuvcpp Win7 MinGW kit + GCC 13）和已知限制见
-[docs/win7-x86.md](docs/win7-x86.md)。
+（libuvcpp 1.8.5 Win7 x86 预编译包 + GCC 13；1.8.3 旧 kit 只提供 cmake/make 和
+zlib 静态库）和已知限制见 [docs/win7-x86.md](docs/win7-x86.md)。
 
 服务端已拆分到独立仓库
 [Antruly/molink-server](https://github.com/Antruly/molink-server)，在该仓库推送
@@ -291,7 +291,8 @@ AppImage 首次使用需要 `chmod +x`，并依赖系统的 GTK 3 与 WebKitGTK 
 产物附加到同一个 Release。Linux/Windows 直接下载 libuvcpp 预编译包（仓库变量
 `UVCPP_VERSION`，默认 `1.8.5`）；macOS 仍从源码构建，需要仓库变量 `UVCPP_REPO`。
 Win7 x86 使用独立的 `.github/workflows/release-win7.yml`（`win7-x86-v*` 标签或手动
-触发），下载 libuvcpp Win7 kit 与 GCC 13 后产出 zip 和 Inno Setup 安装器。
+触发），下载 libuvcpp 1.8.5 Win7 预编译包、1.8.3 deps kit 与 GCC 13 后产出 zip 和
+Inno Setup 安装器。
 
 ## 许可证
 
