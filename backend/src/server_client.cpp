@@ -14,6 +14,18 @@
 #include <web/uvcpp_http_request.h>
 #include <web/uvcpp_http_response.h>
 
+// directory_address() opens a probe socket; keep the platform headers local to
+// this file so the macOS build gets close()/getaddrinfo() declarations too.
+#if defined(_WIN32)
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
+
 // The config macro comes from the web headers above. Windows dependency builds
 // may omit OpenSSL entirely, in which case HTTPS reports a clear error.
 #if UVCPP_OPENSSL_ENABLE
