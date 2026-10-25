@@ -227,6 +227,8 @@ export class MolinkClient {
   } | null = null
   /// The ICE proxy failed; use the resolved address directly from now on.
   private proxyFailed = false
+  /// The same-LAN direct socket failed; use the ICE proxy instead.
+  private directFailed = false
   /// Last application-level error frame. A policy answer (wrong code, locked
   /// host) must not be mistaken for an ICE failure and retried.
   private lastErrorCode = ''
@@ -252,6 +254,7 @@ export class MolinkClient {
     this.closedByUser = false
     this.retryAttempts = 0
     this.proxyFailed = false
+    this.directFailed = false
     this.lastErrorCode = ''
     this.lastErrorMessage = ''
     this.lastConnect = { host, port, token, requestAccess, targetId }
@@ -281,11 +284,18 @@ export class MolinkClient {
     this.pendingTiles.clear()
     this.frameQueue = Promise.resolve()
 
-    // A device-ID connection starts with ICE through the local core. That core
-    // also runs the directory client and owns the UDP socket libjuice needs.
-    // If the proxy cannot establish a path, fall back to the direct address
-    // the directory returned.
-    const useProxy = targetId !== '' && !this.proxyFailed
+    // Two devices on the same LAN should not pay the ICE signaling round
+    // trips: the directory only hands out a private address to requesters
+    // behind the same NAT, and a direct socket to it opens in milliseconds.
+    // If it fails, the ICE proxy below is the fallback. Cross-NAT peers get the
+    // public address (or none), so they still start with ICE.
+    const preferDirect = targetId !== '' && !this.directFailed &&
+        !this.proxyFailed && port > 0 && isPrivateHost(host)
+    // A device-ID connection otherwise starts with ICE through the local core.
+    // That core also runs the directory client and owns the UDP socket
+    // libjuice needs. If the proxy cannot establish a path, fall back to the
+    // direct address the directory returned.
+    const useProxy = targetId !== '' && !this.proxyFailed && !preferDirect
     const url = useProxy
       ? `ws://${window.location.host}/ws/connect?target=${encodeURIComponent(targetId)}`
       : `ws://${formatHost(host)}:${port}/ws/session`
@@ -353,9 +363,19 @@ export class MolinkClient {
                                 this.lastErrorMessage || this.lastErrorCode)
         return
       }
+      if (preferDirect && !this.closedByUser) {
+        // The same-LAN address did not answer: go through ICE instead.
+        this.directFailed = true
+        this.openSocket()
+        return
+      }
       if (useProxy && !this.closedByUser) {
         // ICE failed or the proxy is unavailable: retry the direct path once.
         this.proxyFailed = true
+        if (this.directFailed) {
+          this.handlers.onPhase?.('error', 'could not reach the device')
+          return
+        }
         this.openSocket()
         return
       }
@@ -955,4 +975,23 @@ export class MolinkClient {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
     this.ws.send(JSON.stringify(payload))
   }
+}
+
+/// 10/8, 172.16/12, 192.168/16, 127/8, IPv6 ULA and link-local.
+function isPrivateHost(host: string): boolean {
+  const value = host.trim().replace(/^\[|\]$/g, '')
+  const ipv4 = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(value)
+  if (ipv4) {
+    const a = Number(ipv4[1])
+    const b = Number(ipv4[2])
+    return a === 10 || a === 127 ||
+        (a === 172 && b >= 16 && b <= 31) ||
+        (a === 192 && b === 168) ||
+        (a === 169 && b === 254)
+  }
+  const lower = value.toLowerCase()
+  return lower.startsWith('fc') || lower.startsWith('fd') ||
+      lower.startsWith('fe8') || lower.startsWith('fe9') ||
+      lower.startsWith('fea') || lower.startsWith('feb') ||
+      lower === '::1'
 }
