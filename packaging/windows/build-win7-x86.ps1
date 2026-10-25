@@ -166,7 +166,13 @@ Copy-Item (Join-Path $Repo 'build-win7x86-shell\moLink.exe') $pkg
 Copy-Item (Join-Path $Repo 'build-win7x86-shell\WebView2Loader.dll') $pkg
 Copy-Item (Join-Path $Repo 'build-win7x86-service\molink-service.exe') $pkg
 Copy-Item (Join-Path $Repo 'build-win7x86-helper\molink-helper.exe') $pkg
-Copy-Item (Join-Path $uc 'bin\libuvcpp.dll') $pkg
+# Prebuilt kit: libuvcpp.dll lives in its bin/. Source build: in out\gcc13\bin.
+$uvcppDll = if ($UvcppPrefix) {
+  Join-Path $UvcppPrefix 'bin\libuvcpp.dll'
+} else {
+  Join-Path $Kit 'out\gcc13\bin\libuvcpp.dll'
+}
+Copy-Item $uvcppDll $pkg
 Copy-Item (Join-Path $Kit 'deps\libuv\bin\libuv.dll') $pkg
 Copy-Item (Join-Path $Gcc 'bin\libstdc++-6.dll') $pkg
 Copy-Item (Join-Path $Gcc 'bin\libgcc_s_dw2-1.dll') $pkg
