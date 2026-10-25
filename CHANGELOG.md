@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.9.11] — 2026-10-26
+
+### Fixed
+
+- 客户端默认启用 STUN（`stun.miwifi.com:3478`）。之前未设置 `MOLINK_STUN_HOST` 时只收集
+  内网候选，异地（跨公网）按 ID 连接根本打不通，对方也不会收到访问请求；
+  `MOLINK_STUN_HOST=none` 可关闭，其它值可覆盖。
+
 ## [0.9.10] — 2026-10-25
 
 ### Changed

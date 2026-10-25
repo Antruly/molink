@@ -39,8 +39,19 @@ p2p_manager::p2p_manager(uvcpp::uvcpp_loop* loop, post_fn post,
       server_(std::move(server)),
       registry_(std::move(registry)),
       options_(std::move(options)) {
+  // Cross-NAT connections need a server-reflexive candidate; a client that
+  // only gathers host candidates cannot be reached through two NATs. Default
+  // to a public STUN server so remote installs work out of the box;
+  // MOLINK_STUN_HOST=none disables it, and any other value overrides it.
   const char* stun = std::getenv("MOLINK_STUN_HOST");
-  if (stun != nullptr) stun_host_ = stun;
+  if (stun != nullptr && *stun != '\0') {
+    stun_host_ = stun;
+  } else {
+    stun_host_ = "stun.miwifi.com";
+  }
+  if (stun_host_ == "none" || stun_host_ == "off" || stun_host_ == "0") {
+    stun_host_.clear();
+  }
   const char* stun_port = std::getenv("MOLINK_STUN_PORT");
   if (stun_port != nullptr) {
     const int parsed = std::atoi(stun_port);
