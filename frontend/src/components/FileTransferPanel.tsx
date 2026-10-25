@@ -370,6 +370,8 @@ export function FileTransferPanel({
 
   const onDrop = (event: DragEvent) => {
     event.preventDefault()
+    // Keep the session surface from treating this as a drop-to-paste too.
+    event.stopPropagation()
     enqueue(event.dataTransfer.files)
   }
 
@@ -444,7 +446,10 @@ export function FileTransferPanel({
         <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto p-3">
           <div
             data-file-drop="true"
-            onDragOver={(event) => event.preventDefault()}
+            onDragOver={(event) => {
+              event.preventDefault()
+              event.stopPropagation()
+            }}
             onDrop={onDrop}
             className="rounded-xl border border-dashed border-line bg-panel/50 px-4 py-6 text-center"
           >

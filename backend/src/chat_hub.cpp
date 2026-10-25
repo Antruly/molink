@@ -17,13 +17,19 @@ uint64_t epoch_ms() {
 
 }  // namespace
 
-uint64_t chat_hub::post(const std::string& from, const std::string& text) {
+uint64_t chat_hub::post(const std::string& from, const std::string& text,
+                        const std::string& sender_name,
+                        const std::string& sender_id,
+                        uint32_t sender_session) {
   std::vector<subscriber> subscribers;
   chat_message message;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     message.id = next_id_++;
     message.from = from;
+    message.sender_name = sender_name;
+    message.sender_id = sender_id;
+    message.sender_session = sender_session;
     message.text = text;
     message.ts_ms = epoch_ms();
     messages_.push_back(message);

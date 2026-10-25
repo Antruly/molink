@@ -8,6 +8,7 @@ import {
   type Welcome,
 } from './client'
 import type { Frame } from './protocol'
+import { ClipboardFileSync } from './clipboard-sync'
 
 export interface Stats {
   /** Frames that were actually painted in the last second. */
@@ -72,12 +73,30 @@ export class SessionConnection {
   private lastDropAt = 0
   private congestionTimer: number | null = null
   private clipboardEnabled = true
+  /// This viewer's machine name/ID, sent in hello so the shared chat can
+  /// attribute its messages. Empty for a plain browser.
+  private clientName = ''
+  private clientId = ''
+  /// Sticky across manual reconnects (Windows 7 forces TCP, and the user may
+  /// have checked "force relay").
+  private forceRelay = false
+  /// The active tab keeps the full-rate pull loop in SessionView; every other
+  /// live tab pulls slowly here so it stays current without painting.
+  private foreground = true
+  private backgroundTimer: number | null = null
+  /// Files copied on this machine are pushed to every remote session, in the
+  /// background too. Only the file panel's own uploads pause it.
+  private fileSync: ClipboardFileSync | null = null
+  private fileSyncTimer: number | null = null
+  private fileSyncPaused = false
   private readonly listeners = new Set<SessionEventListener>()
 
   constructor(private readonly sink: SessionSink) {
     this.client.setHandlers({
       onPhase: (phase, detail) => {
         if (phase === 'error') {
+          this.stopBackgroundPull()
+          this.stopFileSync()
           this.sink.onPatch({
             phase,
             error: detail ?? 'connection failed',
@@ -88,6 +107,8 @@ export class SessionConnection {
           return
         }
         if (phase === 'disconnected') {
+          this.stopBackgroundPull()
+          this.stopFileSync()
           this.sink.onPatch({
             phase,
             error: null,
@@ -107,8 +128,11 @@ export class SessionConnection {
           })
           this.startClipboardSync()
           this.startCongestionWatch()
+          if (!this.foreground) this.startBackgroundPull()
+          this.startFileSync()
           return
         }
+        this.stopBackgroundPull()
         this.sink.onPatch({
           phase,
           ...(phase === 'connecting'
@@ -183,11 +207,17 @@ export class SessionConnection {
       },
       onClipboard: (text) => {
         if (!this.clipboardEnabled) return
+        // Only the remote the user is actively working in may write the local
+        // clipboard; otherwise several tabs fight over it. Local -> remote
+        // still broadcasts from every session below.
+        if (!this.foreground) return
+        if (typeof document !== 'undefined' && !document.hasFocus()) return
         // Remember what we just wrote so the poll does not echo it back.
         this.lastClipboard = text
         this.sink.onClipboard(text)
       },
       onSessionEvent: (event: SessionEvent) => {
+        if (event.kind === 'file') this.fileSync?.handleMessage(event.message)
         for (const listener of this.listeners) listener(event)
       },
     })
@@ -208,6 +238,56 @@ export class SessionConnection {
       return
     }
     this.startClipboardSync()
+  }
+
+  /// Enable local file clipboard -> this remote. Called for every session
+  /// when the UI runs on the local core; the token provider is evaluated per
+  /// poll because the local session token may arrive after boot.
+  enableClipboardFileSync(token: () => string): void {
+    if (this.fileSync !== null) return
+    this.fileSync = new ClipboardFileSync(
+      () => this,
+      token,
+      (message) => this.sink.onPatch({ error: message, errorCode: null }),
+    )
+  }
+
+  /// The files panel uploads through the same ids; pause the automatic
+  /// clipboard sync while it is open so the two cannot race.
+  setFilePanelOpen(open: boolean): void {
+    this.fileSyncPaused = open
+  }
+
+  /// Files dropped onto the remote picture: upload them, put them on the
+  /// remote clipboard and paste them into the focused remote window.
+  uploadDroppedFiles(files: File[], pasteAfterUpload: boolean): void {
+    if (files.length === 0) return
+    if (this.fileSync === null) {
+      // A remote-browser session has no local clipboard API; the drop still
+      // works, so create the transfer helper without a token.
+      this.fileSync = new ClipboardFileSync(
+        () => this,
+        () => '',
+        (message) => this.sink.onPatch({ error: message, errorCode: null }),
+      )
+    }
+    void this.fileSync.uploadFiles(files, pasteAfterUpload)
+  }
+
+  private startFileSync(): void {
+    if (this.fileSync === null || this.fileSyncTimer !== null) return
+    this.fileSyncTimer = window.setInterval(() => {
+      if (this.fileSyncPaused || !this.client.isLive()) return
+      void this.fileSync?.poll()
+    }, 1200)
+  }
+
+  private stopFileSync(): void {
+    if (this.fileSyncTimer !== null) {
+      window.clearInterval(this.fileSyncTimer)
+      this.fileSyncTimer = null
+    }
+    this.fileSync?.reset()
   }
 
   private snapshot(now = performance.now()): Stats {
@@ -234,7 +314,15 @@ export class SessionConnection {
   }
 
   connect(host: string, port: number, token: string,
-          requestAccess = false, deviceId = '', forceRelay = false): void {
+          requestAccess = false, deviceId = '', forceRelay?: boolean,
+          clientName?: string, clientId?: string): void {
+    // Keep the identity and TCP-only choice across manual reconnects; only the
+    // first connect supplies them.
+    if (forceRelay !== undefined) this.forceRelay = forceRelay
+    if (clientName !== undefined) this.clientName = clientName
+    if (clientId !== undefined) this.clientId = clientId
+    this.stopBackgroundPull()
+    this.stopFileSync()
     this.stopClipboardSync()
     this.stopCongestionWatch()
     this.lastClipboard = ''
@@ -254,13 +342,51 @@ export class SessionConnection {
       notice: null,
       frame: null,
     })
-    this.client.connect(host, port, token, requestAccess, deviceId, forceRelay)
+    this.client.connect(host, port, token, requestAccess, deviceId,
+                        this.forceRelay, this.clientName, this.clientId)
   }
 
   disconnect(): void {
+    this.stopBackgroundPull()
+    this.stopFileSync()
     this.stopClipboardSync()
     this.stopCongestionWatch()
     this.client.disconnect()
+  }
+
+  /// Called when this tab becomes (or stops being) the visible one. The
+  /// inactive tabs keep pulling at 1 fps so their frame in the store stays
+  /// current and the session never goes idle; only the foreground view pulls
+  /// at full rate.
+  setForeground(active: boolean): void {
+    if (this.foreground === active) return
+    this.foreground = active
+    if (active) {
+      this.stopBackgroundPull()
+      // The full-rate pull loop is owned by SessionView; ask for a fresh
+      // keyframe so the switch shows a complete picture immediately.
+      this.client.requestKeyframe()
+      this.client.requestFrame()
+      // Focus also pulls the remote clipboard once, so a text copied while
+      // this tab was in the background becomes available locally.
+      this.client.requestClipboard()
+    } else if (this.client.isLive()) {
+      this.startBackgroundPull()
+    }
+  }
+
+  private startBackgroundPull(): void {
+    if (this.backgroundTimer !== null) return
+    this.backgroundTimer = window.setInterval(() => {
+      if (!this.client.isLive()) return
+      this.client.requestFrame()
+    }, 1000)
+  }
+
+  private stopBackgroundPull(): void {
+    if (this.backgroundTimer === null) return
+    window.clearInterval(this.backgroundTimer)
+    this.backgroundTimer = null
   }
 
   reconnectNow(): void {

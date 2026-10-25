@@ -31,33 +31,24 @@ using Microsoft::WRL::ComPtr;
 constexpr int kWireRate = 48000;
 constexpr int kWireChannels = 1;
 
-bool is_float32(const WAVEFORMATEX* format) {
-  if (format == nullptr) return false;
-  if (format->wFormatTag == WAVE_FORMAT_IEEE_FLOAT) {
-    return format->wBitsPerSample == 32;
-  }
-  if (format->wFormatTag == WAVE_FORMAT_EXTENSIBLE) {
-    const auto* extended =
-        reinterpret_cast<const WAVEFORMATEXTENSIBLE*>(format);
-    return IsEqualGUID(extended->SubFormat, KSDATAFORMAT_SUBTYPE_IEEE_FLOAT) &&
-           format->wBitsPerSample == 32;
-  }
-  return false;
+/// The format we ask WASAPI for. The audio engine converts it to the device
+/// mix format (and back for capture), so a 44.1 kHz headset or a 24-bit
+/// microphone no longer makes the call look like it has no audio device.
+WAVEFORMATEX wire_format() {
+  WAVEFORMATEX format{};
+  format.wFormatTag = WAVE_FORMAT_PCM;
+  format.nChannels = kWireChannels;
+  format.nSamplesPerSec = kWireRate;
+  format.wBitsPerSample = 16;
+  format.nBlockAlign = kWireChannels * sizeof(int16_t);
+  format.nAvgBytesPerSec = kWireRate * format.nBlockAlign;
+  format.cbSize = 0;
+  return format;
 }
 
-bool is_pcm16(const WAVEFORMATEX* format) {
-  if (format == nullptr) return false;
-  if (format->wFormatTag == WAVE_FORMAT_PCM) {
-    return format->wBitsPerSample == 16;
-  }
-  if (format->wFormatTag == WAVE_FORMAT_EXTENSIBLE) {
-    const auto* extended =
-        reinterpret_cast<const WAVEFORMATEXTENSIBLE*>(format);
-    return IsEqualGUID(extended->SubFormat, KSDATAFORMAT_SUBTYPE_PCM) &&
-           format->wBitsPerSample == 16;
-  }
-  return false;
-}
+constexpr DWORD kSharedFlags =
+    AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM |
+    AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
 
 class wasapi_voice final : public voice_engine {
  public:
@@ -106,14 +97,6 @@ class wasapi_voice final : public voice_engine {
     render_client_.Reset();
     mic_capture_.Reset();
     mic_client_.Reset();
-    if (render_format_ != nullptr) {
-      CoTaskMemFree(render_format_);
-      render_format_ = nullptr;
-    }
-    if (mic_format_ != nullptr) {
-      CoTaskMemFree(mic_format_);
-      mic_format_ = nullptr;
-    }
     {
       std::lock_guard<std::mutex> lock(queue_mutex_);
       queue_.clear();
@@ -143,19 +126,8 @@ class wasapi_voice final : public voice_engine {
       err = "could not open the microphone";
       return false;
     }
-    WAVEFORMATEX* format = nullptr;
-    hr = client->GetMixFormat(&format);
-    if (FAILED(hr) || format == nullptr) {
-      err = "could not read the microphone format";
-      return false;
-    }
-    const bool supported = (is_float32(format) || is_pcm16(format)) &&
-                           format->nSamplesPerSec == kWireRate;
-    CoTaskMemFree(format);
-    if (!supported) {
-      err = "microphone format is not 48 kHz float/16-bit";
-      return false;
-    }
+    // The call engine resamples to 48 kHz mono, so any device the endpoint
+    // enumerates is usable. The actual open happens when the call starts.
     mic_available_ = true;
     return true;
   }
@@ -182,18 +154,9 @@ class wasapi_voice final : public voice_engine {
       err = "could not open the playback device";
       return false;
     }
-    hr = render_client_->GetMixFormat(&render_format_);
-    if (FAILED(hr) || render_format_ == nullptr) {
-      err = "could not read the playback format";
-      return false;
-    }
-    if ((!is_float32(render_format_) && !is_pcm16(render_format_)) ||
-        render_format_->nSamplesPerSec != kWireRate) {
-      err = "playback format is not 48 kHz float/16-bit";
-      return false;
-    }
-    hr = render_client_->Initialize(AUDCLNT_SHAREMODE_SHARED, 0, 1000000, 0,
-                                    render_format_, nullptr);
+    WAVEFORMATEX format = wire_format();
+    hr = render_client_->Initialize(AUDCLNT_SHAREMODE_SHARED, kSharedFlags,
+                                    1000000, 0, &format, nullptr);
     if (FAILED(hr)) {
       err = "playback initialization failed";
       return false;
@@ -231,18 +194,9 @@ class wasapi_voice final : public voice_engine {
       err = "could not open the microphone";
       return false;
     }
-    hr = mic_client_->GetMixFormat(&mic_format_);
-    if (FAILED(hr) || mic_format_ == nullptr) {
-      err = "could not read the microphone format";
-      return false;
-    }
-    if ((!is_float32(mic_format_) && !is_pcm16(mic_format_)) ||
-        mic_format_->nSamplesPerSec != kWireRate) {
-      err = "microphone format is not 48 kHz float/16-bit";
-      return false;
-    }
-    hr = mic_client_->Initialize(AUDCLNT_SHAREMODE_SHARED, 0, 1000000, 0,
-                                 mic_format_, nullptr);
+    WAVEFORMATEX format = wire_format();
+    hr = mic_client_->Initialize(AUDCLNT_SHAREMODE_SHARED, kSharedFlags,
+                                 1000000, 0, &format, nullptr);
     if (FAILED(hr)) {
       err = "microphone initialization failed";
       return false;
@@ -261,8 +215,6 @@ class wasapi_voice final : public voice_engine {
   }
 
   void render_loop() {
-    const int channels = static_cast<int>(render_format_->nChannels);
-    const bool is_float = is_float32(render_format_);
     UINT32 buffer_frames = 0;
     if (FAILED(render_client_->GetBufferSize(&buffer_frames))) return;
     while (running_.load()) {
@@ -288,21 +240,10 @@ class wasapi_voice final : public voice_engine {
           queue_.pop_front();
         }
       }
+      auto* out = reinterpret_cast<int16_t*>(data);
       for (UINT32 frame = 0; frame < available; ++frame) {
-        const int16_t value =
+        out[frame] =
             frame < samples.size() ? samples[frame] : static_cast<int16_t>(0);
-        if (is_float) {
-          auto* out = reinterpret_cast<float*>(data);
-          const float normalized = static_cast<float>(value) / 32768.0f;
-          for (int channel = 0; channel < channels; ++channel) {
-            out[frame * channels + channel] = normalized;
-          }
-        } else {
-          auto* out = reinterpret_cast<int16_t*>(data);
-          for (int channel = 0; channel < channels; ++channel) {
-            out[frame * channels + channel] = value;
-          }
-        }
       }
       render_->ReleaseBuffer(available, 0);
       Sleep(5);
@@ -310,8 +251,6 @@ class wasapi_voice final : public voice_engine {
   }
 
   void mic_loop() {
-    const int channels = static_cast<int>(mic_format_->nChannels);
-    const bool is_float = is_float32(mic_format_);
     std::vector<uint8_t> packet;
     packet.reserve(kWireRate / 50 * 2);
     while (running_.load()) {
@@ -329,23 +268,13 @@ class wasapi_voice final : public voice_engine {
                                            nullptr))) {
           break;
         }
+        // AUTOCONVERTPCM hands us exactly the format requested in
+        // open_capture: 48 kHz mono 16-bit.
+        const bool silent =
+            (flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0 || data == nullptr;
+        const auto* samples = reinterpret_cast<const int16_t*>(data);
         for (UINT32 frame = 0; frame < frames; ++frame) {
-          float mixed = 0.0f;
-          if ((flags & AUDCLNT_BUFFERFLAGS_SILENT) == 0 && data != nullptr) {
-            for (int channel = 0; channel < channels; ++channel) {
-              if (is_float) {
-                mixed += reinterpret_cast<const float*>(data)
-                             [frame * channels + channel] /
-                         static_cast<float>(channels);
-              } else {
-                mixed += reinterpret_cast<const int16_t*>(data)
-                             [frame * channels + channel] /
-                         (32768.0f * static_cast<float>(channels));
-              }
-            }
-          }
-          const float clamped = std::clamp(mixed, -1.0f, 1.0f);
-          const int16_t sample = static_cast<int16_t>(clamped * 32767.0f);
+          const int16_t sample = silent ? 0 : samples[frame];
           packet.push_back(static_cast<uint8_t>(sample & 0xff));
           packet.push_back(static_cast<uint8_t>((sample >> 8) & 0xff));
         }
@@ -370,8 +299,6 @@ class wasapi_voice final : public voice_engine {
   ComPtr<IAudioRenderClient> render_;
   ComPtr<IAudioClient> mic_client_;
   ComPtr<IAudioCaptureClient> mic_capture_;
-  WAVEFORMATEX* render_format_ = nullptr;
-  WAVEFORMATEX* mic_format_ = nullptr;
   std::mutex queue_mutex_;
   std::deque<int16_t> queue_;
 };

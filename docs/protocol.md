@@ -392,9 +392,11 @@ X11 的屏幕抓取**不包含鼠标光标**，服务端单独发送形状与位
 **聊天**
 
 - 客户端 → 核心：`{"type":"chat","action":"send","text":"..."}`（1–4096 字节）
-- 核心 → 所有会话与主机 UI：`{"type":"chat","action":"message","id":N,"from":"remote|host","text":"...","ts":epoch_ms}`
+- 核心 → 所有会话与主机 UI：`{"type":"chat","action":"message","id":N,"from":"remote|host","sender_name":"机器名","sender_id":"设备ID","sender_session":N,"text":"...","ts":epoch_ms}`
 - 客户端请求历史：`{"type":"chat","action":"history"}` → `{"type":"chat","action":"history","messages":[...]}`
 - 主机 UI 通过 `GET /api/chat?since=N` 轮询、`POST /api/chat?text=...` 回复（仅回环）。
+- 发送者身份来自 `hello` 的可选 `name` / `device_id`；没有设备 ID 的浏览器按来源 IP
+  标注。`sender_session` 是主机侧会话号，客户端用它把“自己发的”消息右对齐。
 
 **文件传输**
 
@@ -410,7 +412,13 @@ X11 的屏幕抓取**不包含鼠标光标**，服务端单独发送形状与位
 - 远程剪贴板：`{"type":"clipboard","action":"files"}` 查询当前文件列表；主机剪贴板变化时核心
   主动推送 `{"type":"clipboard","action":"files","files":[{"name","path","size"}]}`。
   `{"type":"file","action":"clipboard-set","paths":[...]}` 把远程文件放进主机剪贴板
-  （Windows `CF_HDROP`），回复 `{"type":"file","action":"clipboard","ok":true,"count":N}`。
+  （Windows `CF_HDROP`，X11 为 `text/uri-list` / `x-special/gnome-copied-files`），
+  回复 `{"type":"file","action":"clipboard","ok":true,"count":N}`。
+- 本机 UI 的自动文件剪贴板：`GET /api/clipboard-files` 返回本机剪贴板文件快照
+  （`{"version":N,"files":[{"id","name","size"}]}`，仅回环）；`GET /api/clipboard-file?id=`
+  返回内容。id 是不透明哈希，文件不在当前剪贴板时返回 404。页面把文件按上面的上传
+  流程传到远端后，再发 `clipboard-set`，因此远端（包括启用剪贴板重定向的 RDP 客户端）
+  可以直接粘贴。端到端同步只在本机壳层/本机浏览器可用。
 
 **音频**
 

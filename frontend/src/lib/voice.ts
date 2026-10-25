@@ -3,6 +3,13 @@ import { PcmPlayer } from './audio'
 /// Two-way voice for a call. Microphone PCM is captured at 48 kHz mono and
 /// sent to the host; the host microphone is played through Web Audio. No
 /// video, per the call design.
+export type MicFailure =
+  | 'unsupported'
+  | 'denied'
+  | 'missing'
+  | 'busy'
+  | 'error'
+
 export class VoiceCall {
   private stream: MediaStream | null = null
   private context: AudioContext | null = null
@@ -15,22 +22,54 @@ export class VoiceCall {
 
   async start(
     send: (pcm: Uint8Array) => void,
-  ): Promise<{ mic: boolean }> {
+  ): Promise<{ mic: boolean; reason?: MicFailure }> {
     this.send = send
-    await this.player.start()
-    let mic = true
+    // Playback is optional: a failed AudioContext must not hide the
+    // microphone result (and vice versa).
     try {
-      this.stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: 1,
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
-        video: false,
-      })
+      await this.player.start()
     } catch {
+      // The host audio still arrives; it just cannot be played here.
+    }
+    let mic = true
+    let reason: MicFailure | undefined
+    // getUserMedia is absent on insecure origins (plain http:// to anything
+    // other than localhost), which is how a remote browser usually reaches a
+    // host. Say so instead of pretending the code failed.
+    if (!navigator.mediaDevices?.getUserMedia) {
       mic = false
+      reason = 'unsupported'
+    } else {
+      try {
+        this.stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            channelCount: 1,
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+          video: false,
+        })
+      } catch (error) {
+        mic = false
+        const name = error instanceof DOMException ? error.name : ''
+        if (name === 'NotAllowedError' || name === 'SecurityError') {
+          reason = 'denied'
+        } else if (
+          name === 'NotFoundError' ||
+          name === 'DevicesNotFoundError'
+        ) {
+          reason = 'missing'
+        } else if (
+          name === 'NotReadableError' ||
+          name === 'TrackStartError' ||
+          name === 'AbortError'
+        ) {
+          reason = 'busy'
+        } else {
+          reason = 'error'
+        }
+      }
     }
     if (this.stream) {
       try {
@@ -63,9 +102,10 @@ export class VoiceCall {
         }
       } catch {
         mic = false
+        reason = 'error'
       }
     }
-    return { mic }
+    return { mic, reason }
   }
 
   pushRemote(pcm: Uint8Array): void {

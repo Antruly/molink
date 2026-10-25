@@ -205,6 +205,7 @@
     "closeWindow": "Close window",
     "quickActions": "Quick actions",
     "moveToolbar": "Drag toolbar",
+    "moveCallBar": "Drag call bar",
     "mobileTools": "Show touch tools",
     "mobileToolsHide": "Hide touch tools",
     "fullscreen": "Fullscreen",
@@ -260,6 +261,8 @@
     "invalid_port": "Port must be a whole number between 1 and 65535.",
     "invalid_uses": "Uses must be a whole number greater than 0.",
     "device_not_found": "No device is registered with that ID",
+    "clipboard_files_failed": "Could not sync the clipboard files (copy again, or use the files panel)",
+    "clipboard_files_too_large": "Clipboard files exceed 256 MB and were not pasted automatically",
     "clipboard_read_failed": "Could not read the local clipboard",
     "clipboard_write_failed": "Could not write to the local clipboard",
     "clipboard_unavailable": "The browser does not expose the clipboard here",
@@ -269,7 +272,8 @@
     "settings_failed": "Could not save the setting.",
     "server_not_configured": "moLink Server is not configured",
     "device_offline": "That device is offline",
-    "server_unreachable": "The moLink Server could not be reached"
+    "server_unreachable": "The moLink Server could not be reached",
+    "clipboard_files_busy": "A clipboard transfer is running; try again in a moment"
   },
   "popout": {
     "noToken": "This window is missing the connection code."
@@ -388,6 +392,10 @@
     "hostMicReady": "Your microphone is available",
     "hostNoMic": "The host microphone is unavailable",
     "no_mic": "Microphone unavailable; you can only listen",
+    "mic_denied": "Microphone permission was denied; allow it in the browser/app and retry",
+    "mic_missing": "No microphone was found",
+    "mic_busy": "The microphone is in use by another program",
+    "mic_insecure": "This page is neither HTTPS nor localhost, so the browser blocks the microphone; you can only listen",
     "declined": "The call was declined",
     "audio_error": "Voice audio could not start",
     "activeHint": "Call connected",
@@ -474,6 +482,9 @@
     "onlineDevices": "Online",
     "cards": "Cards",
     "list": "List",
+    "pageOf": "Page {{page}} of {{pages}}",
+    "prev": "Previous",
+    "next": "Next",
     "noRecent": "No recent connections yet.",
     "noSaved": "Star a device to save it here.",
     "noLan": "No LAN devices found. Enable LAN discovery in Security.",

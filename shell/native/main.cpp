@@ -893,8 +893,10 @@ int main(int argc, char** argv) {
   webkit_settings_set_javascript_can_access_clipboard(settings, TRUE);
   webkit_settings_set_javascript_can_open_windows_automatically(settings, TRUE);
   // getUserMedia for voice calls. The permission handler above only allows
-  // requests from the core's origin.
+  // requests from the core's origin; WebRTC carries the capture pipeline on
+  // newer WebKitGTK releases.
   webkit_settings_set_enable_media_stream(settings, TRUE);
+  webkit_settings_set_enable_webrtc(settings, TRUE);
   gtk_container_add(GTK_CONTAINER(window), view);
 
   static const std::string origin =

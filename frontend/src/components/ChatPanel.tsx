@@ -23,6 +23,8 @@ export function ChatPanel({
   messages,
   onSend,
   remoteLabel,
+  remoteId,
+  selfSessionId,
   callAvailable = false,
   callPhase = 'idle',
   onCall,
@@ -32,6 +34,11 @@ export function ChatPanel({
   messages: ChatMessage[]
   onSend: (text: string) => void
   remoteLabel: string
+  /// Device ID of the peer (shown next to its name).
+  remoteId?: string
+  /// This viewer's host-side session id, used to mark its own messages when
+  /// several people share one chat.
+  selfSessionId?: number
   callAvailable?: boolean
   callPhase?: 'idle' | 'ringing' | 'active'
   onCall?: () => void
@@ -47,6 +54,15 @@ export function ChatPanel({
   }, [messages, open])
 
   if (!open) return null
+
+  const isMine = (message: ChatMessage) =>
+    message.from !== 'host' &&
+    (message.senderSession === undefined ||
+      selfSessionId === undefined ||
+      message.senderSession === selfSessionId)
+  const senderName = (message: ChatMessage) =>
+    message.senderName?.trim() ||
+    (message.from === 'host' ? t('chat.host') : t('chat.remote'))
 
   const send = () => {
     const value = text.trim()
@@ -73,6 +89,11 @@ export function ChatPanel({
         <span className="chip ml-1 !px-1.5 !py-0 text-[10px]">
           {remoteLabel}
         </span>
+        {remoteId ? (
+          <span className="hidden truncate font-mono text-[10px] text-muted sm:inline">
+            {remoteId}
+          </span>
+        ) : null}
         <div className="ml-auto flex items-center gap-1">
           {callAvailable ? (
             <button
@@ -106,7 +127,7 @@ export function ChatPanel({
           </div>
         ) : (
           messages.map((message) => {
-            const mine = message.from !== 'host'
+            const mine = isMine(message)
             return (
               <div
                 key={`${message.id}-${message.ts}`}
@@ -129,7 +150,8 @@ export function ChatPanel({
                       (mine ? 'text-on-accent/60' : 'text-muted/70')
                     }
                   >
-                    {mine ? t('chat.remote') : t('chat.host')} ·{' '}
+                    {senderName(message)}
+                    {message.senderId ? ` · ${message.senderId}` : ''} ·{' '}
                     {timeLabel(message.ts)}
                   </div>
                 </div>

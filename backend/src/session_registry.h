@@ -18,6 +18,10 @@ struct session_info {
   std::string peer_ip;
   unsigned int peer_port = 0;
   bool authenticated = false;
+  /// Identity the client reported in hello; lets a shared chat label who sent
+  /// each message when several viewers are connected.
+  std::string client_name;
+  std::string client_id;
   /// Waiting for the local user to approve a no-code request.
   bool awaiting_approval = false;
   uint32_t access_request_id = 0;

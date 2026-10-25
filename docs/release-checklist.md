@@ -1,6 +1,6 @@
 # 发布检查清单
 
-当前状态：**桌面 0.9.15（标签 `v0.9.15`）+ 服务端 0.2.2（独立仓库 `molink-server`）+
+当前状态：**桌面 0.9.16（标签 `v0.9.16`）+ 服务端 0.2.2（独立仓库 `molink-server`）+
 Windows 7 x86（同一个 Release 的 `win7-x86` job）。桌面端已验证
 Linux/Windows/macOS 发布矩阵、简洁模式/头像/域组码与 Win7 GDI 采集；服务端目录、
 TLS、域组码和迁移在独立仓库验证。** 历史条目（0.6.14 及以下）保留在下方作为回归
@@ -37,7 +37,7 @@ TLS、域组码和迁移在独立仓库验证。** 历史条目（0.6.14 及以�
 | 编码预算 | 2880×1920 关键帧 / 增量帧 | 17–18 ms / 13–18 ms，全部低于帧预算 |
 | 解码预算 | Chrome，2880×1920 | 增量帧 6.4 / 9.7 ms；关键帧主线程扩展 ≤ 24.1 ms |
 | 退出稳定性 | 4 次 SIGTERM 压力测试 | 0 次崩溃 |
-| Windows 服务采集 | 服务安装后 `welcome.tiles.backend=secure-desktop`；helper 记录 `dpi`；`can_set_display_mode=false` 时客户端隐藏分辨率菜单 | 通过（Win10 实机，0.9.15 构建） |
+| Windows 服务采集 | 服务安装后 `welcome.tiles.backend=secure-desktop`；helper 记录 `dpi`；`can_set_display_mode=false` 时客户端隐藏分辨率菜单 | 通过（Win10 实机，0.9.16 构建） |
 | 多次码重连 | `session_token` 重连与重复 `hello` 不扣次数（18→14 仅两次验证码连接） | 通过（Win10 实机） |
 
 ## 发布前仍需完成
@@ -89,7 +89,7 @@ TLS、域组码和迁移在独立仓库验证。** 历史条目（0.6.14 及以�
 | 项目 | 命令 / 方法 | 结果 |
 |---|---|---|
 | 构建 | `packaging/windows/build-win7-x86.ps1`（libuvcpp full + core + shell + service/helper + 安装器） | 通过 |
-| CI | `release-desktop.yml` 的 `win7-x86` job（`v*` 标签） | 通过（随 0.9.15 Release 构建） |
+| CI | `release-desktop.yml` 的 `win7-x86` job（`v*` 标签） | 通过（随 0.9.16 Release 构建） |
 | 目录 / 域组 | 局域网 TLS 目录注册、ID 解析、域组码 | 通过 |
 | WS 会话 | 反向隧道 → welcome → 129 KB 真实关键帧 | 通过 |
 | GDI 采集 | 1024×768 控制台会话，`capture=gdi` | 通过 |

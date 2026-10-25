@@ -302,7 +302,9 @@ export function HostChatDock() {
                           (mine ? 'text-on-accent/60' : 'text-muted/70')
                         }
                       >
-                        {mine ? t('chat.host') : t('chat.remote')} ·{' '}
+                        {message.sender_name?.trim() ||
+                          (mine ? t('chat.host') : t('chat.remote'))}
+                        {message.sender_id ? ` · ${message.sender_id}` : ''} ·{' '}
                         {timeLabel(message.ts)}
                       </div>
                     </div>

@@ -87,7 +87,13 @@ class session_controller final
   void attach_chat();
   void chat_history();
   void attach_call();
+  /// Hop the call event onto the app loop: accept/decline arrive on an HTTP
+  /// worker thread, while the voice engine and the websocket are owned by the
+  /// app loop. Running both sides on the same thread also keeps the WASAPI
+  /// COM objects in one apartment.
   void on_call_event(const call_snapshot& snapshot, const std::string& event);
+  void apply_call_event(const call_snapshot& snapshot,
+                        const std::string& event);
   void start_voice();
   void stop_voice();
   void send_voice(std::vector<uint8_t> pcm);

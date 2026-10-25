@@ -11,9 +11,16 @@
 #include <windows.h>
 #endif
 
+#include <atomic>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <mutex>
 #include <string>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -36,6 +43,52 @@
 
 namespace molink {
 namespace {
+
+/// The clipboard is an asynchronous X11/Win32 conversation, but the HTTP
+/// handler runs on the loop thread. Keep the last answered file list here:
+/// each poll starts a background refresh and returns the previous snapshot,
+/// so a slow clipboard owner never stalls frames or input.
+struct clipboard_files_snapshot {
+  std::mutex mutex;
+  std::vector<clipboard_file> files;
+  uint64_t version = 0;
+  std::atomic<bool> fetching{false};
+};
+
+std::shared_ptr<clipboard_files_snapshot> clipboard_snapshot() {
+  static auto snapshot = std::make_shared<clipboard_files_snapshot>();
+  return snapshot;
+}
+
+std::string clipboard_file_id(const clipboard_file& file) {
+  uint64_t hash = 1469598103934665603ull;
+  const std::string key =
+      file.path + "|" + std::to_string(file.size);
+  for (const unsigned char byte : key) {
+    hash ^= byte;
+    hash *= 1099511628211ull;
+  }
+  char buffer[17] = {};
+  std::snprintf(buffer, sizeof(buffer), "%016llx",
+                static_cast<unsigned long long>(hash));
+  return buffer;
+}
+
+void refresh_clipboard_files(
+    const std::shared_ptr<clipboard_service>& service) {
+  if (!service) return;
+  const auto snapshot = clipboard_snapshot();
+  bool expected = false;
+  if (!snapshot->fetching.compare_exchange_strong(expected, true)) return;
+  service->request_files([snapshot](std::vector<clipboard_file> files) {
+    {
+      std::lock_guard<std::mutex> lock(snapshot->mutex);
+      snapshot->files = std::move(files);
+      ++snapshot->version;
+    }
+    snapshot->fetching.store(false);
+  });
+}
 
 /// Ask the experimental LocalSystem session service. Returns a JSON string
 /// produced by the service, or an unavailable marker on other platforms.
@@ -695,6 +748,9 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
               uvcpp_json item;
               item["id"] = message.id;
               item["from"] = message.from;
+              item["sender_name"] = message.sender_name;
+              item["sender_id"] = message.sender_id;
+              item["sender_session"] = message.sender_session;
               item["text"] = message.text;
               item["ts"] = message.ts_ms;
               list.push_back(std::move(item));
@@ -722,9 +778,108 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
                resp.end();
                return;
              }
-             deps.chat->post("host", text);
+             const std::string host_name =
+                 deps.auth ? deps.auth->settings().device_name : std::string();
+             deps.chat->post("host", text, host_name, deps.device_id, 0);
              resp.status(204).end();
            });
+
+  // The local shell watches its own clipboard for files. The page cannot
+  // touch the OS clipboard's file list, so it polls this snapshot and then
+  // uploads the contents to the remote session. Loopback only: a remote
+  // browser must never receive the host machine's clipboard files.
+  app.get("/api/clipboard-files",
+          [deps](uvcpp_web_request& req, uvcpp_web_response& resp,
+                 uvcpp_web_next) {
+            if (!is_loopback_peer(req.peer_ip()) || !deps.clipboard) {
+              resp.status(403).json_str(R"({"code":"loopback_only"})");
+              resp.end();
+              return;
+            }
+            refresh_clipboard_files(deps.clipboard);
+            const auto snapshot = clipboard_snapshot();
+            std::vector<clipboard_file> files;
+            uint64_t version = 0;
+            {
+              std::lock_guard<std::mutex> lock(snapshot->mutex);
+              files = snapshot->files;
+              version = snapshot->version;
+            }
+            uvcpp_json list = uvcpp_json::array();
+            for (const clipboard_file& file : files) {
+              if (file.path.empty()) continue;
+              uvcpp_json item;
+              item["id"] = clipboard_file_id(file);
+              item["name"] = file.name;
+              item["size"] = file.size;
+              list.push_back(std::move(item));
+            }
+            uvcpp_json j;
+            j["version"] = version;
+            j["files"] = std::move(list);
+            resp.set_header("Cache-Control", "no-store").json(j);
+            resp.end();
+          });
+
+  app.get("/api/clipboard-file",
+          [deps](uvcpp_web_request& req, uvcpp_web_response& resp,
+                 uvcpp_web_next) {
+            if (!is_loopback_peer(req.peer_ip()) || !deps.clipboard) {
+              resp.status(403).json_str(R"({"code":"loopback_only"})");
+              resp.end();
+              return;
+            }
+            const std::string* id = req.query("id");
+            if (id == nullptr || id->empty()) {
+              resp.status(400).json_str(R"({"code":"bad_id"})");
+              resp.end();
+              return;
+            }
+            // Only serve a file that is currently on the clipboard; the id is
+            // a hash so the path itself never reaches the page.
+            std::string path;
+            {
+              const auto snapshot = clipboard_snapshot();
+              std::lock_guard<std::mutex> lock(snapshot->mutex);
+              for (const clipboard_file& file : snapshot->files) {
+                if (clipboard_file_id(file) == *id) {
+                  path = file.path;
+                  break;
+                }
+              }
+            }
+            if (path.empty()) {
+              resp.status(404).json_str(R"({"code":"not_on_clipboard"})");
+              resp.end();
+              return;
+            }
+            constexpr uint64_t kMaxClipboardFile =
+                64ull * 1024ull * 1024ull;
+            std::error_code ec;
+            const std::filesystem::path fs_path(path);
+            if (!std::filesystem::is_regular_file(fs_path, ec) || ec) {
+              resp.status(404).json_str(R"({"code":"missing_file"})");
+              resp.end();
+              return;
+            }
+            const uint64_t size = std::filesystem::file_size(fs_path, ec);
+            if (ec || size > kMaxClipboardFile) {
+              resp.status(413).json_str(R"({"code":"file_too_large"})");
+              resp.end();
+              return;
+            }
+            std::ifstream in(fs_path, std::ios::binary);
+            if (!in) {
+              resp.status(404).json_str(R"({"code":"missing_file"})");
+              resp.end();
+              return;
+            }
+            std::string data((std::istreambuf_iterator<char>(in)),
+                             std::istreambuf_iterator<char>());
+            resp.set_header("Cache-Control", "no-store")
+                .body(data, "application/octet-stream")
+                .end();
+          });
 
   // Voice call control for the person at this machine (the host UI polls).
   app.get("/api/call",

@@ -2,7 +2,7 @@
 #
 #   build-win7-x86.ps1 -Kit C:\path\libuvcpp-1.8.5-mingw32 `
 #                      -Gcc C:\path\i686-13.2.0-posix-dwarf-msvcrt `
-#                      -WebView2 C:\path\wv2 -Version 0.9.15
+#                      -WebView2 C:\path\wv2 -Version 0.9.16
 #
 # -Kit is the portable build kit (uvcpp-kit-1.8.5-mingw32.zip). It supplies
 # cmake, the zlib static library (molink's tile compressor calls compress2
@@ -22,7 +22,7 @@ param(
   [Parameter(Mandatory = $true)][string]$WebView2,
   [string]$UvcppPrefix = "",
   [string]$Repo = "",
-  [string]$Version = "0.9.15",
+  [string]$Version = "0.9.16",
   [string]$Out = ""
 )
 

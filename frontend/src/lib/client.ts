@@ -82,6 +82,12 @@ export interface CursorPosition {
 export interface ChatMessage {
   id: number
   from: 'remote' | 'host' | string
+  /** Machine name reported by the sender (or its peer address). */
+  senderName?: string
+  /** Device ID of the sender, when it has one. */
+  senderId?: string
+  /** Host-side session id that posted it; 0 for the person at the machine. */
+  senderSession?: number
   text: string
   ts: number
 }
@@ -185,9 +191,31 @@ interface ControlMessage {
   chunk?: number
   entries?: FileEntry[]
   messages?: ChatMessage[]
+  sender_name?: string
+  sender_id?: string
+  sender_session?: number
   files?: ClipboardFileEntry[]
   host_microphone?: boolean
   started_ms?: number
+}
+
+/// The wire uses snake_case for the chat sender; the UI works in camelCase.
+interface RawChatMessage extends ChatMessage {
+  sender_name?: string
+  sender_id?: string
+  sender_session?: number
+}
+
+function toChatMessage(raw: RawChatMessage): ChatMessage {
+  return {
+    id: raw.id ?? 0,
+    from: raw.from ?? 'remote',
+    senderName: raw.senderName ?? raw.sender_name,
+    senderId: raw.senderId ?? raw.sender_id,
+    senderSession: raw.senderSession ?? raw.sender_session,
+    text: raw.text ?? '',
+    ts: raw.ts ?? 0,
+  }
 }
 
 function decodeBase64(text: string): Uint8Array | null {
@@ -233,6 +261,10 @@ export class MolinkClient {
     targetId: string
     /// Skip ICE and keep the session on the relay.
     forceRelay: boolean
+    /// This client's machine name and device ID, sent so a shared chat can
+    /// label who typed each message. Empty for a plain browser viewer.
+    clientName: string
+    clientId: string
   } | null = null
   /// The ICE proxy failed; use the resolved address directly from now on.
   private proxyFailed = false
@@ -260,7 +292,8 @@ export class MolinkClient {
   }
 
   connect(host: string, port: number, token: string,
-          requestAccess = false, targetId = '', forceRelay = false): void {
+          requestAccess = false, targetId = '', forceRelay = false,
+          clientName = '', clientId = ''): void {
     this.disconnect()
     this.stopRetryTimers()
     this.closedByUser = false
@@ -271,7 +304,7 @@ export class MolinkClient {
     this.lastErrorMessage = ''
     this.resumeToken = ''
     this.lastConnect = { host, port, token, requestAccess, targetId,
-                        forceRelay }
+                        forceRelay, clientName, clientId }
     this.openSocket()
   }
 
@@ -292,7 +325,16 @@ export class MolinkClient {
   private openSocket(): void {
     const args = this.lastConnect
     if (args === null) return
-    const { host, port, token, requestAccess, targetId, forceRelay } = args
+    const {
+      host,
+      port,
+      token,
+      requestAccess,
+      targetId,
+      forceRelay,
+      clientName,
+      clientId,
+    } = args
     this.closedByUser = false
     this.hasImage = false
     this.pendingFrame = false
@@ -336,8 +378,12 @@ export class MolinkClient {
     ws.onopen = () => {
       if (requestAccess || token === '') {
         // No code: ask the host user to approve this session.
-        this.sendJson({ type: 'request-access', name: 'moLink web',
-                        client: 'molink-web' })
+        this.sendJson({
+          type: 'request-access',
+          name: clientName || 'moLink web',
+          client: 'molink-web',
+          ...(clientId ? { device_id: clientId } : {}),
+        })
       } else {
         // Send the code as well: if the host restarted, the resume token is
         // unknown and the code still authenticates in the same round trip.
@@ -345,6 +391,8 @@ export class MolinkClient {
           type: 'hello',
           token,
           ...(this.resumeToken ? { session: this.resumeToken } : {}),
+          ...(clientName ? { name: clientName } : {}),
+          ...(clientId ? { device_id: clientId } : {}),
           client: 'molink-web',
           protocol: 1,
         })
@@ -718,17 +766,22 @@ export class MolinkClient {
         if (message.action === 'history') {
           this.handlers.onSessionEvent?.({
             kind: 'chat-history',
-            messages: (message.messages ?? []) as ChatMessage[],
+            messages: (message.messages ?? []).map((item) =>
+              toChatMessage(item as RawChatMessage),
+            ),
           })
         } else if (message.action === 'message' && message.text) {
           this.handlers.onSessionEvent?.({
             kind: 'chat',
-            message: {
+            message: toChatMessage({
               id: message.id ?? 0,
               from: message.from ?? 'remote',
+              sender_name: message.sender_name,
+              sender_id: message.sender_id,
+              sender_session: message.sender_session,
               text: message.text,
               ts: message.ts ?? Date.now(),
-            },
+            } as RawChatMessage),
           })
         }
         break

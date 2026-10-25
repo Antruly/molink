@@ -262,6 +262,17 @@ export function SessionView({
   const [callSeconds, setCallSeconds] = useState(0)
   const voiceRef = useRef<VoiceCall | null>(null)
   const callAvailable = welcome?.call === true
+  // The call bar floats over the remote picture; let the user drag it out of
+  // the way (it used to sit on top of the friendly toolbar with no handle).
+  const callBarRef = useRef<HTMLDivElement>(null)
+  const callDrag = useRef<{
+    offsetX: number
+    offsetY: number
+    startX: number
+    startY: number
+    moved: boolean
+  } | null>(null)
+  const [callPos, setCallPos] = useState<{ x: number; y: number } | null>(null)
   const [quickOpen, setQuickOpen] = useState(false)
   const [quickPos, setQuickPos] = useState<{ x: number; y: number } | null>(null)
   const quickBarRef = useRef<HTMLDivElement>(null)
@@ -494,7 +505,18 @@ export function SessionView({
       void voice
         .start((pcm) => activeConnection?.sendVoice(pcm))
         .then((result) => {
-          if (!result.mic) setCallNotice('no_mic')
+          if (result.mic) return
+          setCallNotice(
+            result.reason === 'unsupported'
+              ? 'mic_insecure'
+              : result.reason === 'denied'
+                ? 'mic_denied'
+                : result.reason === 'missing'
+                  ? 'mic_missing'
+                  : result.reason === 'busy'
+                    ? 'mic_busy'
+                    : 'no_mic',
+          )
         })
     } else if (event.action === 'declined') {
       stopVoiceCall()
@@ -523,6 +545,15 @@ export function SessionView({
     voiceRef.current?.setMuted(next)
   }
 
+  // A mounted view is the foreground session: full-rate pull, and the only
+  // one allowed to write the local text clipboard from the remote.
+  useEffect(() => {
+    const active = connection()
+    if (!active) return
+    active.setForeground(true)
+    return () => active.setForeground(false)
+  }, [connection])
+
   useEffect(() => {
     const active = connection()
     if (!active) return
@@ -544,6 +575,13 @@ export function SessionView({
       }
     })
   }, [connection])
+
+  // The automatic file clipboard sync lives in the connection so background
+  // tabs (and popouts) keep mirroring local files too; only the files panel
+  // needs to pause it while it uploads through the same ids.
+  useEffect(() => {
+    connection()?.setFilePanelOpen(filesOpen)
+  }, [connection, filesOpen])
 
   useEffect(() => {
     return () => {
@@ -1043,6 +1081,53 @@ export function SessionView({
     fullDrag.current = null
   }
 
+  const callHandleDown = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    const surface = surfaceRef.current
+    const bar = callBarRef.current
+    if (!surface || !bar) return
+    event.preventDefault()
+    event.stopPropagation()
+    const rect = surface.getBoundingClientRect()
+    const barRect = bar.getBoundingClientRect()
+    const position = callPos ?? {
+      x: barRect.left - rect.left,
+      y: barRect.top - rect.top,
+    }
+    callDrag.current = {
+      offsetX: event.clientX - rect.left - position.x,
+      offsetY: event.clientY - rect.top - position.y,
+      startX: event.clientX,
+      startY: event.clientY,
+      moved: false,
+    }
+    setCallPos(position)
+    event.currentTarget.setPointerCapture(event.pointerId)
+  }
+
+  const callHandleMove = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    const drag = callDrag.current
+    const surface = surfaceRef.current
+    const bar = callBarRef.current
+    if (!drag || !surface || !bar) return
+    if (
+      !drag.moved &&
+      Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) > 4
+    ) {
+      drag.moved = true
+    }
+    const rect = surface.getBoundingClientRect()
+    const maxX = Math.max(4, rect.width - bar.offsetWidth - 4)
+    const maxY = Math.max(4, rect.height - bar.offsetHeight - 4)
+    setCallPos({
+      x: Math.min(maxX, Math.max(4, event.clientX - rect.left - drag.offsetX)),
+      y: Math.min(maxY, Math.max(4, event.clientY - rect.top - drag.offsetY)),
+    })
+  }
+
+  const callHandleUp = () => {
+    callDrag.current = null
+  }
+
   const toggleQuickOpen = () => {
     if (quickSuppressClick.current) {
       quickSuppressClick.current = false
@@ -1060,6 +1145,11 @@ export function SessionView({
       quickPos?.y ?? 12,
       Math.max(4, surfaceSize.height - 40),
     ),
+  }
+
+  const callBarPos = {
+    x: Math.min(callPos?.x ?? 12, Math.max(4, surfaceSize.width - 280)),
+    y: Math.min(callPos?.y ?? 56, Math.max(4, surfaceSize.height - 40)),
   }
 
   const mobileDockDown = (event: ReactPointerEvent<HTMLButtonElement>) => {
@@ -1820,6 +1910,22 @@ export function SessionView({
           onPointerLeave={() => {
             panPointer.current = null
           }}
+          onDragOver={(event) => {
+            if (event.dataTransfer.types.includes('Files')) {
+              event.preventDefault()
+              event.dataTransfer.dropEffect = 'copy'
+            }
+          }}
+          onDrop={(event) => {
+            const files = event.dataTransfer.files
+            if (files.length === 0) return
+            event.preventDefault()
+            event.stopPropagation()
+            connection()?.uploadDroppedFiles(
+              Array.from(files),
+              tab.controlEnabled,
+            )
+          }}
           onContextMenu={(event) => {
             if (tab.controlEnabled) event.preventDefault()
           }}
@@ -2390,11 +2496,25 @@ export function SessionView({
 
           {callPhase !== 'idle' ? (
             <div
+              ref={callBarRef}
               data-local-input="true"
-              className="pointer-events-auto absolute left-3 top-14 z-30 flex max-w-[calc(100%-1.5rem)] items-center gap-2 rounded-full border border-line bg-surface/95 px-3 py-1.5 text-[11px] shadow-lg backdrop-blur"
+              style={{ left: callBarPos.x, top: callBarPos.y }}
+              className="pointer-events-auto absolute z-30 flex max-w-[calc(100%-1.5rem)] items-center gap-2 rounded-full border border-line bg-surface/95 px-2 py-1.5 text-[11px] shadow-lg backdrop-blur"
               onPointerDown={(event) => event.stopPropagation()}
               onPointerUp={(event) => event.stopPropagation()}
             >
+              <button
+                type="button"
+                onPointerDown={callHandleDown}
+                onPointerMove={callHandleMove}
+                onPointerUp={callHandleUp}
+                onPointerCancel={callHandleUp}
+                className="grid h-6 w-4 shrink-0 cursor-move touch-none place-items-center rounded-full text-muted transition hover:bg-panel hover:text-ink"
+                title={t('session.moveCallBar')}
+                aria-label={t('session.moveCallBar')}
+              >
+                <GripHorizontal size={12} />
+              </button>
               <span
                 className={
                   callPhase === 'active' ? 'text-accent' : 'text-warn'
@@ -2453,6 +2573,8 @@ export function SessionView({
             messages={chatMessages}
             onSend={(text) => connection()?.sendChat(text)}
             remoteLabel={tab.label}
+            remoteId={welcome?.device_id}
+            selfSessionId={welcome?.session_id}
             callAvailable={callAvailable}
             callPhase={callPhase}
             onCall={startVoiceCall}

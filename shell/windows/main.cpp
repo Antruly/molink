@@ -538,7 +538,10 @@ class PermissionHandler final
     bool local = false;
     if (raw != nullptr) {
       const std::wstring uri(raw);
-      local = uri.rfind(L"http://127.0.0.1", 0) == 0 ||
+      // Allow the exact origin this shell loaded, not just loopback: a core
+      // bound to a LAN address is still the local UI and needs the mic.
+      local = (!g_origin.empty() && uri.rfind(g_origin, 0) == 0) ||
+              uri.rfind(L"http://127.0.0.1", 0) == 0 ||
               uri.rfind(L"http://localhost", 0) == 0;
       CoTaskMemFree(raw);
     }

@@ -463,6 +463,9 @@ export async function postLockTimeout(
 export interface ChatEntry {
   id: number
   from: 'remote' | 'host' | string
+  sender_name?: string
+  sender_id?: string
+  sender_session?: number
   text: string
   ts: number
 }
@@ -481,6 +484,50 @@ export function fetchChat(token: string, since: number): Promise<ChatResult> {
 export function postChat(token: string, text: string): Promise<void> {
   const query = new URLSearchParams({ text })
   return request<void>(`/api/chat?${query.toString()}`, { method: 'POST' }, token)
+}
+
+export interface ClipboardFileInfo {
+  id: string
+  name: string
+  size: number
+}
+
+export interface ClipboardFilesResult {
+  version: number
+  files: ClipboardFileInfo[]
+}
+
+/// Files currently on the *local* core's clipboard (loopback only).
+export function fetchClipboardFiles(
+  token: string,
+): Promise<ClipboardFilesResult> {
+  return request<ClipboardFilesResult>('/api/clipboard-files', {}, token)
+}
+
+/// Contents of one file on the local clipboard. The id is opaque; the core
+/// refuses ids that are no longer in the clipboard.
+export async function fetchClipboardFile(
+  token: string,
+  id: string,
+): Promise<ArrayBuffer> {
+  const headers = new Headers()
+  if (token) headers.set('Authorization', `Bearer ${token}`)
+  if (clientToken) headers.set('X-MoLink-Client', clientToken)
+  const response = await fetch(
+    `${coreBaseUrl()}/api/clipboard-file?id=${encodeURIComponent(id)}`,
+    { headers, cache: 'no-store' },
+  )
+  if (!response.ok) {
+    let code = ''
+    try {
+      const body = (await response.json()) as { code?: string }
+      code = body.code ?? ''
+    } catch {
+      // Ignore malformed error bodies.
+    }
+    throw new ApiError(response.status, code || 'clipboard_file_failed')
+  }
+  return response.arrayBuffer()
 }
 
 export interface CallState {

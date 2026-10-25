@@ -392,6 +392,14 @@ function initialSavedDevices(): SavedDevice[] {
 const runtimes = new Map<string, SessionConnection>()
 let nextId = 1
 
+/// The active tab pulls at full rate (SessionView); the others keep a slow
+/// pull so their session stays live and their stored frame stays current.
+function setForegroundRuntime(activeId: string): void {
+  for (const [id, connection] of runtimes) {
+    connection.setForeground(id === activeId)
+  }
+}
+
 const UI_CLIENT_ID = (() => {
   try {
     const existing = window.sessionStorage.getItem('molink.clientId')
@@ -1085,12 +1093,33 @@ export const useAppStore = create<AppState>((set, get) => {
         },
       })
       runtimes.set(id, connection)
+      setForegroundRuntime(id)
+      if (get().localMode) {
+        // Local files go to every remote; the local core's clipboard API is
+        // only reachable when this UI is the local shell/browser.
+        connection.enableClipboardFileSync(() => get().token)
+      }
 
       if (trimmedToken === '' && !requestAccess) {
         patchTab(id, { phase: 'error', error: 'no_token' })
       } else {
+        // A shell knows its own machine; a remote browser only sees the
+        // host's identity, so it stays anonymous and the host labels it by
+        // peer address.
+        const self = get()
+        const clientName =
+          self.localMode ? self.device?.device_name ?? '' : ''
+        const clientId =
+          self.localMode ? self.device?.device_id ?? '' : ''
+        // Windows 7's UDP stack and fragmentation path are not reliable for
+        // this app; keep that client on TCP (relay or direct WebSocket) and
+        // skip ICE entirely. The relay's file_data path is TCP too.
+        const windows7 =
+          typeof navigator !== 'undefined' &&
+          /Windows NT 6\.1/i.test(navigator.userAgent)
         connection.connect(tab.host, port, trimmedToken, requestAccess,
-                           deviceId, get().forceRelay)
+                           deviceId, self.forceRelay || windows7,
+                           clientName, clientId)
         if (trimmedToken !== '') {
           remember(tab.host, port, tab.label, trimmedToken, saveToken, {
             id: deviceId,
@@ -1117,10 +1146,14 @@ export const useAppStore = create<AppState>((set, get) => {
         }
         return { tabs, activeTabId }
       })
+      setForegroundRuntime(get().activeTabId)
       get().syncUiState()
     },
 
-    setActiveTab: (id) => set({ activeTabId: id }),
+    setActiveTab: (id) => {
+      set({ activeTabId: id })
+      setForegroundRuntime(id)
+    },
 
     setControlEnabled: (id, enabled) =>
       patchTab(id, { controlEnabled: enabled }),

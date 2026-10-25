@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
+  ChevronLeft,
+  ChevronRight,
   FolderUp,
   LayoutGrid,
   List,
@@ -205,6 +207,22 @@ export function DeviceList({
           ? lanItems
           : onlineItems
 
+  // The saved, LAN and online tabs can grow without bound; page the list so
+  // the panel keeps a stable height instead of becoming a long scroll.
+  const [page, setPage] = useState(0)
+  const pageSize = historyView === 'cards' ? 6 : 10
+  const pageCount = Math.max(1, Math.ceil(items.length / pageSize))
+  // Clamp instead of storing every shrink: the list changes as peers come and
+  // go, and a stale page must never render an empty panel.
+  const currentPage = Math.min(page, pageCount - 1)
+  const visibleItems = items.slice(
+    currentPage * pageSize,
+    (currentPage + 1) * pageSize,
+  )
+  useEffect(() => {
+    setPage(0)
+  }, [tab, historyView])
+
   const isSaved = (item: DeviceItem) =>
     savedDevices.some(
       (device) =>
@@ -403,7 +421,7 @@ export function DeviceList({
           </div>
         ) : historyView === 'cards' ? (
           <div className="grid gap-2 sm:grid-cols-2 2xl:grid-cols-3">
-            {items.map((item) => (
+            {visibleItems.map((item) => (
               <div
                 key={item.key}
                 role="button"
@@ -479,7 +497,7 @@ export function DeviceList({
                 </tr>
               </thead>
               <tbody>
-                {items.map((item) => (
+                {visibleItems.map((item) => (
                   <tr
                     key={item.key}
                     className="cursor-pointer"
@@ -526,6 +544,41 @@ export function DeviceList({
           </div>
         )}
       </div>
+
+      {pageCount > 1 ? (
+        <div className="flex items-center justify-between gap-2 border-t border-line-soft px-2.5 py-2 text-[11px] text-muted">
+          <span>
+            {t('simple.pageOf', {
+              page: currentPage + 1,
+              pages: pageCount,
+            })}
+          </span>
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              className="btn btn-quiet h-7 gap-0.5 px-2 text-[11px]"
+              disabled={currentPage === 0}
+              onClick={() => setPage(Math.max(0, currentPage - 1))}
+              title={t('simple.prev')}
+            >
+              <ChevronLeft size={13} />
+              {t('simple.prev')}
+            </button>
+            <button
+              type="button"
+              className="btn btn-quiet h-7 gap-0.5 px-2 text-[11px]"
+              disabled={currentPage >= pageCount - 1}
+              onClick={() =>
+                setPage(Math.min(pageCount - 1, currentPage + 1))
+              }
+              title={t('simple.next')}
+            >
+              {t('simple.next')}
+              <ChevronRight size={13} />
+            </button>
+          </div>
+        </div>
+      ) : null}
     </section>
   )
 }

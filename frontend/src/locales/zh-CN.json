@@ -205,6 +205,7 @@
     "closeWindow": "关闭窗口",
     "quickActions": "快捷操作",
     "moveToolbar": "拖动工具栏",
+    "moveCallBar": "拖动通话栏",
     "mobileTools": "展开触屏工具栏",
     "mobileToolsHide": "收起触屏工具栏",
     "fullscreen": "全屏",
@@ -260,6 +261,8 @@
     "invalid_port": "端口必须是 1–65535 之间的整数。",
     "invalid_uses": "次数必须是大于 0 的整数。",
     "device_not_found": "没有找到该设备 ID",
+    "clipboard_files_failed": "文件剪贴板同步失败（可尝试重新复制或使用文件面板发送）",
+    "clipboard_files_too_large": "剪贴板文件超过 256 MB，未自动粘贴",
     "clipboard_read_failed": "无法读取本机剪贴板",
     "clipboard_write_failed": "无法写入本机剪贴板",
     "clipboard_unavailable": "当前浏览器环境不提供剪贴板",
@@ -269,7 +272,8 @@
     "settings_failed": "设置保存失败。",
     "server_not_configured": "尚未配置 moLink Server",
     "device_offline": "对方设备当前离线",
-    "server_unreachable": "无法连接 moLink Server"
+    "server_unreachable": "无法连接 moLink Server",
+    "clipboard_files_busy": "剪贴板正在同步文件，请稍后再拖入"
   },
   "popout": {
     "noToken": "这个窗口缺少连接验证码。"
@@ -388,6 +392,10 @@
     "hostMicReady": "本机麦克风可用",
     "hostNoMic": "本机麦克风不可用",
     "no_mic": "未获得麦克风权限，只能接听",
+    "mic_denied": "麦克风权限被拒绝，请在浏览器/应用设置里允许后重试",
+    "mic_missing": "没有找到麦克风设备",
+    "mic_busy": "麦克风被其他程序占用",
+    "mic_insecure": "当前页面不是 HTTPS 或本机地址，浏览器禁止使用麦克风，只能接听",
     "declined": "对方已拒绝",
     "audio_error": "语音通道启动失败",
     "activeHint": "通话已接通",
@@ -474,6 +482,9 @@
     "onlineDevices": "联网",
     "cards": "卡片",
     "list": "列表",
+    "pageOf": "第 {{page}} / {{pages}} 页",
+    "prev": "上一页",
+    "next": "下一页",
     "noRecent": "还没有最近连接。",
     "noSaved": "点击星标把设备保存到这里。",
     "noLan": "没有发现局域网设备；可在安全设置中开启局域网发现。",

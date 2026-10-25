@@ -754,8 +754,30 @@ void session_controller::attach_call() {
 
 void session_controller::on_call_event(const call_snapshot& snapshot,
                                        const std::string& event) {
+  // The host accepts/declines through /api/call, so this runs on an HTTP
+  // worker thread. The voice engine, its WASAPI objects and the websocket
+  // belong to the app loop; marshal before touching any of them.
+  const std::weak_ptr<session_controller> weak = weak_from_this();
+  auto deliver = [weak, snapshot, event] {
+    if (auto self = weak.lock()) self->apply_call_event(snapshot, event);
+  };
+  if (options_.post) {
+    options_.post(std::move(deliver));
+  } else {
+    deliver();
+  }
+}
+
+void session_controller::apply_call_event(const call_snapshot& snapshot,
+                                          const std::string& event) {
   std::shared_ptr<session_info> session = session_.lock();
-  if (!session || snapshot.session_id != session->id) return;
+  if (!session) return;
+  // hangup()/decline()/end() clear the snapshot's session id before they
+  // notify, so an owner check would swallow the event: the host microphone
+  // would keep running after the caller hung up, and other viewers would
+  // never learn the call ended. These two events go to every session.
+  const bool global_event = event == "ended" || event == "declined";
+  if (!global_event && snapshot.session_id != session->id) return;
   uvcpp_json j;
   j["type"] = "call";
   j["action"] = event;
@@ -861,6 +883,9 @@ void session_controller::attach_chat() {
         item["action"] = "message";
         item["id"] = message.id;
         item["from"] = message.from;
+        item["sender_name"] = message.sender_name;
+        item["sender_id"] = message.sender_id;
+        item["sender_session"] = message.sender_session;
         item["text"] = message.text;
         item["ts"] = message.ts_ms;
         const std::string body = uvcpp_json_dump(item);
@@ -888,6 +913,9 @@ void session_controller::chat_history() {
     uvcpp_json item;
     item["id"] = message.id;
     item["from"] = message.from;
+    item["sender_name"] = message.sender_name;
+    item["sender_id"] = message.sender_id;
+    item["sender_session"] = message.sender_session;
     item["text"] = message.text;
     item["ts"] = message.ts_ms;
     messages.push_back(std::move(item));
@@ -946,6 +974,12 @@ void session_controller::on_text(const std::string& text) {
   };
 
   if (type == "hello") {
+    // Optional client identity; the shared chat uses it to say who typed a
+    // message when several people are connected.
+    const std::string client_name = string_field(j, "name");
+    const std::string client_id = string_field(j, "device_id");
+    if (!client_name.empty()) session->client_name = client_name.substr(0, 64);
+    if (!client_id.empty()) session->client_id = client_id.substr(0, 64);
     // A repeat hello must not cost another use of a multi-use code: the relay
     // proxy replays one when its first datagram races the session setup, and
     // a reconnect replays the whole handshake.
@@ -1047,6 +1081,10 @@ void session_controller::on_text(const std::string& text) {
     info.name = string_field(j, "name").substr(0, 64);
     info.client = string_field(j, "client").substr(0, 32);
     info.created_ms = now_ms();
+    session->client_name =
+        string_field(j, "name").substr(0, 64);
+    session->client_id =
+        string_field(j, "device_id").substr(0, 64);
     const std::weak_ptr<session_controller> weak = weak_from_this();
     const uint32_t id = options_.access_requests->add(
         info,
@@ -1445,7 +1483,12 @@ void session_controller::on_text(const std::string& text) {
                    "chat text must be 1..4096 bytes");
         return;
       }
-      if (options_.chat) options_.chat->post("remote", text);
+      if (options_.chat) {
+        const std::string name =
+            session->client_name.empty() ? peer_ip : session->client_name;
+        options_.chat->post("remote", text, name, session->client_id,
+                            session->id);
+      }
     }
     return;
   }

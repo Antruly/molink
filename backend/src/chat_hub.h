@@ -14,6 +14,14 @@ namespace molink {
 struct chat_message {
   uint64_t id = 0;
   std::string from;
+  /// Who typed it: the remote machine's name/id, or the host's. A browser
+  /// client without a device identity is labelled by its peer address.
+  std::string sender_name;
+  std::string sender_id;
+  /// Host-side session that posted it (0 for the person at the machine).
+  /// Clients compare it with their welcome.session_id to mark their own
+  /// messages, which matters when several viewers share one chat.
+  uint32_t sender_session = 0;
   std::string text;
   uint64_t ts_ms = 0;
 };
@@ -25,7 +33,9 @@ class chat_hub {
  public:
   using listener = std::function<void(const chat_message&)>;
 
-  uint64_t post(const std::string& from, const std::string& text);
+  uint64_t post(const std::string& from, const std::string& text,
+                const std::string& sender_name, const std::string& sender_id,
+                uint32_t sender_session);
   std::vector<chat_message> history(uint64_t since) const;
   uint64_t cursor() const;
 

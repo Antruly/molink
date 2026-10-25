@@ -1,8 +1,25 @@
 #include "transport/switchable_transport.h"
 
+#include <cstring>
 #include <utility>
 
+#include "protocol/frame_packet.h"
+
 namespace molink {
+namespace {
+
+/// File bytes are the one payload that cannot tolerate UDP loss: the custom
+/// UDP fragmentation has no retransmission, so a single missing fragment
+/// stalls the whole transfer. Keep the relay (WebSocket over TCP) alive after
+/// the P2P upgrade and route file_data packets there. Frames, voice and input
+/// stay on the low-latency ICE path.
+bool is_file_data(const uint8_t* data, std::size_t len) {
+  return data != nullptr && len >= protocol::kPacketHeaderSize &&
+         std::memcmp(data, protocol::kMagic, sizeof(protocol::kMagic)) == 0 &&
+         data[5] == static_cast<uint8_t>(protocol::packet_type::file_data);
+}
+
+}  // namespace
 
 switchable_transport::switchable_transport(
     std::shared_ptr<session_transport> initial)
@@ -31,6 +48,9 @@ bool switchable_transport::send_text(const std::string& text) {
 }
 
 bool switchable_transport::send_binary(const uint8_t* data, std::size_t len) {
+  if (is_file_data(data, len) && relay_ && relay_->is_open()) {
+    return relay_->send_binary(data, len);
+  }
   return active_ && active_->send_binary(data, len);
 }
 
@@ -62,7 +82,10 @@ void switchable_transport::wire(
         text_(text);
       },
       [this, source](const uint8_t* data, std::size_t len) {
-        if (closed_ || active_.get() != source || !binary_) return;
+        if (closed_ || !binary_) return;
+        // The relay only stays alive for file data after the P2P switch;
+        // everything else arrives on the active transport.
+        if (active_.get() != source && !is_file_data(data, len)) return;
         binary_(data, len);
       },
       [this, source](int code, const std::string& reason) {
@@ -83,12 +106,10 @@ void switchable_transport::set_ice(
   wire(ice_);
   switched_ = true;
   active_ = ice_;
-  // The relay is no longer read; close it so the server frees the pair.
-  if (relay_) {
-    std::shared_ptr<session_transport> old = relay_;
-    relay_.reset();
-    old->close(transport_close::normal, "switched to p2p");
-  }
+  // Keep the relay connected for file_data (see is_file_data): control,
+  // frames and voice use ICE, files stay on reliable TCP. The relay close
+  // handler ignores events while it is not active, so losing the relay only
+  // drops file transfers back to UDP instead of killing the session.
   if (switch_handler_) switch_handler_();
 }
 
