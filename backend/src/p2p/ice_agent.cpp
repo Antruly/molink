@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include <req/uvcpp_udp_send.h>
@@ -15,7 +16,18 @@ constexpr std::size_t kMaxDatagram = 65536;
 
 }  // namespace
 
-ice_agent::ice_agent(uvcpp::uvcpp_loop* loop) : loop_(loop) {}
+ice_agent::ice_agent(uvcpp::uvcpp_loop* loop) : loop_(loop) {
+  // A fixed port is what a firewall rule can admit. libjuice never binds a
+  // socket itself in external mode, so this is also the port it advertises
+  // through STUN.
+  const char* port = std::getenv("MOLINK_P2P_PORT");
+  if (port != nullptr && *port != '\0') {
+    const int value = std::atoi(port);
+    if (value > 0 && value <= 65535) {
+      bind_port_ = static_cast<uint16_t>(value);
+    }
+  }
+}
 
 ice_agent::~ice_agent() { close(); }
 
@@ -30,10 +42,13 @@ bool ice_agent::start(const std::string& stun_host, uint16_t stun_port,
   std::memset(&bind_address, 0, sizeof(bind_address));
   bind_address.sin_family = AF_INET;
   bind_address.sin_addr.s_addr = htonl(INADDR_ANY);
-  bind_address.sin_port = 0;
+  bind_address.sin_port = htons(bind_port_);
   if (udp_->bind(reinterpret_cast<const struct sockaddr*>(&bind_address), 0) !=
       0) {
-    error = "cannot bind the P2P UDP socket";
+    error = bind_port_ == 0
+                ? "cannot bind the P2P UDP socket"
+                : "cannot bind the P2P UDP socket on port " +
+                      std::to_string(bind_port_);
     return false;
   }
   struct sockaddr_storage bound;

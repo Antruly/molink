@@ -75,6 +75,9 @@ class ice_agent {
   juice_agent_t* agent_ = nullptr;
   std::unique_ptr<uvcpp::uvcpp_udp> udp_;
   std::unique_ptr<uvcpp::uvcpp_timer> timer_;
+  /// Fixed local UDP port from MOLINK_P2P_PORT (0 = ephemeral). A predictable
+  /// port lets a firewall rule admit the peer's connectivity checks.
+  uint16_t bind_port_ = 0;
   bool started_ = false;
   bool closed_ = false;
 

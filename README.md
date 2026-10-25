@@ -51,8 +51,9 @@
 
 UDP 数据报按 1200 字节分片/重组（tag + kind + id + index + count），因此大关键帧
 可以走 UDP。STUN 通过 `MOLINK_STUN_HOST` / `MOLINK_STUN_PORT` 配置；未配置时仅使用
-主机候选，适合局域网/同一 NAT。TURN 兜底尚未在客户端接入，可使用 coturn 或
-libjuice 自带的 `juice_server`（见服务端仓库 `docs/p2p-relay.md`）。
+主机候选，适合局域网/同一 NAT。`MOLINK_P2P_PORT` 让 ICE 套接字绑定固定本地端口
+（默认临时端口），便于防火墙放行对端的连通性检查。TURN 兜底尚未在客户端接入，可使用
+coturn 或 libjuice 自带的 `juice_server`（见服务端仓库 `docs/p2p-relay.md`）。
 
 ## 架构
 

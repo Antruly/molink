@@ -25,6 +25,7 @@
   text/MOLK 帧走 ICE 选中的 UDP 通道；ICE 失败自动回退直连 WebSocket
 - UDP 会话层按 1200 字节分片/重组，大关键帧不再受单数据报 MTU 限制
 - `MOLINK_STUN_HOST` / `MOLINK_STUN_PORT` 环境变量用于配置 STUN（不设置时仅主机候选）
+- `MOLINK_P2P_PORT` 固定 ICE 套接字的本地 UDP 端口（默认临时端口），方便防火墙放行
 
 ### Build
 
