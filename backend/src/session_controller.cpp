@@ -922,12 +922,11 @@ void session_controller::on_text(const std::string& text) {
   };
 
   if (type == "hello") {
-    if (options_.lock && options_.lock->locked() &&
-        !is_loopback_peer(peer_ip)) {
-      send_error(transport.get(), "locked", "the UI is locked");
-      transport->close(transport_close::policy, "locked");
-      return;
-    }
+    // A locked host still accepts a session that presents the verification
+    // code: the lock asks for the code again, it is not a blanket refusal.
+    // (Access requests without a code remain blocked below.)
+    const bool locked_for_peer = options_.lock && options_.lock->locked() &&
+                                 !is_loopback_peer(peer_ip);
     if (!options_.auth || !options_.auth->authenticate(
                               string_field(j, "token"), /*consume=*/true)) {
       if (options_.lock) {
@@ -948,6 +947,7 @@ void session_controller::on_text(const std::string& text) {
       return;
     }
     registry_->set_authenticated(session);
+    if (locked_for_peer) options_.lock->unlock();
     if (options_.lock) options_.lock->record_success(peer_ip);
     if (options_.capture) options_.capture->set_active(true);
     send_welcome_message();
