@@ -59,6 +59,9 @@ class auth_state {
   /// Toggle the no-code approval flow without touching the other access
   /// switches. Defaults to enabled.
   void set_allow_access_requests(bool allow);
+  /// Per-path transport encryption: directory/ID sessions and direct LAN
+  /// sessions have separate defaults (remote on, LAN off).
+  void set_transport_security(bool encrypt_remote, bool encrypt_lan);
   void set_service_desired_running(bool enabled);
   /// Phase-2 directory: the switch is independent from the custom URL (an
   /// empty URL with the switch on means the built-in default).

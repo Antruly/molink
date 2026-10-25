@@ -17,6 +17,12 @@ struct app_settings {
   /// Let a remote peer ask the local user for access when it has no code.
   /// The local user still has to approve every request.
   bool allow_access_requests = true;
+  /// Encrypt sessions that arrive through the directory/ID server. On by
+  /// default; the relay already uses WSS and the cores add an end-to-end layer.
+  bool encrypt_remote = true;
+  /// Encrypt direct LAN sessions. Off by default so a LAN connection does not
+  /// pop a self-signed certificate prompt unless the host opts in.
+  bool encrypt_lan = false;
   /// User preference for the optional Windows service. Persisted so a manual
   /// stop survives restarts; an overwrite install must not force it on.
   bool service_desired_running = true;

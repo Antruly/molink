@@ -38,6 +38,7 @@ bool g_smoke = false;
 bool g_smoke_done = false;
 int g_exit_code = 0;
 std::string g_core_host;
+bool g_core_tls = false;
 
 // Single-instance guard: the first shell listens on a per-user Unix socket;
 // later launches send "show" and exit. Pop-outs (--url) and smoke tests are
@@ -145,7 +146,7 @@ std::string ui_host() {
 }
 
 bool start_core(const std::string& core, const std::string& web_root, int& port,
-                std::string& token, std::string& client_token,
+                std::string& token, std::string& client_token, bool& tls,
                 std::string& err) {
   // The core owns the port: it uses the persisted setting or 28418.
   std::vector<std::string> args = {core, "--print-ready", "--parent-pid",
@@ -207,6 +208,7 @@ bool start_core(const std::string& core, const std::string& web_root, int& port,
     return false;
   }
   port = static_cast<int>(parsed_port);
+  tls = line.find("\"tls\":true") != std::string::npos;
   return true;
 }
 
@@ -396,6 +398,31 @@ gboolean on_permission_request(WebKitWebView* view,
     webkit_permission_request_deny(request);
   }
   return TRUE;
+}
+
+gboolean on_tls_error(WebKitWebView* view, const gchar* failing_uri,
+                      GTlsCertificate* certificate, GTlsCertificateFlags,
+                      gpointer) {
+  if (view == nullptr || failing_uri == nullptr || certificate == nullptr) {
+    return FALSE;
+  }
+  // The shell started this core and the user opted into LAN encryption; trust
+  // its self-signed certificate for the host it was loaded from. A browser
+  // without the shell still shows the normal certificate warning.
+  std::string host = ui_host();
+  GUri* uri = g_uri_parse(failing_uri, G_URI_FLAGS_NONE, nullptr);
+  if (uri != nullptr) {
+    const gchar* parsed = g_uri_get_host(uri);
+    if (parsed != nullptr && *parsed != '\0') host = parsed;
+    g_uri_unref(uri);
+  }
+  if (WebKitWebContext* context = webkit_web_view_get_context(view)) {
+    webkit_web_context_allow_tls_certificate_for_host(context, certificate,
+                                                      host.c_str());
+    webkit_web_view_load_uri(view, failing_uri);
+    return TRUE;
+  }
+  return FALSE;
 }
 
 gboolean on_key_press(GtkWidget* window, GdkEventKey* event, gpointer) {
@@ -854,15 +881,18 @@ int main(int argc, char** argv) {
     int port = 0;
     std::string token;
     std::string client_token;
+    bool tls = false;
     std::string error;
-    if (!start_core(core, web_root, port, token, client_token, error)) {
+    if (!start_core(core, web_root, port, token, client_token, tls, error)) {
       std::fprintf(stderr, "moLink shell: %s\n", error.c_str());
       stop_core();
       return 1;
     }
 
+    g_core_tls = tls;
     const std::string host = ui_host();
-    url = "http://" + url_host(host) + ":" + std::to_string(port) + "/?host=";
+    url = std::string(g_core_tls ? "https://" : "http://") + url_host(host) +
+          ":" + std::to_string(port) + "/?host=";
     url += host + "&port=" + std::to_string(port);
     url += "&shell=1&platform=linux";
     if (!client_token.empty()) url += "&client=" + client_token;
@@ -900,10 +930,13 @@ int main(int argc, char** argv) {
   gtk_container_add(GTK_CONTAINER(window), view);
 
   static const std::string origin =
-      "http://" + url_host(ui_host()) + ":";
+      std::string(g_core_tls ? "https://" : "http://") +
+      url_host(ui_host()) + ":";
   g_signal_connect(view, "permission-request",
                    G_CALLBACK(on_permission_request),
                    const_cast<char*>(origin.c_str()));
+  g_signal_connect(view, "load-failed-with-tls-errors",
+                   G_CALLBACK(on_tls_error), nullptr);
   g_signal_connect(view, "create", G_CALLBACK(on_create_web_view), nullptr);
   g_signal_connect(view, "load-changed", G_CALLBACK(on_load_changed), nullptr);
   g_signal_connect(view, "load-failed", G_CALLBACK(on_load_failed), nullptr);

@@ -180,7 +180,11 @@
     "domainJoinPlaceholder": "Enter the 9-digit domain code",
     "domainHint": "Devices with the same domain code appear in each other's domain list; rotating the owner's code invalidates the old one immediately.",
     "stunServer": "STUN server",
-    "stunServerHint": "Used for ICE across NATs. Leave empty for the built-in stun.miwifi.com:3478; enter none to disable STUN."
+    "stunServerHint": "Used for ICE across NATs. Leave empty for the built-in stun.miwifi.com:3478; enter none to disable STUN.",
+    "encryptRemote": "Encrypt ID-server sessions",
+    "encryptRemoteHint": "On by default. Sessions through the ID server/relay get end-to-end encryption; the relay only forwards ciphertext.",
+    "encryptLan": "Encrypt LAN sessions",
+    "encryptLanHint": "Off by default. When on, LAN connections use a self-signed HTTPS/WSS certificate and the peer must accept it."
   },
   "session": {
     "connecting": "Connecting…",
@@ -246,7 +250,14 @@
     "displayModeBusy": "The resolution was just changed; wait two seconds and try again.",
     "enterCode": "Authorization code",
     "connect": "Connect",
-    "relay": "Relay"
+    "relay": "Relay",
+    "secureE2e": "End-to-end encrypted (direct certificate)",
+    "secureRelay": "Relay TLS (server-encrypted, not end-to-end)",
+    "insecure": "Unencrypted session",
+    "insecureHint": "This session is plaintext; enable encryption in Settings",
+    "secureE2eShort": "E2E",
+    "secureRelayShort": "Relay TLS",
+    "insecureShort": "Unencrypted"
   },
   "stats": {
     "fps": "FPS",

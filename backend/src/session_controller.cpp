@@ -613,6 +613,19 @@ void send_welcome(session_transport* transport, const session_info& session,
   j["clipboard"] = opt.clipboard != nullptr && opt.clipboard->available();
   j["clipboard_backend"] = opt.clipboard ? opt.clipboard->backend() : "none";
   j["device_id"] = opt.device_id;
+  if (!opt.cert_fingerprint.empty()) {
+    j["tls_fingerprint"] = opt.cert_fingerprint;
+  }
+  // e2e: direct WSS to this host's certificate; relay: the directory's outer
+  // WSS only; none: plain direct/LAN or raw P2P control.
+  const std::string transport_name = transport->name();
+  std::string security = "none";
+  if (opt.tls_enabled && transport_name == "websocket") {
+    security = "e2e";
+  } else if (transport_name == "relay") {
+    security = "relay";
+  }
+  j["security"] = security;
   std::string welcome_name = opt.device_name;
   if (opt.auth) {
     const app_settings current = opt.auth->settings();

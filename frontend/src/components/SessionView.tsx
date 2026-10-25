@@ -8,6 +8,8 @@ import {
   FolderOpen,
   Gauge,
   GripHorizontal,
+  ShieldCheck,
+  ShieldOff,
   Hand,
   Keyboard,
   LogOut,
@@ -2476,6 +2478,36 @@ export function SessionView({
               <span className="chip" title={t('session.transport')}>
                 {transportLabel}
               </span>
+              {tab.welcome?.security ? (
+                <span
+                  className={
+                    'chip flex items-center gap-1 ' +
+                    (tab.welcome.security === 'e2e'
+                      ? 'text-emerald-500'
+                      : tab.welcome.security === 'relay'
+                        ? 'text-sky-500'
+                        : 'text-warn')
+                  }
+                  title={
+                    tab.welcome.security === 'e2e'
+                      ? t('session.secureE2e')
+                      : tab.welcome.security === 'relay'
+                        ? t('session.secureRelay')
+                        : t('session.insecureHint')
+                  }
+                >
+                  {tab.welcome.security === 'none' ? (
+                    <ShieldOff size={11} />
+                  ) : (
+                    <ShieldCheck size={11} />
+                  )}
+                  {tab.welcome.security === 'e2e'
+                    ? t('session.secureE2eShort')
+                    : tab.welcome.security === 'relay'
+                      ? t('session.secureRelayShort')
+                      : t('session.insecureShort')}
+                </span>
+              ) : null}
             </div>
           ) : (
             <button

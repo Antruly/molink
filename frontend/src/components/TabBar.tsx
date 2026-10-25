@@ -1,4 +1,4 @@
-import { House, Plus, X } from 'lucide-react'
+import { House, Plus, ShieldCheck, ShieldOff, X } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { openSessionWindow } from '../lib/windows'
 import { formatDisplayId } from '../lib/format'
@@ -15,6 +15,43 @@ function StatusDot({ tab }: { tab: SessionTab }) {
     return <span className="h-1.5 w-1.5 rounded-full bg-danger" />
   }
   return <span className="h-1.5 w-1.5 rounded-full bg-muted/60" />
+}
+
+function SecurityIcon({ tab }: { tab: SessionTab }) {
+  const { t } = useTranslation()
+  const security = tab.welcome?.security
+  if (!security) return null
+  if (security === 'e2e') {
+    return (
+      <span
+        className="shrink-0 text-emerald-500"
+        title={t('session.secureE2e')}
+        aria-label={t('session.secureE2e')}
+      >
+        <ShieldCheck size={12} />
+      </span>
+    )
+  }
+  if (security === 'relay') {
+    return (
+      <span
+        className="shrink-0 text-sky-500"
+        title={t('session.secureRelay')}
+        aria-label={t('session.secureRelay')}
+      >
+        <ShieldCheck size={12} />
+      </span>
+    )
+  }
+  return (
+    <span
+      className="shrink-0 text-muted/70"
+      title={t('session.insecure')}
+      aria-label={t('session.insecure')}
+    >
+      <ShieldOff size={12} />
+    </span>
+  )
 }
 
 export function TabBar() {
@@ -81,6 +118,7 @@ export function TabBar() {
             title={tab.deviceId ? `${formatDisplayId(tab.deviceId)} · ${tab.label}` : `${tab.host}:${tab.port}`}
           >
             <StatusDot tab={tab} />
+            <SecurityIcon tab={tab} />
             <span className="truncate">{tab.label}</span>
           </button>
           <button

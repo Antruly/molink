@@ -95,11 +95,25 @@ jobs:
             -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/zlib/prefix"
           cmake --build "$RUNNER_TEMP/zlib/build" --config Release --target install
 
+      # The per-device certificate support links OpenSSL. The runner images
+      # usually ship OpenSSL 3 under Program Files; install it if missing. The
+      # runtime DLLs (libssl-3-x64.dll/libcrypto-3-x64.dll) already come from
+      # the libuvcpp archive staged next to the core.
+      - name: Ensure OpenSSL 3
+        shell: pwsh
+        run: |
+          $root = 'C:\Program Files\OpenSSL-Win64'
+          if (!(Test-Path "$root\include\openssl\ssl.h")) {
+            choco install openssl --no-progress -y
+          }
+          "OPENSSL_ROOT_DIR=$root" | Out-File -FilePath $env:GITHUB_ENV -Append
+
       - name: Build core
         shell: bash
         run: |
           cmake -S backend -B backend/build \
             -DMOLINK_UVCPP_PREFIX="$(cygpath -m "$RUNNER_TEMP/uvcpp")" \
+            -DOPENSSL_ROOT_DIR="$(cygpath -m "$OPENSSL_ROOT_DIR")" \
             -DZLIB_USE_STATIC_LIBS=ON \
             -DZLIB_INCLUDE_DIR="$(cygpath -m "$RUNNER_TEMP/zlib/prefix/include")" \
             -DZLIB_LIBRARY="$(cygpath -m "$RUNNER_TEMP/zlib/prefix/lib/zlibstatic.lib")"

@@ -55,6 +55,7 @@ std::wstring g_url;
 std::wstring g_origin;
 std::wstring g_url_override;
 std::wstring g_core_host;
+bool g_core_tls = false;
 bool g_url_mode = false;
 bool g_quitting = false;
 bool g_tray_added = false;
@@ -243,7 +244,7 @@ std::wstring ui_host_w() {
 }
 
 bool start_core(const std::wstring& core, const std::wstring& web_root, int& port,
-                std::string& token, std::string& client_token,
+                std::string& token, std::string& client_token, bool& tls,
                 std::wstring& error) {
   SECURITY_ATTRIBUTES attributes{};
   attributes.nLength = sizeof(attributes);
@@ -314,6 +315,7 @@ bool start_core(const std::wstring& core, const std::wstring& web_root, int& por
     return false;
   }
   port = static_cast<int>(parsed_port);
+  tls = line.find("\"tls\":true") != std::string::npos;
   return true;
 }
 
@@ -501,6 +503,53 @@ class NavigationHandler final
   std::atomic<ULONG> refs_{1};
 };
 
+/// Trusts the shell's own self-signed HTTPS certificate. Only the origin this
+/// shell loaded is allowed; every other certificate error stays fatal.
+class CertificateHandler final
+    : public ICoreWebView2ServerCertificateErrorDetectedEventHandler {
+ public:
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override {
+    if (ppv == nullptr) return E_POINTER;
+    if (riid == IID_IUnknown ||
+        riid ==
+            IID_ICoreWebView2ServerCertificateErrorDetectedEventHandler) {
+      *ppv = static_cast<ICoreWebView2ServerCertificateErrorDetectedEventHandler*>(
+          this);
+      AddRef();
+      return S_OK;
+    }
+    *ppv = nullptr;
+    return E_NOINTERFACE;
+  }
+  ULONG STDMETHODCALLTYPE AddRef() override { return ++refs_; }
+  ULONG STDMETHODCALLTYPE Release() override {
+    const ULONG refs = --refs_;
+    if (refs == 0) delete this;
+    return refs;
+  }
+  HRESULT STDMETHODCALLTYPE Invoke(
+      ICoreWebView2*,
+      ICoreWebView2ServerCertificateErrorDetectedEventArgs* args) override {
+    if (args == nullptr) return S_OK;
+    LPWSTR raw = nullptr;
+    args->get_RequestUri(&raw);
+    bool allow = false;
+    if (raw != nullptr) {
+      const std::wstring uri(raw);
+      allow = !g_origin.empty() && uri.rfind(g_origin, 0) == 0;
+      CoTaskMemFree(raw);
+    }
+    if (allow) {
+      args->put_Action(
+          COREWEBVIEW2_SERVER_CERTIFICATE_ERROR_ACTION_ALWAYS_ALLOW);
+    }
+    return S_OK;
+  }
+
+ private:
+  std::atomic<ULONG> refs_{1};
+};
+
 /// Grants the microphone to the locally served UI so voice calls work in the
 /// Windows shell. Nothing else is auto-granted.
 class PermissionHandler final
@@ -605,6 +654,17 @@ class ControllerHandler final
       g_webview->add_WebMessageReceived(new WebMessageHandler(), &token);
       g_webview->add_NewWindowRequested(new NewWindowHandler(), &token);
       g_webview->add_PermissionRequested(new PermissionHandler(), &token);
+      // The certificate event landed on ICoreWebView2_14; older runtimes
+      // (notably WebView2 109 on Windows 7) do not implement it, in which
+      // case the shell simply cannot auto-trust a self-signed HTTPS UI.
+      ICoreWebView2_14* modern = nullptr;
+      if (SUCCEEDED(g_webview->QueryInterface(
+              IID_ICoreWebView2_14, reinterpret_cast<void**>(&modern))) &&
+          modern != nullptr) {
+        modern->add_ServerCertificateErrorDetected(new CertificateHandler(),
+                                                   &token);
+        modern->Release();
+      }
       g_webview->Navigate(g_url.c_str());
     }
     return S_OK;
@@ -954,22 +1014,25 @@ int run(HINSTANCE instance) {
   int port = 0;
   std::string token;
   std::string client_token;
+  bool tls = false;
   std::wstring error;
-  if (!start_core(core, web_root, port, token, client_token, error)) {
+  if (!start_core(core, web_root, port, token, client_token, tls, error)) {
     fail_box(error.c_str());
     stop_core();
     return 1;
   }
 
+  g_core_tls = tls;
   const std::wstring host = ui_host_w();
   const std::wstring authority = url_host_w(host);
-  g_url = L"http://" + authority + L":" + std::to_wstring(port) +
+  const std::wstring scheme = g_core_tls ? L"https://" : L"http://";
+  g_url = scheme + authority + L":" + std::to_wstring(port) +
           L"/?host=" + host + L"&port=" + std::to_wstring(port) +
           L"&shell=1&platform=windows";
   if (!client_token.empty()) {
     g_url += L"&client=" + widen(client_token);
   }
-  g_origin = L"http://" + authority + L":" + std::to_wstring(port);
+  g_origin = scheme + authority + L":" + std::to_wstring(port);
   }
 
   SetCurrentProcessExplicitAppUserModelID(L"com.molink.desktop");

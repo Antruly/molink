@@ -49,6 +49,10 @@ export interface Welcome {
   }
   /** Reconnect credential; reused instead of spending another code use. */
   session_token?: string
+  /** e2e: direct TLS to the host; relay: directory WSS only; none: plain. */
+  security?: 'e2e' | 'relay' | 'none' | string
+  /** Host certificate fingerprint advertised for pinning. */
+  tls_fingerprint?: string
   input?: boolean
   input_backend?: string
   clipboard?: boolean
@@ -357,12 +361,22 @@ export class MolinkClient {
     // direct address the directory returned.
     const useProxy = targetId !== '' &&
         (forceRelay || (!this.proxyFailed && !preferDirect))
+    // A page served over HTTPS may only open wss (mixed content). The local
+    // core proxy is same-origin, so it follows the page scheme; a direct
+    // remote host must be the same host (or the local core) to use wss.
+    const securePage =
+        typeof window !== 'undefined' && window.location.protocol === 'https:'
+    const wsScheme = securePage ? 'wss' : 'ws'
+    const directSecure =
+        securePage &&
+        (host === window.location.hostname || host === '127.0.0.1' ||
+         host === 'localhost')
     const proxyUrl =
-        `ws://${window.location.host}/ws/connect?target=${encodeURIComponent(targetId)}` +
+        `${wsScheme}://${window.location.host}/ws/connect?target=${encodeURIComponent(targetId)}` +
         (forceRelay ? '&relay=only' : '')
     const url = useProxy
       ? proxyUrl
-      : `ws://${formatHost(host)}:${port}/ws/session`
+      : `${directSecure ? 'wss' : 'ws'}://${formatHost(host)}:${port}/ws/session`
     this.handlers.onPhase?.('connecting')
 
     let ws: WebSocket

@@ -180,7 +180,11 @@
     "domainJoinPlaceholder": "输入 9 位域组码",
     "domainHint": "同一域组码的设备会出现在各自的域组列表中；码的所有者更换后旧码立即失效。",
     "stunServer": "STUN 服务器",
-    "stunServerHint": "用于跨 NAT 打洞。留空使用内置 stun.miwifi.com:3478；填 none 关闭 STUN。"
+    "stunServerHint": "用于跨 NAT 打洞。留空使用内置 stun.miwifi.com:3478；填 none 关闭 STUN。",
+    "encryptRemote": "远程会话加密（ID 服务器）",
+    "encryptRemoteHint": "默认开启。经 ID 服务器/中继的会话启用端到端加密；中继只能转发，不能读取内容。",
+    "encryptLan": "局域网会话加密",
+    "encryptLanHint": "默认关闭。开启后局域网连接使用自签 HTTPS/WSS，对端需要确认接受证书后才能连接。"
   },
   "session": {
     "connecting": "连接中…",
@@ -246,7 +250,14 @@
     "displayModeBusy": "分辨率刚切换过，请等两秒再试。",
     "enterCode": "授权码",
     "connect": "连接",
-    "relay": "中继"
+    "relay": "中继",
+    "secureE2e": "端到端加密（直连证书）",
+    "secureRelay": "中继 TLS（服务端加密，非端到端）",
+    "insecure": "非加密通讯",
+    "insecureHint": "当前会话为明文传输，建议在设置中开启加密",
+    "secureE2eShort": "E2E",
+    "secureRelayShort": "中继 TLS",
+    "insecureShort": "未加密"
   },
   "stats": {
     "fps": "帧率",

@@ -35,6 +35,8 @@ struct api_deps {
   std::shared_ptr<lock_state> lock;
   std::shared_ptr<network_settings> network;
   std::string device_id;
+  /// SHA-256 fingerprint of the host's self-signed transport certificate.
+  std::string cert_fingerprint;
   /// Random token handed only to the desktop shell through the ready line. It
   /// gates loopback web UI access when allow_web_client is off.
   std::string client_token;

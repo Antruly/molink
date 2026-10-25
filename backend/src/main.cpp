@@ -24,6 +24,7 @@
 #include "config.h"
 #include "discovery.h"
 #include "identity.h"
+#include "tls_identity.h"
 #include "lock_state.h"
 #include "network_settings.h"
 #include "input/input.h"
@@ -144,7 +145,8 @@ void print_ready(const molink::core_config& cfg, int port,
                  const std::string& capture_backend,
                  const std::string& input_backend,
                  const std::string& device_id, bool http2_available,
-                 int tile_size, int change_threshold) {
+                 int tile_size, int change_threshold, bool tls_enabled,
+                 const std::string& cert_fingerprint) {
   uvcpp::uvcpp_json j;
   j["event"] = "ready";
   j["service"] = MOLINK_CORE_SERVICE;
@@ -157,6 +159,9 @@ void print_ready(const molink::core_config& cfg, int port,
   j["client_token"] = client_token;
   j["session_endpoint"] = "/ws/session";
   j["transport"] = "websocket";
+  j["tls"] = tls_enabled;
+  if (!cert_fingerprint.empty()) j["tls_fingerprint"] = cert_fingerprint;
+  j["session_scheme"] = tls_enabled ? "wss" : "ws";
   j["transports"] = uvcpp::uvcpp_json::array();
   j["transports"].push_back("websocket");
   if (http2_available) j["transports"].push_back("http2");
@@ -240,6 +245,15 @@ int main(int argc, char** argv) {
     stored_settings.long_term_code = identity.token;
   }
   auto auth = std::make_shared<auth_state>(std::move(stored_settings));
+  // Self-signed per-device certificate. It is generated once and reused so a
+  // client's fingerprint pin survives restarts. TLS is opt-in (LAN default
+  // off); the relay path keeps using the directory's WSS.
+  const tls_identity tls = load_or_create_tls_identity(config_directory(),
+                                                       identity.device_id);
+  if (!tls.ok()) {
+    std::fprintf(stderr, "molink tls: %s\n", tls.error.c_str());
+  }
+  const bool tls_enabled = auth->settings().encrypt_lan && tls.ok();
   // Only the shell receives this token (through the ready line). It gates the
   // loopback web UI when allow_web_client is off.
   const std::string client_token = generate_token();
@@ -379,6 +393,8 @@ int main(int argc, char** argv) {
   session_opts.clipboard = clipboard;
   session_opts.device_id = identity.device_id;
   session_opts.device_name = auth->settings().device_name;
+  session_opts.cert_fingerprint = tls.fingerprint;
+  session_opts.tls_enabled = tls_enabled;
   session_opts.lock = lock;
 
   uvcpp::uvcpp_web_app app;
@@ -430,6 +446,7 @@ int main(int argc, char** argv) {
   deps.input = input;
   deps.clipboard = clipboard;
   deps.device_id = identity.device_id;
+  deps.cert_fingerprint = tls.fingerprint;
   deps.client_token = client_token;
   deps.auth = auth;
   deps.access_requests = access_requests;
@@ -470,6 +487,23 @@ int main(int argc, char** argv) {
 
   std::signal(SIGINT, on_signal);
   std::signal(SIGTERM, on_signal);
+
+  if (tls_enabled) {
+    app.enable_ssl(tls.cert_path, tls.key_path);
+    if (!app.ssl_error().empty()) {
+      std::fprintf(stderr, "molink tls: %s\n", app.ssl_error().c_str());
+    }
+    // h2c is disabled in this build; advertising h2 over TLS would make a
+    // browser negotiate a protocol the router does not serve. Offer only
+    // HTTP/1.1 (WSS rides on it) unless h2 becomes available.
+    if (app.ssl_context() != nullptr) {
+      if (app.h2c_enabled()) {
+        app.ssl_context()->set_alpn_select_protos({"h2", "http/1.1"});
+      } else {
+        app.ssl_context()->set_alpn_select_protos({"http/1.1"});
+      }
+    }
+  }
 
   // libuvcpp's start() returns once the loop is running; the stop below must
   // wait for the shutdown path, or it would stop the service we just started.
@@ -518,11 +552,13 @@ int main(int argc, char** argv) {
     print_ready(cfg, port, auth->local_session_token(), client_token,
                 capture->backend(), input ? input->backend() : "none",
                 identity.device_id, deps.http2_available,
-                capture_opts.tile_size, capture_opts.change_threshold);
+                capture_opts.tile_size, capture_opts.change_threshold,
+                tls_enabled, tls.fingerprint);
   } else {
     std::cerr << MOLINK_CORE_SERVICE << " " MOLINK_VERSION << " listening on "
               << format_url_host(cfg.host) << ":" << port << "\n"
-              << "  session: ws://" << format_url_host(cfg.host) << ":" << port
+              << "  session: " << (tls_enabled ? "wss://" : "ws://")
+              << format_url_host(cfg.host) << ":" << port
               << "/ws/session\n"
               << "  health:  http://" << format_url_host(cfg.host) << ":"
               << port

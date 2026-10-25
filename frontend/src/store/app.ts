@@ -203,6 +203,8 @@ interface AppState {
     allowWeb: boolean
     discovery: boolean
     allowAccessRequests: boolean
+    encryptRemote?: boolean
+    encryptLan?: boolean
     name: string
     stunServer?: string
   }) => Promise<boolean>

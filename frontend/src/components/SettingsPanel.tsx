@@ -59,6 +59,8 @@ function SecurityControls({
     allowWeb: boolean
     discovery: boolean
     allowAccessRequests: boolean
+    encryptRemote: boolean
+    encryptLan: boolean
     name: string
     stunServer?: string
   }) => Promise<boolean>
@@ -71,6 +73,12 @@ function SecurityControls({
   const [discovery, setDiscovery] = useState(settings.discovery_enabled)
   const [allowAccessRequests, setAllowAccessRequests] = useState(
     settings.allow_access_requests,
+  )
+  const [encryptRemote, setEncryptRemote] = useState(
+    settings.encrypt_remote !== false,
+  )
+  const [encryptLan, setEncryptLan] = useState(
+    settings.encrypt_lan === true,
   )
   const [name, setName] = useState(settings.device_name)
   const [stunServer, setStunServer] = useState(settings.stun_server ?? '')
@@ -85,6 +93,8 @@ function SecurityControls({
     allowWeb?: boolean
     discovery?: boolean
     allowAccessRequests?: boolean
+    encryptRemote?: boolean
+    encryptLan?: boolean
     name?: string
     stunServer?: string
   }) => {
@@ -95,6 +105,8 @@ function SecurityControls({
       discovery: nextRemote ? (values.discovery ?? discovery) : false,
       allowAccessRequests:
         values.allowAccessRequests ?? allowAccessRequests,
+      encryptRemote: values.encryptRemote ?? encryptRemote,
+      encryptLan: values.encryptLan ?? encryptLan,
       name: values.name ?? settings.device_name,
       stunServer: values.stunServer ?? stunServer,
     })
@@ -196,6 +208,42 @@ function SecurityControls({
               void persist({ allowAccessRequests: value })
             }}
             label={t('settings.allowAccessRequests')}
+          />
+        </div>
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <div className="text-[12px] text-ink">
+              {t('settings.encryptRemote')}
+            </div>
+            <div className="mt-0.5 text-[11px] text-muted">
+              {t('settings.encryptRemoteHint')}
+            </div>
+          </div>
+          <Switch
+            checked={encryptRemote}
+            onChange={(value) => {
+              setEncryptRemote(value)
+              void persist({ encryptRemote: value })
+            }}
+            label={t('settings.encryptRemote')}
+          />
+        </div>
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <div className="text-[12px] text-ink">
+              {t('settings.encryptLan')}
+            </div>
+            <div className="mt-0.5 text-[11px] text-muted">
+              {t('settings.encryptLanHint')}
+            </div>
+          </div>
+          <Switch
+            checked={encryptLan}
+            onChange={(value) => {
+              setEncryptLan(value)
+              void persist({ encryptLan: value })
+            }}
+            label={t('settings.encryptLan')}
           />
         </div>
         <label className="block">

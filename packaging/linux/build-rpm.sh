@@ -4,7 +4,7 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
-VERSION=${VERSION:-0.9.16}
+VERSION=${VERSION:-0.9.17}
 WORK=${WORK_DIR:-$(mktemp -d /tmp/molink-rpm.XXXXXX)}
 RPMBUILD="$WORK/rpmbuild"
 OUT=${OUT_DIR:-$ROOT/build/package}

@@ -52,6 +52,10 @@ struct session_options {
   int tile_size = 0;
   std::string device_id;
   std::string device_name;
+  /// Host certificate fingerprint advertised to clients for pinning.
+  std::string cert_fingerprint;
+  /// The host web listener itself speaks TLS (direct LAN encryption).
+  bool tls_enabled = false;
   /// Hop a callback onto the app loop (used for clipboard results, which are
   /// produced on the clipboard thread).
   std::function<void(std::function<void()>)> post;

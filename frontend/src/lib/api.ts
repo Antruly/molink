@@ -204,7 +204,13 @@ const clientToken = params.get('client') ?? ''
 export function coreBaseUrl(): string {
   const host = params.get('host')
   const port = params.get('port')
-  if (host && port) return `http://${formatHost(host)}:${port}`
+  const securePage = window.location.protocol === 'https:'
+  const sameHost =
+    host !== null &&
+    (host === window.location.hostname || host === '127.0.0.1' ||
+     host === 'localhost')
+  const scheme = securePage && sameHost ? 'https' : 'http'
+  if (host && port) return `${scheme}://${formatHost(host)}:${port}`
   if (window.location.port && window.location.port !== '1420') {
     return window.location.origin
   }
@@ -318,6 +324,8 @@ export interface SecuritySettings {
   allow_web_client: boolean
   discovery_enabled: boolean
   allow_access_requests: boolean
+  encrypt_remote?: boolean
+  encrypt_lan?: boolean
   stun_server?: string
   device_name: string
   long_term_code: string
@@ -335,6 +343,8 @@ export function postSettings(
     allowWeb: boolean
     discovery: boolean
     allowAccessRequests: boolean
+    encryptRemote?: boolean
+    encryptLan?: boolean
     name: string
     stunServer?: string
   },
@@ -346,6 +356,12 @@ export function postSettings(
     access_requests: values.allowAccessRequests ? '1' : '0',
     name: values.name,
   })
+  if (values.encryptRemote !== undefined) {
+    query.set('encrypt_remote', values.encryptRemote ? '1' : '0')
+  }
+  if (values.encryptLan !== undefined) {
+    query.set('encrypt_lan', values.encryptLan ? '1' : '0')
+  }
   if (values.stunServer !== undefined) query.set('stun', values.stunServer)
   return request<SecuritySettings>(
     `/api/settings?${query.toString()}`,

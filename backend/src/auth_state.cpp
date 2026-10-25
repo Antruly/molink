@@ -202,6 +202,14 @@ void auth_state::set_allow_access_requests(bool allow) {
   persist_locked();
 }
 
+void auth_state::set_transport_security(bool encrypt_remote,
+                                        bool encrypt_lan) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  settings_.encrypt_remote = encrypt_remote;
+  settings_.encrypt_lan = encrypt_lan;
+  persist_locked();
+}
+
 bool auth_state::set_stun_server(const std::string& value) {
   std::string trimmed = value;
   while (!trimmed.empty() &&

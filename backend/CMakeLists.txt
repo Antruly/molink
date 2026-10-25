@@ -166,6 +166,7 @@ set(MOLINK_CORE_SOURCES
   src/input/macos_input.cpp
   src/config.cpp
   src/identity.cpp
+  src/tls_identity.cpp
   src/lock_state.cpp
   src/session_registry.cpp
   src/service_control.cpp
@@ -192,6 +193,22 @@ endif()
 if(MOLINK_BUILD_CORE)
   add_executable(molink-core ${MOLINK_CORE_SOURCES})
   target_include_directories(molink-core PRIVATE src)
+
+  # Per-device self-signed certificate generation for the encrypted
+  # transports. The runtime OpenSSL used by libuvcpp is a separate copy; the
+  # certificate is exchanged as PEM, so the two never share objects.
+  # OpenSSL generates the per-device certificate. Builds without it (some
+  # macOS runner images) keep the encryption settings but report the identity
+  # as unavailable instead of failing the whole release.
+  find_package(OpenSSL QUIET)
+  if(OpenSSL_FOUND)
+    target_link_libraries(molink-core PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+    target_compile_definitions(molink-core PRIVATE MOLINK_HAVE_OPENSSL=1)
+    message(STATUS "molink: device certificate support enabled")
+  else()
+    target_compile_definitions(molink-core PRIVATE MOLINK_HAVE_OPENSSL=0)
+    message(STATUS "molink: OpenSSL not found; encrypted transport disabled")
+  endif()
 
   # Linux screen capture. X11/XShm is the first backend; a PipeWire portal
   # backend can be added behind the same capture_source interface.

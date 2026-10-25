@@ -160,6 +160,10 @@ app_settings load_settings() {
       settings.discovery_enabled = parse_bool(value, false);
     } else if (key == "allow_access_requests") {
       settings.allow_access_requests = parse_bool(value, true);
+    } else if (key == "encrypt_remote") {
+      settings.encrypt_remote = parse_bool(value, true);
+    } else if (key == "encrypt_lan") {
+      settings.encrypt_lan = parse_bool(value, false);
     } else if (key == "service_desired_running") {
       settings.service_desired_running = parse_bool(value, true);
     } else if (key == "device_name") {
@@ -217,6 +221,8 @@ void save_settings(const app_settings& settings) {
          << "\n";
   stream << "allow_access_requests="
          << (settings.allow_access_requests ? 1 : 0) << "\n";
+  stream << "encrypt_remote=" << (settings.encrypt_remote ? 1 : 0) << "\n";
+  stream << "encrypt_lan=" << (settings.encrypt_lan ? 1 : 0) << "\n";
   stream << "service_desired_running="
          << (settings.service_desired_running ? 1 : 0) << "\n";
   stream << "device_name=" << settings.device_name << "\n";
