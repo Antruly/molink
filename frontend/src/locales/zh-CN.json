@@ -151,7 +151,7 @@
     "serverInvite": "注册邀请码",
     "serverInviteHint": "服务端开启邀请码时必填",
     "serverSave": "保存并注册",
-    "serverClear": "停用",
+    "serverClear": "使用内置目录",
     "serverRegistered": "已注册",
     "serverUnregistered": "未注册",
     "serverOnline": "在线",
@@ -160,7 +160,8 @@
     "serverTlsHint": "已支持 HTTPS；公网证书可留空 CA。",
     "autoSaveHint": "开关修改会立即生效；只有计算机名称需要点“应用”。",
     "serverCa": "自定义 CA（可选）",
-    "serverCaHint": "私有/自签 CA 的 PEM 文件路径；留空使用系统信任库。"
+    "serverCaHint": "私有/自签 CA 的 PEM 文件路径；留空使用系统信任库。",
+    "serverUsingDefault": "留空使用内置目录 {{url}}。"
   },
   "session": {
     "connecting": "连接中…",

@@ -316,7 +316,9 @@ function ServerControls() {
       const next = await fetchServerConfig(token)
       setStatus(next)
       if (!initialized.current) {
-        setUrl(next.url)
+        // The built-in default is not a custom URL; showing it here made a
+        // plain save pin the default as if the user had typed it.
+        setUrl(next.custom_url ?? next.url)
         setInvite(next.invite)
         setCa(next.ca)
         initialized.current = true
@@ -347,7 +349,7 @@ function ServerControls() {
         ca.trim(),
       )
       setStatus(next)
-      setUrl(next.url)
+      setUrl(next.custom_url ?? next.url)
       setNote(t('settings.saved'))
     } catch {
       setNote(t('error.settings_failed'))
@@ -385,10 +387,15 @@ function ServerControls() {
           value={url}
           onChange={(event) => setUrl(event.target.value)}
           className="field font-mono text-[12px]"
-          placeholder="http://192.168.1.5:28430"
+          placeholder={status?.default_url || 'https://molink.ssvr.top:28430'}
           spellCheck={false}
           autoComplete="off"
         />
+        {status?.using_default ? (
+          <span className="mt-1 block text-[10px] text-muted">
+            {t('settings.serverUsingDefault', { url: status.default_url })}
+          </span>
+        ) : null}
       </label>
       <label className="block">
         <span className="mb-1 block text-[10px] uppercase tracking-[0.16em] text-muted">

@@ -151,7 +151,7 @@
     "serverInvite": "Registration invite",
     "serverInviteHint": "Required when the server enables an invite",
     "serverSave": "Save and register",
-    "serverClear": "Disable",
+    "serverClear": "Use built-in",
     "serverRegistered": "Registered",
     "serverUnregistered": "Not registered",
     "serverOnline": "Online",
@@ -160,7 +160,8 @@
     "serverTlsHint": "HTTPS is supported. Leave the CA empty for public certificates.",
     "autoSaveHint": "Toggles apply immediately. Only the computer name needs Apply.",
     "serverCa": "Custom CA (optional)",
-    "serverCaHint": "PEM bundle for a private/self-signed CA. Empty uses the system trust store."
+    "serverCaHint": "PEM bundle for a private/self-signed CA. Empty uses the system trust store.",
+    "serverUsingDefault": "Leave empty to use the built-in directory {{url}}."
   },
   "session": {
     "connecting": "Connecting…",
