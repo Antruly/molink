@@ -151,3 +151,18 @@ libuvcpp kit、GCC 13、nlohmann/json 和 WebView2 SDK，调用该脚本并上�
 3. **Win7 上没有 WebView2**：需要单独安装 109 运行时，或走浏览器 Web UI。
 4. **32 位构建的 API 下限**：`_WIN32_WINNT=0x0601`；不要引入仅在 Windows 8+
    可用的 API（如 `GetSystemTimePreciseAsFileTime`），否则 Win7 启动即失败。
+
+## 故障排查
+
+| 现象 | 处理 |
+|---|---|
+| 原生壳启动后空白/提示 WebView2 | Win7 需要 WebView2 Runtime **109**（最后一个支持 Win7 的版本）；没有时用 `start-browser-ui.cmd` + Firefox ESR 115 / Chrome 109 |
+| 浏览器打开后是白屏或脚本错误 | 不要用 IE11；确认设置里 `allow_web_client=1`，并使用 Firefox ESR 115/Chrome 109 |
+| 局域网能发现设备但连不上 | 入站 28418 被防火墙挡住；管理员运行 `install-firewall.cmd` 或安装器的防火墙任务（`profile=any`）；确认两台机器在同一网段、没有 NAT 隔离 |
+| 远程桌面有画面但没有键鼠 | 核心需要运行在登录用户的交互式会话（桌面/启动项/计划任务），不能是服务会话；查看欢迎消息 `input=true` |
+| 锁屏/登录页看不到 | 需要以管理员安装 `molink-service`（安装器勾选“安装安全桌面服务”或运行 `install-service.cmd`）；纯 GDI 桌面采集不覆盖 Winlogon |
+| 目录 TLS 失败 | 默认目录是 `https://molink.ssvr.top:28430`，服务器必须在 28430 提供 TLS；自签/私有 CA 要在客户端 `server_ca` 指定 PEM；检查证书 SAN 含域名和系统时间 |
+| 域组 tab 提示无此域码 | 域的属主更新了码；向对方要新码。旧版 0.2.0 目录没有域组功能，需要 0.2.1+ |
+| 没有声音 | Win7 测试虚拟机没有声卡；欢迎消息 `audio=false` 是预期行为 |
+| 在远程/过滤令牌会话里安装服务失败 | `sc create` 需要管理员权限的完整令牌；用安装器（UAC）或在控制台以管理员运行 `install-service.cmd` |
+| 启动时报缺少 DLL | 保持 zip/安装目录结构完整；MinGW 运行库（`libstdc++-6`、`libgcc_s_dw2-1`、`libwinpthread-1`）与 `libuvcpp.dll` 必须在 exe 同目录 |
