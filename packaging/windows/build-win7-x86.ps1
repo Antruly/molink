@@ -3,7 +3,7 @@
 #   build-win7-x86.ps1 -Kit C:\path\libuvcpp-1.8.3-mingw32 `
 #                      -UvcppPrefix C:\path\uvcpp-win7-x86-mingw32 `
 #                      -Gcc C:\path\i686-13.2.0-posix-dwarf-msvcrt `
-#                      -WebView2 C:\path\wv2 -Version 0.8.1
+#                      -WebView2 C:\path\wv2 -Version 0.9.0
 #
 # -Kit supplies cmake/make and the zlib static library; its GCC 8.1 is too old
 # for molink's std::filesystem use, so -Gcc must point at a newer i686
@@ -20,7 +20,7 @@ param(
   [Parameter(Mandatory = $true)][string]$WebView2,
   [string]$UvcppPrefix = "",
   [string]$Repo = "",
-  [string]$Version = "0.8.1",
+  [string]$Version = "0.9.0",
   [string]$Out = ""
 )
 

@@ -40,12 +40,14 @@ done
 cp "$ROOT/shell/assets/icons/icon.ico" "$PKG/molink.ico"
 cp -r "$WEB/." "$PKG/web/"
 
-# Runtime DLLs, when libuvcpp was built shared.
-if [ -n "${UVCPP_LIB_DIR:-}" ] && [ -d "$UVCPP_LIB_DIR" ]; then
-  # The release archive also carries the debug DLL; never ship it.
-  find "$UVCPP_LIB_DIR" -maxdepth 1 -name '*.dll' ! -name '*d.dll' \
+# Runtime DLLs, when libuvcpp was built shared. A source install may keep them
+# in lib/, while the release archives put them in bin/ next to the import
+# libraries in lib; check both. Never ship the archive's debug DLL.
+for _dll_dir in "${UVCPP_LIB_DIR:-}" "${UVCPP_ROOT:+$UVCPP_ROOT/bin}"; do
+  [ -n "$_dll_dir" ] && [ -d "$_dll_dir" ] || continue
+  find "$_dll_dir" -maxdepth 1 -name '*.dll' ! -name '*d.dll' \
     -exec cp {} "$PKG/" \; 2>/dev/null || true
-fi
+done
 for dll in "$(dirname "$CORE")"/*.dll; do
   [ -f "$dll" ] && cp "$dll" "$PKG/"
 done
