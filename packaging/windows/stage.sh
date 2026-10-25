@@ -42,7 +42,9 @@ cp -r "$WEB/." "$PKG/web/"
 
 # Runtime DLLs, when libuvcpp was built shared.
 if [ -n "${UVCPP_LIB_DIR:-}" ] && [ -d "$UVCPP_LIB_DIR" ]; then
-  cp "$UVCPP_LIB_DIR"/*.dll "$PKG/" 2>/dev/null || true
+  # The release archive also carries the debug DLL; never ship it.
+  find "$UVCPP_LIB_DIR" -maxdepth 1 -name '*.dll' ! -name '*d.dll' \
+    -exec cp {} "$PKG/" \; 2>/dev/null || true
 fi
 for dll in "$(dirname "$CORE")"/*.dll; do
   [ -f "$dll" ] && cp "$dll" "$PKG/"

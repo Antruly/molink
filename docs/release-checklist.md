@@ -42,7 +42,8 @@ TLS、域组码和迁移在独立仓库验证。** 历史条目（0.6.14 及以�
 
 1. **构建环境**
    - `libgtk-3-dev`、`libwebkit2gtk-4.1-dev`（壳层）
-   - libuvcpp 源码（CI 使用 `UVCPP_REPO` 仓库变量）
+   - libuvcpp 预编译包（Linux/Windows，`UVCPP_VERSION`，默认 1.8.5）；
+     macOS 使用 `UVCPP_REPO` / `UVCPP_REF` 从源码构建
    - `dpkg-deb`（`.deb`）；AppImage 需要 `appimagetool` 与 `patchelf`
    - Windows：Inno Setup 6（安装包）与 NSIS（免安装单文件），CI 自动安装
 2. **平台与后端**

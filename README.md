@@ -288,7 +288,7 @@ AppImage 首次使用需要 `chmod +x`，并依赖系统的 GTK 3 与 WebKitGTK 
 
 推送 `v*` 标签会触发 `.github/workflows/release-desktop.yml`，三个平台并行构建并把
 产物附加到同一个 Release。Linux/Windows 直接下载 libuvcpp 预编译包（仓库变量
-`UVCPP_VERSION`，默认 `1.8.4`）；macOS 仍从源码构建，需要仓库变量 `UVCPP_REPO`。
+`UVCPP_VERSION`，默认 `1.8.5`）；macOS 仍从源码构建，需要仓库变量 `UVCPP_REPO`。
 Win7 x86 使用独立的 `.github/workflows/release-win7.yml`（`win7-x86-v*` 标签或手动
 触发），下载 libuvcpp Win7 kit 与 GCC 13 后产出 zip 和 Inno Setup 安装器。
 

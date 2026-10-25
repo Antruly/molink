@@ -7,8 +7,10 @@ on:
 permissions:
   contents: write
 
-# Every job builds libuvcpp from the UVCPP_REPO repository variable, then the
-# core, frontend and the platform shell. Artifacts are attached to the release.
+# Linux and Windows download the prebuilt libuvcpp archive (UVCPP_VERSION,
+# default 1.8.5); macOS has no prebuilt asset yet and builds it from the
+# UVCPP_REPO repository variable. Then the core, frontend and platform shell
+# are built and attached to the release.
 jobs:
   linux:
     runs-on: ubuntu-latest
@@ -31,27 +33,18 @@ jobs:
           cache: pnpm
           cache-dependency-path: frontend/pnpm-lock.yaml
 
-      - name: Build libuvcpp
+      - name: Fetch prebuilt libuvcpp
         shell: bash
-        run: |
-          if [ -z "${{ vars.UVCPP_REPO }}" ]; then
-            echo "::error::Set the UVCPP_REPO repository variable."
-            exit 1
-          fi
-          REF="${{ vars.UVCPP_REF }}"; REF="${REF:-main}"
-          ./packaging/clone-retry.sh --depth 1 --branch "$REF" "${{ vars.UVCPP_REPO }}" "$RUNNER_TEMP/libuvcpp"
-          cmake -S "$RUNNER_TEMP/libuvcpp" -B "$RUNNER_TEMP/libuvcpp/build" \
-            -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
-            -DUVCPP_ENABLE_OPENSSL=ON \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/uvcpp"
-          cmake --build "$RUNNER_TEMP/libuvcpp/build" --parallel
-          cmake --install "$RUNNER_TEMP/libuvcpp/build"
+        env:
+          UVCPP_VERSION: ${{ vars.UVCPP_VERSION }}
+        run: ./packaging/fetch-uvcpp.sh linux-x64 "${UVCPP_VERSION:-1.8.5}" "$RUNNER_TEMP/uvcpp"
 
       - name: Build packages
         env:
           CMAKE_PREFIX_PATH: ${{ runner.temp }}/uvcpp
+          PKG_CONFIG_PATH: ${{ runner.temp }}/uvcpp/lib/pkgconfig
           UVCPP_LIB_DIR: ${{ runner.temp }}/uvcpp/lib
+          UVCPP_ROOT: ${{ runner.temp }}/uvcpp
           VERSION: ${{ github.ref_name }}
         run: |
           export VERSION="${VERSION#v}"
@@ -83,61 +76,17 @@ jobs:
           cache: pnpm
           cache-dependency-path: frontend/pnpm-lock.yaml
 
-      - name: Install OpenSSL
-        shell: pwsh
-        run: |
-          choco install openssl -y --no-progress
-          $roots = @(
-            'C:\Program Files\OpenSSL-Win64',
-            'C:\Program Files\OpenSSL'
-          ) | Where-Object { Test-Path $_ }
-          if (-not $roots) {
-            $roots = Get-ChildItem 'C:\Program Files' -Directory -Filter 'OpenSSL*' |
-              ForEach-Object { $_.FullName }
-          }
-          $root = @($roots)[0]
-          if (-not $root) { throw 'OpenSSL installation not found' }
-          "OPENSSL_ROOT_DIR=$root" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "OPENSSL_BIN=$root\bin" | Out-File -FilePath $env:GITHUB_ENV -Append
-
-      - name: Build libuvcpp
+      - name: Fetch prebuilt libuvcpp
         shell: bash
-        run: |
-          if [ -z "${{ vars.UVCPP_REPO }}" ]; then
-            echo "::error::Set the UVCPP_REPO repository variable."
-            exit 1
-          fi
-          REF="${{ vars.UVCPP_REF }}"; REF="${REF:-main}"
-          ./packaging/clone-retry.sh --depth 1 --branch "$REF" "${{ vars.UVCPP_REPO }}" "$RUNNER_TEMP/libuvcpp"
-          cmake -S "$RUNNER_TEMP/libuvcpp" -B "$RUNNER_TEMP/libuvcpp/build" \
-            -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
-            -DUVCPP_ENABLE_OPENSSL=ON \
-            -DOPENSSL_ROOT_DIR="$OPENSSL_ROOT_DIR" \
-            -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/uvcpp"
-          cmake --build "$RUNNER_TEMP/libuvcpp/build" --config Release --parallel
-          cmake --install "$RUNNER_TEMP/libuvcpp/build" --config Release
-          cfg="$RUNNER_TEMP/uvcpp/include/uvcpp/uvcpp_config.h"
-          grep -qE "^#[[:space:]]*define[[:space:]]+UVCPP_OPENSSL_ENABLE[[:space:]]+1" "$cfg" || {
-            echo "::error::libuvcpp was built without OpenSSL" >&2
-            exit 1
-          }
-
-      - name: Install libuv and zlib into the prefix
-        shell: bash
-        run: |
-          ./packaging/clone-retry.sh --depth 1 https://github.com/libuv/libuv.git "$RUNNER_TEMP/libuv"
-          cmake -S "$RUNNER_TEMP/libuv" -B "$RUNNER_TEMP/libuv/build" \
-            -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/uvcpp" -DBUILD_TESTING=OFF
-          cmake --build "$RUNNER_TEMP/libuv/build" --config Release --target install
-          ./packaging/clone-retry.sh --depth 1 https://github.com/madler/zlib.git "$RUNNER_TEMP/zlib"
-          cmake -S "$RUNNER_TEMP/zlib" -B "$RUNNER_TEMP/zlib/build" \
-            -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/uvcpp"
-          cmake --build "$RUNNER_TEMP/zlib/build" --config Release --target install
+        env:
+          UVCPP_VERSION: ${{ vars.UVCPP_VERSION }}
+        run: ./packaging/fetch-uvcpp.sh msvc-x64 "${UVCPP_VERSION:-1.8.5}" "$RUNNER_TEMP/uvcpp"
 
       - name: Build core
         shell: bash
         run: |
-          cmake -S backend -B backend/build -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/uvcpp"
+          cmake -S backend -B backend/build \
+            -DMOLINK_UVCPP_PREFIX="$(cygpath -m "$RUNNER_TEMP/uvcpp")"
           cmake --build backend/build --config Release --parallel
 
       - name: Build frontend

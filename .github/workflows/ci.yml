@@ -96,40 +96,25 @@ jobs:
         run: cmake --build shell/macos/build --parallel
 
   windows-core:
-    # Builds libuvcpp and molink-core with MSVC so the Windows capture, input
-    # and clipboard backends are compiled on every main push.
-    if: github.event_name != 'pull_request' && vars.UVCPP_REPO != ''
+    # Builds molink-core with MSVC against the prebuilt libuvcpp release, so
+    # the Windows capture, input and clipboard backends are compiled on every
+    # main push without waiting for a libuvcpp source build.
+    if: github.event_name != 'pull_request'
     runs-on: windows-latest
+    env:
+      UVCPP_VERSION: ${{ vars.UVCPP_VERSION }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build libuvcpp
+      - name: Fetch prebuilt libuvcpp
         shell: bash
-        run: |
-          REF="${{ vars.UVCPP_REF }}"; REF="${REF:-master}"
-          ./packaging/clone-retry.sh --depth 1 --branch "$REF" "${{ vars.UVCPP_REPO }}" "$RUNNER_TEMP/libuvcpp"
-          cmake -S "$RUNNER_TEMP/libuvcpp" -B "$RUNNER_TEMP/libuvcpp/build" \
-            -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
-            -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/uvcpp"
-          cmake --build "$RUNNER_TEMP/libuvcpp/build" --config Release --parallel
-          cmake --install "$RUNNER_TEMP/libuvcpp/build" --config Release
-
-      - name: Install libuv and zlib into the prefix
-        shell: bash
-        run: |
-          ./packaging/clone-retry.sh --depth 1 https://github.com/libuv/libuv.git "$RUNNER_TEMP/libuv"
-          cmake -S "$RUNNER_TEMP/libuv" -B "$RUNNER_TEMP/libuv/build" \
-            -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/uvcpp" -DBUILD_TESTING=OFF
-          cmake --build "$RUNNER_TEMP/libuv/build" --config Release --target install
-          ./packaging/clone-retry.sh --depth 1 https://github.com/madler/zlib.git "$RUNNER_TEMP/zlib"
-          cmake -S "$RUNNER_TEMP/zlib" -B "$RUNNER_TEMP/zlib/build" \
-            -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/uvcpp"
-          cmake --build "$RUNNER_TEMP/zlib/build" --config Release --target install
+        run: ./packaging/fetch-uvcpp.sh msvc-x64 "${UVCPP_VERSION:-1.8.5}" "$RUNNER_TEMP/uvcpp"
 
       - name: Build core
         shell: bash
         run: |
-          cmake -S backend -B backend/build -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/uvcpp"
+          cmake -S backend -B backend/build \
+            -DMOLINK_UVCPP_PREFIX="$(cygpath -m "$RUNNER_TEMP/uvcpp")"
           cmake --build backend/build --config Release --parallel
 
   macos-core:

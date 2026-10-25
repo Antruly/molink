@@ -42,6 +42,10 @@ jobs:
           Invoke-WebRequest -Uri $url -OutFile wv2.zip
           Expand-Archive wv2.zip -DestinationPath wv2
 
+      # The 1.8.3 source kit is still needed: the newer Win7 x86 binaries
+      # (uvcpp-win7-x86-mingw32.zip) ship without the WebApp module
+      # (UVCPP_WEBAPP_ENABLE=0), and molink-core needs it. The build script
+      # compiles the full profile from this kit with GCC 13.
       - name: Fetch the libuvcpp Win7 MinGW kit
         shell: pwsh
         run: |
