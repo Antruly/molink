@@ -134,7 +134,7 @@ export interface ClientHandlers {
   onWelcome: (welcome: Welcome) => void
   onFrame: (frame: Frame, byteLength: number) => void
   onLatency: (ms: number) => void
-  onError: (message: string) => void
+  onError: (message: string, code?: string) => void
   onCursor: (shape: CursorShape) => void
   onCursorPosition: (position: CursorPosition) => void
   onClipboard: (text: string) => void
@@ -227,6 +227,10 @@ export class MolinkClient {
   } | null = null
   /// The ICE proxy failed; use the resolved address directly from now on.
   private proxyFailed = false
+  /// Last application-level error frame. A policy answer (wrong code, locked
+  /// host) must not be mistaken for an ICE failure and retried.
+  private lastErrorCode = ''
+  private lastErrorMessage = ''
   private retryAttempts = 0
   private retryTimer: number | null = null
   private autoRetryTimer: number | null = null
@@ -248,6 +252,8 @@ export class MolinkClient {
     this.closedByUser = false
     this.retryAttempts = 0
     this.proxyFailed = false
+    this.lastErrorCode = ''
+    this.lastErrorMessage = ''
     this.lastConnect = { host, port, token, requestAccess, targetId }
     this.openSocket()
   }
@@ -323,6 +329,30 @@ export class MolinkClient {
       this.stopPing()
       this.pendingFrame = false
       this.ws = null
+      // Wrong code / locked host / denied request: the host answered and
+      // closed on purpose. Falling back to a direct socket or retrying would
+      // just loop; surface the reason so the UI can ask for the code again.
+      // The close reason is a second source of truth: over UDP the error
+      // frame and the close can race, and the proxy may only deliver the
+      // close.
+      const closeReason = event.reason ?? ''
+      const reasonAuth = /invalid token|unauthorized|locked|too many|banned|access denied/i
+          .test(closeReason)
+      const policyError = reasonAuth ||
+          this.lastErrorCode === 'unauthorized' ||
+          this.lastErrorCode === 'locked' ||
+          this.lastErrorCode === 'too_many_attempts' ||
+          this.lastErrorCode === 'ip_banned' ||
+          this.lastErrorCode === 'access_denied';
+      if (policyError) {
+        if (!this.lastErrorMessage && closeReason) {
+          this.lastErrorMessage = closeReason
+        }
+        this.lastErrorCode = this.lastErrorCode || 'unauthorized'
+        this.handlers.onPhase?.('error',
+                                this.lastErrorMessage || this.lastErrorCode)
+        return
+      }
       if (useProxy && !this.closedByUser) {
         // ICE failed or the proxy is unavailable: retry the direct path once.
         this.proxyFailed = true
@@ -657,9 +687,15 @@ export class MolinkClient {
           message: message.message,
         })
         break
-      case 'error':
-        this.handlers.onError?.(message.message ?? message.code ?? 'error')
+      case 'error': {
+        const code = typeof message.code === 'string' ? message.code : ''
+        this.lastErrorCode = code
+        this.lastErrorMessage =
+            typeof message.message === 'string' ? message.message : code
+        this.handlers.onError?.(
+          this.lastErrorMessage || code || 'error', code || undefined)
         break
+      }
       default:
         break
     }

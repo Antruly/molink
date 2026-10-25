@@ -237,7 +237,10 @@
     "audioVolume": "音量",
     "qualityUltra": "超清",
     "qualityLossless": "无损",
-    "qualityGame": "游戏"
+    "qualityGame": "游戏",
+    "badCode": "授权码不正确，请重新输入",
+    "enterCode": "授权码",
+    "connect": "连接"
   },
   "stats": {
     "fps": "帧率",

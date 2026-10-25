@@ -237,7 +237,10 @@
     "audioVolume": "Volume",
     "qualityUltra": "Ultra",
     "qualityLossless": "Lossless",
-    "qualityGame": "Game"
+    "qualityGame": "Game",
+    "badCode": "The code is incorrect. Enter it again.",
+    "enterCode": "Authorization code",
+    "connect": "Connect"
   },
   "stats": {
     "fps": "FPS",

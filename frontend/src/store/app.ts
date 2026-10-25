@@ -84,6 +84,8 @@ export interface SessionTab {
   cursorPosition: CursorPosition | null
   stats: Stats
   error: string | null
+  /// Machine-readable error code from the host (e.g. unauthorized).
+  errorCode?: string | null
   notice: string | null
   /// When the host must approve this session: epoch ms of the 60 s deadline.
   approvalDeadline: number | null

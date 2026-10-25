@@ -14,10 +14,10 @@ namespace {
 
 constexpr uint64_t kConnectTimeoutMs = 20000;
 constexpr int kPollIntervalMs = 500;
-// Pending signalling is polled while the core is registered. Keep this well
-// under the directory's per-IP request budget when several devices share one
-// NAT: 2 s per device is 30 requests/minute.
-constexpr uint64_t kPendingIntervalMs = 2000;
+// Pending signalling is polled while the core is registered. The directory
+// allows 8 requests/second per device, so 500 ms (2/s) is well inside the
+// budget and makes an incoming connect visible almost immediately.
+constexpr uint64_t kPendingIntervalMs = 500;
 
 void plog(const std::string& message) {
   std::fprintf(stderr, "p2p: %s\n", message.c_str());

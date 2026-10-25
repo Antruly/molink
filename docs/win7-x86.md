@@ -133,7 +133,7 @@ core、shell、service/helper、打包、Inno Setup）：
 ./packaging/windows/build-win7-x86.ps1 `
   -Kit C:\path\libuvcpp-1.8.5-mingw32 `
   -Gcc C:\path\i686-13.2.0-posix-dwarf-msvcrt `
-  -WebView2 C:\path\wv2 -Version 0.9.4 -Out build\package
+  -WebView2 C:\path\wv2 -Version 0.9.5 -Out build\package
 ```
 
 `.github/workflows/release-desktop.yml` 的 `win7-x86` job 在 `v*` 标签时下载

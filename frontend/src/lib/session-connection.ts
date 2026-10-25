@@ -29,6 +29,7 @@ export interface TabPatch {
   cursorPosition?: CursorPosition | null
   stats?: Stats
   error?: string | null
+  errorCode?: string | null
   notice?: string | null
   approvalDeadline?: number | null
   retryAt?: number | null
@@ -89,6 +90,7 @@ export class SessionConnection {
           this.sink.onPatch({
             phase,
             error: null,
+            errorCode: null,
             notice: 'connection_lost',
           })
           return
@@ -97,6 +99,7 @@ export class SessionConnection {
           this.sink.onPatch({
             phase,
             error: null,
+            errorCode: null,
             notice: null,
             approvalDeadline: null,
             retryAt: null,
@@ -105,12 +108,18 @@ export class SessionConnection {
           this.startCongestionWatch()
           return
         }
-        this.sink.onPatch({ phase })
+        this.sink.onPatch({
+          phase,
+          ...(phase === 'connecting'
+            ? { error: null, errorCode: null, notice: null }
+            : {}),
+        })
       },
       onAccessRequested: () => {
         this.sink.onPatch({
           phase: 'connecting',
           error: null,
+          errorCode: null,
           notice: 'waiting_approval',
           approvalDeadline: Date.now() + 60_000,
         })
@@ -147,8 +156,8 @@ export class SessionConnection {
         this.latency = ms
         this.sink.onPatch({ stats: this.snapshot() })
       },
-      onError: (message) =>
-        this.sink.onPatch({ error: message, notice: null }),
+      onError: (message, code) =>
+        this.sink.onPatch({ error: message, errorCode: code ?? null, notice: null }),
       onCursor: (cursorShape) => this.sink.onPatch({ cursorShape }),
       onCursorPosition: (cursorPosition) =>
         this.sink.onPatch({ cursorPosition }),

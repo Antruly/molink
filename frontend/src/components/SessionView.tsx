@@ -234,6 +234,7 @@ export function SessionView({
   const pressedButtons = useRef<Set<number>>(new Set())
   const [surfaceSize, setSurfaceSize] = useState({ width: 0, height: 0 })
   const [actionError, setActionError] = useState<string | null>(null)
+  const [retryCode, setRetryCode] = useState('')
   const touchDevice = touchPrimary()
   const [virtualMouse, setVirtualMouse] = useState(false)
   const [displayMode, setDisplayMode] = useState<DisplayMode>('fit')
@@ -385,6 +386,15 @@ export function SessionView({
   const reconnect = useCallback(() => {
     connection()?.connect(tab.host, tab.port, tab.token, tab.token === '', tab.deviceId)
   }, [connection, tab.host, tab.port, tab.token, tab.deviceId])
+  // A wrong verification code is a policy answer, not a network failure.
+  // Ask for a new code instead of reconnecting with the same one.
+  const needsCode = tab.errorCode === 'unauthorized'
+  const submitCode = () => {
+    const value = retryCode.trim()
+    if (value === '') return
+    setRetryCode('')
+    connection()?.connect(tab.host, tab.port, value, false, tab.deviceId)
+  }
 
   // A background tab is throttled and may miss frames; resync as soon as it
   // becomes visible again instead of waiting for the next pull.
@@ -1713,11 +1723,38 @@ export function SessionView({
           }
         >
           <span className="min-w-0 flex-1">
-            {tab.error
-              ? String(t(`error.${tab.error}`, { defaultValue: tab.error }))
-              : actionError}
+            {needsCode
+              ? t('session.badCode')
+              : tab.error
+                ? String(t(`error.${tab.error}`, { defaultValue: tab.error }))
+                : actionError}
           </span>
-          {tab.error ? (
+          {needsCode ? (
+            <form
+              className="flex items-center gap-1"
+              onSubmit={(event) => {
+                event.preventDefault()
+                submitCode()
+              }}
+            >
+              <input
+                className="field h-7 w-32 px-2 font-mono text-[11px]"
+                value={retryCode}
+                onChange={(event) => setRetryCode(event.target.value)}
+                placeholder={t('session.enterCode')}
+                spellCheck={false}
+                autoFocus
+              />
+              <button
+                type="submit"
+                className="btn h-7 px-2 text-[11px]"
+                disabled={retryCode.trim() === ''}
+              >
+                {t('session.connect')}
+              </button>
+            </form>
+          ) : null}
+          {tab.error && !needsCode ? (
             <button
               type="button"
               onClick={reconnect}
@@ -1726,7 +1763,7 @@ export function SessionView({
               {t('session.reconnect')}
             </button>
           ) : null}
-          {tab.error && /token|unauth|auth|invalid/i.test(tab.error) ? (
+          {tab.error && !needsCode && /token|unauth|auth|invalid/i.test(tab.error) ? (
             <button
               type="button"
               onClick={requestAccessFromError}

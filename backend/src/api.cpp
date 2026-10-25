@@ -612,6 +612,7 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
   auto directory_lookup = [deps](uvcpp_web_request& req,
                                  uvcpp_web_response& resp,
                                  const std::string& query) {
+    (void)req;
     if (!deps.server) {
       resp.status(503).json_str(R"({"code":"directory_unavailable"})");
       resp.end();
