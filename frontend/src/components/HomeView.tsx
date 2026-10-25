@@ -21,6 +21,7 @@ import {
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { ApiError, lookupDevice } from '../lib/api'
+import { formatDisplayId } from '../lib/format'
 import { useAppStore, type RecentConnection } from '../store/app'
 import { ServiceCard } from './ServiceCard'
 
@@ -964,7 +965,7 @@ export function HomeView() {
                       {recent.label}
                     </div>
                     <div className="mt-0.5 truncate font-mono text-[10px] text-muted">
-                      {recent.host}:{recent.port}
+                      {recent.id ? formatDisplayId(recent.id) : `${recent.host}:${recent.port}`}
                     </div>
                   </div>
                   {recent.token ? (
@@ -1045,7 +1046,7 @@ export function HomeView() {
                   </div>
                   <div className="mt-0.5 flex gap-2 font-mono text-[10px] text-muted">
                     <span>
-                      {recent.host}:{recent.port}
+                      {recent.id ? formatDisplayId(recent.id) : `${recent.host}:${recent.port}`}
                     </span>
                     <span>·</span>
                     <span>{relativeTime(recent.at, i18n.language)}</span>

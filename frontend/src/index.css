@@ -245,3 +245,47 @@
   -webkit-app-region: drag;
   app-region: drag;
 }
+
+/* The fullscreen toolbar floats over the black picture. Theme colors would
+   make its text the same shade as the background in the light theme, so force
+   a white-on-dark palette there. */
+.fullscreen-toolbar,
+.fullscreen-toolbar .btn,
+.fullscreen-toolbar button,
+.fullscreen-toolbar label {
+  color: #f8fafc;
+}
+
+.fullscreen-toolbar .btn {
+  border-color: rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.fullscreen-toolbar .btn:hover {
+  border-color: rgba(255, 255, 255, 0.35);
+  background: rgba(255, 255, 255, 0.16);
+  color: #ffffff;
+}
+
+.fullscreen-toolbar .btn-quiet {
+  background: transparent;
+  color: rgba(255, 255, 255, 0.75);
+}
+
+.fullscreen-toolbar .btn-quiet:hover {
+  background: rgba(255, 255, 255, 0.14);
+  color: #ffffff;
+}
+
+.fullscreen-toolbar .btn-primary {
+  background: rgba(255, 255, 255, 0.22);
+  color: #ffffff;
+}
+
+.fullscreen-toolbar .field,
+.fullscreen-toolbar input,
+.fullscreen-toolbar select {
+  border-color: rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.1);
+  color: #ffffff;
+}

@@ -1,6 +1,7 @@
 import { House, Plus, X } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { openSessionWindow } from '../lib/windows'
+import { formatDisplayId } from '../lib/format'
 import { useAppStore, type SessionTab } from '../store/app'
 
 function StatusDot({ tab }: { tab: SessionTab }) {
@@ -77,7 +78,7 @@ export function TabBar() {
             type="button"
             onClick={() => setActiveTab(tab.id)}
             className="flex max-w-[190px] items-center gap-2 py-1.5"
-            title={`${tab.host}:${tab.port}`}
+            title={tab.deviceId ? `${formatDisplayId(tab.deviceId)} · ${tab.label}` : `${tab.host}:${tab.port}`}
           >
             <StatusDot tab={tab} />
             <span className="truncate">{tab.label}</span>

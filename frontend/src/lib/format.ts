@@ -9,3 +9,11 @@ export function formatRelative(value: number): string {
   if (Math.abs(hours) < 24) return formatter.format(hours, 'hour')
   return formatter.format(Math.round(hours / 24), 'day')
 }
+
+/// Directory device IDs are shown as 3-3-3 groups (AB3-DEF-GHJ). Anything
+/// else (a host, an empty value) is returned unchanged.
+export function formatDisplayId(value?: string | null): string {
+  const raw = (value ?? '').replace(/[^A-Za-z0-9]/g, '').toUpperCase()
+  if (raw.length !== 9) return value ?? ''
+  return `${raw.slice(0, 3)}-${raw.slice(3, 6)}-${raw.slice(6)}`
+}

@@ -34,6 +34,7 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from 'react'
 import { useTranslation } from 'react-i18next'
+import { formatDisplayId } from '../lib/format'
 import { codecName } from '../lib/protocol'
 import { shellInfo, windowAction } from '../lib/shell'
 import { openSessionWindow } from '../lib/windows'
@@ -1482,8 +1483,13 @@ export function SessionView({
             <div className="truncate text-sm font-medium">{tab.label}</div>
           </div>
           <div className="mt-0.5 truncate font-mono text-[11px] text-muted">
-            {tab.host}:{tab.port}
-            {welcome?.device_name ? ` · ${welcome.device_name}` : ''}
+            {tab.deviceId
+              ? `${formatDisplayId(tab.deviceId)} · ${
+                  welcome?.device_name || tab.label
+                }`
+              : `${tab.host}:${tab.port}${
+                  welcome?.device_name ? ` · ${welcome.device_name}` : ''
+                }`}
           </div>
         </div>
 
@@ -1937,7 +1943,7 @@ export function SessionView({
             <div
               ref={quickBarRef}
               className={
-                'pointer-events-auto absolute z-40 flex max-w-[96vw] items-center gap-0.5 overflow-x-auto rounded-full border border-white/10 bg-black/70 px-2 py-1.5 text-white shadow-2xl backdrop-blur-md ' +
+                'fullscreen-toolbar pointer-events-auto absolute z-40 flex max-w-[96vw] items-center gap-0.5 overflow-x-auto rounded-full border border-white/10 bg-black/70 px-2 py-1.5 text-white shadow-2xl backdrop-blur-md ' +
                 (fullPos ? '' : 'left-1/2 top-3 -translate-x-1/2')
               }
               style={fullPos ? { left: fullPos.x, top: fullPos.y } : undefined}
