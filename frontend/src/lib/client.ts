@@ -44,7 +44,11 @@ export interface Welcome {
     tile_h: number
     synthetic: boolean
     backend?: string
+    /** The capture backend implements set_display_mode. */
+    can_set_display_mode?: boolean
   }
+  /** Reconnect credential; reused instead of spending another code use. */
+  session_token?: string
   input?: boolean
   input_backend?: string
   clipboard?: boolean
@@ -238,6 +242,9 @@ export class MolinkClient {
   /// host) must not be mistaken for an ICE failure and retried.
   private lastErrorCode = ''
   private lastErrorMessage = ''
+  /// Session token from the last welcome. Reconnecting with it does not spend
+  /// another use of the host's temporary verification code.
+  private resumeToken = ''
   private retryAttempts = 0
   private retryTimer: number | null = null
   private autoRetryTimer: number | null = null
@@ -262,6 +269,7 @@ export class MolinkClient {
     this.directFailed = false
     this.lastErrorCode = ''
     this.lastErrorMessage = ''
+    this.resumeToken = ''
     this.lastConnect = { host, port, token, requestAccess, targetId,
                         forceRelay }
     this.openSocket()
@@ -273,6 +281,10 @@ export class MolinkClient {
     this.stopRetryTimers()
     this.retryAttempts = 0
     this.closedByUser = false
+    // A manual retry starts clean: a stale policy error would otherwise make
+    // the next close look like a rejection even when the code is fine.
+    this.lastErrorCode = ''
+    this.lastErrorMessage = ''
     this.handlers.onPhase?.('connecting')
     this.openSocket()
   }
@@ -327,8 +339,15 @@ export class MolinkClient {
         this.sendJson({ type: 'request-access', name: 'moLink web',
                         client: 'molink-web' })
       } else {
-        this.sendJson({ type: 'hello', token, client: 'molink-web',
-                        protocol: 1 })
+        // Send the code as well: if the host restarted, the resume token is
+        // unknown and the code still authenticates in the same round trip.
+        this.sendJson({
+          type: 'hello',
+          token,
+          ...(this.resumeToken ? { session: this.resumeToken } : {}),
+          client: 'molink-web',
+          protocol: 1,
+        })
       }
     }
 
@@ -365,6 +384,7 @@ export class MolinkClient {
           this.lastErrorCode === 'ip_banned' ||
           this.lastErrorCode === 'access_denied';
       if (policyError) {
+        this.resumeToken = ''
         if (!this.lastErrorMessage && closeReason) {
           this.lastErrorMessage = closeReason
         }
@@ -612,8 +632,13 @@ export class MolinkClient {
     }
 
     switch (message.type) {
-      case 'welcome':
-        this.handlers.onWelcome?.(message as unknown as Welcome)
+      case 'welcome': {
+        const welcome = message as unknown as Welcome
+        if (typeof welcome.session_token === 'string' &&
+            welcome.session_token !== '') {
+          this.resumeToken = welcome.session_token
+        }
+        this.handlers.onWelcome?.(welcome)
         this.retryAttempts = 0
         this.stopRetryTimers()
         this.handlers.onPhase?.('live')
@@ -625,6 +650,7 @@ export class MolinkClient {
         this.requestKeyframe()
         this.requestFrame()
         break
+      }
       case 'hello_required':
         // Expected before our hello is processed; nothing to report.
         break
@@ -728,6 +754,12 @@ export class MolinkClient {
         break
       case 'error': {
         const code = typeof message.code === 'string' ? message.code : ''
+        // The host rejected our credentials (wrong or exhausted code); a
+        // fresh code will arrive from the UI, so drop the stale resume token.
+        if (code === 'unauthorized' || code === 'ip_banned' ||
+            code === 'too_many_attempts') {
+          this.resumeToken = ''
+        }
         this.lastErrorCode = code
         this.lastErrorMessage =
             typeof message.message === 'string' ? message.message : code

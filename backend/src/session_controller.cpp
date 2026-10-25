@@ -8,6 +8,7 @@
 #include "session_controller.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -83,6 +84,13 @@ uint64_t epoch_us() {
 /// Replaying more than this means the client is hopelessly behind; a keyframe
 /// is cheaper than shipping dozens of deltas it will render in one go.
 constexpr uint32_t kMaxReplayFrames = 120;
+
+/// A display mode change resets the driver and the desktop duplication. A
+/// burst of requests (someone clicking through the resolution menu) can leave
+/// the adapter in a bad state, so the host answers at most one change per
+/// couple of seconds. The display is shared by every session.
+constexpr uint64_t kDisplayModeCooldownMs = 2000;
+std::atomic<uint64_t> g_last_display_mode_ms{0};
 
 const char* codec_name(uint8_t codec) {
   switch (static_cast<protocol::codec>(codec)) {
@@ -527,7 +535,8 @@ void send_capture_frame(session_transport* transport,
 }
 
 void send_welcome(session_transport* transport, const session_info& session,
-                  const session_options& opt) {
+                  const session_options& opt,
+                  const std::string& resume_token) {
   const std::shared_ptr<const captured_frame> frame =
       opt.capture ? opt.capture->latest() : nullptr;
 
@@ -535,6 +544,7 @@ void send_welcome(session_transport* transport, const session_info& session,
   j["type"] = "welcome";
   j["session"] = session.public_id;
   j["session_id"] = session.id;
+  if (!resume_token.empty()) j["session_token"] = resume_token;
   j["protocol"] = protocol::kProtocolVersion;
   j["service"] = MOLINK_CORE_SERVICE;
   j["version"] = opt.version;
@@ -585,6 +595,9 @@ void send_welcome(session_transport* transport, const session_info& session,
   j["tiles"]["tile_size"] = opt.tile_size;
   j["tiles"]["backend"] = opt.capture ? opt.capture->backend() : "none";
   j["tiles"]["synthetic"] = opt.capture ? !opt.capture->is_real() : true;
+  // Clients use this to offer the resolution menu only where it can work.
+  j["tiles"]["can_set_display_mode"] =
+      opt.capture && opt.capture->supports_display_mode();
   j["input"] = opt.input != nullptr && opt.input->available();
   j["input_backend"] = opt.input ? opt.input->backend() : "none";
   j["call"] = opt.voice != nullptr;
@@ -673,6 +686,11 @@ bool session_controller::start(const std::string* initial_token) {
     if (!locked && options_.auth && options_.auth->authenticate(
                                          *initial_token, /*consume=*/true)) {
       registry_->set_authenticated(session);
+      if (options_.auth->valid_session(*initial_token)) {
+        resume_token_ = *initial_token;
+      } else {
+        issue_resume_token();
+      }
       if (options_.lock) options_.lock->record_success(peer_ip);
     } else if (!locked) {
       if (options_.lock) {
@@ -714,10 +732,15 @@ void session_controller::send_welcome_message() {
   std::shared_ptr<session_transport> transport = transport_.lock();
   std::shared_ptr<session_info> session = session_.lock();
   if (transport && session) {
-    send_welcome(transport.get(), *session, options_);
+    send_welcome(transport.get(), *session, options_, resume_token_);
     attach_chat();
     attach_call();
   }
+}
+
+void session_controller::issue_resume_token() {
+  if (!resume_token_.empty()) return;
+  if (options_.auth) resume_token_ = options_.auth->create_session();
 }
 
 void session_controller::attach_call() {
@@ -881,6 +904,7 @@ void session_controller::approve_access_request() {
   registry_->set_awaiting_approval(session, false);
   registry_->set_authenticated(session);
   registry_->touch(*session);
+  issue_resume_token();
   if (options_.capture) options_.capture->set_active(true);
   send_welcome_message();
 }
@@ -922,13 +946,35 @@ void session_controller::on_text(const std::string& text) {
   };
 
   if (type == "hello") {
+    // A repeat hello must not cost another use of a multi-use code: the relay
+    // proxy replays one when its first datagram races the session setup, and
+    // a reconnect replays the whole handshake.
+    if (session->authenticated) {
+      send_welcome_message();
+      return;
+    }
     // A locked host still accepts a session that presents the verification
     // code: the lock asks for the code again, it is not a blanket refusal.
     // (Access requests without a code remain blocked below.)
     const bool locked_for_peer = options_.lock && options_.lock->locked() &&
                                  !is_loopback_peer(peer_ip);
-    if (!options_.auth || !options_.auth->authenticate(
-                              string_field(j, "token"), /*consume=*/true)) {
+    // `session` is the reconnect credential from a previous welcome. It is a
+    // session token, not a code: checking it through valid_session() keeps it
+    // from bypassing the temporary code's usage budget. While the host is
+    // locked it is ignored, so the lock still demands the code again.
+    const std::string resume = string_field(j, "session");
+    bool authenticated = false;
+    if (!locked_for_peer && !resume.empty() && options_.auth &&
+        options_.auth->valid_session(resume)) {
+      authenticated = true;
+      resume_token_ = resume;
+    } else if (options_.auth && options_.auth->authenticate(
+                                   string_field(j, "token"),
+                                   /*consume=*/true)) {
+      authenticated = true;
+      issue_resume_token();
+    }
+    if (!authenticated) {
       if (options_.lock) {
         const int delay = options_.lock->record_failure(peer_ip);
         if (delay != 0) {
@@ -1179,6 +1225,20 @@ void session_controller::on_text(const std::string& text) {
                  "display mode out of range");
       return;
     }
+    if (!options_.capture->supports_display_mode()) {
+      send_error(transport.get(), "display_mode_unsupported",
+                 "this capture path cannot change the display mode");
+      return;
+    }
+    const uint64_t requested_ms = now_ms();
+    const uint64_t previous_ms = g_last_display_mode_ms.load();
+    if (previous_ms != 0 && requested_ms > previous_ms &&
+        requested_ms - previous_ms < kDisplayModeCooldownMs) {
+      send_error(transport.get(), "display_mode_busy",
+                 "wait before changing the display mode again");
+      return;
+    }
+    g_last_display_mode_ms.store(requested_ms);
     if (!options_.capture->set_display_mode(static_cast<uint16_t>(width),
                                             static_cast<uint16_t>(height))) {
       send_error(transport.get(), "display_mode_failed",

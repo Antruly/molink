@@ -390,6 +390,12 @@ export function SessionView({
   // A wrong verification code is a policy answer, not a network failure.
   // Ask for a new code instead of reconnecting with the same one.
   const needsCode = tab.errorCode === 'unauthorized'
+  // A rejected display-mode change is not a broken link: reconnecting cannot
+  // fix it, and the backend cannot apply the mode at all.
+  const displayModeError =
+    tab.errorCode === 'display_mode_failed' ||
+    tab.errorCode === 'display_mode_unsupported' ||
+    tab.errorCode === 'display_mode_busy'
   const submitCode = () => {
     const value = retryCode.trim()
     if (value === '') return
@@ -1731,9 +1737,15 @@ export function SessionView({
           <span className="min-w-0 flex-1">
             {needsCode
               ? t('session.badCode')
-              : tab.error
-                ? String(t(`error.${tab.error}`, { defaultValue: tab.error }))
-                : actionError}
+              : tab.errorCode === 'display_mode_busy'
+                ? t('session.displayModeBusy')
+                : displayModeError
+                  ? t('session.displayModeFailed')
+                  : tab.error
+                    ? String(
+                        t(`error.${tab.error}`, { defaultValue: tab.error }),
+                      )
+                    : actionError}
           </span>
           {needsCode ? (
             <form
@@ -1760,13 +1772,22 @@ export function SessionView({
               </button>
             </form>
           ) : null}
-          {tab.error && !needsCode ? (
+          {tab.error && !needsCode && !displayModeError ? (
             <button
               type="button"
               onClick={reconnect}
               className="btn h-7 px-2 text-[11px]"
             >
               {t('session.reconnect')}
+            </button>
+          ) : null}
+          {displayModeError ? (
+            <button
+              type="button"
+              onClick={() => connection()?.dismissError()}
+              className="btn h-7 px-2 text-[11px]"
+            >
+              {t('error.dismiss')}
             </button>
           ) : null}
           {tab.error && !needsCode && /token|unauth|auth|invalid/i.test(tab.error) ? (
@@ -1854,6 +1875,12 @@ export function SessionView({
                 {qualityWatermark && welcome ? (
                   <span className="rounded-md border border-white/15 bg-black/65 px-2 py-1 font-mono text-[10px] uppercase text-white/85 backdrop-blur">
                     {codecLabel}
+                  </span>
+                ) : null}
+                {qualityWatermark && welcome?.tiles.backend ? (
+                  <span className="rounded-md border border-white/15 bg-black/65 px-2 py-1 font-mono text-[10px] text-white/85 backdrop-blur">
+                    {welcome.tiles.backend}
+                    {welcome.version ? ` · v${welcome.version}` : ''}
                   </span>
                 ) : null}
                 {syntheticLabel ? (
@@ -2300,7 +2327,8 @@ export function SessionView({
                   </select>
                 </label>
               ) : null}
-              {welcome && !welcome.tiles.synthetic ? (
+              {welcome && !welcome.tiles.synthetic &&
+              welcome.tiles.can_set_display_mode !== false ? (
                 <label
                   className="flex items-center gap-1 rounded-md border border-line bg-panel px-1.5 text-muted"
                   title={t('session.resolution')}

@@ -20,8 +20,11 @@ export function SimpleHomeView() {
   const setForceRelay = useAppStore((state) => state.setForceRelay)
 
   const [mode, setMode] = useState<SessionIntent>('desktop')
-  const [input, setInput] = useState('')
-  const [code, setCode] = useState('')
+  const input = useAppStore((state) => state.connectDraft.input)
+  const code = useAppStore((state) => state.connectDraft.code)
+  const setConnectDraft = useAppStore((state) => state.setConnectDraft)
+  const setInput = (value: string) => setConnectDraft({ input: value })
+  const setCode = (value: string) => setConnectDraft({ code: value })
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
@@ -39,7 +42,9 @@ export function SimpleHomeView() {
       item.port,
       token,
       item.label,
-      false,
+      // Remember the code per device: a single click on its card later can
+      // echo it (masked) without retyping.
+      !requestAccess,
       requestAccess,
       preferredMode,
       intent,
@@ -152,8 +157,22 @@ export function SimpleHomeView() {
         <div className="lg:col-span-9">
           <DeviceList
             mode={mode}
+            onPick={(item) => {
+              // A single click only fills the form: the ID goes into the
+              // input box and a remembered code is echoed (masked) into the
+              // code field. Double-click or the mode buttons connect.
+              const target =
+                item.id && item.source !== 'lan'
+                  ? item.id
+                  : `${item.host}:${item.port}`
+              setConnectDraft({
+                input: target,
+                ...(item.token ? { code: item.token } : {}),
+              })
+              setError(null)
+            }}
             onConnect={(item, intent) => {
-              const token = code.trim() || item.token || ''
+              const token = item.token || code.trim()
               connect(item, intent, token)
             }}
           />

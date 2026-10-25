@@ -197,7 +197,9 @@ int main(int argc, char** argv) {
     }
   }
   if (!dpi_ok) {
-    if (HMODULE shcore = GetModuleHandleW(L"shcore.dll")) {
+    // shcore.dll is not loaded into every process; load it explicitly so the
+    // per-monitor fallback also works on Windows 8.1.
+    if (HMODULE shcore = LoadLibraryW(L"shcore.dll")) {
       auto set_awareness = reinterpret_cast<set_dpi_awareness_fn>(
           GetProcAddress(shcore, "SetProcessDpiAwareness"));
       if (set_awareness != nullptr) {

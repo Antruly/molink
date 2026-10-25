@@ -98,7 +98,10 @@ export function ConnectCard({
               value={code}
               onChange={(event) => setCode(event.target.value)}
               placeholder={t('simple.codePlaceholder')}
-              autoComplete="off"
+              type="password"
+              autoComplete="new-password"
+              spellCheck={false}
+              aria-label={t('simple.codePlaceholder')}
             />
           </label>
           <span className="text-[10px] text-muted">

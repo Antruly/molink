@@ -175,6 +175,12 @@ class capture_source {
     return false;
   }
 
+  /// True when set_display_mode() can do something on this backend. The
+  /// session advertises this so clients do not offer a resolution menu that
+  /// is guaranteed to fail (the secure-desktop, GDI and X11 sources cannot
+  /// change the mode).
+  virtual bool supports_display_mode() const { return false; }
+
   /// True when frames come from a real display rather than the test pattern.
   virtual bool is_real() const = 0;
 

@@ -241,6 +241,8 @@
     "qualityLossless": "Lossless",
     "qualityGame": "Game",
     "badCode": "The code is incorrect. Enter it again.",
+    "displayModeFailed": "This capture path cannot change the display mode (the background service/lock-screen capture is read-only, or the driver rejected the mode). Change the display settings on the host instead.",
+    "displayModeBusy": "The resolution was just changed; wait two seconds and try again.",
     "enterCode": "Authorization code",
     "connect": "Connect",
     "relay": "Relay"
@@ -411,6 +413,8 @@
     "codePlaceholder": "Verification code (optional)",
     "requestHint": "Without a code, the other side must approve",
     "codeHint": "A code connects directly",
+    "clickToFill": "Click a card to fill the form; double-click to connect",
+    "doubleClickConnect": "Double-click to connect",
     "connect": "Connect",
     "requestAccess": "Send request",
     "connecting": "Connecting…",

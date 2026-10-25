@@ -343,6 +343,12 @@ export class SessionConnection {
     this.client.setDisplayMode(width, height)
   }
 
+  /// Clears an application-level error shown in the tab (for example a
+  /// rejected display-mode change) without touching the connection.
+  dismissError(): void {
+    this.sink.onPatch({ error: null, errorCode: null })
+  }
+
   requestClipboard(): void {
     this.client.requestClipboard()
   }

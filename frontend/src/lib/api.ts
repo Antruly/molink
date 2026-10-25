@@ -132,6 +132,8 @@ export interface UiPreferences {
   uiMode?: 'simple' | 'advanced'
   savedDevices?: SavedDevicePreference[]
   recents?: RecentPreference[]
+  /// Last values typed into the simple connect form.
+  connectDraft?: { input: string; code: string }
 }
 
 export interface ServerState {

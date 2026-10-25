@@ -38,6 +38,39 @@ void log_line(const std::string& message) {
   if (out) out << message << "\n";
 }
 
+// GDI virtualization: an unaware process sees a 2560x1440 screen at 150%
+// scaling as 1707x960, and BitBlt returns that scaled bitmap. The helper is a
+// separate process from molink-core, so the core's DPI setup does not apply
+// here: without this call the session reports and streams logical pixels.
+// Match molink-core: per-monitor v2, then per-monitor, then Win7 system DPI.
+void enable_physical_pixels() {
+  using set_dpi_ctx_fn = BOOL(WINAPI*)(void*);
+  using set_dpi_awareness_fn = HRESULT(WINAPI*)(int);
+  bool ok = false;
+  if (HMODULE user32 = GetModuleHandleW(L"user32.dll")) {
+    auto set_ctx = reinterpret_cast<set_dpi_ctx_fn>(
+        GetProcAddress(user32, "SetProcessDpiAwarenessContext"));
+    if (set_ctx != nullptr) {
+      // PER_MONITOR_AWARE_V2 = -4
+      ok = set_ctx(reinterpret_cast<void*>(-4)) != FALSE;
+    }
+  }
+  if (!ok) {
+    // Load shcore explicitly: it is not mapped into every process, so
+    // GetModuleHandle would miss it on Windows 8.1.
+    HMODULE shcore = LoadLibraryW(L"shcore.dll");
+    if (shcore != nullptr) {
+      auto set_awareness = reinterpret_cast<set_dpi_awareness_fn>(
+          GetProcAddress(shcore, "SetProcessDpiAwareness"));
+      if (set_awareness != nullptr) {
+        // PROCESS_PER_MONITOR_DPI_AWARE = 2
+        ok = SUCCEEDED(set_awareness(2));
+      }
+    }
+  }
+  if (!ok) SetProcessDPIAware();
+}
+
 std::string utf8(const wchar_t* text) {
   if (text == nullptr) return {};
   const int size = WideCharToMultiByte(CP_UTF8, 0, text, -1, nullptr, 0,
@@ -128,11 +161,14 @@ std::string desktop_json() {
   wchar_t name[256] = {};
   DWORD needed = 0;
   GetUserObjectInformationW(g_desktop, UOI_NAME, name, sizeof(name), &needed);
+  HDC screen = GetDC(nullptr);
+  const int dpi = screen != nullptr ? GetDeviceCaps(screen, LOGPIXELSX) : 0;
+  if (screen != nullptr) ReleaseDC(nullptr, screen);
   char buffer[512] = {};
   std::snprintf(buffer, sizeof(buffer),
-                R"({"ok":true,"desktop":"%s","width":%d,"height":%d})",
+                R"({"ok":true,"desktop":"%s","width":%d,"height":%d,"dpi":%d})",
                 utf8(name).c_str(), GetSystemMetrics(SM_CXSCREEN),
-                GetSystemMetrics(SM_CYSCREEN));
+                GetSystemMetrics(SM_CYSCREEN), dpi);
   return buffer;
 }
 
@@ -475,6 +511,7 @@ void input_pipe_loop(std::atomic<bool>& running) {
 }  // namespace
 
 int wmain() {
+  enable_physical_pixels();
   std::string err;
   if (!open_input_desktop(err)) {
     log_line("open_input_desktop failed: " + err);

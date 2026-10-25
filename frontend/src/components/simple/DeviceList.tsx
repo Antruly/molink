@@ -33,9 +33,13 @@ type Tab = 'recent' | 'saved' | 'lan' | 'online'
 
 export function DeviceList({
   mode,
+  onPick,
   onConnect,
 }: {
   mode: SessionIntent
+  /// Single click: fill the connect form instead of starting a session.
+  onPick: (item: DeviceItem) => void
+  /// Double click or an explicit mode button: connect now.
   onConnect: (item: DeviceItem, intent: SessionIntent) => void
 }) {
   const { t } = useTranslation()
@@ -405,11 +409,13 @@ export function DeviceList({
                 role="button"
                 tabIndex={0}
                 className="group cursor-pointer rounded-xl border border-line bg-panel/35 p-3 transition hover:border-accent/40 hover:bg-panel/60"
-                onClick={() => onConnect(item, mode)}
+                title={t('simple.clickToFill')}
+                onClick={() => onPick(item)}
+                onDoubleClick={() => onConnect(item, mode)}
                 onKeyDown={(event) => {
                   if (event.key === 'Enter' || event.key === ' ') {
                     event.preventDefault()
-                    onConnect(item, mode)
+                    onPick(item)
                   }
                 }}
               >
@@ -477,7 +483,9 @@ export function DeviceList({
                   <tr
                     key={item.key}
                     className="cursor-pointer"
-                    onClick={() => onConnect(item, mode)}
+                    title={t('simple.clickToFill')}
+                    onClick={() => onPick(item)}
+                    onDoubleClick={() => onConnect(item, mode)}
                   >
                     <td>
                       <div className="flex items-center gap-2">

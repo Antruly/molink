@@ -177,7 +177,7 @@
 2. 客户端发送：
 
 ```json
-{"type":"hello","token":"<token>","client":"molink-web","protocol":1}
+{"type":"hello","token":"<token>","session":"<session_token>","client":"molink-web","protocol":1}
 ```
 
 3. 令牌正确 → `welcome`；错误 → `error` 后以 close code `1008` 关闭。
@@ -185,6 +185,11 @@
 5. 错误令牌按来源 IP 计数，与 `/api/login` 共用阶梯封禁额度（见 §5.1）；封禁中的来源在握手后立即以 `1008` 关闭。
 
 令牌来自 `molink-core` 启动时的随机生成（32 位十六进制）或 `MOLINK_TOKEN` / `--token`。
+
+`welcome` 会带一个 `session_token`。断线重连时客户端把它放在 `session` 字段（`token`
+仍带原验证码），服务端先用会话令牌鉴权，成功则不消耗验证码次数；会话令牌失效
+（主机重启）或主机处于锁定状态时，退回用 `token` 里的验证码鉴权。对已鉴权的连接
+重复发 `hello` 只会重发 `welcome`，不会再次扣减多次验证码的次数。
 
 ### 4.1.1 免密审批
 
@@ -211,7 +216,7 @@
 | type | 字段 | 说明 |
 |---|---|---|
 | `hello_required` | `protocol`, `service`, `version` | 等待鉴权 |
-| `welcome` | `session`, `session_id`, `protocol`, `service`, `version`, `transport`, `tiles`, `displays`, `display_index` | 鉴权成功；`displays` 为可切换显示器列表 |
+| `welcome` | `session`, `session_id`, `session_token`, `protocol`, `service`, `version`, `transport`, `tiles`, `displays`, `display_index` | 鉴权成功；`displays` 为可切换显示器列表；`session_token` 用于重连免扣验证码次数 |
 | `ping` | `t` | 应用层心跳，每 15 秒 |
 | `pong` | `t`, `server_ms` | 对客户端 ping 的回应 |
 | `access-requested` | `id` | 已登记免密请求，等待本机用户审批 |
@@ -244,17 +249,19 @@
 }
 ```
 
-`backend` 取值：`x11-shm`、`x11`、`synthetic`。`synthetic: true` 表示当前是合成测试帧，
+`backend` 取值：`x11-shm`、`x11`、`dxgi-duplication`、`gdi`、`secure-desktop`、
+`synthetic`。`synthetic: true` 表示当前是合成测试帧，
 不是真实屏幕。`codec` 反映当前帧实际使用的编码（`bgra`、`deflate-bgra`、`rgb24`、
 `rgb565`、`deflate-rgb24` 或 `deflate-rgb565`）；`quality` 是当前画质预设
 （`smooth`/`balanced`/`quality`/`raw`）；`input` 表示本机是否支持输入注入；
-`clipboard` 表示本机是否支持剪贴板同步。
+`clipboard` 表示本机是否支持剪贴板同步；`can_set_display_mode` 表示该采集后端
+能否执行 `display-mode`（`secure-desktop`、`gdi`、X11 与合成帧均为 `false`）。
 
 **客户端 → 服务端**
 
 | type | 字段 | 说明 |
 |---|---|---|
-| `hello` | `token` | 鉴权 |
+| `hello` | `token`, `session`（可选） | 鉴权；`session` 是上次 `welcome` 给的会话令牌，优先于验证码且不消耗次数 |
 | `request-access` | `name`, `client` | 无验证码请求远程访问；需被控端开关开启 |
 | `ping` | `t` | 客户端主动测延迟；服务端回 `pong` 并原样带回 `t` |
 | `pong` | `t` | 回应服务端心跳 |
@@ -263,6 +270,7 @@
 | `capture-fps` | `fps` (1..60) | 调整主机的采集帧率（全局）；服务端回 `capture-fps` |
 | `quality` | `mode`（`smooth`/`balanced`/`quality`/`ultra`/`lossless`/`raw`/`game`），可选 `fps` | 切换主机的编码预设（全局）；`fps` 同时调整采集帧率（为兼容旧客户端保留）。服务端回 `quality`，带实际生效的 `mode` 与 `format` |
 | `display` | `index` | 切换被控端显示器（全局）；服务端回 `display` 并发送新关键帧 |
+| `display-mode` | `width`, `height` | 请求主机切换显示模式；仅当 `welcome.tiles.can_set_display_mode` 不为 `false` 时可用（目前仅 DXGI 采集）。成功回 `display-mode` 并发送关键帧；后端不支持回 `display_mode_unsupported`，驱动拒绝回 `display_mode_failed`，两秒内重复请求回 `display_mode_busy` |
 | `input` | `events[]` | 指针/键盘事件；需要已鉴权，见 §4.3 |
 | `bye` | — | 正常关闭 |
 

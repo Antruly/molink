@@ -110,6 +110,8 @@ class windows_capture final : public capture_base {
     return true;
   }
 
+  bool supports_display_mode() const override { return true; }
+
   bool set_display_mode(uint16_t width, uint16_t height) override {
     const display_info info = current_display_info();
     if (info.name.empty() || width == 0 || height == 0) return false;

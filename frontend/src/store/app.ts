@@ -125,6 +125,14 @@ export interface SavedDevice {
   savedAt: number
 }
 
+/// The last values typed into the simple connect form. The shell opens a new
+/// ephemeral port on every launch, so localStorage alone would lose them; the
+/// same object is also mirrored into the core's ui.json.
+export interface ConnectDraft {
+  input: string
+  code: string
+}
+
 interface AppState {
   theme: Theme
   qualityWatermark: boolean
@@ -154,6 +162,7 @@ interface AppState {
   tabs: SessionTab[]
   activeTabId: string
   recents: RecentConnection[]
+  connectDraft: ConnectDraft
 
   setTheme: (theme: Theme) => void
   toggleTheme: () => void
@@ -166,6 +175,7 @@ interface AppState {
   setPreferredMode: (mode: SessionMode) => void
   setForceRelay: (value: boolean) => void
   setUiMode: (mode: UiMode) => void
+  setConnectDraft: (patch: Partial<ConnectDraft>) => void
   loadUiPreferences: () => Promise<void>
   saveDevice: (device: Omit<SavedDevice, 'key' | 'savedAt'> & { key?: string }) => void
   patchSavedDevice: (id: string, patch: Partial<SavedDevice>) => void
@@ -236,6 +246,7 @@ const HISTORY_VIEW_KEY = 'molink.historyView'
 const MODE_KEY = 'molink.sessionMode'
 const UI_MODE_KEY = 'molink.uiMode'
 const SAVED_DEVICES_KEY = 'molink.savedDevices'
+const CONNECT_DRAFT_KEY = 'molink.connectDraft'
 const EMPTY_STATS: Stats = {
   fps: 0,
   wireFps: 0,
@@ -348,6 +359,19 @@ function initialUiMode(): UiMode {
   return saved === 'advanced' ? 'advanced' : 'simple'
 }
 
+function initialConnectDraft(): ConnectDraft {
+  try {
+    const parsed = JSON.parse(readStorage(CONNECT_DRAFT_KEY)) as ConnectDraft
+    if (parsed && typeof parsed.input === 'string' &&
+        typeof parsed.code === 'string') {
+      return { input: parsed.input, code: parsed.code }
+    }
+  } catch {
+    // Fall through to an empty draft.
+  }
+  return { input: '', code: '' }
+}
+
 function initialSavedDevices(): SavedDevice[] {
   try {
     const parsed = JSON.parse(readStorage(SAVED_DEVICES_KEY)) as SavedDevice[]
@@ -421,6 +445,7 @@ export const useAppStore = create<AppState>((set, get) => {
         uiMode: get().uiMode,
         savedDevices: saved,
         recents: get().recents,
+        connectDraft: get().connectDraft,
       }).catch(() => undefined)
     }, 400)
   }
@@ -489,6 +514,7 @@ export const useAppStore = create<AppState>((set, get) => {
     tabs: [],
     activeTabId: 'home',
     recents: initialRecents(),
+    connectDraft: initialConnectDraft(),
 
     setTheme: (theme) => {
       writeStorage(THEME_KEY, theme)
@@ -549,6 +575,13 @@ export const useAppStore = create<AppState>((set, get) => {
       schedulePersist()
     },
 
+    setConnectDraft: (patch) => {
+      const next: ConnectDraft = { ...get().connectDraft, ...patch }
+      writeStorage(CONNECT_DRAFT_KEY, JSON.stringify(next))
+      set({ connectDraft: next })
+      schedulePersist()
+    },
+
     loadUiPreferences: async () => {
       const token = get().token
       if (!token) return
@@ -587,6 +620,16 @@ export const useAppStore = create<AppState>((set, get) => {
         if (Array.isArray(prefs.recents) && prefs.recents.length > 0) {
           next.recents = prefs.recents.slice(0, 8)
           writeStorage(RECENT_KEY, JSON.stringify(next.recents))
+        }
+        const draft = prefs.connectDraft
+        if (draft && typeof draft.input === 'string' &&
+            typeof draft.code === 'string' &&
+            (draft.input !== '' || draft.code !== '')) {
+          next.connectDraft = { input: draft.input, code: draft.code }
+          writeStorage(
+            CONNECT_DRAFT_KEY,
+            JSON.stringify(next.connectDraft),
+          )
         }
         set(next)
       } catch {

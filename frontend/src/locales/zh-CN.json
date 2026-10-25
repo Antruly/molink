@@ -241,6 +241,8 @@
     "qualityLossless": "无损",
     "qualityGame": "游戏",
     "badCode": "授权码不正确，请重新输入",
+    "displayModeFailed": "当前采集方式无法修改分辨率（后台服务/锁屏采集为只读画面，或显卡驱动不接受该模式）。请在主机上直接调整显示设置。",
+    "displayModeBusy": "分辨率刚切换过，请等两秒再试。",
     "enterCode": "授权码",
     "connect": "连接",
     "relay": "中继"
@@ -411,6 +413,8 @@
     "codePlaceholder": "验证码（可选）",
     "requestHint": "不填验证码将发送请求，由对方确认",
     "codeHint": "填写验证码将直接连接",
+    "clickToFill": "单击卡片填入连接框，双击直接连接",
+    "doubleClickConnect": "双击直接连接",
     "connect": "连接",
     "requestAccess": "发送连接请求",
     "connecting": "正在连接…",

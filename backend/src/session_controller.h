@@ -78,6 +78,10 @@ class session_controller final
   void on_binary(const uint8_t* data, std::size_t len);
   void on_close(int code, const std::string& reason);
   void send_welcome_message();
+  /// Creates the reconnect credential handed out in the welcome. A client
+  /// that drops and reconnects presents it instead of spending another use of
+  /// a multi-use verification code.
+  void issue_resume_token();
   /// Sends the chat history and starts receiving new messages. Called once the
   /// session has authenticated.
   void attach_chat();
@@ -99,6 +103,9 @@ class session_controller final
   std::weak_ptr<session_transport> transport_;
   std::weak_ptr<session_info> session_;
   session_options options_;
+  /// Issued once per connection; unknown to the host after a restart, in
+  /// which case the client falls back to its verification code.
+  std::string resume_token_;
   std::unique_ptr<file_transfer> files_;
   int chat_subscription_ = 0;
   int audio_subscription_ = 0;
