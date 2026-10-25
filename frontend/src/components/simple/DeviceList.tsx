@@ -8,13 +8,7 @@ import {
   Star,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import {
-  ApiError,
-  fetchDomainDevices,
-  lookupDevices,
-  type DomainDevice,
-  type PeerStatus,
-} from '../../lib/api'
+import { lookupDevices, type PeerStatus } from '../../lib/api'
 import { platformEmoji } from '../../lib/avatar'
 import { formatRelative } from '../../lib/format'
 import { useAppStore, type SessionIntent } from '../../store/app'
@@ -29,12 +23,12 @@ export interface DeviceItem {
   platform?: string
   avatar?: string
   online?: boolean
-  source: 'recent' | 'saved' | 'lan' | 'domain'
+  source: 'recent' | 'saved' | 'lan'
   token?: string
   lastSeen: number
 }
 
-type Tab = 'recent' | 'saved' | 'domain' | 'lan' | 'online'
+type Tab = 'recent' | 'saved' | 'lan' | 'online'
 
 export function DeviceList({
   mode,
@@ -48,7 +42,6 @@ export function DeviceList({
   const savedDevices = useAppStore((state) => state.savedDevices)
   const nearby = useAppStore((state) => state.nearby)
   const localMode = useAppStore((state) => state.localMode)
-  const token = useAppStore((state) => state.token)
   const server = useAppStore((state) => state.server)
   const refreshDiscovery = useAppStore((state) => state.refreshDiscovery)
   const saveDevice = useAppStore((state) => state.saveDevice)
@@ -59,8 +52,6 @@ export function DeviceList({
 
   const [tab, setTab] = useState<Tab>('recent')
   const [peers, setPeers] = useState<Record<string, PeerStatus>>({})
-  const [domainPeers, setDomainPeers] = useState<DomainDevice[]>([])
-  const [domainInvalid, setDomainInvalid] = useState(false)
   const [nowTick, setNowTick] = useState(() => Date.now())
 
   useEffect(() => {
@@ -71,9 +62,6 @@ export function DeviceList({
   const serverInfo = server?.server
   const serverUrl = serverInfo?.url ?? ''
   const serverEnabled = serverInfo?.enabled ?? true
-  const registered = serverInfo?.registered ?? false
-  const domainCode = serverInfo?.domain ?? ''
-  const domainValid = serverInfo?.domain_valid ?? false
 
   useEffect(() => {
     if (!localMode) return
@@ -124,45 +112,6 @@ export function DeviceList({
     }
   }, [refreshPeers])
 
-  const refreshDomain = useCallback(async () => {
-    if (!localMode || !serverEnabled || !token) {
-      setDomainPeers([])
-      setDomainInvalid(false)
-      return
-    }
-    // Older directories (0.2.0) never issue a domain code and have no
-    // /v1/devices/domain route; do not turn that 404 into "code revoked".
-    if (!registered || domainCode === '') {
-      setDomainPeers([])
-      setDomainInvalid(false)
-      return
-    }
-    if (!domainValid) {
-      setDomainPeers([])
-      setDomainInvalid(true)
-      return
-    }
-    try {
-      const result = await fetchDomainDevices(token)
-      setDomainPeers(result.devices)
-      setDomainInvalid(false)
-    } catch (caught) {
-      setDomainPeers([])
-      setDomainInvalid(
-        caught instanceof ApiError && caught.code === 'unknown_domain',
-      )
-    }
-  }, [localMode, serverEnabled, token, registered, domainCode, domainValid])
-
-  useEffect(() => {
-    const initial = window.setTimeout(() => void refreshDomain(), 0)
-    const timer = window.setInterval(() => void refreshDomain(), 30000)
-    return () => {
-      window.clearTimeout(initial)
-      window.clearInterval(timer)
-    }
-  }, [refreshDomain])
-
   const recentItems = useMemo<DeviceItem[]>(
     () =>
       recents.map((recent) => {
@@ -205,23 +154,6 @@ export function DeviceList({
     [savedDevices, peers],
   )
 
-  const domainItems = useMemo<DeviceItem[]>(
-    () =>
-      domainPeers.map((peer) => ({
-        key: `domain:${peer.id}`,
-        id: peer.id,
-        host: peer.host,
-        port: peer.port,
-        label: peer.name || peer.display_id || peer.id,
-        platform: peer.platform,
-        avatar: peer.avatar,
-        online: peer.online,
-        source: 'domain',
-        lastSeen: peer.last_seen_ms,
-      })),
-    [domainPeers],
-  )
-
   const lanItems = useMemo<DeviceItem[]>(
     () =>
       nearby.map((peer) => ({
@@ -262,11 +194,9 @@ export function DeviceList({
       ? recentItems
       : tab === 'saved'
         ? savedItems
-        : tab === 'domain'
-          ? domainItems
-          : tab === 'lan'
-            ? lanItems
-            : onlineItems
+        : tab === 'lan'
+          ? lanItems
+          : onlineItems
 
   const isSaved = (item: DeviceItem) =>
     savedDevices.some(
@@ -359,11 +289,6 @@ export function DeviceList({
   const tabs: Array<{ value: Tab; label: string; count?: number }> = [
     { value: 'recent', label: t('simple.recent'), count: recentItems.length },
     { value: 'saved', label: t('simple.saved'), count: savedItems.length },
-    {
-      value: 'domain',
-      label: t('simple.domain'),
-      count: domainItems.length,
-    },
     { value: 'lan', label: t('simple.lan'), count: lanItems.length },
     { value: 'online', label: t('simple.onlineDevices'), count: onlineItems.length },
   ]
@@ -373,27 +298,17 @@ export function DeviceList({
       ? t('simple.noRecent')
       : tab === 'saved'
         ? t('simple.noSaved')
-        : tab === 'domain'
-          ? !serverEnabled
+        : tab === 'lan'
+          ? localMode
+            ? t('simple.noLan')
+            : t('simple.lanLocalOnly')
+          : !serverEnabled
             ? t('simple.serverDisabledHint')
-            : !registered
-              ? t('simple.serverPending')
-              : domainInvalid || (domainCode !== '' && !domainValid)
-                ? t('simple.domainRevokedHint')
-                : domainCode === ''
-                  ? t('simple.domainPending')
-                  : t('simple.noDomainPeers')
-          : tab === 'lan'
-            ? localMode
-              ? t('simple.noLan')
-              : t('simple.lanLocalOnly')
-            : !serverEnabled
-              ? t('simple.serverDisabledHint')
-              : t('simple.noOnline')
+            : t('simple.noOnline')
 
   return (
-    <section className="card flex h-full min-h-[320px] flex-col p-0">
-      <div className="flex flex-wrap items-center gap-2 border-b border-line-soft p-3">
+    <section className="card flex h-full min-h-[240px] flex-col p-0">
+      <div className="flex flex-wrap items-center gap-2 border-b border-line-soft p-2.5">
         <div className="flex flex-wrap items-center gap-0.5">
           {tabs.map((item) => (
             <button
@@ -444,13 +359,13 @@ export function DeviceList({
         </div>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto p-3">
+      <div className="min-h-0 flex-1 overflow-y-auto p-2.5">
         {items.length === 0 ? (
-          <div className="rounded-xl border border-dashed border-line px-4 py-12 text-center text-[12px] leading-relaxed text-muted">
+          <div className="rounded-xl border border-dashed border-line px-4 py-8 text-center text-[12px] leading-relaxed text-muted">
             {emptyText}
           </div>
         ) : historyView === 'cards' ? (
-          <div className="grid gap-2.5 sm:grid-cols-2 2xl:grid-cols-3">
+          <div className="grid gap-2 sm:grid-cols-2 2xl:grid-cols-3">
             {items.map((item) => (
               <div
                 key={item.key}

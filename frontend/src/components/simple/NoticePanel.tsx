@@ -52,14 +52,6 @@ export function NoticePanel() {
           <Server size={12} className={online ? 'text-accent' : 'text-muted'} />
           {statusText}
         </div>
-        <div className="mt-1 truncate font-mono text-[10px] text-muted">
-          {enabled ? info?.url || t('simple.serverPending') : t('simple.lanOnly')}
-        </div>
-        {info?.last_error && enabled ? (
-          <div className="mt-1 line-clamp-2 text-[10px] leading-relaxed text-warn">
-            {info.last_error}
-          </div>
-        ) : null}
       </div>
 
       {update ? (

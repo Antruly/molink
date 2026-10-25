@@ -24,7 +24,7 @@ constexpr uint64_t kStrikeResetMs = 24ull * 60 * 60 * 1000;
 
 lock_state::lock_state(int timeout_seconds)
     : timeout_seconds_(timeout_seconds < 0 ? 0 : timeout_seconds),
-      last_activity_ms_(now_ms()) {
+      last_remote_activity_ms_(now_ms()) {
   for (const std::string& ip : load_banned_ips()) {
     const std::string normalized = normalize_peer(ip);
     if (!normalized.empty()) banned_.insert(normalized);
@@ -44,7 +44,7 @@ int lock_state::timeout_seconds() const {
 void lock_state::set_timeout_seconds(int seconds) {
   std::lock_guard<std::mutex> lock(mutex_);
   timeout_seconds_ = seconds < 0 ? 0 : seconds;
-  last_activity_ms_ = now_ms();
+  last_remote_activity_ms_ = now_ms();
 }
 
 int lock_state::total_sessions_locked(uint64_t now) const {
@@ -61,46 +61,72 @@ int lock_state::total_sessions_locked(uint64_t now) const {
   return total;
 }
 
+int lock_state::remote_sessions_locked(uint64_t now) const {
+  int total = 0;
+  for (const auto& entry : ui_clients_) {
+    if (!entry.second.remote) continue;
+    if (now > entry.second.updated_ms &&
+        now - entry.second.updated_ms > 60000) {
+      continue;
+    }
+    total += entry.second.sessions;
+  }
+  return total;
+}
+
 int lock_state::open_sessions() const {
   std::lock_guard<std::mutex> lock(mutex_);
   return total_sessions_locked(now_ms());
 }
 
-void lock_state::set_ui_sessions(const std::string& client, int count) {
+void lock_state::set_ui_sessions(const std::string& client, int count,
+                                 bool remote) {
   std::lock_guard<std::mutex> lock(mutex_);
   ui_client& entry = ui_clients_[client.empty() ? "default" : client];
   entry.sessions = count < 0 ? 0 : (count > 64 ? 64 : count);
+  entry.remote = remote;
   entry.updated_ms = now_ms();
-  last_activity_ms_ = entry.updated_ms;
 }
 
-void lock_state::touch() {
+void lock_state::note_remote() {
   std::lock_guard<std::mutex> lock(mutex_);
-  last_activity_ms_ = now_ms();
+  if (!remote_seen_) {
+    remote_seen_ = true;
+    last_remote_activity_ms_ = now_ms();
+  }
+}
+
+void lock_state::touch(bool remote) {
+  // Local activity must not postpone a remote tab's idle lock: the person at
+  // the machine and the person behind the remote browser are different users.
+  if (!remote) return;
+  std::lock_guard<std::mutex> lock(mutex_);
+  remote_seen_ = true;
+  last_remote_activity_ms_ = now_ms();
 }
 
 bool lock_state::should_lock(uint64_t now,
                              bool has_authenticated_sessions) const {
   std::lock_guard<std::mutex> lock(mutex_);
   if (locked_ || timeout_seconds_ == 0 || has_authenticated_sessions ||
-      total_sessions_locked(now) > 0) {
+      !remote_seen_ || remote_sessions_locked(now) > 0) {
     return false;
   }
-  return now > last_activity_ms_ &&
-         now - last_activity_ms_ >=
+  return now > last_remote_activity_ms_ &&
+         now - last_remote_activity_ms_ >=
              static_cast<uint64_t>(timeout_seconds_) * 1000u;
 }
 
 void lock_state::lock() {
   std::lock_guard<std::mutex> lock(mutex_);
   locked_ = true;
-  last_activity_ms_ = now_ms();
+  last_remote_activity_ms_ = now_ms();
 }
 
 void lock_state::unlock() {
   std::lock_guard<std::mutex> lock(mutex_);
   locked_ = false;
-  last_activity_ms_ = now_ms();
+  last_remote_activity_ms_ = now_ms();
 }
 
 std::string lock_state::normalize_peer(const std::string& peer) {

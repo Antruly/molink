@@ -86,6 +86,31 @@ export default function App() {
     return () => window.clearInterval(timer)
   }, [authPhase])
 
+  // A WebView navigates to a dropped file, link or selection by default, which
+  // replaces the whole UI with that document. Drops are only accepted inside
+  // an explicit file-drop zone (the files panel); everywhere else they are
+  // swallowed. Text drops are blocked too, so a stray drag cannot insert HTML
+  // into the page.
+  useEffect(() => {
+    const inDropZone = (target: EventTarget | null) =>
+      target instanceof Element && target.closest('[data-file-drop]') !== null
+    const onDragOver = (event: DragEvent) => {
+      if (inDropZone(event.target)) return
+      event.preventDefault()
+      if (event.dataTransfer) event.dataTransfer.dropEffect = 'none'
+    }
+    const onDrop = (event: DragEvent) => {
+      if (inDropZone(event.target)) return
+      event.preventDefault()
+    }
+    window.addEventListener('dragover', onDragOver)
+    window.addEventListener('drop', onDrop)
+    return () => {
+      window.removeEventListener('dragover', onDragOver)
+      window.removeEventListener('drop', onDrop)
+    }
+  }, [])
+
   useEffect(() => {
     if (authPhase !== 'ready') return
     let last = 0

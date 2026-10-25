@@ -410,13 +410,13 @@ void send_capture_frame(session_transport* transport,
     return;
   }
 
+  int64_t start_seq = -1;
   if (!session->has_image) {
     // The newest frame is usually a delta. Look back through the short
     // capture history for the keyframe instead of waiting for a fresh one;
     // otherwise a client that misses the exact keyframe moment keeps getting
     // empty frames.
-    int64_t start_seq = latest->keyframe ? static_cast<int64_t>(latest->seq)
-                                         : -1;
+    start_seq = latest->keyframe ? static_cast<int64_t>(latest->seq) : -1;
     if (start_seq < 0) {
       for (uint32_t back = 0;
            back < kMaxReplayFrames && latest->seq >= back; ++back) {
@@ -437,16 +437,29 @@ void send_capture_frame(session_transport* transport,
   }
 
   const int64_t last = session->last_capture_seq;
-  if (last < 0 || static_cast<uint32_t>(last) >= latest->seq) {
+  if (last >= 0 && static_cast<uint32_t>(last) >= latest->seq) {
     // Nothing new since the last response. Answer anyway so the client's
     // request does not stay in flight.
+    send_empty_frame(transport, session, latest->width, latest->height, false);
+    return;
+  }
+  // A session without a picture replays from the keyframe it found above,
+  // which may be frame 0. Treating last == -1 as "nothing to send" here
+  // would leave a fresh session staring at empty frames forever.
+  if (last < 0 && start_seq < 0) {
     send_empty_frame(transport, session, latest->width, latest->height, false);
     return;
   }
 
   // Replay every frame the session has not seen. Capture keeps a bounded
   // history precisely so a poll that arrived late does not need a keyframe.
-  const uint32_t missing = latest->seq - static_cast<uint32_t>(last);
+  const uint32_t first = last < 0 ? static_cast<uint32_t>(start_seq)
+                                  : static_cast<uint32_t>(last) + 1;
+  if (first > latest->seq) {
+    send_empty_frame(transport, session, latest->width, latest->height, false);
+    return;
+  }
+  const uint32_t missing = latest->seq - first + 1;
   if (missing > kMaxReplayFrames) {
     session->has_image = false;
     session->last_capture_seq = -1;
@@ -459,8 +472,7 @@ void send_capture_frame(session_transport* transport,
       std::chrono::duration_cast<std::chrono::microseconds>(
           std::chrono::system_clock::now().time_since_epoch())
           .count());
-  for (uint32_t seq = static_cast<uint32_t>(last) + 1; seq <= latest->seq;
-       ++seq) {
+  for (uint32_t seq = first; seq <= latest->seq; ++seq) {
     const std::shared_ptr<const captured_frame> frame = opt.capture->find(seq);
     if (!frame) {
       // Evicted from history. Resynchronize from a fresh keyframe.
@@ -656,7 +668,8 @@ bool session_controller::start(const std::string* initial_token) {
     // A locked core leaves the session unauthenticated; the hello handler
     // reports "locked" once the connection is fully established, where the
     // error and close frame are actually delivered.
-    const bool locked = options_.lock && options_.lock->locked();
+    const bool locked = options_.lock && options_.lock->locked() &&
+                        !is_loopback_peer(peer_ip);
     if (!locked && options_.auth && options_.auth->authenticate(
                                          *initial_token, /*consume=*/true)) {
       registry_->set_authenticated(session);
@@ -890,7 +903,7 @@ void session_controller::on_text(const std::string& text) {
   const std::string peer_ip = transport->peer_ip();
 
   session->last_seen_ms = now_ms();
-  if (options_.lock) options_.lock->touch();
+  if (options_.lock) options_.lock->touch(!is_loopback_peer(peer_ip));
 
   uvcpp_json j;
   const uvcpp::json_status status = uvcpp::uvcpp_json_parse(text, j);
@@ -909,7 +922,8 @@ void session_controller::on_text(const std::string& text) {
   };
 
   if (type == "hello") {
-    if (options_.lock && options_.lock->locked()) {
+    if (options_.lock && options_.lock->locked() &&
+        !is_loopback_peer(peer_ip)) {
       send_error(transport.get(), "locked", "the UI is locked");
       transport->close(transport_close::policy, "locked");
       return;
@@ -969,7 +983,8 @@ void session_controller::on_text(const std::string& text) {
                  "remote approval is disabled on this host");
       return;
     }
-    if (options_.lock && options_.lock->locked()) {
+    if (options_.lock && options_.lock->locked() &&
+        !is_loopback_peer(peer_ip)) {
       send_error(transport.get(), "locked", "the UI is locked");
       transport->close(transport_close::policy, "locked");
       return;
@@ -1484,7 +1499,9 @@ void session_controller::on_binary(const uint8_t* data, std::size_t len) {
   if (!transport || !session) return;
 
   session->last_seen_ms = now_ms();
-  if (options_.lock) options_.lock->touch();
+  if (options_.lock) {
+    options_.lock->touch(!is_loopback_peer(transport->peer_ip()));
+  }
   protocol::packet pkt;
   std::string err;
   if (!protocol::decode_packet(data, len, pkt, err)) {

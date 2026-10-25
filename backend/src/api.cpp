@@ -136,6 +136,10 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
       next();
       return;
     }
+    // A remote client is connected. This only marks its presence; the idle
+    // timer still starts from /api/activity, so polling cannot keep a tab
+    // unlocked forever.
+    if (deps.lock) deps.lock->note_remote();
     const app_settings settings =
         deps.auth ? deps.auth->settings() : app_settings{};
     if (settings.allow_remote_access) {
@@ -253,12 +257,12 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
   });
 
   // ---- Idle lock -------------------------------------------------------
-  // While locked only the state probe and the login/unlock endpoint remain
-  // reachable; everything else (including the local device credentials) is
-  // blocked until the verification code is entered again.
+  // Only remote browsers lock. The local shell/browser is the person sitting
+  // at the machine and stays usable; while a remote tab is locked, only the
+  // state probe and the login/unlock endpoint remain reachable for it.
   app.use([deps](uvcpp_web_request& req, uvcpp_web_response& resp,
                  uvcpp_web_next next) {
-    if (!deps.lock) {
+    if (!deps.lock || is_loopback_peer(req.peer_ip())) {
       next();
       return;
     }
@@ -382,7 +386,10 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
                 j["access_requests"].push_back(std::move(item));
               }
             }
-            j["locked"] = deps.lock != nullptr && deps.lock->locked();
+            // The local UI never reports the lock: it is exempt from the gate,
+            // and a remote tab going idle must not show a lock screen here.
+            j["locked"] =
+                deps.lock != nullptr && deps.lock->locked() && !local;
             j["lock_timeout"] =
                 deps.lock != nullptr ? deps.lock->timeout_seconds() : 0;
             j["open_sessions"] =
@@ -523,9 +530,9 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
            });
 
   app.post("/api/activity",
-           [deps](uvcpp_web_request&, uvcpp_web_response& resp,
+           [deps](uvcpp_web_request& req, uvcpp_web_response& resp,
                   uvcpp_web_next) {
-             if (deps.lock) deps.lock->touch();
+             if (deps.lock) deps.lock->touch(!is_loopback_peer(req.peer_ip()));
              resp.status(204).end();
            });
 
@@ -729,7 +736,8 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
              }
              deps.lock->set_ui_sessions(
                  client != nullptr ? *client : std::string(),
-                 count < 0 ? 0 : (count > 64 ? 64 : count));
+                 count < 0 ? 0 : (count > 64 ? 64 : count),
+                 !is_loopback_peer(req.peer_ip()));
              resp.status(204).end();
            });
 
@@ -813,15 +821,7 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
   app.get("/api/device",
           [deps](uvcpp_web_request& req, uvcpp_web_response& resp,
                  uvcpp_web_next) {
-            if (deps.lock && deps.lock->locked()) {
-              uvcpp_json body;
-              body["type"] = "error";
-              body["code"] = "locked";
-              body["message"] = "the UI is locked";
-              resp.status(423).json(body);
-              resp.end();
-              return;
-            }
+            // Loopback-only, and the local UI is exempt from the idle lock.
             const std::string peer = req.peer_ip();
             const bool loopback = is_loopback_peer(peer);
             if (!loopback) {
@@ -865,7 +865,6 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
                 deps.input != nullptr && deps.input->available();
             j["capabilities"]["clipboard"] =
                 deps.clipboard != nullptr && deps.clipboard->available();
-            if (deps.lock) deps.lock->touch();
             resp.set_header("Cache-Control", "no-store").json(j);
             resp.end();
           });

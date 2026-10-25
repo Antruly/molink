@@ -301,12 +301,17 @@ function SecurityControls({
 function ServerControls() {
   const { t } = useTranslation()
   const token = useAppStore((state) => state.token)
+  const setServerEnabled = useAppStore((state) => state.setServerEnabled)
+  const setDomain = useAppStore((state) => state.setDomain)
   const [url, setUrl] = useState('')
   const [invite, setInvite] = useState('')
   const [ca, setCa] = useState('')
   const [status, setStatus] = useState<ServerConfig | null>(null)
   const [note, setNote] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [serverBusy, setServerBusy] = useState(false)
+  const [domainInput, setDomainInput] = useState('')
+  const [domainBusy, setDomainBusy] = useState(false)
   const [copied, setCopied] = useState(false)
   const initialized = useRef(false)
 
@@ -367,6 +372,66 @@ function ServerControls() {
       window.setTimeout(() => setCopied(false), 1500)
     } catch {
       // Clipboard access can be denied; the ID is still visible.
+    }
+  }
+
+  const enabled = status?.enabled ?? true
+  const registered = status?.registered ?? false
+  const domainCode = status?.domain ?? ''
+  const domainValid = status?.domain_valid ?? false
+  const domainShown =
+    domainCode.length === 9
+      ? `${domainCode.slice(0, 3)}-${domainCode.slice(3, 6)}-${domainCode.slice(6)}`
+      : domainCode
+
+  const toggleServer = async (next: boolean) => {
+    if (serverBusy) return
+    setServerBusy(true)
+    const ok = await setServerEnabled(next)
+    setServerBusy(false)
+    setNote(ok ? t('settings.saved') : t('error.settings_failed'))
+    if (ok) void load()
+  }
+
+  const copyDomain = async () => {
+    if (!domainCode) return
+    try {
+      await navigator.clipboard.writeText(domainCode)
+      setNote(t('settings.domainCopied'))
+    } catch {
+      // Clipboard access can be denied; the code is still visible.
+    }
+  }
+
+  const rotateDomain = async () => {
+    if (domainBusy || !registered) return
+    if (!window.confirm(t('settings.domainRotateConfirm'))) return
+    setDomainBusy(true)
+    const result = await setDomain('rotate')
+    setDomainBusy(false)
+    setNote(
+      result === 'ok'
+        ? t('settings.domainRotated')
+        : t('error.settings_failed'),
+    )
+    if (result === 'ok') void load()
+  }
+
+  const joinDomain = async () => {
+    if (domainBusy || !registered) return
+    const value = domainInput.trim()
+    if (!value) return
+    setDomainBusy(true)
+    const result = await setDomain('join', value)
+    setDomainBusy(false)
+    if (result === 'ok') {
+      setDomainInput('')
+      setNote(t('settings.domainJoined'))
+      void load()
+    } else if (result === 'unknown_domain') {
+      setNote(t('settings.domainUnknown'))
+    } else {
+      setNote(t('error.settings_failed'))
     }
   }
 
@@ -485,6 +550,96 @@ function ServerControls() {
           ) : null}
         </div>
       ) : null}
+      <div className="flex items-center justify-between gap-3 rounded-lg border border-line-soft px-3 py-2">
+        <div className="min-w-0">
+          <div className="text-[11px] text-ink">{t('settings.serverEnabled')}</div>
+          <div className="text-[10px] leading-relaxed text-muted">
+            {t('settings.serverEnabledHint')}
+          </div>
+        </div>
+        <Switch
+          checked={enabled}
+          disabled={serverBusy}
+          onChange={(value) => void toggleServer(value)}
+          label={t('settings.serverEnabled')}
+        />
+      </div>
+
+      <div className="rounded-lg border border-line bg-panel/50 p-3 text-[11px]">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-[11px] text-ink">{t('settings.domain')}</span>
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              className="grid h-6 w-6 place-items-center rounded text-muted transition hover:bg-panel hover:text-ink disabled:opacity-40"
+              onClick={() => void copyDomain()}
+              title={t('settings.domainCopy')}
+              disabled={!domainCode}
+            >
+              <Copy size={12} />
+            </button>
+            <button
+              type="button"
+              className="grid h-6 w-6 place-items-center rounded text-muted transition hover:bg-panel hover:text-ink disabled:opacity-40"
+              onClick={() => void rotateDomain()}
+              title={t('settings.domainRotate')}
+              disabled={!enabled || !registered || domainBusy}
+            >
+              <RefreshCw size={12} />
+            </button>
+          </div>
+        </div>
+        <div className="mt-1 flex items-baseline gap-2">
+          <span className="font-mono text-[14px] font-semibold tracking-[.12em] text-ink">
+            {domainShown || '—'}
+          </span>
+          <span
+            className={
+              'text-[10px] ' +
+              (!enabled
+                ? 'text-muted'
+                : !domainCode
+                  ? 'text-muted'
+                  : domainValid
+                    ? 'text-accent'
+                    : 'text-warn')
+            }
+          >
+            {!enabled
+              ? t('settings.serverDisabled')
+              : !domainCode
+                ? t('settings.domainPending')
+                : domainValid
+                  ? t('settings.domainActive')
+                  : t('settings.domainRevoked')}
+          </span>
+        </div>
+        <div className="mt-2 flex items-center gap-1.5">
+          <input
+            className="field h-7 min-w-0 flex-1 px-2 font-mono text-[11px] uppercase"
+            value={domainInput}
+            onChange={(event) => setDomainInput(event.target.value)}
+            placeholder={t('settings.domainJoinPlaceholder')}
+            maxLength={13}
+            spellCheck={false}
+            disabled={!enabled || !registered || domainBusy}
+          />
+          <button
+            type="button"
+            className="btn h-7 shrink-0 px-2 text-[10px]"
+            onClick={() => void joinDomain()}
+            disabled={
+              !enabled || !registered || domainBusy || domainInput.trim() === ''
+            }
+          >
+            {t('settings.domainJoin')}
+          </button>
+        </div>
+        <div className="mt-1 text-[10px] leading-relaxed text-muted">
+          {t('settings.domainHint')}
+        </div>
+      </div>
+
       <p className="text-[10px] leading-relaxed text-muted">
         {t('settings.serverTlsHint')}
       </p>

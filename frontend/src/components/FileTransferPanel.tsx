@@ -443,6 +443,7 @@ export function FileTransferPanel({
       {tab === 'send' ? (
         <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto p-3">
           <div
+            data-file-drop="true"
             onDragOver={(event) => event.preventDefault()}
             onDrop={onDrop}
             className="rounded-xl border border-dashed border-line bg-panel/50 px-4 py-6 text-center"

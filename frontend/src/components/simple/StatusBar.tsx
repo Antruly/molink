@@ -30,7 +30,7 @@ export function StatusBar() {
         ? t('simple.statusServerConnecting')
         : t('simple.statusServerOffline')
   return (
-    <footer className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-line-soft px-1 py-2 text-[10px] text-muted">
+    <footer className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-line-soft px-1 py-2 text-[10px] text-muted">
       <span className="flex items-center gap-1.5">
         <Server size={11} />
         <span className={`h-1.5 w-1.5 rounded-full ${dot}`} />

@@ -118,8 +118,8 @@ export function SimpleHomeView() {
   }
 
   return (
-    <div className="mx-auto w-full max-w-7xl px-4 py-5 sm:px-6">
-      <div className="grid gap-4 lg:grid-cols-12">
+    <div className="mx-auto w-full max-w-7xl px-4 py-3 sm:px-6">
+      <div className="grid gap-3 lg:grid-cols-12">
         {localMode ? (
           <div className="lg:col-span-4">
             <SelfCard />
@@ -140,7 +140,7 @@ export function SimpleHomeView() {
         </div>
       </div>
 
-      <div className="mt-4 grid gap-4 lg:grid-cols-12">
+      <div className="mt-3 grid gap-3 lg:grid-cols-12">
         <div className="lg:col-span-3">
           <NoticePanel />
         </div>

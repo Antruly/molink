@@ -32,7 +32,7 @@ export function ConnectCard({
   const { t } = useTranslation()
   const requestAccess = code.trim() === ''
   return (
-    <section className="card h-full p-4">
+    <section className="card h-full p-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
           <h2 className="text-[15px] font-semibold text-ink">{t('simple.connectTitle')}</h2>
