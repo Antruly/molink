@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.9.7] — 2026-10-25
+
+### Fixed
+
+- Windows 7 没有 WebView2 时，`moLink.exe` 不再直接报
+  “could not create the WebView2 environment” 退出：内核照常启动，程序自动在默认浏览器
+  打开带 client token 的 UI，并提示安装 WebView2 Runtime 109 或使用 Firefox ESR 115 /
+  Chrome 109；关闭 moLink 窗口会停止后台服务。
+
+### Added
+
+- 支持把**固定版 WebView2 运行时**放在程序目录的 `WebView2Runtime\`（Win7 离线包使用）：
+  存在时优先用它，不需要系统安装 Evergreen 运行时。
+
 ## [0.9.6] — 2026-10-25
 
 ### Added

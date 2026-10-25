@@ -71,6 +71,42 @@ void fail_box(const wchar_t* message) {
   MessageBoxW(g_window, message, L"moLink", MB_ICONERROR | MB_OK);
 }
 
+bool g_browser_fallback = false;
+
+/// WebView2 is unavailable (Windows 7 without the last 109 runtime, a broken
+/// installation, or a missing loader). The core is already running, so open
+/// the same URL — it carries the client token — in the default browser and
+/// keep this window as the backend lifetime indicator instead of exiting.
+void browser_fallback(const wchar_t* reason) {
+  if (g_browser_fallback) return;
+  g_browser_fallback = true;
+  std::wstring note =
+      L"WebView2 is unavailable. moLink was opened in your default browser.\n"
+      L"Closing this window stops the moLink backend.\n\n";
+  if (reason != nullptr) {
+    note += reason;
+    note += L"\n\n";
+  }
+  note += L"Install WebView2 Runtime 109 (the last version supporting Windows 7) "
+          L"and restart, or open this URL in Firefox ESR 115 / Chrome 109:\n";
+  note += g_url;
+  if (g_window != nullptr) {
+    SetWindowTextW(g_window, L"moLink (browser mode)");
+  }
+  // Open the browser before the modal note so the UI is usable even if
+  // nobody dismisses the dialog immediately.
+  if (!g_url.empty()) {
+    ShellExecuteW(g_window, L"open", g_url.c_str(), nullptr, nullptr,
+                  SW_SHOWNORMAL);
+  }
+  if (g_window != nullptr) {
+    ShowWindow(g_window, SW_SHOW);
+    UpdateWindow(g_window);
+  }
+  MessageBoxW(g_window, note.c_str(), L"moLink",
+              MB_ICONINFORMATION | MB_OK);
+}
+
 // GetDpiForWindow is Windows 10 1607+. Resolve it at runtime so the same
 // executable loads on Windows 7, where the static import would fail with
 // "entry point not found" before WinMain runs. Fall back to the screen DPI.
@@ -602,8 +638,12 @@ class EnvironmentHandler final
   HRESULT STDMETHODCALLTYPE Invoke(
       HRESULT result, ICoreWebView2Environment* environment) override {
     if (FAILED(result) || environment == nullptr) {
-      fail_and_close(
-          L"WebView2 runtime not found (install the Edge WebView2 Runtime)");
+      if (g_smoke) {
+        fail_and_close(
+            L"WebView2 runtime not found (install the Edge WebView2 Runtime)");
+        return result;
+      }
+      browser_fallback(L"WebView2 runtime is unavailable (install WebView2 Runtime 109)");
       return result;
     }
     environment->CreateCoreWebView2Controller(g_window, new ControllerHandler());
@@ -961,38 +1001,61 @@ int run(HINSTANCE instance) {
   if (loader_module == nullptr) {
     loader_module = LoadLibraryW(L"WebView2Loader.dll");
   }
-  if (loader_module == nullptr) {
-    fail_box(L"WebView2Loader.dll not found next to moLink.exe");
-    DestroyWindow(g_window);
-    return 1;
-  }
   using CreateEnvironmentFn = HRESULT(STDAPICALLTYPE*)(
       PCWSTR, PCWSTR, ICoreWebView2EnvironmentOptions*,
       ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler*);
-  auto create_environment = reinterpret_cast<CreateEnvironmentFn>(
-      GetProcAddress(loader_module, "CreateCoreWebView2EnvironmentWithOptions"));
-  if (create_environment == nullptr) {
-    fail_box(L"WebView2Loader.dll does not export the environment factory");
-    DestroyWindow(g_window);
-    return 1;
+  CreateEnvironmentFn create_environment = nullptr;
+  if (loader_module != nullptr) {
+    create_environment = reinterpret_cast<CreateEnvironmentFn>(
+        GetProcAddress(loader_module,
+                       "CreateCoreWebView2EnvironmentWithOptions"));
   }
 
-  PWSTR local_app_data = nullptr;
-  std::wstring user_data = L".";
-  if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr,
-                                     &local_app_data))) {
-    user_data = std::wstring(local_app_data) + L"\\moLink\\WebView2";
-    CoTaskMemFree(local_app_data);
-    std::error_code ec;
-    fs::create_directories(user_data, ec);
-  }
+  if (loader_module == nullptr) {
+    if (g_smoke) {
+      fail_box(L"WebView2Loader.dll not found next to moLink.exe");
+      DestroyWindow(g_window);
+      return 1;
+    }
+    browser_fallback(L"WebView2Loader.dll is missing");
+  } else if (create_environment == nullptr) {
+    if (g_smoke) {
+      fail_box(L"WebView2Loader.dll does not export the environment factory");
+      DestroyWindow(g_window);
+      return 1;
+    }
+    browser_fallback(L"WebView2Loader.dll does not export the environment factory");
+  } else {
+    PWSTR local_app_data = nullptr;
+    std::wstring user_data = L".";
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr,
+                                       &local_app_data))) {
+      user_data = std::wstring(local_app_data) + L"\\moLink\\WebView2";
+      CoTaskMemFree(local_app_data);
+      std::error_code ec;
+      fs::create_directories(user_data, ec);
+    }
 
-  const HRESULT created = create_environment(
-      nullptr, user_data.c_str(), nullptr, new EnvironmentHandler());
-  if (FAILED(created)) {
-    fail_box(L"could not create the WebView2 environment");
-    DestroyWindow(g_window);
-    return 1;
+    // A fixed-version WebView2 runtime can sit next to the exe (the Windows 7
+    // offline package). Use it instead of the Evergreen installation.
+    std::wstring browser_folder;
+    const std::wstring bundled = exe_dir() + L"\\WebView2Runtime";
+    if (GetFileAttributesW((bundled + L"\\msedgewebview2.exe").c_str()) !=
+        INVALID_FILE_ATTRIBUTES) {
+      browser_folder = bundled;
+    }
+
+    const HRESULT created = create_environment(
+        browser_folder.empty() ? nullptr : browser_folder.c_str(),
+        user_data.c_str(), nullptr, new EnvironmentHandler());
+    if (FAILED(created)) {
+      if (g_smoke) {
+        fail_box(L"could not create the WebView2 environment");
+        DestroyWindow(g_window);
+        return 1;
+      }
+      browser_fallback(L"Could not create the WebView2 environment (install WebView2 Runtime 109)");
+    }
   }
 
   ShowWindow(g_window, SW_SHOW);
