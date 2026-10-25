@@ -155,7 +155,7 @@ export function SelfCard() {
             )}
           </div>
           <div className="mt-2 flex items-center gap-1.5">
-            <span className="min-w-0 truncate font-mono text-[13px] font-medium text-ink">
+            <span className="min-w-0 truncate font-mono text-[20px] font-semibold tracking-wide text-ink">
               {shownId || t('simple.idPending')}
             </span>
             {shownId ? (

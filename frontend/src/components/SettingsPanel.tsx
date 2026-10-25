@@ -74,7 +74,7 @@ function SecurityControls({
   const [name, setName] = useState(settings.device_name)
   const [longTerm, setLongTerm] = useState('')
   const [showLongTerm, setShowLongTerm] = useState(false)
-  const [customUses, setCustomUses] = useState('20')
+  const [customUses, setCustomUses] = useState('1')
   const [customValue, setCustomValue] = useState('')
   const [note, setNote] = useState<string | null>(null)
 

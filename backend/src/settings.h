@@ -36,10 +36,10 @@ struct app_settings {
   std::string long_term_code;
 
   /// Temporary code shown on the home page.
-  std::string temp_mode = "multi";  // "single" | "multi"
+  std::string temp_mode = "single";  // "single" | "multi"
   std::string temp_code;
-  int temp_uses = 20;
-  int temp_remaining = 20;
+  int temp_uses = 1;
+  int temp_remaining = 1;
 };
 
 app_settings load_settings();

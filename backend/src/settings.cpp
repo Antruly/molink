@@ -181,12 +181,12 @@ app_settings load_settings() {
     } else if (key == "temp_code") {
       settings.temp_code = value;
     } else if (key == "temp_uses") {
-      settings.temp_uses = parse_int(value, 20);
+      settings.temp_uses = parse_int(value, 1);
     } else if (key == "temp_remaining") {
       settings.temp_remaining = parse_int(value, -1);
     }
   }
-  if (settings.temp_uses < 1) settings.temp_uses = 20;
+  if (settings.temp_uses < 1) settings.temp_uses = 1;
   if (settings.temp_uses > 10000) settings.temp_uses = 10000;
   if (settings.temp_remaining > settings.temp_uses) {
     settings.temp_remaining = settings.temp_uses;

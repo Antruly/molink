@@ -91,9 +91,9 @@ auth_state::auth_state(app_settings settings)
     : settings_(std::move(settings)), local_session_(generate_token()) {
   if (settings_.device_name.empty()) settings_.device_name = default_device_name();
   if (settings_.temp_mode != "single" && settings_.temp_mode != "multi") {
-    settings_.temp_mode = "multi";
+    settings_.temp_mode = "single";
   }
-  if (settings_.temp_uses < 1) settings_.temp_uses = 20;
+  if (settings_.temp_uses < 1) settings_.temp_uses = 1;
   if (settings_.temp_uses > 10000) settings_.temp_uses = 10000;
 
   std::string err;
@@ -317,7 +317,7 @@ bool auth_state::verify_code_locked(const std::string& supplied, bool consume) {
 
 void auth_state::rotate_temp_locked() {
   settings_.temp_uses = settings_.temp_mode == "single" ? 1 : settings_.temp_uses;
-  if (settings_.temp_uses < 1) settings_.temp_uses = 20;
+  if (settings_.temp_uses < 1) settings_.temp_uses = 1;
   settings_.temp_remaining = settings_.temp_uses;
   settings_.temp_code = generate_numeric(6);
 }
