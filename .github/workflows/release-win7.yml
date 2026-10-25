@@ -76,7 +76,7 @@ jobs:
         run: |
           $version = '${{ github.event.inputs.version }}'
           if ('${{ github.ref }}' -like 'refs/tags/win7-x86-v*') {
-            $version = '${{ github.ref_name }}'.Substring(11)
+            $version = '${{ github.ref_name }}' -replace '^win7-x86-v',''
           }
           ./packaging/windows/build-win7-x86.ps1 `
             -Kit "$PWD\kit\libuvcpp-1.8.3-mingw32" `
@@ -124,7 +124,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           name: moLink Win7 x86 ${{ github.ref_name }}
-          overwrite: true
+          overwrite_files: true
           body: 'Windows 7 x86 (32-bit) preview: GDI capture core, optional secure-desktop service, WebView2 shell and browser-UI launcher.'
           files: |
             build/package/*win7-x86.zip
