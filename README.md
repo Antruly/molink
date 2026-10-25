@@ -2,7 +2,7 @@
 
 跨平台远程桌面。Web 优先，一套后台 + 浏览器壳层，桌面端直连，移动端经服务端中转。
 
-> 版本 0.9.1 · MIT · 协议版本 1
+> 版本 0.9.2 · MIT · 协议版本 1
 
 ![主页（亮色）](docs/screenshots/home-light.png)
 ![会话页（合成测试帧）](docs/screenshots/session-light.png)
@@ -140,9 +140,9 @@ cmake --build shell/native/build --parallel
 生成 Linux 安装包：
 
 ```bash
-./packaging/linux/build-deb.sh       # build/package/molink_0.9.1_amd64.deb
-./packaging/linux/build-appimage.sh  # build/package/moLink-0.9.1-x86_64.AppImage
-./packaging/linux/build-rpm.sh       # build/package/molink-0.9.1-1.x86_64.rpm
+./packaging/linux/build-deb.sh       # build/package/molink_0.9.2_amd64.deb
+./packaging/linux/build-appimage.sh  # build/package/moLink-0.9.2-x86_64.AppImage
+./packaging/linux/build-rpm.sh       # build/package/molink-0.9.2-1.x86_64.rpm
 ```
 
 Windows（需 WebView2 SDK、Inno Setup 6 与 NSIS）与 macOS（`.app` + `.dmg`）的构建步骤见
@@ -251,10 +251,9 @@ python3 tools/bench_quality.py http://127.0.0.1:28418 --token <ready-token>
 
 桌面端不发布 zip。
 
-Windows 7 x86（32 位）是独立预览线：推送 `win7-x86-v*` 标签触发
-`.github/workflows/release-win7.yml`，产物为 `moLink-<版本>-win7-x86.zip` 和
-`moLink-<版本>-win7-x86-setup.exe`，也可以手动触发工作流。构建方法、依赖
-（libuvcpp 1.8.5 Win7 x86 预编译包 + GCC 13；1.8.3 旧 kit 只提供 cmake/make 和
+Windows 7 x86（32 位）与其它平台在**同一个 `v*` Release**：`release-desktop.yml` 的
+`win7-x86` job 产出 `moLink-<版本>-win7-x86.zip` 和 `moLink-<版本>-win7-x86-setup.exe`。
+构建方法、依赖（libuvcpp 1.8.5 kit 的 `prebuilt/` + GCC 13；kit 另提供 cmake/make 和
 zlib 静态库）和已知限制见 [docs/win7-x86.md](docs/win7-x86.md)。
 
 服务端已拆分到独立仓库
@@ -280,19 +279,18 @@ zlib 静态库）和已知限制见 [docs/win7-x86.md](docs/win7-x86.md)。
 | Linux | `.deb`、`.AppImage`、`.rpm` | 本机验证；RPM 由 CI 构建 |
 | Windows | 安装器 `.exe`、免安装 `.exe` | 壳层交叉编译通过，由 CI 打包 |
 | macOS | `.dmg` | 由 macOS CI 构建 |
-| Windows 7 x86 | 安装器 `.exe`、便携 `.zip` | GDI 采集/输入已验证；由 `release-win7.yml` 构建；原生壳需 WebView2 109，浏览器 UI 可用 |
+| Windows 7 x86 | 安装器 `.exe`、便携 `.zip` | GDI 采集/输入已验证；由 `release-desktop.yml` 的 win7-x86 job 构建；原生壳需 WebView2 109，浏览器 UI 可用 |
 | 服务端 Linux | `.deb`、`.rpm`、`.tar.gz` | 本机验证 deb；RPM 由 CI 构建 |
 | 服务端 Windows | 安装器 `.exe`、`.zip` | 由 Windows CI 构建 |
 | 服务端 macOS | `.pkg`（未签名）、`.tar.gz` | 由 macOS CI 构建 |
 
 AppImage 首次使用需要 `chmod +x`，并依赖系统的 GTK 3 与 WebKitGTK 4.1；缺少依赖时 AppRun 会弹出说明。
 
-推送 `v*` 标签会触发 `.github/workflows/release-desktop.yml`，三个平台并行构建并把
-产物附加到同一个 Release。Linux/Windows 直接下载 libuvcpp 预编译包（仓库变量
-`UVCPP_VERSION`，默认 `1.8.5`）；macOS 仍从源码构建，需要仓库变量 `UVCPP_REPO`。
-Win7 x86 使用独立的 `.github/workflows/release-win7.yml`（`win7-x86-v*` 标签或手动
-触发），下载 libuvcpp 1.8.5 Win7 预编译包、1.8.3 deps kit 与 GCC 13 后产出 zip 和
-Inno Setup 安装器。
+推送 `v*` 标签会触发 `.github/workflows/release-desktop.yml`，四个 job（Linux、Windows、
+macOS、Win7 x86）并行构建并把产物附加到同一个 Release。Linux/Windows 直接下载
+libuvcpp 预编译包（仓库变量 `UVCPP_VERSION`，默认 `1.8.5`）；macOS 仍从源码构建，需要
+仓库变量 `UVCPP_REPO`；Win7 x86 下载 libuvcpp 1.8.5 kit 与 GCC 13，产出 zip 和 Inno
+Setup 安装器。
 
 ## 许可证
 

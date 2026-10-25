@@ -1,7 +1,7 @@
 # 发布检查清单
 
-当前状态：**桌面 0.9.1（标签 `v0.9.1`）+ 服务端 0.2.2（独立仓库 `molink-server`）+
-Windows 7 x86 预览（`win7-x86-v*` / `release-win7.yml`）。桌面端已验证
+当前状态：**桌面 0.9.2（标签 `v0.9.2`）+ 服务端 0.2.2（独立仓库 `molink-server`）+
+Windows 7 x86（同一个 Release 的 `win7-x86` job）。桌面端已验证
 Linux/Windows/macOS 发布矩阵、简洁模式/头像/域组码与 Win7 GDI 采集；服务端目录、
 TLS、域组码和迁移在独立仓库验证。** 历史条目（0.6.14 及以下）保留在下方作为回归
 基线；Win7 x86 的专项检查见文末。
@@ -87,7 +87,7 @@ TLS、域组码和迁移在独立仓库验证。** 历史条目（0.6.14 及以�
 | 项目 | 命令 / 方法 | 结果 |
 |---|---|---|
 | 构建 | `packaging/windows/build-win7-x86.ps1`（libuvcpp full + core + shell + service/helper + 安装器） | 通过 |
-| CI | `release-win7.yml` 手动触发 | 通过（run 40138250042，4m32s） |
+| CI | `release-desktop.yml` 的 `win7-x86` job（`v*` 标签） | 通过（随 0.9.2 Release 构建） |
 | 目录 / 域组 | 局域网 TLS 目录注册、ID 解析、域组码 | 通过 |
 | WS 会话 | 反向隧道 → welcome → 129 KB 真实关键帧 | 通过 |
 | GDI 采集 | 1024×768 控制台会话，`capture=gdi` | 通过 |

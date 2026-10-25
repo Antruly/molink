@@ -59,4 +59,16 @@ for dll in "/c/Program Files/OpenSSL-Win64/bin"/libssl-*.dll \
   [ -f "$dll" ] && cp "$dll" "$PKG/"
 done
 
+# The libuvcpp archive ships a 14.29-era MSVCP140.dll. molink is built with the
+# runner's current toolset, and an app-local stale runtime makes the core crash
+# before it prints its ready line (the shell then reports "did not report a
+# ready port and tokens"). Overwrite the CRT with the newest redist installed
+# on the machine; a newer MSVCP140 runs binaries built with older toolsets too.
+CRT=$(ls -d "/c/Program Files/Microsoft Visual Studio"/*/*/VC/Redist/MSVC/*/x64/Microsoft.VC14*CRT 2>/dev/null | sort -V | tail -n 1)
+if [ -n "${CRT:-}" ] && [ -d "$CRT" ]; then
+  for dll in msvcp140.dll vcruntime140.dll vcruntime140_1.dll concrt140.dll; do
+    [ -f "$CRT/$dll" ] && cp "$CRT/$dll" "$PKG/"
+  done
+fi
+
 echo "staged: $(ls "$PKG" | tr '\n' ' ')"

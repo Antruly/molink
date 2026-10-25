@@ -1,26 +1,28 @@
 # Build the Windows 7 x86 (32-bit) client from the libuvcpp Win7 MinGW kit.
 #
-#   build-win7-x86.ps1 -Kit C:\path\libuvcpp-1.8.3-mingw32 `
-#                      -UvcppPrefix C:\path\uvcpp-win7-x86-mingw32 `
+#   build-win7-x86.ps1 -Kit C:\path\libuvcpp-1.8.5-mingw32 `
 #                      -Gcc C:\path\i686-13.2.0-posix-dwarf-msvcrt `
-#                      -WebView2 C:\path\wv2 -Version 0.9.1
+#                      -WebView2 C:\path\wv2 -Version 0.9.2
 #
-# -Kit supplies cmake/make and the zlib static library; its GCC 8.1 is too old
-# for molink's std::filesystem use, so -Gcc must point at a newer i686
-# toolchain (mingw-builds 13.2 msvcrt is what the release uses).
+# -Kit is the portable build kit (uvcpp-kit-1.8.5-mingw32.zip). It supplies
+# cmake, the zlib static library (molink's tile compressor calls compress2
+# directly) and, in 1.8.5, a prebuilt/ prefix with the full profile
+# (web + webapp). Its GCC 8.1 is too old for molink's std::filesystem use, so
+# -Gcc must point at a newer i686 toolchain (mingw-builds 13.2 msvcrt is what
+# the release uses).
 #
-# -UvcppPrefix points at the 1.8.5+ Win7 x86 release archive, which already
-# carries the full/webapp profile (libuvcpp.dll + import library + headers).
-# OpenSSL/zlib/libuv/llhttp are statically linked into libuvcpp.dll, so the
-# only extra library molink needs is zlib (its own tile compressor). Without
-# -UvcppPrefix the script falls back to building libuvcpp from the 1.8.3 kit.
+# -UvcppPrefix optionally overrides that prefix with the standalone 1.8.5+
+# release archive (uvcpp-win7-x86-mingw32). OpenSSL/libuv/llhttp are statically
+# linked into libuvcpp.dll; only zlib is taken from the kit. Without it, the
+# kit's prebuilt/ is used; only a kit older than 1.8.5 (no prebuilt full
+# profile) falls back to building libuvcpp from source.
 param(
   [Parameter(Mandatory = $true)][string]$Kit,
   [Parameter(Mandatory = $true)][string]$Gcc,
   [Parameter(Mandatory = $true)][string]$WebView2,
   [string]$UvcppPrefix = "",
   [string]$Repo = "",
-  [string]$Version = "0.9.1",
+  [string]$Version = "0.9.2",
   [string]$Out = ""
 )
 
@@ -34,7 +36,13 @@ if (-not $Out) {
 $Kit = (Resolve-Path $Kit).Path
 $Gcc = (Resolve-Path $Gcc).Path
 $WebView2 = (Resolve-Path $WebView2).Path
-if ($UvcppPrefix) { $UvcppPrefix = (Resolve-Path $UvcppPrefix).Path }
+if ($UvcppPrefix) {
+  $UvcppPrefix = (Resolve-Path $UvcppPrefix).Path
+} elseif (Test-Path (Join-Path $Kit 'prebuilt\include\uvcpp\uvcpp_config.h')) {
+  # 1.8.5+ kits carry the full-profile install; use it instead of rebuilding.
+  $UvcppPrefix = (Join-Path $Kit 'prebuilt')
+  Write-Host "using the kit's prebuilt prefix: $UvcppPrefix"
+}
 New-Item -ItemType Directory -Force $Out | Out-Null
 
 $cmake = Join-Path $Kit 'deps\cmake\bin\cmake.exe'
@@ -173,7 +181,11 @@ $uvcppDll = if ($UvcppPrefix) {
   Join-Path $Kit 'out\gcc13\bin\libuvcpp.dll'
 }
 Copy-Item $uvcppDll $pkg
-Copy-Item (Join-Path $Kit 'deps\libuv\bin\libuv.dll') $pkg
+if (-not $UvcppPrefix) {
+  # The prebuilt/release libuvcpp.dll links libuv statically; a source build
+  # against the kit's shared uv target still needs it next to the DLL.
+  Copy-Item (Join-Path $Kit 'deps\libuv\bin\libuv.dll') $pkg
+}
 Copy-Item (Join-Path $Gcc 'bin\libstdc++-6.dll') $pkg
 Copy-Item (Join-Path $Gcc 'bin\libgcc_s_dw2-1.dll') $pkg
 Copy-Item (Join-Path $Gcc 'bin\libwinpthread-1.dll') $pkg

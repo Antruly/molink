@@ -5,36 +5,39 @@ Windows 客户端使用同一套协议和目录。
 
 ## 依赖与工具链
 
-- **libuvcpp Win7 x86 kit**：`uvcpp-kit-1.8.3-mingw32.zip`
+- **libuvcpp Win7 x86 kit**：`uvcpp-kit-1.8.5-mingw32.zip`
   （[libuvcpp releases](https://github.com/Antruly/libuvcpp/releases)）。
-  kit 内含 libuv 1.40、OpenSSL 1.1.1w、zlib、llhttp 和一套 GCC 8.1。
+  kit 内含 CMake、libuv 1.40、OpenSSL 1.1.1w、zlib、llhttp、一套 GCC 8.1，
+  以及 `prebuilt/` —— 1.8.5 起它就是 **full 档**（`UVCPP_WEBAPP_ENABLE=1`）。
 - **编译器**：kit 自带的 GCC 8.1 **不能**用于 moLink（见下方已知问题），改用
   [niXman mingw-builds](https://github.com/niXman/mingw-builds-binaries)
   的 `i686-13.2.0-release-posix-dwarf-msvcrt`（msvcrt 运行时，Win7 友好）。
-- `nlohmann/json` 头文件：可以复用 `deps/nlohmann_json` 源码树，或把
-  `nlohmann/` 放进 libuvcpp 的安装前缀（只在源码构建 libuvcpp 时需要）。
+- 不需要 nlohmann/json 源码树：1.8.5 kit 的 `prebuilt/` 已经是 full 档；
+  只有回退到“从源码编 libuvcpp”才用得上它。
 
-## 推荐：直接用 1.8.5 预编译包
+## 推荐：直接用 1.8.5 kit（prebuilt 就是 full 档）
 
-1.8.5 起 `uvcpp-win7-x86-mingw32.zip` 已包含 WebApp
-（`UVCPP_WEBAPP_ENABLE=1`），以及 `bin/libuvcpp.dll`、`lib/libuvcpp.dll.a` 和全部
-头文件；libuv/OpenSSL/zlib/llhttp 都静态链进了 `libuvcpp.dll`。配置时传
-`-DMOLINK_UVCPP_PREFIX=<解压目录>` 就不再编译 libuvcpp。
+`uvcpp-kit-1.8.5-mingw32.zip` 的 `prebuilt/` 就是一个装好的 full 档前缀：
+`bin/libuvcpp.dll`、`lib/libuvcpp.dll.a` 和全部头文件，`UVCPP_WEBAPP_ENABLE=1`；
+libuv/OpenSSL/llhttp 都静态链进了 `libuvcpp.dll`。脚本在 `-Kit` 指向 1.8.5 kit 且
+没传 `-UvcppPrefix` 时**默认用这个 prebuilt**，不再编译 libuvcpp。
+
+也可以改用单独的发布包 `uvcpp-win7-x86-mingw32.zip` 作为前缀（内容与 `prebuilt/` 相同）。
 
 例外是 zlib：molink-core 自己直接调用 `compress2`（`backend/src/compression.cpp`），
-而 1.8.5 包只有 `include/zlib.h`、没有 zlib 库，所以仍从 1.8.3 kit 的 `deps/zlib`
+而 libuvcpp 的发布包只有 `include/zlib.h`、没有 zlib 库，所以仍从 **kit 的 `deps/zlib`**
 取 `libzlibstatic.a`（纯 C，ABI 无关），并传 `ZLIB_LIBRARY` / `ZLIB_INCLUDE_DIR`。
 OpenSSL 不需要，客户端没有直接调用。
 
-`packaging/windows/build-win7-x86.ps1 -Kit <1.8.3 kit> -UvcppPrefix <1.8.5 kit> ...`
-封装了这条路径；不传 `-UvcppPrefix` 时回退到下面的源码构建。
+`packaging/windows/build-win7-x86.ps1 -Kit <1.8.5 kit> [-UvcppPrefix <发布包>] ...`
+封装了这条路径；不传 `-UvcppPrefix` 就用 kit 的 `prebuilt/`。
 
-## 构建 libuvcpp（full profile，1.8.5 之前的回退路径）
+## 从源码构建 libuvcpp（只有 1.8.5 之前的旧 kit 需要）
 
-full = web + WebApp（moLink 需要 WebApp；1.8.3 kit 的 `prebuilt/` 只是 web profile）。
+旧 kit 的 `prebuilt/` 只有 web 档（没有 WebApp），这时才需要自己编一份 full。
 
 ```powershell
-$KIT = 'C:\path\to\libuvcpp-1.8.3-mingw32'
+$KIT = 'C:\path\to\libuvcpp-<1.8.5 之前的 kit>'
 $GCC = 'C:\path\to\i686-13.2.0-posix-dwarf-msvcrt'
 cmake -S $KIT -B $KIT\build-gcc13-full -G "MinGW Makefiles" `
   -DCMAKE_C_COMPILER="$GCC/bin/gcc.exe" `
@@ -66,7 +69,7 @@ cmake --install $KIT\build-gcc13-full
 `MOLINK_WIN7_KIT`）。把 kit 的 `out/gcc13` 当作 uvcpp 前缀：
 
 ```powershell
-$KIT = 'C:\path\to\libuvcpp-1.8.3-mingw32'
+$KIT = 'C:\path\to\libuvcpp-<1.8.5 之前的 kit>'
 $env:MOLINK_WIN7_KIT = $KIT
 $env:MOLINK_WIN7_GCC = 'C:\path\to\i686-13.2.0-posix-dwarf-msvcrt'
 # uvcpp 的 CMake target 还引用裸 `uv`，把 import lib 放进前缀
@@ -128,14 +131,14 @@ core、shell、service/helper、打包、Inno Setup）：
 
 ```powershell
 ./packaging/windows/build-win7-x86.ps1 `
-  -Kit C:\path\libuvcpp-1.8.3-mingw32 `
+  -Kit C:\path\libuvcpp-1.8.5-mingw32 `
   -Gcc C:\path\i686-13.2.0-posix-dwarf-msvcrt `
-  -WebView2 C:\path\wv2 -Version 0.9.1 -Out build\package
+  -WebView2 C:\path\wv2 -Version 0.9.2 -Out build\package
 ```
 
-`.github/workflows/release-win7.yml` 在 `win7-x86-v*` 标签或手动触发时下载
-libuvcpp kit、GCC 13、nlohmann/json 和 WebView2 SDK，调用该脚本并上传 zip 与
-安装器；标签构建还会创建对应的 Release。
+`.github/workflows/release-desktop.yml` 的 `win7-x86` job 在 `v*` 标签时下载
+**1.8.5 kit**、GCC 13 和 WebView2 SDK（不再单独取发布包，也不需要 nlohmann/json），
+调用该脚本并上传 zip 与安装器；资产附加到同一个 Release。
 
 ## 已验证状态（2026-10-25）
 

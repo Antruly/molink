@@ -247,3 +247,105 @@ jobs:
           name: moLink ${{ github.ref_name }}
           body: 'macOS disk image.'
           files: build/package/*.dmg
+
+  # Windows 7 x86 ships in the same release as the other platforms.
+  win7-x86:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: Fetch WebView2 SDK
+        shell: pwsh
+        run: |
+          $version = '1.0.4258.31'
+          $url = "https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/$version/microsoft.web.webview2.$version.nupkg"
+          Invoke-WebRequest -Uri $url -OutFile wv2.zip
+          Expand-Archive wv2.zip -DestinationPath wv2
+
+      # The 1.8.5 kit supplies cmake/make, the zlib static library and a
+      # prebuilt/ prefix with the full/webapp profile, so libuvcpp is not
+      # rebuilt from source. GCC 13 i686 remains the compiler.
+      - name: Fetch the libuvcpp 1.8.5 kit
+        shell: pwsh
+        run: |
+          $url = 'https://github.com/Antruly/libuvcpp/releases/download/v1.8.5/uvcpp-kit-1.8.5-mingw32.zip'
+          Invoke-WebRequest -Uri $url -OutFile kit.zip
+          Expand-Archive kit.zip -DestinationPath kit
+
+      - name: Fetch GCC 13 i686
+        shell: pwsh
+        run: |
+          choco install 7zip -y --no-progress
+          $url = 'https://github.com/niXman/mingw-builds-binaries/releases/download/13.2.0-rt_v11-rev1/i686-13.2.0-release-posix-dwarf-msvcrt-rt_v11-rev1.7z'
+          Invoke-WebRequest -Uri $url -OutFile gcc13.7z
+          & 'C:\Program Files\7-Zip\7z.exe' x gcc13.7z -ogcc13 -y | Out-Null
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Build Win7 x86 package
+        shell: pwsh
+        run: |
+          $version = '${{ github.ref_name }}' -replace '^v',''
+          ./packaging/windows/build-win7-x86.ps1 `
+            -Kit "$PWD\kit\libuvcpp-1.8.5-mingw32" `
+            -Gcc "$PWD\gcc13\mingw32" `
+            -WebView2 "$PWD\wv2" `
+            -Version $version `
+            -Out "$PWD\build\package"
+
+      - name: Smoke test the packaged core
+        shell: pwsh
+        run: |
+          $exe = 'build\molink-win7-x86\molink-core.exe'
+          & $exe --version
+          if ($LASTEXITCODE -ne 0) { throw 'molink-core --version failed' }
+          $out = Join-Path $env:RUNNER_TEMP 'core.out'
+          $err = Join-Path $env:RUNNER_TEMP 'core.err'
+          $p = Start-Process $exe `
+            -ArgumentList '--host 127.0.0.1 --port 0 --no-capture --no-input --print-ready' `
+            -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
+          $ready = $false
+          for ($i = 0; $i -lt 40; $i++) {
+            Start-Sleep -Milliseconds 250
+            if ((Test-Path $out) -and ((Get-Content $out -Raw) -match '"event":"ready"')) {
+              $ready = $true
+              break
+            }
+          }
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          if (-not $ready) {
+            Get-Content $out, $err -ErrorAction SilentlyContinue
+            throw 'the packaged core did not report ready'
+          }
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: moLink-win7-x86
+          path: |
+            build/package/*win7-x86.zip
+            build/package/*win7-x86-setup.exe
+
+      - name: Attach to the shared release
+        uses: softprops/action-gh-release@v2
+        with:
+          overwrite_files: true
+          files: |
+            build/package/*win7-x86.zip
+            build/package/*win7-x86-setup.exe

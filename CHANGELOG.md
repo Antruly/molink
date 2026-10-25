@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.9.2] — 2026-10-25
+
+### Fixed
+
+- Windows 安装包现在附带与构建工具集匹配的 VC 运行时。libuvcpp 1.8.5 包内自带的
+  `MSVCP140.dll` 是 14.29，而内核用新工具集构建，加载它会在启动时崩溃（事件日志
+  指向 MSVCP140 的 0xc0000005），外壳因此报
+  “molink-core did not report a ready port and tokens”。打包时改用机器上最新的
+  Redist CRT 覆盖。
+
+### Changed
+
+- Win7 x86 构建改用 libuvcpp **1.8.5 kit**（`uvcpp-kit-1.8.5-mingw32.zip`）：它的
+  `prebuilt/` 就是 full 档（web + webapp），`build-win7-x86.ps1` 默认拿它当
+  `MOLINK_UVCPP_PREFIX`，不再从源码编 libuvcpp；cmake 与 zlib 静态库仍取自 kit 的
+  `deps/`。
+- Win7 x86 不再单独发版：`release-desktop.yml` 新增 `win7-x86` job，与 Linux/Windows/
+  macOS 一起附加到同一个 `v*` Release；旧的 `release-win7.yml` 与 `win7-x86-v*`
+  标签停用。
+
 ## [0.9.1] — 2026-10-25
 
 ### Changed
