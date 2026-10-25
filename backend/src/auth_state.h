@@ -68,6 +68,10 @@ class auth_state {
   /// "preset:<name>" or a small image data URL; empty clears it.
   bool set_avatar(std::string avatar, std::string& err);
 
+  /// STUN server for ICE: "host[:port]", empty = built-in default,
+  /// "none" disables STUN.
+  bool set_stun_server(const std::string& value);
+
  private:
   bool valid_session_locked(const std::string& token) const;
   bool verify_code_locked(const std::string& supplied, bool consume);

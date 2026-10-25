@@ -80,6 +80,8 @@ class p2p_manager {
   void worker_loop();
   void enqueue(std::function<void()> task);
   void sweep();
+  /// Re-read STUN from settings before a new connection (UI override).
+  void refresh_stun();
 
   std::shared_ptr<ice_agent> make_agent();
   void start_incoming(const signal_session_info& session);

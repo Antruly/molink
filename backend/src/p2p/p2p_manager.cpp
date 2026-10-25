@@ -7,6 +7,7 @@
 #include <future>
 #include <utility>
 
+#include "settings.h"
 #include "util.h"
 
 namespace molink {
@@ -158,6 +159,41 @@ void p2p_manager::worker_loop() {
   }
 }
 
+void p2p_manager::refresh_stun() {
+  const app_settings settings = load_settings();
+  std::string value = settings.stun_server;
+  while (!value.empty() &&
+         (value.back() == ' ' || value.back() == '\t' ||
+          value.back() == '\r' || value.back() == '\n')) {
+    value.pop_back();
+  }
+  std::size_t start = 0;
+  while (start < value.size() &&
+         (value[start] == ' ' || value[start] == '\t')) {
+    ++start;
+  }
+  value = value.substr(start);
+  if (value.empty()) return;  // keep the env/default chosen at startup
+  if (value == "none" || value == "off" || value == "0") {
+    stun_host_.clear();
+    return;
+  }
+  std::string host = value;
+  uint16_t port = stun_port_ == 0 ? 3478 : stun_port_;
+  const std::size_t colon = value.rfind(':');
+  if (colon != std::string::npos && value.find(':') == colon) {
+    host = value.substr(0, colon);
+    const int parsed = std::atoi(value.c_str() + colon + 1);
+    if (parsed > 0 && parsed <= 65535) {
+      port = static_cast<uint16_t>(parsed);
+    }
+  }
+  if (!host.empty()) {
+    stun_host_ = host;
+    stun_port_ = port;
+  }
+}
+
 void p2p_manager::sweep() {
   const uint64_t now = now_ms();
   for (auto it = outgoing_.begin(); it != outgoing_.end();) {
@@ -188,6 +224,7 @@ std::shared_ptr<ice_agent> p2p_manager::make_agent() {
 
 void p2p_manager::connect(const std::string& target, ready_fn ready,
                           error_fn error) {
+  refresh_stun();
   if (target.empty()) {
     error("target device id is empty");
     return;
@@ -308,6 +345,7 @@ void p2p_manager::finish_outgoing(uint64_t id, const std::string& error) {
 }
 
 void p2p_manager::start_incoming(const signal_session_info& session) {
+  refresh_stun();
   if (incoming_.count(session.connect_id) != 0 ||
       completed_incoming_.count(session.connect_id) != 0) {
     return;

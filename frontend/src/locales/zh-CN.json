@@ -178,7 +178,9 @@
     "domainUnknown": "域组码不存在",
     "domainJoin": "加入",
     "domainJoinPlaceholder": "输入 9 位域组码",
-    "domainHint": "同一域组码的设备会出现在各自的域组列表中；码的所有者更换后旧码立即失效。"
+    "domainHint": "同一域组码的设备会出现在各自的域组列表中；码的所有者更换后旧码立即失效。",
+    "stunServer": "STUN 服务器",
+    "stunServerHint": "用于跨 NAT 打洞。留空使用内置 stun.miwifi.com:3478；填 none 关闭 STUN。"
   },
   "session": {
     "connecting": "连接中…",

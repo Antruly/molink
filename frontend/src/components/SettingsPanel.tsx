@@ -60,6 +60,7 @@ function SecurityControls({
     discovery: boolean
     allowAccessRequests: boolean
     name: string
+    stunServer?: string
   }) => Promise<boolean>
   onLongTerm: (value: string) => Promise<boolean>
   onCustomCode: (uses: number, value: string) => Promise<AuthCode | null>
@@ -72,6 +73,7 @@ function SecurityControls({
     settings.allow_access_requests,
   )
   const [name, setName] = useState(settings.device_name)
+  const [stunServer, setStunServer] = useState(settings.stun_server ?? '')
   const [longTerm, setLongTerm] = useState('')
   const [showLongTerm, setShowLongTerm] = useState(false)
   const [customUses, setCustomUses] = useState('1')
@@ -84,6 +86,7 @@ function SecurityControls({
     discovery?: boolean
     allowAccessRequests?: boolean
     name?: string
+    stunServer?: string
   }) => {
     const nextRemote = values.allowRemote ?? allowRemote
     const ok = await onSave({
@@ -93,6 +96,7 @@ function SecurityControls({
       allowAccessRequests:
         values.allowAccessRequests ?? allowAccessRequests,
       name: values.name ?? settings.device_name,
+      stunServer: values.stunServer ?? stunServer,
     })
     setNote(ok ? t('settings.saved') : t('error.settings_failed'))
     return ok
@@ -194,6 +198,28 @@ function SecurityControls({
             label={t('settings.allowAccessRequests')}
           />
         </div>
+        <label className="block">
+          <span className="mb-1 block text-[10px] uppercase tracking-[0.14em] text-muted">
+            {t('settings.stunServer')}
+          </span>
+          <input
+            className="field h-8 w-full px-2 font-mono text-[11px]"
+            value={stunServer}
+            onChange={(event) => setStunServer(event.target.value)}
+            onBlur={() => void persist({ stunServer })}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.preventDefault()
+                void persist({ stunServer })
+              }
+            }}
+            placeholder="stun.miwifi.com:3478"
+            spellCheck={false}
+          />
+          <span className="mt-1 block text-[10px] leading-relaxed text-muted">
+            {t('settings.stunServerHint')}
+          </span>
+        </label>
         <label className="block">
           <span className="mb-1 block text-[10px] uppercase tracking-[0.14em] text-muted">
             {t('settings.deviceName')}

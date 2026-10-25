@@ -1148,6 +1148,7 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
             j["device_name"] = settings.device_name;
             j["avatar"] = settings.avatar;
             j["server_enabled"] = settings.server_enabled;
+            j["stun_server"] = settings.stun_server;
             j["long_term_code"] = settings.long_term_code;
             // The listener is always on 0.0.0.0; access toggles apply at once.
             j["restart_required"] = false;
@@ -1179,6 +1180,12 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
              const bool discovery = flag("discovery", before.discovery_enabled);
              const bool access_requests =
                  flag("access_requests", before.allow_access_requests);
+             const std::string* stun = req.query("stun");
+             if (stun != nullptr && !deps.auth->set_stun_server(*stun)) {
+               resp.status(400).json_str(R"({"code":"invalid_stun"})");
+               resp.end();
+               return;
+             }
              const std::string* name = req.query("name");
              deps.auth->update_access(allow_remote, allow_web, discovery,
                                       name != nullptr ? *name : std::string());
@@ -1204,6 +1211,7 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
              j["allow_web_client"] = after.allow_web_client;
              j["discovery_enabled"] = after.discovery_enabled;
              j["allow_access_requests"] = after.allow_access_requests;
+             j["stun_server"] = after.stun_server;
              j["device_name"] = after.device_name;
              j["restart_required"] = false;
              resp.set_header("Cache-Control", "no-store").json(j);

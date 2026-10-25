@@ -316,6 +316,7 @@ export interface SecuritySettings {
   allow_web_client: boolean
   discovery_enabled: boolean
   allow_access_requests: boolean
+  stun_server?: string
   device_name: string
   long_term_code: string
   restart_required: boolean
@@ -333,6 +334,7 @@ export function postSettings(
     discovery: boolean
     allowAccessRequests: boolean
     name: string
+    stunServer?: string
   },
 ): Promise<SecuritySettings> {
   const query = new URLSearchParams({
@@ -342,6 +344,7 @@ export function postSettings(
     access_requests: values.allowAccessRequests ? '1' : '0',
     name: values.name,
   })
+  if (values.stunServer !== undefined) query.set('stun', values.stunServer)
   return request<SecuritySettings>(
     `/api/settings?${query.toString()}`,
     { method: 'POST' },

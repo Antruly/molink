@@ -202,6 +202,43 @@ void auth_state::set_allow_access_requests(bool allow) {
   persist_locked();
 }
 
+bool auth_state::set_stun_server(const std::string& value) {
+  std::string trimmed = value;
+  while (!trimmed.empty() &&
+         (trimmed.back() == ' ' || trimmed.back() == '\t' ||
+          trimmed.back() == '\r' || trimmed.back() == '\n')) {
+    trimmed.pop_back();
+  }
+  std::size_t start = 0;
+  while (start < trimmed.size() &&
+         (trimmed[start] == ' ' || trimmed[start] == '\t')) {
+    ++start;
+  }
+  trimmed = trimmed.substr(start);
+  if (trimmed.size() > 255 || has_whitespace_or_control(trimmed)) {
+    return false;
+  }
+  if (trimmed != "none" && trimmed != "off" && trimmed != "0") {
+    const std::size_t colon = trimmed.rfind(':');
+    if (colon != std::string::npos && trimmed.find(':') == colon) {
+      if (colon == 0) return false;
+      const std::string port = trimmed.substr(colon + 1);
+      if (!port.empty()) {
+        try {
+          const int parsed = std::stoi(port);
+          if (parsed < 1 || parsed > 65535) return false;
+        } catch (...) {
+          return false;
+        }
+      }
+    }
+  }
+  std::lock_guard<std::mutex> lock(mutex_);
+  settings_.stun_server = trimmed;
+  persist_locked();
+  return true;
+}
+
 void auth_state::set_service_desired_running(bool enabled) {
   std::lock_guard<std::mutex> lock(mutex_);
   settings_.service_desired_running = enabled;

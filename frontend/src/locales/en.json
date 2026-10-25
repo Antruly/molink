@@ -178,7 +178,9 @@
     "domainUnknown": "Unknown domain code",
     "domainJoin": "Join",
     "domainJoinPlaceholder": "Enter the 9-digit domain code",
-    "domainHint": "Devices with the same domain code appear in each other's domain list; rotating the owner's code invalidates the old one immediately."
+    "domainHint": "Devices with the same domain code appear in each other's domain list; rotating the owner's code invalidates the old one immediately.",
+    "stunServer": "STUN server",
+    "stunServerHint": "Used for ICE across NATs. Leave empty for the built-in stun.miwifi.com:3478; enter none to disable STUN."
   },
   "session": {
     "connecting": "Connecting…",

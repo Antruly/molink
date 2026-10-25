@@ -189,6 +189,7 @@ interface AppState {
     discovery: boolean
     allowAccessRequests: boolean
     name: string
+    stunServer?: string
   }) => Promise<boolean>
   decideAccessRequest: (id: number, allow: boolean) => Promise<void>
   setLongTermCode: (value: string) => Promise<boolean>

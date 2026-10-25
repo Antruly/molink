@@ -29,6 +29,9 @@ struct app_settings {
   std::string server_invite;
   /// Optional PEM CA bundle used to verify an HTTPS directory.
   std::string server_ca;
+  /// STUN server for ICE: "host[:port]", empty = built-in default,
+  /// "none" disables server-reflexive candidates.
+  std::string stun_server;
   /// "preset:<name>" or a small image data URL, synced to the directory.
   std::string avatar;
 
