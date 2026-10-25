@@ -1,0 +1,64 @@
+name: Release Win7 Offline
+
+# Builds the Windows 7 x86 offline package: the normal portable package plus a
+# fixed-version WebView2 runtime (109.0.1518.78, the last version supporting
+# Windows 7). The shell looks for WebView2Runtime\ next to the exe and passes
+# it to CreateCoreWebView2EnvironmentWithOptions, so no system installation is
+# needed. Kept as a separate, manually triggered asset because the runtime adds
+# roughly 180 MB to the download.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag (e.g. v0.9.7)'
+        required: true
+        default: 'v0.9.7'
+
+permissions:
+  contents: write
+
+jobs:
+  offline:
+    runs-on: windows-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download the normal Win7 package
+        shell: pwsh
+        run: |
+          $version = '${{ github.event.inputs.tag }}' -replace '^v',''
+          gh release download '${{ github.event.inputs.tag }}' `
+            -R $env:GITHUB_REPOSITORY `
+            -p "moLink-$version-win7-x86.zip" -D dl --clobber
+          Expand-Archive "dl\moLink-$version-win7-x86.zip" -DestinationPath pkg
+
+      - name: Fetch the fixed WebView2 109 runtime (x86)
+        shell: pwsh
+        run: |
+          choco install 7zip -y --no-progress
+          $url = 'https://github.com/westinyang/WebView2RuntimeArchive/releases/download/109.0.1518.78/Microsoft.WebView2.FixedVersionRuntime.109.0.1518.78.x86.cab'
+          Invoke-WebRequest -Uri $url -OutFile wv2.cab
+          & 'C:\Program Files\7-Zip\7z.exe' x wv2.cab -owv2 -y | Out-Null
+          $exe = Get-ChildItem wv2 -Recurse -Filter msedgewebview2.exe |
+            Select-Object -First 1
+          if (-not $exe) { throw 'fixed WebView2 runtime not found in the cab' }
+          $sig = Get-AuthenticodeSignature $exe.FullName
+          if ($sig.Status -ne 'Valid') {
+            throw "WebView2 runtime signature is not valid: $($sig.Status)"
+          }
+          if ($sig.SignerCertificate.Subject -notmatch 'Microsoft') {
+            throw "unexpected WebView2 signer: $($sig.SignerCertificate.Subject)"
+          }
+          Copy-Item -Recurse $exe.Directory.FullName 'pkg\WebView2Runtime'
+          Get-ChildItem 'pkg\WebView2Runtime' | Select-Object -First 5 -ExpandProperty Name
+
+      - name: Package and attach to the release
+        shell: pwsh
+        run: |
+          $version = '${{ github.event.inputs.tag }}' -replace '^v',''
+          $out = "moLink-$version-win7-x86-offline.zip"
+          Compress-Archive -Path 'pkg\*' -DestinationPath $out -CompressionLevel Optimal
+          Get-Item $out | Select-Object Name,Length
+          gh release upload '${{ github.event.inputs.tag }}' $out --clobber

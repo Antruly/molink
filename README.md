@@ -252,7 +252,9 @@ python3 tools/bench_quality.py http://127.0.0.1:28418 --token <ready-token>
 桌面端不发布 zip。
 
 Windows 7 x86（32 位）与其它平台在**同一个 `v*` Release**：`release-desktop.yml` 的
-`win7-x86` job 产出 `moLink-<版本>-win7-x86.zip` 和 `moLink-<版本>-win7-x86-setup.exe`。
+`win7-x86` job 产出 `moLink-<版本>-win7-x86.zip` 和 `moLink-<版本>-win7-x86-setup.exe`；
+另有 `moLink-<版本>-win7-x86-offline.zip`（手动触发 `release-win7-offline.yml`），内含固定版
+WebView2 Runtime 109（`WebView2Runtime\`），无需系统安装，体积约 180 MB。
 构建方法、依赖（libuvcpp 1.8.5 kit 的 `prebuilt/` + GCC 13；kit 另提供 cmake/make 和
 zlib 静态库）和已知限制见 [docs/win7-x86.md](docs/win7-x86.md)。
 

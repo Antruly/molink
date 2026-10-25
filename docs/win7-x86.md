@@ -184,3 +184,10 @@ core、shell、service/helper、打包、Inno Setup）：
 | 没有声音 | Win7 测试虚拟机没有声卡；欢迎消息 `audio=false` 是预期行为 |
 | 在远程/过滤令牌会话里安装服务失败 | `sc create` 需要管理员权限的完整令牌；用安装器（UAC）或在控制台以管理员运行 `install-service.cmd` |
 | 启动时报缺少 DLL | 保持 zip/安装目录结构完整；MinGW 运行库（`libstdc++-6`、`libgcc_s_dw2-1`、`libwinpthread-1`）与 `libuvcpp.dll` 必须在 exe 同目录 |
+
+## 离线 WebView2（可选）
+
+Win7 没有 WebView2 时，`moLink.exe` 会自动改用默认浏览器打开 UI（见 0.9.7）；如果需要原生
+外壳且不装系统运行时，用 `moLink-<版本>-win7-x86-offline.zip`：它把固定版 WebView2
+109.0.1518.78（x86，Win7 最后支持版本）放在 `WebView2Runtime\`，外壳检测到后直接用它。
+该包由 `.github/workflows/release-win7-offline.yml` 手动生成，约 180 MB。
