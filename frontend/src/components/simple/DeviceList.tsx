@@ -43,6 +43,7 @@ export function DeviceList({
   const nearby = useAppStore((state) => state.nearby)
   const localMode = useAppStore((state) => state.localMode)
   const server = useAppStore((state) => state.server)
+  const token = useAppStore((state) => state.token)
   const refreshDiscovery = useAppStore((state) => state.refreshDiscovery)
   const saveDevice = useAppStore((state) => state.saveDevice)
   const removeSavedDevice = useAppStore((state) => state.removeSavedDevice)
@@ -87,7 +88,7 @@ export function DeviceList({
       return
     }
     try {
-      const list = await lookupDevices(serverUrl, trackedIds)
+      const list = await lookupDevices(serverUrl, token, trackedIds)
       const next: Record<string, PeerStatus> = {}
       for (const peer of list) {
         next[peer.id] = peer

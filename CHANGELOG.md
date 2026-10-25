@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.9.4] — 2026-10-25
+
+### Fixed
+
+- 设备 ID 查询改由本机核心代理（`/api/directory/device`、`/api/directory/devices`）：
+  浏览器直接 `fetch` 目录时，需要浏览器自己信任目录的私有（Cloudflare Origin）证书；
+  没安装该 CA 的机器会报「无法连接 ID 服务器」，即使 ICE 会话已经建立。现在查询由核心
+  带着 CA 完成，浏览器只访问本机核心。
+
+### Changed
+
+- 包含 0.9.3 的改动：简洁模式本机 ID 字号 20px；默认单次验证码（1 次）
+
 ## [0.9.3] — 2026-10-25
 
 ### Changed

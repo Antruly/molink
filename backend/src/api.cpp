@@ -605,6 +605,71 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
              resp.end();
            });
 
+  // Device lookups through this core's directory connection. The browser used
+  // to call /v1/devices directly, which required it (not the core) to trust the
+  // directory's CA; with a private/Origin certificate that failed and the UI
+  // reported "could not reach the ID server" even though ICE sessions worked.
+  auto directory_lookup = [deps](uvcpp_web_request& req,
+                                 uvcpp_web_response& resp,
+                                 const std::string& query) {
+    if (!deps.server) {
+      resp.status(503).json_str(R"({"code":"directory_unavailable"})");
+      resp.end();
+      return;
+    }
+    std::string body;
+    std::string error;
+    int status = 0;
+    if (!deps.server->directory_lookup(query, body, status, error)) {
+      uvcpp_json j;
+      j["type"] = "error";
+      j["code"] = "directory_unreachable";
+      j["message"] = error;
+      resp.status(502).json(j);
+      resp.end();
+      return;
+    }
+    resp.set_header("Cache-Control", "no-store");
+    if (status == 200) {
+      resp.json_str(body);
+    } else if (status == 404) {
+      resp.status(404).json_str(
+          R"({"type":"error","code":"unknown_device","message":"unknown device"})");
+    } else if (status == 429) {
+      resp.status(429).json_str(
+          R"({"type":"error","code":"rate_limited","message":"the directory rate-limited this lookup"})");
+    } else {
+      uvcpp_json j;
+      j["type"] = "error";
+      j["code"] = "directory_error";
+      j["message"] = body.empty() ? error : body;
+      resp.status(502).json(j);
+    }
+    resp.end();
+  };
+  app.get("/api/directory/device",
+          [directory_lookup](uvcpp_web_request& req, uvcpp_web_response& resp,
+                             uvcpp_web_next) {
+            const std::string* id = req.query("id");
+            if (id == nullptr || id->empty()) {
+              resp.status(400).json_str(R"({"code":"bad_request"})");
+              resp.end();
+              return;
+            }
+            directory_lookup(req, resp, "id=" + url_encode(*id));
+          });
+  app.get("/api/directory/devices",
+          [directory_lookup](uvcpp_web_request& req, uvcpp_web_response& resp,
+                             uvcpp_web_next) {
+            const std::string* ids = req.query("ids");
+            if (ids == nullptr || ids->empty()) {
+              resp.status(400).json_str(R"({"code":"bad_request"})");
+              resp.end();
+              return;
+            }
+            directory_lookup(req, resp, "ids=" + url_encode(*ids));
+          });
+
   // Chat between the person at this machine and a controlling client. The
   // local UI polls for new messages; the session websocket carries the other
   // side. Both use the same shared log.

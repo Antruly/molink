@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <cstdlib>
 #include <cstring>
 #include <random>
@@ -124,6 +125,22 @@ std::string base64_encode(const uint8_t* data, std::size_t len) {
     out.push_back(kAlphabet[(v >> 12) & 0x3f]);
     out.push_back(two ? kAlphabet[(v >> 6) & 0x3f] : '=');
     out.push_back('=');
+  }
+  return out;
+}
+
+std::string url_encode(const std::string& value) {
+  static const char hex[] = "0123456789ABCDEF";
+  std::string out;
+  out.reserve(value.size());
+  for (unsigned char c : value) {
+    if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+      out.push_back(static_cast<char>(c));
+    } else {
+      out.push_back('%');
+      out.push_back(hex[c >> 4]);
+      out.push_back(hex[c & 0x0f]);
+    }
   }
   return out;
 }

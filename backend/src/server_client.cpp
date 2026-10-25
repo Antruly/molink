@@ -67,22 +67,6 @@ std::string trim(std::string value) {
   return value.substr(start);
 }
 
-std::string url_encode(const std::string& value) {
-  static const char hex[] = "0123456789ABCDEF";
-  std::string out;
-  out.reserve(value.size());
-  for (unsigned char c : value) {
-    if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
-      out.push_back(static_cast<char>(c));
-    } else {
-      out.push_back('%');
-      out.push_back(hex[c >> 4]);
-      out.push_back(hex[c & 0x0f]);
-    }
-  }
-  return out;
-}
-
 struct parsed_url {
   std::string host;
   int port = 80;
@@ -690,6 +674,21 @@ bool server_client::signal_close(const std::string& connect_id,
     return false;
   }
   return true;
+}
+
+bool server_client::directory_lookup(const std::string& query,
+                                     std::string& body, int& http_status,
+                                     std::string& error) {
+  signaling_credentials credentials;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    credentials = signaling_credentials_locked();
+  }
+  if (credentials.url.empty()) {
+    error = "not registered with the directory";
+    return false;
+  }
+  return get(credentials.url, "/v1/devices", query, body, http_status, error);
 }
 
 bool server_client::post(const std::string& base_url, const std::string& path,

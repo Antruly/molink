@@ -105,6 +105,13 @@ class server_client {
                          std::string& error);
   bool signal_close(const std::string& connect_id, std::string& error);
 
+  /// GET /v1/devices through this device's directory credentials. The body is
+  /// returned verbatim and `http_status` is the directory's status; the browser
+  /// cannot do this itself because it would have to trust the directory's
+  /// private CA and go cross-origin.
+  bool directory_lookup(const std::string& query, std::string& body,
+                        int& http_status, std::string& error);
+
  private:
   struct signaling_credentials {
     std::string url;

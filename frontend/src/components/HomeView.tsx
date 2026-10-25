@@ -192,7 +192,7 @@ export function HomeView() {
     setResolving(true)
     setError(null)
     try {
-      const info = await lookupDevice(serverUrl, deviceId)
+      const info = await lookupDevice(serverUrl, authToken, deviceId)
       if (!info.online) {
         setError('device_offline')
         return

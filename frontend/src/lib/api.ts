@@ -585,50 +585,35 @@ export function saveUiPreferences(
 
 /// Batch online status for the saved/recent device list. The directory only
 /// returns the caller's own list of IDs; there is no global enumeration.
+///
+/// Lookups go through the local core: the directory's certificate may be a
+/// private/Origin CA that the browser does not trust, while the core carries
+/// (or is configured with) that CA.
 export async function lookupDevices(
   serverUrl: string,
+  token: string,
   ids: string[],
 ): Promise<PeerStatus[]> {
   if (!serverUrl || ids.length === 0) return []
-  const base = serverUrl.replace(/\/+$/, '')
   const query = ids.slice(0, 20).map(encodeURIComponent).join(',')
-  const response = await fetch(`${base}/v1/devices?ids=${query}`, {
-    cache: 'no-store',
-  })
-  if (!response.ok) {
-    let code = `http_${response.status}`
-    try {
-      const body = (await response.json()) as { code?: string }
-      if (body.code) code = body.code
-    } catch {
-      // Keep the HTTP status as the code.
-    }
-    throw new ApiError(response.status, code)
-  }
-  const body = (await response.json()) as { devices?: PeerStatus[] }
+  const body = await request<{ devices?: PeerStatus[] }>(
+    `/api/directory/devices?ids=${query}`,
+    {},
+    token,
+  )
   return body.devices ?? []
 }
 
-/// Resolves a device ID through the public directory. The server enables CORS,
-/// so the UI can call it directly without a core-side proxy.
+/// Resolves a device ID via the local core's directory connection.
 export async function lookupDevice(
   serverUrl: string,
+  token: string,
   id: string,
 ): Promise<DeviceLookup> {
-  const base = serverUrl.replace(/\/+$/, '')
-  const response = await fetch(
-    `${base}/v1/devices?id=${encodeURIComponent(id)}`,
-    { cache: 'no-store' },
+  if (!serverUrl) throw new ApiError(0, 'server_not_configured')
+  return request<DeviceLookup>(
+    `/api/directory/device?id=${encodeURIComponent(id)}`,
+    {},
+    token,
   )
-  if (!response.ok) {
-    let code = `http_${response.status}`
-    try {
-      const body = (await response.json()) as { code?: string }
-      if (body.code) code = body.code
-    } catch {
-      // Keep the HTTP status as the code.
-    }
-    throw new ApiError(response.status, code)
-  }
-  return (await response.json()) as DeviceLookup
 }

@@ -13,6 +13,7 @@ export function SimpleHomeView() {
   const { t } = useTranslation()
   const localMode = useAppStore((state) => state.localMode)
   const server = useAppStore((state) => state.server)
+  const token = useAppStore((state) => state.token)
   const createSession = useAppStore((state) => state.createSession)
   const preferredMode = useAppStore((state) => state.preferredMode)
 
@@ -63,7 +64,7 @@ export function SimpleHomeView() {
           setError(t('simple.serverRequired'))
           return
         }
-        const device = await lookupDevice(info.url, target.id ?? '')
+        const device = await lookupDevice(info.url, token, target.id ?? '')
         if (!device.online) {
           setError(t('simple.deviceOffline'))
           return
