@@ -153,6 +153,7 @@ export function HomeView() {
     targetToken: string,
     label?: string,
     saveToken = false,
+    targetId = '',
   ) => {
     const requestAccess = targetToken.trim() === ''
     createSession(
@@ -163,6 +164,8 @@ export function HomeView() {
       saveToken,
       requestAccess,
       preferredMode,
+      'desktop',
+      targetId || undefined,
     )
     if (requestAccess) {
       rememberRecent(
@@ -205,6 +208,7 @@ export function HomeView() {
         requestAccess ? '' : code.trim(),
         info.name || targetHost,
         !requestAccess && rememberCode,
+        info.id,
       )
     } catch (caught) {
       const codeValue = caught instanceof ApiError ? caught.code : ''

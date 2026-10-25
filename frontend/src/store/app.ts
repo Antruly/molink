@@ -74,6 +74,9 @@ export interface SessionTab {
   host: string
   port: number
   token: string
+  /// Directory device ID; the connection then tries ICE through the local
+  /// core before falling back to the direct address.
+  deviceId?: string
   phase: ClientPhase
   welcome: Welcome | null
   frame: Frame | null
@@ -983,6 +986,7 @@ export const useAppStore = create<AppState>((set, get) => {
         host: host.trim(),
         port,
         token: trimmedToken,
+        deviceId,
         phase: 'connecting',
         welcome: null,
         frame: null,
@@ -1029,7 +1033,7 @@ export const useAppStore = create<AppState>((set, get) => {
       if (trimmedToken === '' && !requestAccess) {
         patchTab(id, { phase: 'error', error: 'no_token' })
       } else {
-        connection.connect(tab.host, port, trimmedToken, requestAccess)
+        connection.connect(tab.host, port, trimmedToken, requestAccess, deviceId)
         if (trimmedToken !== '') {
           remember(tab.host, port, tab.label, trimmedToken, saveToken, {
             id: deviceId,

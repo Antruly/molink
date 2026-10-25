@@ -9,8 +9,11 @@
 #if defined(_WIN32)
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <iphlpapi.h>
 #else
 #include <arpa/inet.h>
+#include <ifaddrs.h>
+#include <net/if.h>
 #include <netdb.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -126,28 +129,69 @@ std::string base64_encode(const uint8_t* data, std::size_t len) {
 }
 
 std::vector<std::string> local_ipv4_addresses() {
-  char hostname[256] = {};
-  if (gethostname(hostname, sizeof(hostname) - 1) != 0) return {};
-  addrinfo hints{};
-  hints.ai_family = AF_INET;
-  hints.ai_socktype = SOCK_STREAM;
-  addrinfo* result = nullptr;
-  if (getaddrinfo(hostname, nullptr, &hints, &result) != 0) return {};
   std::vector<std::string> out;
-  for (addrinfo* entry = result; entry != nullptr; entry = entry->ai_next) {
-    if (entry->ai_addr == nullptr) continue;
-    char text[INET_ADDRSTRLEN] = {};
-    const auto* address = reinterpret_cast<const sockaddr_in*>(entry->ai_addr);
-    if (inet_ntop(AF_INET, &address->sin_addr, text, sizeof(text)) == nullptr) {
-      continue;
-    }
-    const std::string value(text);
-    if (value.rfind("127.", 0) == 0) continue;
+  auto add = [&out](const std::string& value) {
+    if (value.empty() || value.rfind("127.", 0) == 0) return;
     if (std::find(out.begin(), out.end(), value) == out.end()) {
       out.push_back(value);
     }
+  };
+
+#if defined(_WIN32)
+  ULONG size = 16 * 1024;
+  std::vector<unsigned char> storage(size);
+  auto* addresses = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(storage.data());
+  ULONG result = GetAdaptersAddresses(
+      AF_INET, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
+                   GAA_FLAG_SKIP_DNS_SERVER,
+      nullptr, addresses, &size);
+  if (result == ERROR_BUFFER_OVERFLOW) {
+    storage.resize(size);
+    addresses = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(storage.data());
+    result = GetAdaptersAddresses(
+        AF_INET, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
+                     GAA_FLAG_SKIP_DNS_SERVER,
+        nullptr, addresses, &size);
   }
-  freeaddrinfo(result);
+  if (result == NO_ERROR) {
+    for (auto* adapter = addresses; adapter != nullptr; adapter = adapter->Next) {
+      if (adapter->OperStatus != IfOperStatusUp) continue;
+      for (auto* unicast = adapter->FirstUnicastAddress; unicast != nullptr;
+           unicast = unicast->Next) {
+        const sockaddr* address = unicast->Address.lpSockaddr;
+        if (address == nullptr || address->sa_family != AF_INET) continue;
+        char text[INET_ADDRSTRLEN] = {};
+        const auto* ipv4 = reinterpret_cast<const sockaddr_in*>(address);
+        if (inet_ntop(AF_INET, &ipv4->sin_addr, text, sizeof(text)) != nullptr) {
+          add(text);
+        }
+      }
+    }
+  }
+#else
+  struct ifaddrs* interfaces = nullptr;
+  if (getifaddrs(&interfaces) == 0) {
+    for (struct ifaddrs* item = interfaces; item != nullptr;
+         item = item->ifa_next) {
+      if (item->ifa_addr == nullptr) continue;
+      if (!(item->ifa_flags & IFF_UP) || (item->ifa_flags & IFF_LOOPBACK)) {
+        continue;
+      }
+      if (item->ifa_name != nullptr &&
+          std::strcmp(item->ifa_name, "docker0") == 0) {
+        continue;
+      }
+      if (item->ifa_addr->sa_family != AF_INET) continue;
+      char text[INET_ADDRSTRLEN] = {};
+      const auto* ipv4 = reinterpret_cast<const sockaddr_in*>(item->ifa_addr);
+      if (inet_ntop(AF_INET, &ipv4->sin_addr, text, sizeof(text)) != nullptr) {
+        add(text);
+      }
+    }
+    freeifaddrs(interfaces);
+  }
+#endif
+
   const auto is_private = [](const std::string& value) {
     if (value.rfind("10.", 0) == 0 || value.rfind("192.168.", 0) == 0) {
       return true;
@@ -164,5 +208,4 @@ std::vector<std::string> local_ipv4_addresses() {
                    });
   return out;
 }
-
 }  // namespace molink

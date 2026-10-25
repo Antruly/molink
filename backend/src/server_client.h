@@ -44,6 +44,21 @@ struct domain_peer {
   uint64_t last_seen_ms = 0;
 };
 
+/// One ICE signaling session from the directory (see /v1/connect*).
+struct signal_session_info {
+  std::string connect_id;
+  std::string from_id;
+  std::string from_name;
+  std::string offer;
+  std::vector<std::string> from_candidates;
+  std::string answer;
+  std::vector<std::string> to_candidates;
+  bool answered = false;
+  bool closed = false;
+  bool expired = false;
+  std::uint64_t expires_ms = 0;
+};
+
 /// Runs in its own thread: registers this core with the configured directory,
 /// sends a heartbeat every 30 seconds, and keeps the assigned ID in
 /// server.json so a restart reuses it. The built-in directory is used when no
@@ -73,7 +88,30 @@ class server_client {
   /// Devices that currently share this device's domain code (self excluded).
   bool list_domain_devices(std::vector<domain_peer>& out, std::string& err);
 
+  // ---- ICE signaling (P2P) ------------------------------------------------
+  // These are synchronous HTTP calls; the P2P worker thread calls them. They
+  // use the same directory URL, device ID/token and CA as register/heartbeat.
+  bool signal_create(const std::string& target, const std::string& offer,
+                     const std::vector<std::string>& candidates,
+                     std::string& connect_id, std::string& error);
+  bool signal_pending(std::vector<signal_session_info>& out, std::string& error);
+  bool signal_answer(const std::string& connect_id, const std::string& answer,
+                     const std::vector<std::string>& candidates,
+                     std::string& error);
+  bool signal_status(const std::string& connect_id,
+                     signal_session_info& out, std::string& error);
+  bool signal_candidates(const std::string& connect_id,
+                         const std::vector<std::string>& candidates,
+                         std::string& error);
+  bool signal_close(const std::string& connect_id, std::string& error);
+
  private:
+  struct signaling_credentials {
+    std::string url;
+    std::string device_id;
+    std::string token;
+  };
+  signaling_credentials signaling_credentials_locked() const;
   void run();
   bool try_register(const std::string& url, const std::string& invite);
   bool try_heartbeat();
@@ -102,6 +140,10 @@ class server_client {
   /// Serialises server.json writes: the UI thread rotates a domain while the
   /// worker may save a heartbeat, and both use the same temporary file.
   std::mutex credentials_mutex_;
+  /// libuvcpp's synchronous HTTP client is not safe to use from two threads at
+  /// once (global TLS/loop state). The heartbeat thread and the P2P signaling
+  /// worker share this directory client, so every request is serialised.
+  std::mutex http_mutex_;
   server_status status_;
   std::string token_;
   std::string active_url_;

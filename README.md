@@ -26,7 +26,7 @@
 | 设备 ID / 验证码（持久化，默认隐藏） | ✅ 令牌保存在配置目录 |
 | 本机免验证 / 远程验证码登录 | ✅ 回环免验证；非本机必须验证 |
 | 远程一键控制核心所在主机 | ✅ 验证后点击即可 |
-| 空闲自动锁定（默认 60 秒） | ✅ 无操作且无远程会话时锁定，可配置/持久化 |
+| 空闲自动锁定（默认 60 秒） | ✅ 仅非本机（远程浏览器）无操作时锁定；本机壳层/浏览器不锁定 |
 | 首次连接独立窗口、后续连接 Tab、标签拖出 | ✅ 三个平台的原生多窗口 |
 | 亮/暗主题、无边框圆角、自绘标题栏、关闭到托盘 | ✅ Linux/Windows；macOS 使用原生标题栏 |
 | 连接质量水印（默认关闭） | ✅ |
@@ -35,6 +35,24 @@
 | H.264 / AV1 + WebCodecs | ⏳ |
 | 设备目录 / 按 ID 连接（moLink Server） | ✅ 注册/心跳/在线状态/HTTPS；桌面端已接入 |
 | 中继 / TURN、WebRTC/P2P、UDP 直连、移动端 | ⏳ 二阶段后续 |
+
+## P2P / ICE（按设备 ID 连接）
+
+浏览器不能自己开 UDP 或跑 ICE，所以“按 ID 连接”由本机核心代理：
+
+1. 前端连接本机的 `ws://<本机核心>/ws/connect?target=<设备ID>`（本机壳层和远端浏览器
+   都是同一个核心）。
+2. 本机核心通过目录的 `/v1/connect*` 信令与被叫交换 ICE offer/answer；双方核心用
+   libjuice 的 external-socket 模式，在各自的 `uvcpp_udp` 上打洞（libjuice 不建
+   socket、不建线程，`uvcpp_timer` 驱动重传/保活）。
+3. ICE 完成后，浏览器 WebSocket 与 ICE/UDP 会话做透明桥接；被叫端用与
+   `/ws/session` 相同的 `session_controller` 处理 hello、验证码、帧和输入。
+4. ICE 失败时本地核心关闭代理连接，前端自动回退到目录返回地址的直连 WebSocket。
+
+UDP 数据报按 1200 字节分片/重组（tag + kind + id + index + count），因此大关键帧
+可以走 UDP。STUN 通过 `MOLINK_STUN_HOST` / `MOLINK_STUN_PORT` 配置；未配置时仅使用
+主机候选，适合局域网/同一 NAT。TURN 兜底尚未在客户端接入，可使用 coturn 或
+libjuice 自带的 `juice_server`（见服务端仓库 `docs/p2p-relay.md`）。
 
 ## 架构
 
@@ -269,7 +287,8 @@ Windows 7 x86（32 位）是独立预览线：推送 `win7-x86-v*` 标签触发
 AppImage 首次使用需要 `chmod +x`，并依赖系统的 GTK 3 与 WebKitGTK 4.1；缺少依赖时 AppRun 会弹出说明。
 
 推送 `v*` 标签会触发 `.github/workflows/release-desktop.yml`，三个平台并行构建并把
-产物附加到同一个 Release；需要仓库变量 `UVCPP_REPO`（libuvcpp 源码地址）。
+产物附加到同一个 Release。Linux/Windows 直接下载 libuvcpp 预编译包（仓库变量
+`UVCPP_VERSION`，默认 `1.8.4`）；macOS 仍从源码构建，需要仓库变量 `UVCPP_REPO`。
 Win7 x86 使用独立的 `.github/workflows/release-win7.yml`（`win7-x86-v*` 标签或手动
 触发），下载 libuvcpp Win7 kit 与 GCC 13 后产出 zip 和 Inno Setup 安装器。
 

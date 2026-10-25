@@ -223,7 +223,7 @@ export class SessionConnection {
   }
 
   connect(host: string, port: number, token: string,
-          requestAccess = false): void {
+          requestAccess = false, deviceId = ''): void {
     this.stopClipboardSync()
     this.stopCongestionWatch()
     this.lastClipboard = ''
@@ -243,7 +243,7 @@ export class SessionConnection {
       notice: null,
       frame: null,
     })
-    this.client.connect(host, port, token, requestAccess)
+    this.client.connect(host, port, token, requestAccess, deviceId)
   }
 
   disconnect(): void {

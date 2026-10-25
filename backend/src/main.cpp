@@ -31,6 +31,8 @@
 #include "input/windows_secure_input.h"
 #endif
 #include "server_client.h"
+#include "p2p/p2p_manager.h"
+#include "transport/connect_proxy.h"
 #include "ui_store.h"
 #include "session_registry.h"
 #include "util.h"
@@ -423,8 +425,13 @@ int main(int argc, char** argv) {
   session_opts.bound_port = bound_port;
   session_opts.http2_available = deps.http2_available;
   session_opts.tile_size = capture_opts.tile_size;
+  auto p2p = std::make_shared<p2p_manager>(
+      app.loop(),
+      [&app](std::function<void()> fn) { app.post(std::move(fn)); },
+      server_client_state, registry, session_opts);
   register_http_routes(app, deps);
   app.websocket("/ws/session", make_ws_handler(registry, session_opts));
+  app.websocket("/ws/connect", make_connect_handler(p2p));
 
   if (!web_root.empty()) {
     uvcpp::uvcpp_web_static_options static_options;
@@ -454,6 +461,7 @@ int main(int argc, char** argv) {
   const int port = app.bound_port();
   bound_port->store(port);
   server_client_state->start();
+  p2p->start();
   discovery->set_web_port(port);
   {
     const app_settings current = auth->settings();
@@ -525,6 +533,7 @@ int main(int argc, char** argv) {
   // asked for it, and the app's own lifetime defines when it is no longer
   // needed.
   stop_session_service(service_error);
+  p2p->stop();
   server_client_state->stop();
   app.stop();
   app.join();

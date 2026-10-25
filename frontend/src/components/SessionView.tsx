@@ -379,12 +379,12 @@ export function SessionView({
   }, [tab.phase, tab.retryAt])
 
   const requestAccessFromError = useCallback(() => {
-    createSession(tab.host, tab.port, '', tab.label, false, true)
+    createSession(tab.host, tab.port, '', tab.label, false, true, tab.mode, tab.intent, tab.deviceId)
     closeTab(tab.id)
-  }, [closeTab, createSession, tab.host, tab.label, tab.port, tab.id])
+  }, [closeTab, createSession, tab.host, tab.label, tab.port, tab.id, tab.mode, tab.intent, tab.deviceId])
   const reconnect = useCallback(() => {
-    connection()?.connect(tab.host, tab.port, tab.token, tab.token === '')
-  }, [connection, tab.host, tab.port, tab.token])
+    connection()?.connect(tab.host, tab.port, tab.token, tab.token === '', tab.deviceId)
+  }, [connection, tab.host, tab.port, tab.token, tab.deviceId])
 
   // A background tab is throttled and may miss frames; resync as soon as it
   // becomes visible again instead of waiting for the next pull.

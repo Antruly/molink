@@ -221,7 +221,12 @@ export class MolinkClient {
     port: number
     token: string
     requestAccess: boolean
+    /// Directory device ID. When set, the first attempt goes through the
+    /// local core's /ws/connect ICE proxy instead of a direct WebSocket.
+    targetId: string
   } | null = null
+  /// The ICE proxy failed; use the resolved address directly from now on.
+  private proxyFailed = false
   private retryAttempts = 0
   private retryTimer: number | null = null
   private autoRetryTimer: number | null = null
@@ -237,12 +242,13 @@ export class MolinkClient {
   }
 
   connect(host: string, port: number, token: string,
-          requestAccess = false): void {
+          requestAccess = false, targetId = ''): void {
     this.disconnect()
     this.stopRetryTimers()
     this.closedByUser = false
     this.retryAttempts = 0
-    this.lastConnect = { host, port, token, requestAccess }
+    this.proxyFailed = false
+    this.lastConnect = { host, port, token, requestAccess, targetId }
     this.openSocket()
   }
 
@@ -259,7 +265,7 @@ export class MolinkClient {
   private openSocket(): void {
     const args = this.lastConnect
     if (args === null) return
-    const { host, port, token, requestAccess } = args
+    const { host, port, token, requestAccess, targetId } = args
     this.closedByUser = false
     this.hasImage = false
     this.pendingFrame = false
@@ -269,7 +275,14 @@ export class MolinkClient {
     this.pendingTiles.clear()
     this.frameQueue = Promise.resolve()
 
-    const url = `ws://${formatHost(host)}:${port}/ws/session`
+    // A device-ID connection starts with ICE through the local core. That core
+    // also runs the directory client and owns the UDP socket libjuice needs.
+    // If the proxy cannot establish a path, fall back to the direct address
+    // the directory returned.
+    const useProxy = targetId !== '' && !this.proxyFailed
+    const url = useProxy
+      ? `ws://${window.location.host}/ws/connect?target=${encodeURIComponent(targetId)}`
+      : `ws://${formatHost(host)}:${port}/ws/session`
     this.handlers.onPhase?.('connecting')
 
     let ws: WebSocket
@@ -310,6 +323,12 @@ export class MolinkClient {
       this.stopPing()
       this.pendingFrame = false
       this.ws = null
+      if (useProxy && !this.closedByUser) {
+        // ICE failed or the proxy is unavailable: retry the direct path once.
+        this.proxyFailed = true
+        this.openSocket()
+        return
+      }
       if (this.closedByUser) {
         this.handlers.onPhase?.('idle')
         return

@@ -23,6 +23,7 @@
 #include "auth_state.h"
 #include "identity.h"
 #include "settings.h"
+#include "util.h"
 
 namespace molink {
 namespace {
@@ -394,6 +395,291 @@ bool server_client::list_domain_devices(std::vector<domain_peer>& out,
   return true;
 }
 
+server_client::signaling_credentials
+server_client::signaling_credentials_locked() const {
+  signaling_credentials out;
+  out.url = active_url_;
+  out.device_id = status_.device_id;
+  out.token = token_;
+  return out;
+}
+
+namespace {
+
+signal_session_info parse_signal_session(const json& item) {
+  signal_session_info session;
+  session.connect_id = item.value("connect_id", std::string());
+  const auto from = item.find("from");
+  if (from != item.end() && from->is_object()) {
+    session.from_id = from->value("id", std::string());
+    session.from_name = from->value("name", std::string());
+  }
+  session.offer = item.value("offer", std::string());
+  session.answer = item.value("answer", std::string());
+  session.answered = item.value("answered", false);
+  session.closed = item.value("closed", false);
+  session.expired = item.value("expired", false);
+  session.expires_ms = item.value("expires_ms", static_cast<uint64_t>(0));
+  for (const char* key : {"from_candidates", "to_candidates"}) {
+    const auto values = item.find(key);
+    if (values == item.end() || !values->is_array()) continue;
+    auto& target = std::string(key) == "from_candidates"
+                       ? session.from_candidates
+                       : session.to_candidates;
+    for (const json& value : *values) {
+      if (value.is_string()) target.push_back(value.get<std::string>());
+    }
+  }
+  return session;
+}
+
+std::string signal_error_text(const std::string& body, int status) {
+  try {
+    const json response = json::parse(body);
+    const std::string code = response.value("code", std::string());
+    const std::string message = response.value("message", std::string());
+    if (!code.empty() || !message.empty()) {
+      return code + (message.empty() ? std::string() : ": " + message);
+    }
+  } catch (...) {
+  }
+  return "server returned HTTP " + std::to_string(status);
+}
+
+}  // namespace
+
+bool server_client::signal_create(const std::string& target,
+                                  const std::string& offer,
+                                  const std::vector<std::string>& candidates,
+                                  std::string& connect_id,
+                                  std::string& err) {
+  signaling_credentials credentials;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    credentials = signaling_credentials_locked();
+  }
+  if (credentials.url.empty() || credentials.device_id.empty() ||
+      credentials.token.empty()) {
+    err = "not registered with the directory";
+    return false;
+  }
+  json payload;
+  payload["id"] = credentials.device_id;
+  payload["token"] = credentials.token;
+  payload["target"] = target;
+  payload["offer"] = offer;
+  payload["candidates"] = candidates;
+  std::string body;
+  std::string error;
+  int status = 0;
+  if (!post(credentials.url, "/v1/connect", "", payload.dump(), body, status,
+            error)) {
+    err = error;
+    return false;
+  }
+  if (status != 200) {
+    err = signal_error_text(body, status);
+    return false;
+  }
+  try {
+    const json response = json::parse(body);
+    connect_id = response.value("connect_id", std::string());
+  } catch (...) {
+    err = "the directory returned invalid JSON";
+    return false;
+  }
+  if (connect_id.empty()) {
+    err = "the directory did not return a connect id";
+    return false;
+  }
+  return true;
+}
+
+bool server_client::signal_pending(std::vector<signal_session_info>& out,
+                                   std::string& err) {
+  out.clear();
+  signaling_credentials credentials;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    credentials = signaling_credentials_locked();
+  }
+  if (credentials.url.empty() || credentials.device_id.empty() ||
+      credentials.token.empty()) {
+    err = "not registered with the directory";
+    return false;
+  }
+  const std::string query =
+      "id=" + url_encode(credentials.device_id) +
+      "&token=" + url_encode(credentials.token);
+  std::string body;
+  std::string error;
+  int status = 0;
+  if (!get(credentials.url, "/v1/connect/pending", query, body, status,
+           error)) {
+    err = error;
+    return false;
+  }
+  if (status != 200) {
+    err = signal_error_text(body, status);
+    return false;
+  }
+  try {
+    const json response = json::parse(body);
+    const auto sessions = response.find("sessions");
+    if (sessions != response.end() && sessions->is_array()) {
+      for (const json& item : *sessions) {
+        out.push_back(parse_signal_session(item));
+      }
+    }
+  } catch (...) {
+    err = "the directory returned invalid JSON";
+    return false;
+  }
+  return true;
+}
+
+bool server_client::signal_answer(const std::string& connect_id,
+                                  const std::string& answer,
+                                  const std::vector<std::string>& candidates,
+                                  std::string& err) {
+  signaling_credentials credentials;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    credentials = signaling_credentials_locked();
+  }
+  if (credentials.url.empty()) {
+    err = "not registered with the directory";
+    return false;
+  }
+  json payload;
+  payload["id"] = credentials.device_id;
+  payload["token"] = credentials.token;
+  payload["connect_id"] = connect_id;
+  payload["answer"] = answer;
+  payload["candidates"] = candidates;
+  std::string body;
+  std::string error;
+  int status = 0;
+  if (!post(credentials.url, "/v1/connect/answer", "", payload.dump(), body,
+            status, error)) {
+    err = error;
+    return false;
+  }
+  if (status != 200) {
+    err = signal_error_text(body, status);
+    return false;
+  }
+  return true;
+}
+
+bool server_client::signal_status(const std::string& connect_id,
+                                  signal_session_info& out,
+                                  std::string& err) {
+  out = signal_session_info{};
+  signaling_credentials credentials;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    credentials = signaling_credentials_locked();
+  }
+  if (credentials.url.empty()) {
+    err = "not registered with the directory";
+    return false;
+  }
+  const std::string query =
+      "id=" + url_encode(credentials.device_id) +
+      "&token=" + url_encode(credentials.token) +
+      "&connect_id=" + url_encode(connect_id);
+  std::string body;
+  std::string error;
+  int status = 0;
+  if (!get(credentials.url, "/v1/connect/status", query, body, status,
+           error)) {
+    err = error;
+    return false;
+  }
+  if (status == 404) {
+    err = "connect_not_found";
+    return false;
+  }
+  if (status != 200) {
+    err = signal_error_text(body, status);
+    return false;
+  }
+  try {
+    const json response = json::parse(body);
+    const auto session = response.find("session");
+    if (session != response.end() && session->is_object()) {
+      out = parse_signal_session(*session);
+    }
+  } catch (...) {
+    err = "the directory returned invalid JSON";
+    return false;
+  }
+  return true;
+}
+
+bool server_client::signal_candidates(
+    const std::string& connect_id,
+    const std::vector<std::string>& candidates, std::string& err) {
+  signaling_credentials credentials;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    credentials = signaling_credentials_locked();
+  }
+  if (credentials.url.empty()) {
+    err = "not registered with the directory";
+    return false;
+  }
+  json payload;
+  payload["id"] = credentials.device_id;
+  payload["token"] = credentials.token;
+  payload["connect_id"] = connect_id;
+  payload["candidates"] = candidates;
+  std::string body;
+  std::string error;
+  int status = 0;
+  if (!post(credentials.url, "/v1/connect/candidates", "", payload.dump(),
+            body, status, error)) {
+    err = error;
+    return false;
+  }
+  if (status != 200) {
+    err = signal_error_text(body, status);
+    return false;
+  }
+  return true;
+}
+
+bool server_client::signal_close(const std::string& connect_id,
+                                 std::string& err) {
+  signaling_credentials credentials;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    credentials = signaling_credentials_locked();
+  }
+  if (credentials.url.empty()) {
+    err = "not registered with the directory";
+    return false;
+  }
+  json payload;
+  payload["id"] = credentials.device_id;
+  payload["token"] = credentials.token;
+  payload["connect_id"] = connect_id;
+  std::string body;
+  std::string error;
+  int status = 0;
+  if (!post(credentials.url, "/v1/connect/close", "", payload.dump(), body,
+            status, error)) {
+    err = error;
+    return false;
+  }
+  if (status != 200) {
+    err = signal_error_text(body, status);
+    return false;
+  }
+  return true;
+}
+
 bool server_client::post(const std::string& base_url, const std::string& path,
                          const std::string& query, const std::string& payload,
                          std::string& body, int& http_status,
@@ -412,6 +698,7 @@ bool server_client::request(bool post_method, const std::string& base_url,
                             const std::string& path, const std::string& query,
                             const std::string& payload, std::string& body,
                             int& http_status, std::string& error) {
+  std::lock_guard<std::mutex> http_lock(http_mutex_);
   parsed_url parsed;
   if (!parse_url(base_url, parsed, error)) return false;
   std::string target = parsed.base + path;
@@ -466,6 +753,91 @@ bool server_client::request(bool post_method, const std::string& base_url,
   return true;
 }
 
+namespace {
+
+/// The local IPv4 address the OS uses to reach the directory. Advertising this
+/// one (rather than the first interface address) matters on multi-homed hosts:
+/// the connector and the directory are on the same network.
+std::string directory_address(const std::string& url) {
+  std::string rest = url;
+  const std::size_t scheme = rest.find("://");
+  if (scheme != std::string::npos) rest = rest.substr(scheme + 3);
+  const std::size_t slash = rest.find('/');
+  if (slash != std::string::npos) rest = rest.substr(0, slash);
+  if (rest.empty()) return std::string();
+
+  std::string host = rest;
+  std::string port = "443";
+  if (rest.front() == '[') {
+    const std::size_t close = rest.find(']');
+    if (close == std::string::npos) return std::string();
+    host = rest.substr(1, close - 1);
+    if (close + 2 <= rest.size() && rest[close + 1] == ':') {
+      port = rest.substr(close + 2);
+    }
+  } else {
+    const std::size_t colon = rest.rfind(':');
+    if (colon != std::string::npos) {
+      host = rest.substr(0, colon);
+      port = rest.substr(colon + 1);
+    }
+  }
+
+  addrinfo hints{};
+  hints.ai_family = AF_INET;
+  hints.ai_socktype = SOCK_DGRAM;
+  addrinfo* resolved = nullptr;
+  if (getaddrinfo(host.c_str(), port.c_str(), &hints, &resolved) != 0) {
+    return std::string();
+  }
+
+  std::string result;
+#if defined(_WIN32)
+  SOCKET socket_handle = ::socket(AF_INET, SOCK_DGRAM, 0);
+  if (socket_handle != INVALID_SOCKET) {
+    if (::connect(socket_handle,
+                  static_cast<const sockaddr*>(resolved->ai_addr),
+                  static_cast<int>(resolved->ai_addrlen)) == 0) {
+      sockaddr_in local{};
+      int length = sizeof(local);
+      if (::getsockname(socket_handle,
+                        reinterpret_cast<sockaddr*>(&local), &length) == 0) {
+        char text[INET_ADDRSTRLEN] = {};
+        if (inet_ntop(AF_INET, &local.sin_addr, text, sizeof(text)) != nullptr) {
+          result = text;
+        }
+      }
+    }
+    ::closesocket(socket_handle);
+  }
+#else
+  const int socket_handle = ::socket(AF_INET, SOCK_DGRAM, 0);
+  if (socket_handle >= 0) {
+    if (::connect(socket_handle, resolved->ai_addr, resolved->ai_addrlen) == 0) {
+      sockaddr_in local{};
+      socklen_t length = sizeof(local);
+      if (::getsockname(socket_handle, reinterpret_cast<sockaddr*>(&local),
+                        &length) == 0) {
+        char text[INET_ADDRSTRLEN] = {};
+        if (inet_ntop(AF_INET, &local.sin_addr, text, sizeof(text)) != nullptr) {
+          result = text;
+        }
+      }
+    }
+    ::close(socket_handle);
+  }
+#endif
+  freeaddrinfo(resolved);
+
+  if (!result.empty() && !is_loopback_peer(result)) return result;
+  for (const std::string& address : local_ipv4_addresses()) {
+    if (!is_loopback_peer(address)) return address;
+  }
+  return std::string();
+}
+
+}  // namespace
+
 bool server_client::try_register(const std::string& url,
                                  const std::string& invite) {
   const int port = bound_port_ ? bound_port_->load() : 0;
@@ -476,9 +848,13 @@ bool server_client::try_register(const std::string& url,
   const app_settings settings = auth_->settings();
   const std::string name =
       settings.device_name.empty() ? std::string("moLink") : settings.device_name;
+  const std::string local_address = directory_address(url);
   std::string query = "name=" + url_encode(name) +
                       "&port=" + std::to_string(port) +
                       "&version=" + url_encode(version_);
+  if (!local_address.empty()) {
+    query += "&address=" + url_encode(local_address);
+  }
   if (!invite.empty()) query += "&invite=" + url_encode(invite);
 
   json payload;
@@ -486,6 +862,7 @@ bool server_client::try_register(const std::string& url,
   payload["port"] = port;
   payload["version"] = version_;
   payload["platform"] = device_platform();
+  if (!local_address.empty()) payload["address"] = local_address;
   if (!settings.avatar.empty()) payload["avatar"] = settings.avatar;
   if (!invite.empty()) payload["invite"] = invite;
 
@@ -554,10 +931,14 @@ bool server_client::try_heartbeat() {
   const app_settings settings = auth_->settings();
   const std::string name =
       settings.device_name.empty() ? std::string("moLink") : settings.device_name;
-  const std::string query =
+  const std::string local_address = directory_address(active_url_);
+  std::string query =
       "id=" + url_encode(id) + "&token=" + url_encode(token) +
       "&port=" + std::to_string(port) + "&version=" + url_encode(version_) +
       "&name=" + url_encode(name);
+  if (!local_address.empty()) {
+    query += "&address=" + url_encode(local_address);
+  }
   json payload;
   payload["id"] = id;
   payload["token"] = token;
@@ -565,6 +946,7 @@ bool server_client::try_heartbeat() {
   payload["version"] = version_;
   payload["name"] = name;
   payload["platform"] = device_platform();
+  if (!local_address.empty()) payload["address"] = local_address;
   if (!settings.avatar.empty()) payload["avatar"] = settings.avatar;
   std::string body;
   std::string error;

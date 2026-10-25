@@ -36,7 +36,47 @@ option(MOLINK_BUILD_CORE
 #
 # Point UVCPP_ROOT or CMAKE_PREFIX_PATH at an unpacked release if it is not
 # installed in a standard prefix.
+set(MOLINK_UVCPP_PREFIX "" CACHE PATH
+  "Unpacked libuvcpp release archive (include/ and lib/, bin/ on Windows)")
+
 if(MOLINK_BUILD_CORE)
+  if(MOLINK_UVCPP_PREFIX)
+    # CI uses the release archive directly instead of building libuvcpp from
+    # source. It ships no CMake package config, so create an imported target.
+    if(NOT EXISTS "${MOLINK_UVCPP_PREFIX}/include/uvcpp/uvcpp_config.h")
+      message(FATAL_ERROR
+        "MOLINK_UVCPP_PREFIX does not look like a libuvcpp release archive: "
+        "${MOLINK_UVCPP_PREFIX}")
+    endif()
+    add_library(uvcpp_prebuilt SHARED IMPORTED)
+    set_target_properties(uvcpp_prebuilt PROPERTIES
+      INTERFACE_INCLUDE_DIRECTORIES "${MOLINK_UVCPP_PREFIX}/include")
+    if(WIN32)
+      find_library(_uvp_implib NAMES uvcpp libuvcpp
+        PATHS "${MOLINK_UVCPP_PREFIX}/lib" NO_DEFAULT_PATH)
+      find_file(_uvp_dll NAMES uvcpp.dll libuvcpp.dll
+        PATHS "${MOLINK_UVCPP_PREFIX}/bin" NO_DEFAULT_PATH)
+      if(NOT _uvp_implib OR NOT _uvp_dll)
+        message(FATAL_ERROR
+          "libuvcpp release archive is missing uvcpp.lib or uvcpp.dll")
+      endif()
+      set_target_properties(uvcpp_prebuilt PROPERTIES
+        IMPORTED_IMPLIB "${_uvp_implib}"
+        IMPORTED_LOCATION "${_uvp_dll}")
+    else()
+      find_file(_uvp_so NAMES libuvcpp.so libuvcpp.dylib
+        PATHS "${MOLINK_UVCPP_PREFIX}/lib" NO_DEFAULT_PATH)
+      if(NOT _uvp_so)
+        message(FATAL_ERROR
+          "libuvcpp release archive is missing lib/libuvcpp.so")
+      endif()
+      set_target_properties(uvcpp_prebuilt PROPERTIES
+        IMPORTED_LOCATION "${_uvp_so}")
+    endif()
+    set(UVP_UVCPP_TARGET uvcpp_prebuilt)
+    set(UVP_UVCPP_PREFIX "${MOLINK_UVCPP_PREFIX}")
+    set(UVP_UVCPP_ROUTE "prebuilt archive (${MOLINK_UVCPP_PREFIX})")
+  else()
   find_package(uvcpp 1.7.0 CONFIG QUIET)
 
   if(uvcpp_FOUND)
@@ -70,8 +110,29 @@ if(MOLINK_BUILD_CORE)
     set(UVP_UVCPP_TARGET PkgConfig::UVCPP)
     set(UVP_UVCPP_ROUTE "pkg-config (${UVCPP_VERSION})")
   endif()
+  endif()
 
   message(STATUS "uvp: libuvcpp via ${UVP_UVCPP_ROUTE}")
+endif()
+
+if(MOLINK_BUILD_CORE)
+  # ICE/P2P uses the external-socket mode added in Antruly/libjuice. Point
+  # MOLINK_LIBJUICE_DIR at a local checkout for offline builds; otherwise CI
+  # fetches the pinned fork commit.
+  set(MOLINK_LIBJUICE_DIR "" CACHE PATH
+    "Patched libjuice source tree (external socket mode)")
+  if(MOLINK_LIBJUICE_DIR)
+    add_subdirectory("${MOLINK_LIBJUICE_DIR}" "${CMAKE_BINARY_DIR}/libjuice"
+                     EXCLUDE_FROM_ALL)
+  else()
+    include(FetchContent)
+    set(NO_TESTS ON CACHE BOOL "" FORCE)
+    FetchContent_Declare(libjuice
+      GIT_REPOSITORY https://github.com/Antruly/libjuice.git
+      GIT_TAG ea7fdce765311634103193bfcc5370916d2c0230)
+    FetchContent_MakeAvailable(libjuice)
+  endif()
+  set(MOLINK_LIBJUICE_TARGET LibJuice::LibJuiceStatic)
 endif()
 
 set(MOLINK_CORE_SOURCES
@@ -110,6 +171,10 @@ set(MOLINK_CORE_SOURCES
   src/service_control.cpp
   src/test_pattern.cpp
   src/transport/ws_transport.cpp
+  src/transport/juice_transport.cpp
+  src/transport/connect_proxy.cpp
+  src/p2p/ice_agent.cpp
+  src/p2p/p2p_manager.cpp
   src/util.cpp
   src/session_controller.cpp
   src/protocol/frame_packet.cpp
@@ -138,7 +203,7 @@ if(MOLINK_BUILD_CORE)
 
   if(WIN32)
     target_link_libraries(molink-core PRIVATE
-      d3d11 dxgi dxguid gdi32 user32 ole32 uuid ws2_32 advapi32 shell32)
+      d3d11 dxgi dxguid gdi32 user32 ole32 uuid ws2_32 iphlpapi advapi32 shell32)
     if(MINGW)
       # WASAPI format GUIDs (KSDATAFORMAT_SUBTYPE_*) live in ksguid on MinGW;
       # MSVC pulls them in through the SDK's default libraries.
@@ -199,7 +264,10 @@ if(MOLINK_BUILD_CORE)
     endforeach()
   endif()
 
-  target_link_libraries(molink-core PRIVATE ${UVP_UVCPP_TARGET} ${CMAKE_DL_LIBS})
+  # The P2P socket and timer use libuvcpp's own wrappers, so they run on the
+  # same libuv instance as the rest of the core and need no extra libuv link.
+  target_link_libraries(molink-core PRIVATE ${UVP_UVCPP_TARGET}
+    ${MOLINK_LIBJUICE_TARGET} ${CMAKE_DL_LIBS})
 
   # libuvcpp's installed libuvcpp.so depends on libllhttp.so in its own directory
   # but carries no RUNPATH of its own. The executable's default RUNPATH is not
