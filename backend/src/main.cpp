@@ -180,9 +180,33 @@ int main(int argc, char** argv) {
   using namespace molink;
 
 #if defined(_WIN32)
-  // Keep GetSystemMetrics/SendInput in physical pixels so they match the DXGI
-  // output rectangles used for capture and monitor selection.
-  SetProcessDPIAware();
+  // Keep GetSystemMetrics/BitBlt/SendInput in physical pixels. System DPI
+  // awareness (SetProcessDPIAware) is virtualized on a per-monitor scaling
+  // different from the system DPI: a 1920x1080 screen at 112.5% then reports
+  // and captures 1707x960 logical pixels. Prefer per-monitor v2, fall back to
+  // per-monitor, then to the Windows 7 system-DPI API.
+  using set_dpi_ctx_fn = BOOL(WINAPI*)(void*);
+  using set_dpi_awareness_fn = HRESULT(WINAPI*)(int);
+  bool dpi_ok = false;
+  if (HMODULE user32 = GetModuleHandleW(L"user32.dll")) {
+    auto set_ctx = reinterpret_cast<set_dpi_ctx_fn>(
+        GetProcAddress(user32, "SetProcessDpiAwarenessContext"));
+    if (set_ctx != nullptr) {
+      // PER_MONITOR_AWARE_V2 = -4
+      dpi_ok = set_ctx(reinterpret_cast<void*>(-4)) != FALSE;
+    }
+  }
+  if (!dpi_ok) {
+    if (HMODULE shcore = GetModuleHandleW(L"shcore.dll")) {
+      auto set_awareness = reinterpret_cast<set_dpi_awareness_fn>(
+          GetProcAddress(shcore, "SetProcessDpiAwareness"));
+      if (set_awareness != nullptr) {
+        // PROCESS_PER_MONITOR_DPI_AWARE = 2
+        dpi_ok = SUCCEEDED(set_awareness(2));
+      }
+    }
+  }
+  if (!dpi_ok) SetProcessDPIAware();
 #endif
 
   core_config cfg;
