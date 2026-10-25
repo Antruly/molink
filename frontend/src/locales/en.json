@@ -508,6 +508,8 @@
     "domainHint": "Devices on the same channel appear in the Channel list. Share the code with the people you want to connect to.",
     "domainHintUnregistered": "The ID server (0.2.1 or newer) generates the channel code after registration; it cannot be created locally.",
     "domainRevokedHint": "This channel code no longer exists. Ask its owner for a new one, or create your own.",
-    "noDomainPeers": "No other devices on this channel yet."
+    "noDomainPeers": "No other devices on this channel yet.",
+    "clearRecent": "Clear recent",
+    "clearRecentConfirm": "Remove all recent connections?"
   }
 }

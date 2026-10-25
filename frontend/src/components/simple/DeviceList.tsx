@@ -6,6 +6,7 @@ import {
   MessageSquare,
   Monitor,
   Star,
+  Trash2,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { lookupDevices, type PeerStatus } from '../../lib/api'
@@ -44,6 +45,7 @@ export function DeviceList({
   const localMode = useAppStore((state) => state.localMode)
   const server = useAppStore((state) => state.server)
   const token = useAppStore((state) => state.token)
+  const forgetRecent = useAppStore((state) => state.forgetRecent)
   const refreshDiscovery = useAppStore((state) => state.refreshDiscovery)
   const saveDevice = useAppStore((state) => state.saveDevice)
   const removeSavedDevice = useAppStore((state) => state.removeSavedDevice)
@@ -267,6 +269,23 @@ export function DeviceList({
     </div>
   )
 
+  const forgetButton = (item: DeviceItem) => {
+    if (item.source !== 'recent') return null
+    return (
+      <button
+        type="button"
+        className="grid h-7 w-7 place-items-center rounded-md text-muted transition hover:bg-danger/10 hover:text-danger"
+        title={t('home.forget')}
+        onClick={(event) => {
+          event.stopPropagation()
+          forgetRecent(item.lastSeen)
+        }}
+      >
+        <Trash2 size={13} />
+      </button>
+    )
+  }
+
   const starButton = (item: DeviceItem) => {
     const saved = isSaved(item)
     return (
@@ -331,6 +350,19 @@ export function DeviceList({
           ))}
         </div>
         <div className="ml-auto flex items-center gap-1">
+          {tab === 'recent' && recents.length > 0 ? (
+            <button
+              type="button"
+              className="grid h-7 w-7 place-items-center rounded-md text-muted transition hover:bg-danger/10 hover:text-danger"
+              title={t('simple.clearRecent')}
+              onClick={() => {
+                if (!window.confirm(t('simple.clearRecentConfirm'))) return
+                for (const recent of [...recents]) forgetRecent(recent.at)
+              }}
+            >
+              <Trash2 size={13} />
+            </button>
+          ) : null}
           <button
             type="button"
             className={
@@ -410,6 +442,7 @@ export function DeviceList({
                     </div>
                   </div>
                   <div className="flex items-center opacity-0 transition group-hover:opacity-100">
+                    {forgetButton(item)}
                     {starButton(item)}
                   </div>
                 </div>
@@ -420,6 +453,7 @@ export function DeviceList({
                   <div className="flex items-center">
                     {quickActions(item)}
                     <span className="ml-1 opacity-0 transition group-hover:opacity-100">
+                      {forgetButton(item)}
                       {starButton(item)}
                     </span>
                   </div>
@@ -473,6 +507,7 @@ export function DeviceList({
                     <td>
                       <div className="flex justify-end gap-0.5">
                         {quickActions(item)}
+                        {forgetButton(item)}
                         {starButton(item)}
                       </div>
                     </td>
