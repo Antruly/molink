@@ -721,7 +721,7 @@ bool server_client::request(bool post_method, const std::string& base_url,
   uvcpp::uvcpp_ssl_context tls_context(uvcpp::tls_mode::CLIENT);
   if (parsed.tls) {
     const std::string ca_path =
-        auth_ ? trim(auth_->settings().server_ca) : std::string();
+        auth_ ? effective_server_ca(auth_->settings()) : std::string();
     tls_context.set_verify_mode(uvcpp::tls_verify_mode::PEER_STRICT);
     if (!ca_path.empty() && !tls_context.load_ca_file(ca_path)) {
       error = "could not load the server CA file";

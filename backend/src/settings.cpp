@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <string>
 
 #if !defined(_WIN32)
@@ -50,6 +51,58 @@ int parse_int(const std::string& value, int fallback) {
   }
 }
 
+/// Cloudflare Origin CA root (https://developers.cloudflare.com/ssl/origin-configuration/origin-ca/).
+/// The built-in directory's certificate is issued by this CA; public trust
+/// stores do not include it, so the client carries a copy.
+constexpr char kDirectoryCaPem[] = R"PEM(-----BEGIN CERTIFICATE-----
+MIIEADCCAuigAwIBAgIID+rOSdTGfGcwDQYJKoZIhvcNAQELBQAwgYsxCzAJBgNV
+BAYTAlVTMRkwFwYDVQQKExBDbG91ZEZsYXJlLCBJbmMuMTQwMgYDVQQLEytDbG91
+ZEZsYXJlIE9yaWdpbiBTU0wgQ2VydGlmaWNhdGUgQXV0aG9yaXR5MRYwFAYDVQQH
+Ew1TYW4gRnJhbmNpc2NvMRMwEQYDVQQIEwpDYWxpZm9ybmlhMB4XDTE5MDgyMzIx
+MDgwMFoXDTI5MDgxNTE3MDAwMFowgYsxCzAJBgNVBAYTAlVTMRkwFwYDVQQKExBD
+bG91ZEZsYXJlLCBJbmMuMTQwMgYDVQQLEytDbG91ZEZsYXJlIE9yaWdpbiBTU0wg
+Q2VydGlmaWNhdGUgQXV0aG9yaXR5MRYwFAYDVQQHEw1TYW4gRnJhbmNpc2NvMRMw
+EQYDVQQIEwpDYWxpZm9ybmlhMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKC
+AQEAwEiVZ/UoQpHmFsHvk5isBxRehukP8DG9JhFev3WZtG76WoTthvLJFRKFCHXm
+V6Z5/66Z4S09mgsUuFwvJzMnE6Ej6yIsYNCb9r9QORa8BdhrkNn6kdTly3mdnykb
+OomnwbUfLlExVgNdlP0XoRoeMwbQ4598foiHblO2B/LKuNfJzAMfS7oZe34b+vLB
+yrP/1bgCSLdc1AxQc1AC0EsQQhgcyTJNgnG4va1c7ogPlwKyhbDyZ4e59N5lbYPJ
+SmXI/cAe3jXj1FBLJZkwnoDKe0v13xeF+nF32smSH0qB7aJX2tBMW4TWtFPmzs5I
+lwrFSySWAdwYdgxw180yKU0dvwIDAQABo2YwZDAOBgNVHQ8BAf8EBAMCAQYwEgYD
+VR0TAQH/BAgwBgEB/wIBAjAdBgNVHQ4EFgQUJOhTV118NECHqeuU27rhFnj8KaQw
+HwYDVR0jBBgwFoAUJOhTV118NECHqeuU27rhFnj8KaQwDQYJKoZIhvcNAQELBQAD
+ggEBAHwOf9Ur1l0Ar5vFE6PNrZWrDfQIMyEfdgSKofCdTckbqXNTiXdgbHs+TWoQ
+wAB0pfJDAHJDXOTCWRyTeXOseeOi5Btj5CnEuw3P0oXqdqevM1/+uWp0CM35zgZ8
+VD4aITxity0djzE6Qnx3Syzz+ZkoBgTnNum7d9A66/V636x4vTeqbZFBr9erJzgz
+hhurjcoacvRNhnjtDRM0dPeiCJ50CP3wEYuvUzDHUaowOsnLCjQIkWbR7Ni6KEIk
+MOz2U0OBSif3FTkhCgZWQKOOLo1P42jHC3ssUZAtVNXrCk3fw9/E15k8NPkBazZ6
+0iykLhH1trywrKRMVw67F44IE8Y=
+-----END CERTIFICATE-----
+)PEM";
+
+/// Write the bundled CA into the config directory (where the process can read
+/// it) and return its path. Returns empty when the directory is unwritable.
+std::string bundled_directory_ca() {
+  const std::string dir = config_directory();
+  if (dir.empty()) return std::string();
+  std::error_code ec;
+  fs::create_directories(dir, ec);
+  const fs::path path = fs::path(dir) / "directory-ca.pem";
+  const std::string pem(kDirectoryCaPem);
+  std::ifstream existing(path, std::ios::binary);
+  if (existing) {
+    const std::string current((std::istreambuf_iterator<char>(existing)),
+                              std::istreambuf_iterator<char>());
+    if (current == pem) return path.string();
+  }
+  std::ofstream out(path, std::ios::binary | std::ios::trunc);
+  if (!out) return std::string();
+  out << pem;
+  out.close();
+  if (!out) return std::string();
+  return path.string();
+}
+
 }  // namespace
 
 std::string default_server_url() { return MOLINK_DEFAULT_SERVER_URL; }
@@ -58,6 +111,15 @@ std::string effective_server_url(const app_settings& settings) {
   if (!settings.server_enabled) return std::string();
   const std::string custom = trim(settings.server_url);
   return custom.empty() ? default_server_url() : custom;
+}
+
+std::string effective_server_ca(const app_settings& settings) {
+  const std::string custom = trim(settings.server_ca);
+  if (!custom.empty()) return custom;
+  if (effective_server_url(settings) != default_server_url()) {
+    return std::string();
+  }
+  return bundled_directory_ca();
 }
 
 std::string default_device_name() {

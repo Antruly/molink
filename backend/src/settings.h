@@ -53,4 +53,11 @@ std::string default_device_name();
 std::string effective_server_url(const app_settings& settings);
 std::string default_server_url();
 
+/// CA bundle for the effective directory. A user-provided server_ca wins. For
+/// the built-in directory there is no public CA to rely on: its certificate is
+/// issued by Cloudflare's Origin CA, so the bundled root is written to the
+/// config directory and used by default. Custom directories and an empty
+/// server_ca keep the system trust store.
+std::string effective_server_ca(const app_settings& settings);
+
 }  // namespace molink

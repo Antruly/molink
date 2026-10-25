@@ -130,7 +130,7 @@ core、shell、service/helper、打包、Inno Setup）：
 ./packaging/windows/build-win7-x86.ps1 `
   -Kit C:\path\libuvcpp-1.8.3-mingw32 `
   -Gcc C:\path\i686-13.2.0-posix-dwarf-msvcrt `
-  -WebView2 C:\path\wv2 -Version 0.9.0 -Out build\package
+  -WebView2 C:\path\wv2 -Version 0.9.1 -Out build\package
 ```
 
 `.github/workflows/release-win7.yml` 在 `win7-x86-v*` 标签或手动触发时下载

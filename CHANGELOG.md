@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.9.1] — 2026-10-25
+
+### Changed
+
+- 内置目录 `https://molink.ssvr.top:28430` 使用 Cloudflare Origin 证书，客户端现在随包
+  携带该 CA：`server_ca` 留空且使用内置目录时自动校验（根证书写入配置目录，
+  设置里仍显示为空，不会写入 `server_ca`）；自定义目录留空仍使用系统信任库
+
 ## [0.9.0] — 2026-10-25
 
 ### Changed

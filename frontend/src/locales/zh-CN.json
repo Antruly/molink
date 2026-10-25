@@ -160,7 +160,7 @@
     "serverTlsHint": "已支持 HTTPS；公网证书可留空 CA。",
     "autoSaveHint": "开关修改会立即生效；只有计算机名称需要点“应用”。",
     "serverCa": "自定义 CA（可选）",
-    "serverCaHint": "私有/自签 CA 的 PEM 文件路径；留空使用系统信任库。",
+    "serverCaHint": "私有/自签 CA 的 PEM 文件路径；留空时内置目录使用随包的根证书，自定义目录使用系统信任库。",
     "serverUsingDefault": "留空使用内置目录 {{url}}。",
     "serverEnabled": "启用远程目录",
     "serverEnabledHint": "关闭后只保留局域网 / IP 连接，本机不再注册到 moLink Server。",

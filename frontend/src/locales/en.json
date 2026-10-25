@@ -160,7 +160,7 @@
     "serverTlsHint": "HTTPS is supported. Leave the CA empty for public certificates.",
     "autoSaveHint": "Toggles apply immediately. Only the computer name needs Apply.",
     "serverCa": "Custom CA (optional)",
-    "serverCaHint": "PEM bundle for a private/self-signed CA. Empty uses the system trust store.",
+    "serverCaHint": "PEM bundle for a private/self-signed CA. Empty trusts the bundled root for the built-in directory and the system store for custom directories.",
     "serverUsingDefault": "Leave empty to use the built-in directory {{url}}.",
     "serverEnabled": "Enable remote directory",
     "serverEnabledHint": "When off, only LAN/IP connections remain and this device is no longer registered with moLink Server.",
