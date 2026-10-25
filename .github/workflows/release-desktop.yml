@@ -21,7 +21,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake libgtk-3-dev libwebkit2gtk-4.1-dev \
-            librsvg2-dev patchelf libuv1-dev libssl-dev curl rpm
+            librsvg2-dev patchelf libuv1-dev libssl-dev zlib1g-dev curl rpm
 
       - uses: pnpm/action-setup@v4
         with:
@@ -82,11 +82,27 @@ jobs:
           UVCPP_VERSION: ${{ vars.UVCPP_VERSION }}
         run: ./packaging/fetch-uvcpp.sh msvc-x64 "${UVCPP_VERSION:-1.8.5}" "$RUNNER_TEMP/uvcpp"
 
+      # The archive ships zlib.h (libuvcpp's public headers include it) but no
+      # zlib library, and molink compresses tiles itself. Build a static zlib
+      # so the package needs no extra zlib.dll.
+      - name: Build zlib (static)
+        shell: bash
+        run: |
+          ./packaging/clone-retry.sh --depth 1 --branch v1.3.1 \
+            https://github.com/madler/zlib.git "$RUNNER_TEMP/zlib"
+          cmake -S "$RUNNER_TEMP/zlib" -B "$RUNNER_TEMP/zlib/build" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/zlib/prefix"
+          cmake --build "$RUNNER_TEMP/zlib/build" --config Release --target install
+
       - name: Build core
         shell: bash
         run: |
           cmake -S backend -B backend/build \
-            -DMOLINK_UVCPP_PREFIX="$(cygpath -m "$RUNNER_TEMP/uvcpp")"
+            -DMOLINK_UVCPP_PREFIX="$(cygpath -m "$RUNNER_TEMP/uvcpp")" \
+            -DZLIB_USE_STATIC_LIBS=ON \
+            -DZLIB_INCLUDE_DIR="$(cygpath -m "$RUNNER_TEMP/zlib/prefix/include")" \
+            -DZLIB_LIBRARY="$(cygpath -m "$RUNNER_TEMP/zlib/prefix/lib/zlibstatic.lib")"
           cmake --build backend/build --config Release --parallel
 
       - name: Build frontend
