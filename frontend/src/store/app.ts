@@ -86,6 +86,8 @@ export interface SessionTab {
   error: string | null
   /// Machine-readable error code from the host (e.g. unauthorized).
   errorCode?: string | null
+  /// "relay" or "p2p" for a device-ID session.
+  transport?: string
   notice: string | null
   /// When the host must approve this session: epoch ms of the 60 s deadline.
   approvalDeadline: number | null
@@ -135,6 +137,8 @@ interface AppState {
   immersive: boolean
   historyView: HistoryView
   preferredMode: SessionMode
+  /// Force every device-ID connection through the server relay (no ICE).
+  forceRelay: boolean
   uiMode: UiMode
   savedDevices: SavedDevice[]
   authPhase: AuthPhase
@@ -160,6 +164,7 @@ interface AppState {
   setImmersive: (value: boolean) => void
   setHistoryView: (view: HistoryView) => void
   setPreferredMode: (mode: SessionMode) => void
+  setForceRelay: (value: boolean) => void
   setUiMode: (mode: UiMode) => void
   loadUiPreferences: () => Promise<void>
   saveDevice: (device: Omit<SavedDevice, 'key' | 'savedAt'> & { key?: string }) => void
@@ -468,6 +473,7 @@ export const useAppStore = create<AppState>((set, get) => {
     immersive: false,
     historyView: initialHistoryView(),
     preferredMode: initialSessionMode(),
+    forceRelay: readStorage('molink.forceRelay') === '1',
     uiMode: initialUiMode(),
     savedDevices: initialSavedDevices(),
     authPhase: 'booting',
@@ -527,6 +533,10 @@ export const useAppStore = create<AppState>((set, get) => {
       set({ historyView: view })
     },
 
+    setForceRelay: (value) => {
+      writeStorage('molink.forceRelay', value ? '1' : '0')
+      set({ forceRelay: value })
+    },
     setPreferredMode: (mode) => {
       writeStorage(MODE_KEY, mode)
       set({ preferredMode: mode })
@@ -1036,7 +1046,8 @@ export const useAppStore = create<AppState>((set, get) => {
       if (trimmedToken === '' && !requestAccess) {
         patchTab(id, { phase: 'error', error: 'no_token' })
       } else {
-        connection.connect(tab.host, port, trimmedToken, requestAccess, deviceId)
+        connection.connect(tab.host, port, trimmedToken, requestAccess,
+                           deviceId, get().forceRelay)
         if (trimmedToken !== '') {
           remember(tab.host, port, tab.label, trimmedToken, saveToken, {
             id: deviceId,

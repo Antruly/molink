@@ -1,5 +1,7 @@
 #include "transport/connect_proxy.h"
 
+#include "transport/switchable_transport.h"
+
 #include <deque>
 #include <string>
 #include <utility>
@@ -12,9 +14,10 @@ class connect_proxy final
     : public std::enable_shared_from_this<connect_proxy> {
  public:
   connect_proxy(uvcpp::uvcpp_ws_connection* browser,
-                std::shared_ptr<p2p_manager> manager, std::string target)
+                std::shared_ptr<p2p_manager> manager, std::string target,
+                bool relay_only)
       : browser_(browser), manager_(std::move(manager)),
-        target_(std::move(target)) {}
+        target_(std::move(target)), relay_only_(relay_only) {}
 
   void start() {
     if (browser_ == nullptr) return;
@@ -34,8 +37,8 @@ class connect_proxy final
           self->on_browser_close(code, reason);
         });
     manager_->connect(
-        target_,
-        [self](std::shared_ptr<juice_transport> transport) {
+        target_, relay_only_,
+        [self](std::shared_ptr<session_transport> transport) {
           self->on_ready(std::move(transport));
         },
         [self](const std::string& error) { self->on_error(error); });
@@ -87,12 +90,29 @@ class connect_proxy final
     pending_binary_.clear();
   }
 
-  void on_ready(std::shared_ptr<juice_transport> transport) {
+  void send_transport(const char* mode) {
+    if (browser_ == nullptr) return;
+    const std::string message = std::string("{\"type\":\"transport\",\"mode\":\"") +
+                                mode + "\"}";
+    browser_->send_text(message.data(), message.size());
+  }
+
+  void on_ready(std::shared_ptr<session_transport> transport) {
     if (closed_ || browser_ == nullptr) {
       transport->close(transport_close::normal, "browser closed");
       return;
     }
     transport_ = std::move(transport);
+    if (auto switcher =
+            std::dynamic_pointer_cast<switchable_transport>(transport_)) {
+      std::weak_ptr<connect_proxy> proxy = weak_from_this();
+      switcher->set_switch_handler([proxy] {
+        if (auto self = proxy.lock()) self->send_transport("p2p");
+      });
+      send_transport("relay");
+    } else {
+      send_transport("p2p");
+    }
     std::weak_ptr<connect_proxy> weak = weak_from_this();
     transport_->set_handlers(
         [weak](const std::string& text) {
@@ -145,7 +165,8 @@ class connect_proxy final
   uvcpp::uvcpp_ws_connection* browser_ = nullptr;
   std::shared_ptr<p2p_manager> manager_;
   std::string target_;
-  std::shared_ptr<juice_transport> transport_;
+  bool relay_only_ = false;
+  std::shared_ptr<session_transport> transport_;
   std::deque<std::string> pending_text_;
   std::deque<std::vector<uint8_t>> pending_binary_;
   std::string hello_text_;
@@ -167,7 +188,11 @@ uvcpp::uvcpp_web_ws_handler make_connect_handler(
                   "target device id is required");
       return;
     }
-    auto proxy = std::make_shared<connect_proxy>(conn, manager, *target);
+    const std::string* relay = request.query("relay");
+    const bool relay_only =
+        relay != nullptr && (*relay == "only" || *relay == "1");
+    auto proxy =
+        std::make_shared<connect_proxy>(conn, manager, *target, relay_only);
     proxy->start();
   };
 }

@@ -222,24 +222,61 @@ std::shared_ptr<ice_agent> p2p_manager::make_agent() {
   return std::make_shared<ice_agent>(loop_);
 }
 
-void p2p_manager::connect(const std::string& target, ready_fn ready,
-                          error_fn error) {
+void p2p_manager::connect(const std::string& target, bool relay_only,
+                          ready_fn ready, error_fn error) {
   refresh_stun();
   if (target.empty()) {
     error("target device id is empty");
     return;
   }
   const uint64_t id = next_outgoing_++;
-  plog("connecting to " + target);
+  plog("connecting to " + target + (relay_only ? " (relay only)" : ""));
   outgoing entry;
   entry.target = target;
   entry.created_ms = now_ms();
   entry.ready = std::move(ready);
   entry.error = std::move(error);
-  auto agent = make_agent();
-  entry.agent = agent;
+  entry.relay_only = relay_only;
+  if (!relay_only) entry.agent = make_agent();
   outgoing_.emplace(id, std::move(entry));
 
+  if (relay_only) {
+    // No ICE: create the signaling session only so both sides can obtain a
+    // relay token and pair. The offer is a placeholder; the target's ICE will
+    // not complete, which is fine because this side never uses it.
+    enqueue([this, id, target] {
+      std::string connect_id;
+      std::string error;
+      if (!server_->signal_create(target, "v=0", {}, connect_id, error)) {
+        plog("signal_create failed: " + error);
+        post_([this, id, error] { finish_outgoing(id, error); });
+        return;
+      }
+      plog("relay-only connect id " + connect_id);
+      post_([this, id, connect_id] {
+        auto found = outgoing_.find(id);
+        if (found == outgoing_.end() || found->second.finished) return;
+        found->second.connect_id = connect_id;
+      });
+      std::string url;
+      std::string ca;
+      if (!server_->relay_create(connect_id, url, ca, error)) {
+        plog("relay_create failed: " + error);
+        post_([this, id, error] { finish_outgoing(id, error); });
+        return;
+      }
+      plog("relay url " + url.substr(0, url.find('?')));
+      post_([this, id, url, ca] { start_relay_outgoing(id, url, ca); });
+    });
+    return;
+  }
+
+  std::shared_ptr<ice_agent> agent;
+  {
+    auto found = outgoing_.find(id);
+    if (found == outgoing_.end()) return;
+    agent = found->second.agent;
+  }
   agent->set_handlers(
       [this, id](const std::string& sdp) {
         auto it = outgoing_.find(id);
@@ -271,6 +308,14 @@ void p2p_manager::connect(const std::string& target, ready_fn ready,
             outgoing_poll_[id] = outgoing_poll{id, connect_id,
                                                entry->second.created_ms};
           });
+          // Relay first: open the data path in parallel with hole punching.
+          std::string url;
+          std::string ca;
+          if (!server_->relay_create(connect_id, url, ca, error)) {
+            plog("relay unavailable: " + error);
+            return;
+          }
+          post_([this, id, url, ca] { start_relay_outgoing(id, url, ca); });
         });
       },
       [this, id](int state) {
@@ -290,11 +335,38 @@ void p2p_manager::connect(const std::string& target, ready_fn ready,
   }
 }
 
+void p2p_manager::start_relay_outgoing(uint64_t id, std::string url,
+                                       std::string ca) {
+  auto it = outgoing_.find(id);
+  if (it == outgoing_.end() || it->second.finished) return;
+  plog("relay start outgoing " + it->second.target);
+  auto relay = std::make_shared<relay_transport>(std::move(url), std::move(ca),
+                                                 post_);
+  auto switcher = std::make_shared<switchable_transport>(relay);
+  it->second.relay = relay;
+  it->second.switcher = switcher;
+  relay->set_ready_handler([this, id] { on_outgoing_relay_ready(id); });
+  relay->start();
+}
+
+void p2p_manager::on_outgoing_relay_ready(uint64_t id) {
+  auto it = outgoing_.find(id);
+  if (it == outgoing_.end() || it->second.finished) return;
+  outgoing& entry = it->second;
+  if (entry.delivered || entry.ice_completed) return;
+  plog("relay ready for " + entry.target + ", delivering session");
+  entry.delivered = true;
+  ready_fn ready = std::move(entry.ready);
+  entry.ready = nullptr;
+  if (ready) ready(entry.switcher);
+}
+
 void p2p_manager::handle_status(uint64_t id,
                                 const signal_session_info& session) {
   auto it = outgoing_.find(id);
   if (it == outgoing_.end() || it->second.finished) return;
   outgoing& entry = it->second;
+  if (!entry.agent) return;
   if (session.closed || session.expired) {
     finish_outgoing(id, "the ICE session was closed");
     return;
@@ -313,9 +385,29 @@ void p2p_manager::deliver_outgoing(uint64_t id) {
   auto it = outgoing_.find(id);
   if (it == outgoing_.end() || it->second.finished) return;
   outgoing& entry = it->second;
+  if (entry.ice_completed || !entry.agent) return;
+  entry.ice_completed = true;
   const auto endpoint = parse_endpoint(entry.agent->selected_remote());
-  auto transport = std::make_shared<juice_transport>(
-      entry.agent, endpoint.first, endpoint.second);
+  auto ice = std::make_shared<juice_transport>(entry.agent, endpoint.first,
+                                               endpoint.second);
+
+  if (entry.delivered && entry.switcher) {
+    // The session is already live on the relay; move it to the direct path.
+    plog("switching " + entry.target + " to p2p");
+    entry.switcher->set_ice(ice);
+    entry.ice = ice;
+    entry.finished = true;
+    {
+      std::lock_guard<std::mutex> lock(outgoing_mutex_);
+      outgoing_poll_.erase(id);
+    }
+    outgoing_.erase(it);
+    return;
+  }
+
+  // The relay is not ready yet: use ICE directly and ignore a late relay.
+  entry.delivered = true;
+  entry.ice = ice;
   entry.finished = true;
   ready_fn ready = std::move(entry.ready);
   {
@@ -323,19 +415,32 @@ void p2p_manager::deliver_outgoing(uint64_t id) {
     outgoing_poll_.erase(id);
   }
   outgoing_.erase(it);
-  if (ready) ready(transport);
+  if (ready) ready(ice);
 }
 
 void p2p_manager::finish_outgoing(uint64_t id, const std::string& error) {
   auto it = outgoing_.find(id);
   if (it == outgoing_.end()) return;
-  if (it->second.finished) {
+  outgoing& entry = it->second;
+  if (entry.finished) {
     outgoing_.erase(it);
     return;
   }
-  it->second.finished = true;
-  error_fn callback = std::move(it->second.error);
-  if (it->second.agent) it->second.agent->close();
+  entry.finished = true;
+  if (entry.delivered) {
+    // The proxy already owns a live relay session; an ICE failure must not
+    // tear it down.
+    if (entry.agent) entry.agent->close();
+    {
+      std::lock_guard<std::mutex> lock(outgoing_mutex_);
+      outgoing_poll_.erase(id);
+    }
+    outgoing_.erase(it);
+    return;
+  }
+  error_fn callback = std::move(entry.error);
+  if (entry.agent) entry.agent->close();
+  if (entry.relay) entry.relay->close(transport_close::normal, "connect failed");
   {
     std::lock_guard<std::mutex> lock(outgoing_mutex_);
     outgoing_poll_.erase(id);
@@ -357,6 +462,21 @@ void p2p_manager::start_incoming(const signal_session_info& session) {
   auto agent = make_agent();
   entry.agent = agent;
   incoming_.emplace(session.connect_id, std::move(entry));
+
+  // Open the relay in parallel with ICE; whichever path is ready first starts
+  // the session, and the relay switches to ICE when the checks complete.
+  enqueue([this, connect_id = session.connect_id] {
+    std::string url;
+    std::string ca;
+    std::string error;
+    if (!server_->relay_create(connect_id, url, ca, error)) {
+      plog("incoming relay unavailable: " + error);
+      return;
+    }
+    post_([this, connect_id, url, ca] {
+      start_relay_incoming(connect_id, url, ca);
+    });
+  });
 
   agent->set_handlers(
       [this, id = session.connect_id](const std::string& sdp) {
@@ -395,18 +515,61 @@ void p2p_manager::start_incoming(const signal_session_info& session) {
   agent->apply_remote_offer(session.offer, session.from_candidates);
 }
 
+void p2p_manager::start_relay_incoming(const std::string& connect_id,
+                                       std::string url, std::string ca) {
+  auto it = incoming_.find(connect_id);
+  if (it == incoming_.end() || it->second.finished) return;
+  plog("relay start incoming " + connect_id);
+  auto relay = std::make_shared<relay_transport>(std::move(url), std::move(ca),
+                                                 post_);
+  auto switcher = std::make_shared<switchable_transport>(relay);
+  it->second.relay = relay;
+  it->second.switcher = switcher;
+  relay->set_ready_handler(
+      [this, connect_id] { on_incoming_relay_ready(connect_id); });
+  relay->start();
+}
+
+void p2p_manager::on_incoming_relay_ready(const std::string& connect_id) {
+  auto it = incoming_.find(connect_id);
+  if (it == incoming_.end() || it->second.finished) return;
+  incoming& entry = it->second;
+  if (entry.relay_delivered) return;
+  if (entry.ice_delivered) {
+    if (entry.relay) entry.relay->close(transport_close::normal,
+                                        "p2p already established");
+    return;
+  }
+  plog("incoming " + connect_id + " relay ready, starting session");
+  entry.relay_delivered = true;
+  auto controller = std::make_shared<session_controller>(
+      registry_, entry.switcher, options_);
+  controller->start(nullptr);
+}
+
 void p2p_manager::deliver_incoming(const std::string& connect_id) {
   auto it = incoming_.find(connect_id);
   if (it == incoming_.end() || it->second.finished) return;
   incoming& entry = it->second;
+  if (entry.ice_delivered) return;
+  entry.ice_delivered = true;
   plog("incoming " + connect_id + " ICE completed");
   const auto endpoint = parse_endpoint(entry.agent->selected_remote());
   auto transport = std::make_shared<juice_transport>(
       entry.agent, endpoint.first, endpoint.second);
+
+  if (entry.relay_delivered && entry.switcher) {
+    plog("incoming " + connect_id + " switching to p2p");
+    entry.switcher->set_ice(transport);
+    entry.finished = true;
+    completed_incoming_.insert(connect_id);
+    incoming_.erase(it);
+    return;
+  }
+
   entry.finished = true;
   completed_incoming_.insert(connect_id);
   incoming_.erase(it);
-
   auto controller =
       std::make_shared<session_controller>(registry_, transport, options_);
   controller->start(nullptr);
@@ -417,8 +580,15 @@ void p2p_manager::finish_incoming(const std::string& connect_id,
   (void)error;
   auto it = incoming_.find(connect_id);
   if (it == incoming_.end()) return;
-  it->second.finished = true;
-  if (it->second.agent) it->second.agent->close();
+  incoming& entry = it->second;
+  entry.finished = true;
+  if (entry.agent) entry.agent->close();
+  if (entry.relay_delivered) {
+    // The session already lives on the relay; do not close the relay/switcher.
+    incoming_.erase(it);
+    return;
+  }
+  if (entry.relay) entry.relay->close(transport_close::normal, "connect failed");
   completed_incoming_.insert(connect_id);
   incoming_.erase(it);
 }

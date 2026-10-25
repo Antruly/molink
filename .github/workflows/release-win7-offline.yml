@@ -10,9 +10,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Existing release tag (e.g. v0.9.13)'
+        description: 'Existing release tag (e.g. v0.9.14)'
         required: true
-        default: 'v0.9.13'
+        default: 'v0.9.14'
 
 permissions:
   contents: write

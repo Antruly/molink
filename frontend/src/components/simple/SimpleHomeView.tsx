@@ -16,6 +16,8 @@ export function SimpleHomeView() {
   const token = useAppStore((state) => state.token)
   const createSession = useAppStore((state) => state.createSession)
   const preferredMode = useAppStore((state) => state.preferredMode)
+  const forceRelay = useAppStore((state) => state.forceRelay)
+  const setForceRelay = useAppStore((state) => state.setForceRelay)
 
   const [mode, setMode] = useState<SessionIntent>('desktop')
   const [input, setInput] = useState('')
@@ -136,6 +138,8 @@ export function SimpleHomeView() {
             setCode={setCode}
             busy={busy}
             error={error}
+            forceRelay={forceRelay}
+            onForceRelay={setForceRelay}
             onSubmit={() => void connectInput()}
           />
         </div>

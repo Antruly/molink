@@ -135,6 +135,8 @@ export interface ClientHandlers {
   onFrame: (frame: Frame, byteLength: number) => void
   onLatency: (ms: number) => void
   onError: (message: string, code?: string) => void
+  /// "relay" or "p2p" for a device-ID session.
+  onTransport?: (mode: string) => void
   onCursor: (shape: CursorShape) => void
   onCursorPosition: (position: CursorPosition) => void
   onClipboard: (text: string) => void
@@ -165,6 +167,7 @@ interface ControlMessage {
   y?: number
   visible?: boolean
   text?: string
+  mode?: string
   index?: number
   action?: string
   ok?: boolean
@@ -224,6 +227,8 @@ export class MolinkClient {
     /// Directory device ID. When set, the first attempt goes through the
     /// local core's /ws/connect ICE proxy instead of a direct WebSocket.
     targetId: string
+    /// Skip ICE and keep the session on the relay.
+    forceRelay: boolean
   } | null = null
   /// The ICE proxy failed; use the resolved address directly from now on.
   private proxyFailed = false
@@ -248,7 +253,7 @@ export class MolinkClient {
   }
 
   connect(host: string, port: number, token: string,
-          requestAccess = false, targetId = ''): void {
+          requestAccess = false, targetId = '', forceRelay = false): void {
     this.disconnect()
     this.stopRetryTimers()
     this.closedByUser = false
@@ -257,7 +262,8 @@ export class MolinkClient {
     this.directFailed = false
     this.lastErrorCode = ''
     this.lastErrorMessage = ''
-    this.lastConnect = { host, port, token, requestAccess, targetId }
+    this.lastConnect = { host, port, token, requestAccess, targetId,
+                        forceRelay }
     this.openSocket()
   }
 
@@ -274,7 +280,7 @@ export class MolinkClient {
   private openSocket(): void {
     const args = this.lastConnect
     if (args === null) return
-    const { host, port, token, requestAccess, targetId } = args
+    const { host, port, token, requestAccess, targetId, forceRelay } = args
     this.closedByUser = false
     this.hasImage = false
     this.pendingFrame = false
@@ -289,15 +295,19 @@ export class MolinkClient {
     // behind the same NAT, and a direct socket to it opens in milliseconds.
     // If it fails, the ICE proxy below is the fallback. Cross-NAT peers get the
     // public address (or none), so they still start with ICE.
-    const preferDirect = targetId !== '' && !this.directFailed &&
+    const preferDirect = targetId !== '' && !forceRelay && !this.directFailed &&
         !this.proxyFailed && port > 0 && isPrivateHost(host)
     // A device-ID connection otherwise starts with ICE through the local core.
     // That core also runs the directory client and owns the UDP socket
     // libjuice needs. If the proxy cannot establish a path, fall back to the
     // direct address the directory returned.
-    const useProxy = targetId !== '' && !this.proxyFailed && !preferDirect
+    const useProxy = targetId !== '' &&
+        (forceRelay || (!this.proxyFailed && !preferDirect))
+    const proxyUrl =
+        `ws://${window.location.host}/ws/connect?target=${encodeURIComponent(targetId)}` +
+        (forceRelay ? '&relay=only' : '')
     const url = useProxy
-      ? `ws://${window.location.host}/ws/connect?target=${encodeURIComponent(targetId)}`
+      ? proxyUrl
       : `ws://${formatHost(host)}:${port}/ws/session`
     this.handlers.onPhase?.('connecting')
 
@@ -372,6 +382,10 @@ export class MolinkClient {
       if (useProxy && !this.closedByUser) {
         // ICE failed or the proxy is unavailable: retry the direct path once.
         this.proxyFailed = true
+        if (forceRelay) {
+          this.handlers.onPhase?.('error', 'the relay is unavailable')
+          return
+        }
         if (this.directFailed) {
           this.handlers.onPhase?.('error', 'could not reach the device')
           return
@@ -706,6 +720,11 @@ export class MolinkClient {
           startedMs: message.started_ms,
           message: message.message,
         })
+        break
+      case 'transport':
+        if (typeof message.mode === 'string') {
+          this.handlers.onTransport?.(message.mode)
+        }
         break
       case 'error': {
         const code = typeof message.code === 'string' ? message.code : ''

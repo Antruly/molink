@@ -691,6 +691,66 @@ bool server_client::directory_lookup(const std::string& query,
   return get(credentials.url, "/v1/devices", query, body, http_status, error);
 }
 
+bool server_client::relay_create(const std::string& connect_id,
+                                 std::string& relay_url,
+                                 std::string& ca_path, std::string& error) {
+  signaling_credentials credentials;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    credentials = signaling_credentials_locked();
+  }
+  if (credentials.url.empty() || credentials.device_id.empty() ||
+      credentials.token.empty()) {
+    error = "not registered with the directory";
+    return false;
+  }
+  json payload;
+  payload["id"] = credentials.device_id;
+  payload["token"] = credentials.token;
+  payload["connect_id"] = connect_id;
+  std::string body;
+  int status = 0;
+  if (!post(credentials.url, "/v1/connect/relay", "", payload.dump(), body,
+            status, error)) {
+    return false;
+  }
+  if (status != 200) {
+    error = signal_error_text(body, status);
+    return false;
+  }
+  std::string relay_token;
+  try {
+    const json response = json::parse(body);
+    relay_token = response.value("relay_token", std::string());
+  } catch (...) {
+    error = "the directory returned invalid JSON";
+    return false;
+  }
+  if (relay_token.empty()) {
+    error = "the directory did not return a relay token";
+    return false;
+  }
+  std::string base = credentials.url;
+  while (!base.empty() && base.back() == '/') base.pop_back();
+  std::string scheme;
+  if (base.rfind("https://", 0) == 0) {
+    scheme = "wss://";
+    base.erase(0, 8);
+  } else if (base.rfind("http://", 0) == 0) {
+    scheme = "ws://";
+    base.erase(0, 7);
+  } else {
+    error = "unsupported directory URL";
+    return false;
+  }
+  const std::size_t slash = base.find('/');
+  if (slash != std::string::npos) base = base.substr(0, slash);
+  relay_url = scheme + base + "/v1/relay?connect_id=" +
+              url_encode(connect_id) + "&token=" + url_encode(relay_token);
+  ca_path = auth_ ? effective_server_ca(auth_->settings()) : std::string();
+  return true;
+}
+
 bool server_client::post(const std::string& base_url, const std::string& path,
                          const std::string& query, const std::string& payload,
                          std::string& body, int& http_status,

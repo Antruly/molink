@@ -242,7 +242,8 @@
     "qualityGame": "Game",
     "badCode": "The code is incorrect. Enter it again.",
     "enterCode": "Authorization code",
-    "connect": "Connect"
+    "connect": "Connect",
+    "relay": "Relay"
   },
   "stats": {
     "fps": "FPS",
@@ -512,6 +513,7 @@
     "domainRevokedHint": "This channel code no longer exists. Ask its owner for a new one, or create your own.",
     "noDomainPeers": "No other devices on this channel yet.",
     "clearRecent": "Clear recent",
-    "clearRecentConfirm": "Remove all recent connections?"
+    "clearRecentConfirm": "Remove all recent connections?",
+    "forceRelay": "Force relay (no hole punching)"
   }
 }

@@ -2,7 +2,7 @@
 
 跨平台远程桌面。Web 优先，一套后台 + 浏览器壳层，桌面端直连，移动端经服务端中转。
 
-> 版本 0.9.13 · MIT · 协议版本 1
+> 版本 0.9.14 · MIT · 协议版本 1
 
 ![主页（亮色）](docs/screenshots/home-light.png)
 ![会话页（合成测试帧）](docs/screenshots/session-light.png)
@@ -41,7 +41,8 @@
 浏览器不能自己开 UDP 或跑 ICE，所以“按 ID 连接”由本机核心代理：
 
 1. 前端连接本机的 `ws://<本机核心>/ws/connect?target=<设备ID>`（本机壳层和远端浏览器
-   都是同一个核心）。
+   都是同一个核心）。核心**先**通过目录的 `WS /v1/relay` 建立中继会话（秒开），同时后台
+   继续 ICE 打洞；成功后自动切换到 P2P，失败则保持中继。连接页可勾选“强制中继”跳过打洞。
 2. 本机核心通过目录的 `/v1/connect*` 信令与被叫交换 ICE offer/answer；双方核心用
    libjuice 的 external-socket 模式，在各自的 `uvcpp_udp` 上打洞（libjuice 不建
    socket、不建线程，`uvcpp_timer` 驱动重传/保活）。
@@ -140,9 +141,9 @@ cmake --build shell/native/build --parallel
 生成 Linux 安装包：
 
 ```bash
-./packaging/linux/build-deb.sh       # build/package/molink_0.9.13_amd64.deb
-./packaging/linux/build-appimage.sh  # build/package/moLink-0.9.13-x86_64.AppImage
-./packaging/linux/build-rpm.sh       # build/package/molink-0.9.13-1.x86_64.rpm
+./packaging/linux/build-deb.sh       # build/package/molink_0.9.14_amd64.deb
+./packaging/linux/build-appimage.sh  # build/package/moLink-0.9.14-x86_64.AppImage
+./packaging/linux/build-rpm.sh       # build/package/molink-0.9.14-1.x86_64.rpm
 ```
 
 Windows（需 WebView2 SDK、Inno Setup 6 与 NSIS）与 macOS（`.app` + `.dmg`）的构建步骤见

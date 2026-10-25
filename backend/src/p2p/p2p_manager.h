@@ -20,6 +20,8 @@
 #include "session_controller.h"
 #include "session_registry.h"
 #include "transport/juice_transport.h"
+#include "transport/relay_transport.h"
+#include "transport/switchable_transport.h"
 
 namespace molink {
 
@@ -37,7 +39,7 @@ namespace molink {
 class p2p_manager {
  public:
   using post_fn = std::function<void(std::function<void()>)>;
-  using ready_fn = std::function<void(std::shared_ptr<juice_transport>)>;
+  using ready_fn = std::function<void(std::shared_ptr<session_transport>)>;
   using error_fn = std::function<void(const std::string&)>;
 
   p2p_manager(uvcpp::uvcpp_loop* loop, post_fn post,
@@ -53,7 +55,8 @@ class p2p_manager {
   void stop();
 
   /// Called on the app loop. `target` is the 9-character device ID.
-  void connect(const std::string& target, ready_fn ready, error_fn error);
+  void connect(const std::string& target, bool relay_only, ready_fn ready,
+               error_fn error);
 
  private:
   struct outgoing {
@@ -63,9 +66,15 @@ class p2p_manager {
     std::vector<std::string> candidates;
     bool answer_applied = false;
     bool finished = false;
+    bool relay_only = false;
+    bool delivered = false;
+    bool ice_completed = false;
     uint64_t created_ms = 0;
     ready_fn ready;
     error_fn error;
+    std::shared_ptr<relay_transport> relay;
+    std::shared_ptr<switchable_transport> switcher;
+    std::shared_ptr<juice_transport> ice;
   };
 
   struct incoming {
@@ -74,7 +83,11 @@ class p2p_manager {
     std::vector<std::string> candidates;
     bool answered = false;
     bool finished = false;
+    bool relay_delivered = false;
+    bool ice_delivered = false;
     uint64_t created_ms = 0;
+    std::shared_ptr<relay_transport> relay;
+    std::shared_ptr<switchable_transport> switcher;
   };
 
   void worker_loop();
@@ -90,6 +103,11 @@ class p2p_manager {
   void deliver_outgoing(uint64_t id);
   void finish_incoming(const std::string& connect_id, const std::string& error);
   void deliver_incoming(const std::string& connect_id);
+  void start_relay_outgoing(uint64_t id, std::string url, std::string ca);
+  void on_outgoing_relay_ready(uint64_t id);
+  void start_relay_incoming(const std::string& connect_id, std::string url,
+                            std::string ca);
+  void on_incoming_relay_ready(const std::string& connect_id);
 
   static std::pair<std::string, unsigned int> parse_endpoint(
       const std::string& endpoint);

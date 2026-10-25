@@ -242,7 +242,8 @@
     "qualityGame": "游戏",
     "badCode": "授权码不正确，请重新输入",
     "enterCode": "授权码",
-    "connect": "连接"
+    "connect": "连接",
+    "relay": "中继"
   },
   "stats": {
     "fps": "帧率",
@@ -512,6 +513,7 @@
     "domainRevokedHint": "此域组码已失效，请联系发起人获取新码，或更新自己的域组码。",
     "noDomainPeers": "当前域组还没有其他设备。",
     "clearRecent": "清空最近记录",
-    "clearRecentConfirm": "确定清空所有最近连接记录？"
+    "clearRecentConfirm": "确定清空所有最近连接记录？",
+    "forceRelay": "强制中继（不打洞）"
   }
 }

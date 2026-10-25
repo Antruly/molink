@@ -112,6 +112,12 @@ class server_client {
   bool directory_lookup(const std::string& query, std::string& body,
                         int& http_status, std::string& error);
 
+  /// Obtain the relay credentials for a signaling session and build the
+  /// WebSocket URL (ws/wss follows the directory scheme) plus the CA path the
+  /// relay transport should verify with.
+  bool relay_create(const std::string& connect_id, std::string& relay_url,
+                    std::string& ca_path, std::string& error);
+
  private:
   struct signaling_credentials {
     std::string url;

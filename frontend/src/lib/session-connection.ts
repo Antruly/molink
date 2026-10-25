@@ -30,6 +30,7 @@ export interface TabPatch {
   stats?: Stats
   error?: string | null
   errorCode?: string | null
+  transport?: string
   notice?: string | null
   approvalDeadline?: number | null
   retryAt?: number | null
@@ -158,6 +159,7 @@ export class SessionConnection {
       },
       onError: (message, code) =>
         this.sink.onPatch({ error: message, errorCode: code ?? null, notice: null }),
+      onTransport: (mode) => this.sink.onPatch({ transport: mode }),
       onCursor: (cursorShape) => this.sink.onPatch({ cursorShape }),
       onCursorPosition: (cursorPosition) =>
         this.sink.onPatch({ cursorPosition }),
@@ -232,7 +234,7 @@ export class SessionConnection {
   }
 
   connect(host: string, port: number, token: string,
-          requestAccess = false, deviceId = ''): void {
+          requestAccess = false, deviceId = '', forceRelay = false): void {
     this.stopClipboardSync()
     this.stopCongestionWatch()
     this.lastClipboard = ''
@@ -252,7 +254,7 @@ export class SessionConnection {
       notice: null,
       frame: null,
     })
-    this.client.connect(host, port, token, requestAccess, deviceId)
+    this.client.connect(host, port, token, requestAccess, deviceId, forceRelay)
   }
 
   disconnect(): void {

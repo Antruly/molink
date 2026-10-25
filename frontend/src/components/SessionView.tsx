@@ -2558,7 +2558,13 @@ export function SessionView({
             : 'flex flex-wrap items-center justify-between gap-2 border-t border-line-soft px-4 py-2 text-[11px] text-muted/85'
         }
       >
-        <span>{synthetic ? t('session.synthetic') : t('session.direct')}</span>
+        <span>{
+          synthetic
+            ? t('session.synthetic')
+            : tab.transport === 'relay'
+              ? t('session.relay')
+              : t('session.direct')
+        }</span>
         <span>
           {tab.controlEnabled
             ? t('session.controlOnHint')

@@ -17,6 +17,8 @@ export function ConnectCard({
   setCode,
   busy,
   error,
+  forceRelay,
+  onForceRelay,
   onSubmit,
 }: {
   mode: SessionIntent
@@ -27,6 +29,8 @@ export function ConnectCard({
   setCode: (value: string) => void
   busy: boolean
   error: string | null
+  forceRelay: boolean
+  onForceRelay: (value: boolean) => void
   onSubmit: () => void
 }) {
   const { t } = useTranslation()
@@ -101,6 +105,15 @@ export function ConnectCard({
             {requestAccess ? t('simple.requestHint') : t('simple.codeHint')}
           </span>
         </div>
+        <label className="flex items-center gap-1.5 text-[10px] text-muted">
+          <input
+            type="checkbox"
+            className="h-3 w-3 accent-[var(--accent)]"
+            checked={forceRelay}
+            onChange={(event) => onForceRelay(event.target.checked)}
+          />
+          {t('simple.forceRelay')}
+        </label>
         {error ? (
           <div className="rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-[11px] text-danger">
             {error}
