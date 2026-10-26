@@ -361,7 +361,7 @@ class x11_capture final : public capture_base {
       // did not see, and gives late joiners a recent keyframe. The host can
       // shorten it to as little as 1 s from the display settings.
       const int interval_ms =
-          periodic_keyframe_ms() > 0 ? periodic_keyframe_ms() : 30000;
+          periodic_keyframe_ms() > 0 ? periodic_keyframe_ms() : 120000;
       const bool refresh_due = std::chrono::steady_clock::now() - last_full >
                                std::chrono::milliseconds(interval_ms);
       const bool whole_screen =

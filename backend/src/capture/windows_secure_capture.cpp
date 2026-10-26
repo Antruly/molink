@@ -219,7 +219,7 @@ class secure_capture final : public capture_base {
     }
     const auto now = std::chrono::steady_clock::now();
     const int interval_ms =
-        periodic_keyframe_ms() > 0 ? periodic_keyframe_ms() : 30000;
+        periodic_keyframe_ms() > 0 ? periodic_keyframe_ms() : 120000;
     const bool refresh_due =
         now - last_full_ > std::chrono::milliseconds(interval_ms);
     const bool keyframe = !have_previous_ ||

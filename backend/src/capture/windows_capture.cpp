@@ -190,7 +190,7 @@ class windows_capture final : public capture_base {
         last_grab_error.clear();
         const bool key = keyframe_requested_.exchange(false) || !have_previous_;
         const int interval_ms =
-            periodic_keyframe_ms() > 0 ? periodic_keyframe_ms() : 30000;
+            periodic_keyframe_ms() > 0 ? periodic_keyframe_ms() : 120000;
         const bool refresh_due =
             std::chrono::steady_clock::now() - last_full >
             std::chrono::milliseconds(interval_ms);
@@ -214,7 +214,7 @@ class windows_capture final : public capture_base {
         // still the current desktop because nothing changed.
         const auto now = std::chrono::steady_clock::now();
         const int interval_ms =
-            periodic_keyframe_ms() > 0 ? periodic_keyframe_ms() : 30000;
+            periodic_keyframe_ms() > 0 ? periodic_keyframe_ms() : 120000;
         const bool refresh_due =
             now - last_full > std::chrono::milliseconds(interval_ms);
         if (pixels_valid &&

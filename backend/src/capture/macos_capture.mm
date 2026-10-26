@@ -133,7 +133,7 @@ class macos_capture final : public capture_base {
       if (grab(pixels, grab_error)) {
         const bool key = keyframe_requested_.exchange(false) || !have_previous_;
         const int interval_ms =
-            periodic_keyframe_ms() > 0 ? periodic_keyframe_ms() : 30000;
+            periodic_keyframe_ms() > 0 ? periodic_keyframe_ms() : 120000;
         const bool refresh_due =
             std::chrono::steady_clock::now() - last_full >
             std::chrono::milliseconds(interval_ms);
