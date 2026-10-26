@@ -219,9 +219,9 @@ class svt_av1_encoder final : public av1_encoder {
     config.source_height = static_cast<uint32_t>(height);
     config.frame_rate_numerator = 30;
     config.frame_rate_denominator = 1;
-    // 13 is the fastest preset; 10 keeps a little more quality while still
-    // fitting a rectangle in a frame budget on a desktop CPU.
-    config.enc_mode = 10;
+    // 13 is the fastest preset; 12 keeps a little more quality and is still
+    // fast enough for a rectangle inside a capture frame budget.
+    config.enc_mode = 12;
     config.intra_period_length = 1;
     if constexpr (kModernApi) {
       // 4.x: every picture is intra and hierarchical levels below 2 are

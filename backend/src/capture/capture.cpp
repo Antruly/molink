@@ -114,6 +114,7 @@ quality_profile quality_profile_for(quality_mode mode) {
       profile.minimum_change_threshold = 16;
       profile.lossless = false;
       profile.av1_qp = 32;
+      profile.av1_max_area_percent = 60;
       break;
     case quality_mode::quality:
       // Keep every colour bit, spend more CPU on zlib, and never ignore a
@@ -121,7 +122,10 @@ quality_profile quality_profile_for(quality_mode mode) {
       profile.format = tile_format::bgra;
       profile.effort = compression_effort::best;
       profile.lossless = true;
-      profile.av1_qp = 4;
+      // Near-lossless but still encodable in real time: QP 12 on a bounded
+      // area is much faster than QP 4 over the whole screen.
+      profile.av1_qp = 12;
+      profile.av1_max_area_percent = 20;
       profile.maximum_change_threshold = 1;
       break;
     case quality_mode::turbo:
@@ -133,6 +137,7 @@ quality_profile quality_profile_for(quality_mode mode) {
       profile.lossless = false;
       profile.av1_qp = 36;
       profile.av1_grayscale = true;
+      profile.av1_max_area_percent = 60;
       break;
     case quality_mode::raw:
       // Original BGRA pixels, deliberately not deflated. Useful on a fast
@@ -143,13 +148,15 @@ quality_profile quality_profile_for(quality_mode mode) {
       profile.compress = false;
       profile.lossless = true;
       profile.av1_qp = 1;
+      profile.av1_max_area_percent = 20;
       profile.maximum_change_threshold = 1;
       break;
     case quality_mode::balanced:
     default:
       profile.format = tile_format::bgra;
       profile.effort = compression_effort::balanced;
-      profile.av1_qp = 22;
+      profile.av1_qp = 24;
+      profile.av1_max_area_percent = 35;
       break;
   }
   return profile;

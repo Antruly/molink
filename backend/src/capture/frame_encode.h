@@ -53,6 +53,9 @@ struct encode_options {
   int av1_qp = 32;
   /// Encode the rectangles as luminance-only (the turbo preset).
   bool av1_grayscale = false;
+  /// Cap on the AV1-encoded area per frame, percent of the screen (100 = no
+  /// cap). The uncapped rectangles stay in the tile payload.
+  int av1_max_area_percent = 100;
   int av1_max_rects = 4;
   /// Minimum rectangle area in pixels; 0 means two capture tiles.
   int av1_min_area = 0;

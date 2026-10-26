@@ -38,6 +38,10 @@ struct quality_profile {
   int av1_qp = 24;
   /// The turbo preset is monochrome; AV1 must encode grayscale pixels.
   bool av1_grayscale = false;
+  /// Upper bound on the AV1-encoded area per frame, as a percentage of the
+  /// screen. Encoding a full 2520x1680 frame at a near-lossless QP cannot fit
+  /// a capture frame budget, so the rest stays on the tile path.
+  int av1_max_area_percent = 100;
   /// Raise the configured change threshold to at least this value (0 = leave).
   int minimum_change_threshold = 0;
   /// Lower a non-zero change threshold to at most this value (0 = leave).
@@ -282,6 +286,9 @@ class capture_base : public capture_source {
   }
   bool quality_av1_grayscale() const {
     return quality_profile_for(quality_.load()).av1_grayscale;
+  }
+  int quality_av1_max_area_percent() const {
+    return quality_profile_for(quality_.load()).av1_max_area_percent;
   }
 
   bool running() const override { return running_.load(); }

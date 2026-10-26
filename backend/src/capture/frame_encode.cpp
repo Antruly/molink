@@ -363,6 +363,20 @@ bool encode_capture_frame(protocol::frame_header& header,
       }
       chosen.push_back(rect);
     }
+    if (!chosen.empty() && options.av1_max_area_percent < 100) {
+      const long long limit = static_cast<long long>(header.screen_w) *
+                              header.screen_h * options.av1_max_area_percent /
+                              100;
+      long long used = 0;
+      std::vector<pixel_rect> capped;
+      for (const pixel_rect& rect : chosen) {
+        const long long area = static_cast<long long>(rect.w) * rect.h;
+        if (used + area > limit) continue;
+        used += area;
+        capped.push_back(rect);
+      }
+      chosen.swap(capped);
+    }
     if (!chosen.empty()) {
       std::vector<uint8_t> patch;
       std::string av1_error;
