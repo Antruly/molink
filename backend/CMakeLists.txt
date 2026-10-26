@@ -154,6 +154,7 @@ set(MOLINK_CORE_SOURCES
   src/capture/frame_encode.cpp
   src/capture/dirty_rects.cpp
   src/capture/av1_encoder.cpp
+  src/capture/av1_frame.cpp
   src/clipboard/x11_clipboard.cpp
   src/clipboard/windows_clipboard.cpp
   src/access_requests.cpp
@@ -268,6 +269,7 @@ if(MOLINK_BUILD_CORE)
   endif()
   if(MOLINK_DAV1D_FOUND)
     target_compile_definitions(molink-core PRIVATE MOLINK_HAVE_DAV1D=1)
+    target_include_directories(molink-core PRIVATE ${DAV1D_INCLUDE_DIR})
     target_link_libraries(molink-core PRIVATE ${DAV1D_LIBRARY})
     message(STATUS "molink: AV1 rectangle decoding enabled (dav1d)")
   endif()
@@ -418,6 +420,27 @@ if(MOLINK_SVT_AV1_FOUND AND MOLINK_DAV1D_FOUND)
       "RUNTIME_OUTPUT_DIRECTORY_${uvp_config_upper}" "${CMAKE_BINARY_DIR}")
   endforeach()
   add_test(NAME av1_roundtrip COMMAND molink-core-av1-test)
+
+  add_executable(molink-core-av1-frame-test
+    tests/av1_frame_test.cpp
+    src/capture/av1_frame.cpp
+    src/capture/av1_encoder.cpp
+    src/protocol/frame_packet.cpp
+  )
+  target_include_directories(molink-core-av1-frame-test PRIVATE
+    src ${SVT_AV1_INCLUDE_DIR} ${DAV1D_INCLUDE_DIR})
+  target_compile_definitions(molink-core-av1-frame-test PRIVATE
+    MOLINK_HAVE_SVT_AV1=1 MOLINK_HAVE_DAV1D=1)
+  target_link_libraries(molink-core-av1-frame-test PRIVATE
+    ${SVT_AV1_LIBRARY} ${DAV1D_LIBRARY})
+  set_target_properties(molink-core-av1-frame-test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+  foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
+    string(TOUPPER "${uvp_config}" uvp_config_upper)
+    set_target_properties(molink-core-av1-frame-test PROPERTIES
+      "RUNTIME_OUTPUT_DIRECTORY_${uvp_config_upper}" "${CMAKE_BINARY_DIR}")
+  endforeach()
+  add_test(NAME av1_frame COMMAND molink-core-av1-frame-test)
 endif()
 
 if (MSVC)
@@ -433,6 +456,10 @@ if (MSVC)
   if(TARGET molink-core-av1-test)
     target_compile_options(molink-core-av1-test PRIVATE /W4 /permissive- /utf-8)
   endif()
+  if(TARGET molink-core-av1-frame-test)
+    target_compile_options(molink-core-av1-frame-test PRIVATE
+      /W4 /permissive- /utf-8)
+  endif()
 else()
   if(MOLINK_BUILD_CORE)
     target_compile_options(molink-core PRIVATE -Wall -Wextra -Wpedantic)
@@ -441,5 +468,9 @@ else()
   target_compile_options(molink-core-dirty-rects-test PRIVATE -Wall -Wextra -Wpedantic)
   if(TARGET molink-core-av1-test)
     target_compile_options(molink-core-av1-test PRIVATE -Wall -Wextra -Wpedantic)
+  endif()
+  if(TARGET molink-core-av1-frame-test)
+    target_compile_options(molink-core-av1-frame-test PRIVATE
+      -Wall -Wextra -Wpedantic)
   endif()
 endif()
