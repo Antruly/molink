@@ -179,6 +179,7 @@ set(MOLINK_CORE_SOURCES
   src/transport/relay_transport.cpp
   src/transport/switchable_transport.cpp
   src/transport/connect_proxy.cpp
+  src/transport/direct_proxy.cpp
   src/p2p/ice_agent.cpp
   src/p2p/p2p_manager.cpp
   src/util.cpp

@@ -25,7 +25,11 @@ class relay_transport final : public session_transport {
  public:
   using post_fn = std::function<void(std::function<void()>)>;
 
-  relay_transport(std::string url, std::string ca_path, post_fn post);
+  /// `relay_protocol` is false for a plain session WebSocket (`/ws/session`):
+  /// the transport is ready as soon as the socket opens and the
+  /// relay-ready/relay-closed texts are ordinary messages.
+  relay_transport(std::string url, std::string ca_path, post_fn post,
+                  bool relay_protocol = true);
   ~relay_transport() override;
 
   const char* name() const override { return "relay"; }
@@ -50,6 +54,7 @@ class relay_transport final : public session_transport {
 
   std::string url_;
   std::string ca_path_;
+  bool relay_protocol_ = true;
   post_fn post_;
   std::thread thread_;
   std::atomic<bool> running_{false};

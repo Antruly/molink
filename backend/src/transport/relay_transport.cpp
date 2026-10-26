@@ -14,8 +14,9 @@
 namespace molink {
 
 relay_transport::relay_transport(std::string url, std::string ca_path,
-                                 post_fn post)
-    : url_(std::move(url)), ca_path_(std::move(ca_path)), post_(std::move(post)) {}
+                                 post_fn post, bool relay_protocol)
+    : url_(std::move(url)), ca_path_(std::move(ca_path)), post_(std::move(post)),
+      relay_protocol_(relay_protocol) {}
 
 relay_transport::~relay_transport() { close(transport_close::normal, "gone"); }
 
@@ -131,7 +132,8 @@ void relay_transport::thread_main() {
   }
 
   client.on_text([this](const std::string& text) {
-    if (text.find("\"relay-ready\"") != std::string::npos) {
+    if (relay_protocol_ &&
+        text.find("\"relay-ready\"") != std::string::npos) {
       ready_ = true;
       std::fprintf(stderr, "relay: ready\n");
       std::fflush(stderr);
@@ -149,7 +151,8 @@ void relay_transport::thread_main() {
       }
       return;
     }
-    if (text.find("\"relay-closed\"") != std::string::npos) {
+    if (relay_protocol_ &&
+        text.find("\"relay-closed\"") != std::string::npos) {
       closed_ = true;
       ready_ = false;
       deliver_close(transport_close::normal, "relay closed");
@@ -205,6 +208,24 @@ void relay_transport::thread_main() {
     deliver_close(transport_close::policy, "cannot reach the relay");
     running_ = false;
     return;
+  }
+
+  if (!relay_protocol_) {
+    // A plain session socket is usable as soon as the WebSocket handshake
+    // completed; there is no pairing message to wait for.
+    ready_ = true;
+    std::function<void()> handler;
+    {
+      std::lock_guard<std::mutex> lock(handler_mutex_);
+      handler = ready_handler_;
+    }
+    if (handler) {
+      if (post_) {
+        post_(std::move(handler));
+      } else {
+        handler();
+      }
+    }
   }
 
   while (running_) {

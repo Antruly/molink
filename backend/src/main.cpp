@@ -34,6 +34,7 @@
 #include "server_client.h"
 #include "p2p/p2p_manager.h"
 #include "transport/connect_proxy.h"
+#include "transport/direct_proxy.h"
 #include "ui_store.h"
 #include "session_registry.h"
 #include "util.h"
@@ -476,6 +477,10 @@ int main(int argc, char** argv) {
   app.websocket("/ws/session", make_ws_handler(registry, session_opts));
   app.websocket("/ws/connect", make_connect_handler(
       p2p, [&app](std::function<void()> fn) { app.post(std::move(fn)); }));
+  // Typed-IP sessions go through this core as well, so AV1 patches can be
+  // decoded before they reach the page.
+  app.websocket("/ws/direct", make_direct_handler(
+      [&app](std::function<void()> fn) { app.post(std::move(fn)); }));
 
   if (!web_root.empty()) {
     uvcpp::uvcpp_web_static_options static_options;

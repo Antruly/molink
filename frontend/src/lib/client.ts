@@ -316,6 +316,10 @@ export class MolinkClient {
   private proxyFailed = false
   /// The same-LAN direct socket failed; use the ICE proxy instead.
   private directFailed = false
+  /// The typed-IP local proxy failed; use the host's socket directly.
+  private directProxyFailed = false
+  /// The current socket was opened through /ws/direct on the local core.
+  private usedDirectProxy = false
   /// Last application-level error frame. A policy answer (wrong code, locked
   /// host) must not be mistaken for an ICE failure and retried.
   private lastErrorCode = ''
@@ -365,6 +369,7 @@ export class MolinkClient {
     this.retryAttempts = 0
     this.proxyFailed = false
     this.directFailed = false
+    this.directProxyFailed = false
     this.lastErrorCode = ''
     this.lastErrorMessage = ''
     this.resumeToken = ''
@@ -443,9 +448,20 @@ export class MolinkClient {
     const proxyUrl =
         `${wsScheme}://${window.location.host}/ws/connect?target=${encodeURIComponent(targetId)}` +
         (forceRelay ? '&relay=only' : '')
+    // A typed address also goes through the local core so it can decode AV1
+    // patches; if that proxy is unavailable (remote UI, older core) the
+    // direct socket below still works, just without AV1.
+    const useDirectProxy = targetId === '' && !this.directProxyFailed &&
+        typeof window !== 'undefined' && window.location.host !== ''
+    this.usedDirectProxy = useDirectProxy
+    const directProxyUrl =
+        `${wsScheme}://${window.location.host}/ws/direct?host=${encodeURIComponent(host)}` +
+        `&port=${encodeURIComponent(String(port))}`
     const url = useProxy
       ? proxyUrl
-      : `${directSecure ? 'wss' : 'ws'}://${formatHost(host)}:${port}/ws/session`
+      : useDirectProxy
+        ? directProxyUrl
+        : `${directSecure ? 'wss' : 'ws'}://${formatHost(host)}:${port}/ws/session`
     this.handlers.onPhase?.('connecting')
 
     let ws: WebSocket
@@ -527,6 +543,14 @@ export class MolinkClient {
         this.lastErrorCode = this.lastErrorCode || 'unauthorized'
         this.handlers.onPhase?.('error',
                                 this.lastErrorMessage || this.lastErrorCode)
+        return
+      }
+      if (this.usedDirectProxy && !this.closedByUser) {
+        // The local proxy could not reach the host (or is unavailable in this
+        // page); fall back to the host's own socket, without AV1.
+        this.usedDirectProxy = false
+        this.directProxyFailed = true
+        this.openSocket()
         return
       }
       if (preferDirect && !this.closedByUser) {
