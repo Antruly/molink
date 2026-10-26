@@ -2,7 +2,7 @@
 
 跨平台远程桌面。Web 优先，一套后台 + 浏览器壳层，桌面端直连，移动端经服务端中转。
 
-> 官方网站：[ssvr.top/molink](https://ssvr.top/molink) · 版本 0.9.30 · MIT · 协议版本 1
+> 官方网站：[ssvr.top/molink](https://ssvr.top/molink) · 版本 0.9.36 · MIT · 协议版本 1
 
 ![主页（亮色）](docs/screenshots/home-light.png)
 ![会话页（合成测试帧）](docs/screenshots/session-light.png)
