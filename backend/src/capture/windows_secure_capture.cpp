@@ -92,6 +92,8 @@ class secure_capture final : public capture_base {
       err = "secure desktop has no size";
       return false;
     }
+    secure_desktop_ = info.find("\"desktop\":\"Default\"") ==
+                      std::string::npos;
     running_.store(true);
     thread_ = std::thread([this] { run(); });
     return true;
@@ -133,20 +135,34 @@ class secure_capture final : public capture_base {
  private:
   void run() {
     auto next = std::chrono::steady_clock::now();
+    auto next_info = next;
     while (running_.load()) {
       if (!active_.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
         next = std::chrono::steady_clock::now();
+        next_info = next;
         continue;
+      }
+      const auto now = std::chrono::steady_clock::now();
+      if (now >= next_info) {
+        next_info = now + std::chrono::seconds(2);
+        std::vector<uint8_t> info;
+        if (helper_command("info", info)) {
+          const std::string text(reinterpret_cast<const char*>(info.data()),
+                                 info.size());
+          secure_desktop_ = text.find("\"desktop\":\"Default\"") ==
+                            std::string::npos;
+        }
       }
       std::string err;
       capture_frame(err);
-      // GDI + a large pipe copy is much heavier than DXGI; the lock screen
-      // does not need the full session frame rate.
-      const int fps = std::min(8, std::max(1, target_fps()));
+      // GDI + a large pipe copy is much heavier than DXGI. The lock screen
+      // only needs a slow refresh, but a normal desktop should feel live.
+      const int cap = secure_desktop_ ? 8 : 15;
+      const int fps = std::min(cap, std::max(1, target_fps()));
       next += std::chrono::milliseconds(1000 / fps);
-      const auto now = std::chrono::steady_clock::now();
-      if (next < now) next = now;
+      const auto after = std::chrono::steady_clock::now();
+      if (next < after) next = after;
       std::this_thread::sleep_until(next);
     }
   }
@@ -241,6 +257,7 @@ class secure_capture final : public capture_base {
   }
 
   capture_options options_;
+  bool secure_desktop_ = true;
   uint16_t width_ = 0;
   uint16_t height_ = 0;
   std::vector<uint8_t> previous_;

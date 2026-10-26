@@ -207,16 +207,13 @@ bool capture_on_thread(std::vector<uint8_t>& out, int& width, int& height,
     return false;
   }
   HGDIOBJ old = SelectObject(memory, bitmap);
+  // Plain SRCCOPY: CAPTUREBLT forces DWM to compose for every grab, which
+  // makes the host cursor blink and costs latency. DWM's composed desktop is
+  // already in the screen DC on current Windows versions.
   bool blitted = BitBlt(memory, 0, 0, width, height, screen, 0, 0,
-                        SRCCOPY | CAPTUREBLT) != 0;
+                        SRCCOPY) != 0;
   if (!blitted) {
-    const DWORD capture_error = GetLastError();
-    // CAPTUREBLT is not supported on the secure desktop; plain SRCCOPY works.
-    blitted = BitBlt(memory, 0, 0, width, height, screen, 0, 0, SRCCOPY) != 0;
-    if (!blitted) {
-      err = "BitBlt failed: " + std::to_string(capture_error) + "/" +
-            std::to_string(GetLastError());
-    }
+    err = "BitBlt failed: " + std::to_string(GetLastError());
   }
   BITMAPINFO info{};
   info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -303,7 +300,15 @@ void send_unicode(const std::wstring& text) {
 
 std::string handle_line(const std::string& line, std::vector<uint8_t>& frame,
                         int& width, int& height) {
-  if (line != "quit") refresh_input_desktop();
+  // Opening the input desktop for every command (each mouse move included)
+  // made the host cursor blink and added latency. The capture command runs
+  // continuously, so a desktop switch is still noticed within a few frames.
+  static ULONGLONG last_desktop_refresh = 0;
+  const ULONGLONG now = GetTickCount64();
+  if (line != "quit" && now - last_desktop_refresh >= 250) {
+    last_desktop_refresh = now;
+    refresh_input_desktop();
+  }
   if (line == "info") return desktop_json();
   if (line == "capture") {
     std::string err;
