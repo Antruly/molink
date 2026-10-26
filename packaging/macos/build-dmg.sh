@@ -21,7 +21,11 @@ if [ -n "${OPENSSL_LIB_DIR:-}" ]; then
 fi
 AV1_PREFIX=$(brew --prefix 2>/dev/null || true)
 AV1_ARG=""
-[ -n "$AV1_PREFIX" ] && AV1_ARG="-DCMAKE_PREFIX_PATH=$AV1_PREFIX"
+# Keep the libuvcpp prefix the release workflow put in CMAKE_PREFIX_PATH; a
+# bare -D would replace it and the core would fail to find uvcpp.
+if [ -n "$AV1_PREFIX" ]; then
+  AV1_ARG="-DCMAKE_PREFIX_PATH=$AV1_PREFIX${CMAKE_PREFIX_PATH:+;$CMAKE_PREFIX_PATH}"
+fi
 cmake -S "$ROOT/backend" -B "$ROOT/backend/build" -DCMAKE_BUILD_TYPE=Release \
   -DMOLINK_ENABLE_AV1=ON ${AV1_ARG:+"$AV1_ARG"} \
   ${OPENSSL_ROOT_ARG:+"$OPENSSL_ROOT_ARG"} >/dev/null
