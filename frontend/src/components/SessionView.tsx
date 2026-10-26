@@ -1599,6 +1599,14 @@ export function SessionView({
               label={t('stats.bandwidth')}
               value={formatBandwidth(tab.stats.bytesPerSec)}
             />
+            {tab.av1Active ? (
+              <span
+                className="rounded-lg border border-emerald-500/45 bg-emerald-500/10 px-2 py-1 font-mono text-[10px] font-semibold text-emerald-500"
+                title={`AV1 ${tab.av1WireBytes ?? 0} B wire → ${tab.av1DecodedBytes ?? 0} B decoded`}
+              >
+                AV1
+              </span>
+            ) : null}
           </div>
 
           {clipboardAvailable ? (

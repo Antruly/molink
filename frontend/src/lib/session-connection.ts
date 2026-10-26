@@ -201,7 +201,7 @@ export class SessionConnection {
         this.av1Timer = window.setTimeout(() => {
           this.av1Timer = null
           this.sink.onPatch({ av1Active: false })
-        }, 5000)
+        }, 10000)
       },
       onCursor: (cursorShape) => this.sink.onPatch({ cursorShape }),
       onCursorPosition: (cursorPosition) =>
