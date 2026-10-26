@@ -263,6 +263,16 @@ const kKeyframeRecoveryMs = 3000
 const kHelloRetryMs = 2000
 const kHelloAttempts = 5
 
+/// A session whose pings go unanswered is dead even if the socket never
+/// reports a close: relay and NAT connections go half-open exactly like that,
+/// leaving a frozen picture and dead input until the user reconnects.
+const kPingIntervalMs = 3000
+const kPingMissLimit = 6
+
+/// Unanswered frame requests before the host is treated as unresponsive. The
+/// request is retried every second by requestFrame().
+const kFrameMissLimit = 15
+
 export class MolinkClient {
   private ws: WebSocket | null = null
   private handlers: Partial<ClientHandlers> = {}
@@ -323,6 +333,13 @@ export class MolinkClient {
   private autoRetryTimer: number | null = null
   private refreshTimer: number | null = null
   private pingTimer: number | null = null
+  /// When the pending ping was sent, and how many pings in a row went
+  /// unanswered. A dead relay link never fires onclose, so this is the only
+  /// way to notice it.
+  private pendingPingAt = 0
+  private missedPongs = 0
+  /// Frame requests that timed out in a row, reset by every arriving frame.
+  private missedFrameResponses = 0
   private closedByUser = false
   private hasImage = false
   // Decompression is asynchronous; chaining keeps frames applied in order.
@@ -382,6 +399,7 @@ export class MolinkClient {
     this.hasImage = false
     this.pendingFrame = false
     this.pendingFrameAt = 0
+    this.missedFrameResponses = 0
     this.latestFrameSeq = -1
     this.lastKeyframeRequest = 0
     this.lastKeyframeRecovery = 0
@@ -470,6 +488,9 @@ export class MolinkClient {
     }
 
     ws.onclose = (event: CloseEvent) => {
+      // A socket that a stall recovery already replaced must not clear the
+      // new one and schedule a second reconnect.
+      if (this.ws !== ws) return
       this.stopPing()
       this.stopHelloRetry()
       this.pendingFrame = false
@@ -640,9 +661,18 @@ export class MolinkClient {
   /** Asks for one synthetic frame. Returns false while one is in flight. */
   requestFrame(): boolean {
     if (!this.isLive()) return false
-    if (this.pendingFrame &&
-        Date.now() - this.pendingFrameAt < kFrameRequestTimeoutMs) {
-      return false
+    if (this.pendingFrame) {
+      if (Date.now() - this.pendingFrameAt < kFrameRequestTimeoutMs) {
+        return false
+      }
+      // The previous retry was not answered either. A host that keeps pongs
+      // flowing but stops answering frame pulls has a stuck capture/input
+      // path; reconnecting is the only client-side recovery.
+      this.missedFrameResponses += 1
+      if (this.missedFrameResponses >= kFrameMissLimit) {
+        this.recoverStalledSession('the host stopped sending frames')
+        return false
+      }
     }
     this.pendingFrame = true
     this.pendingFrameAt = Date.now()
@@ -787,6 +817,7 @@ export class MolinkClient {
   }
 
   private handleText(text: string): void {
+    this.noteInbound()
     let message: ControlMessage
     try {
       message = JSON.parse(text) as ControlMessage
@@ -830,6 +861,8 @@ export class MolinkClient {
         }
         break
       case 'pong': {
+        this.pendingPingAt = 0
+        this.missedPongs = 0
         const sent = (message as { t?: number }).t
         if (typeof sent === 'number') {
           this.handlers.onLatency?.(Math.max(0, performance.now() - sent))
@@ -952,6 +985,7 @@ export class MolinkClient {
   }
 
   private handleBinary(buffer: ArrayBuffer): void {
+    this.noteInbound()
     try {
       const packet = decodePacket(buffer)
       if (packet.type === PacketType.audio) {
@@ -987,6 +1021,7 @@ export class MolinkClient {
       }
       if (packet.type !== PacketType.frame) return
       this.pendingFrame = false
+      this.missedFrameResponses = 0
       const frame = parseFramePayload(packet.payload)
       this.noteFrameClock(packet.tsUs)
       if ((packet.flags & PacketFlag.tileRefresh) !== 0) {
@@ -1185,14 +1220,32 @@ export class MolinkClient {
     }, 200)
   }
 
+  /// Any message proves the link is alive. A pong can sit behind a large frame
+  /// on the same TCP relay stream, so the watchdog measures total silence
+  /// rather than pong latency.
+  private noteInbound(): void {
+    this.pendingPingAt = 0
+    this.missedPongs = 0
+  }
+
   private startPing(): void {
     this.stopPing()
     const ping = () => {
       if (!this.isLive()) return
+      if (this.pendingPingAt !== 0) {
+        this.missedPongs += 1
+        if (this.missedPongs >= kPingMissLimit) {
+          this.recoverStalledSession('the link stopped responding')
+          return
+        }
+      } else {
+        this.missedPongs = 0
+      }
+      this.pendingPingAt = Date.now()
       this.sendJson({ type: 'ping', t: performance.now() })
     }
     ping()
-    this.pingTimer = window.setInterval(ping, 3000)
+    this.pingTimer = window.setInterval(ping, kPingIntervalMs)
   }
 
   /// Coalesces keyframe requests while stale frames are being dropped.
@@ -1208,6 +1261,29 @@ export class MolinkClient {
       window.clearInterval(this.pingTimer)
       this.pingTimer = null
     }
+    this.pendingPingAt = 0
+    this.missedPongs = 0
+  }
+
+  /// The session looks live but nothing is coming back. Drop the socket and
+  /// reconnect; the resume token keeps this from spending another code use.
+  private recoverStalledSession(reason: string): void {
+    if (this.closedByUser || !this.isLive()) return
+    const ws = this.ws
+    this.ws = null
+    this.stopPing()
+    this.stopHelloRetry()
+    this.pendingFrame = false
+    this.missedFrameResponses = 0
+    if (ws !== null) {
+      try {
+        ws.close(4000, reason)
+      } catch {
+        // The socket may already be unusable; reconnecting is what matters.
+      }
+    }
+    this.handlers.onPhase?.('connecting')
+    this.openSocket()
   }
 
   private sendJson(payload: Record<string, unknown>): void {

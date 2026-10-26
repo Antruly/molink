@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
-VERSION=${VERSION:-0.9.20}
+VERSION=${VERSION:-0.9.21}
 ARCH=${ARCH:-$(uname -m)}
 BUILD=${BUILD_DIR:-$ROOT/build/macos}
 APP="$BUILD/moLink.app"
