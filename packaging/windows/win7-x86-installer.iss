@@ -1,7 +1,7 @@
 ; moLink Windows 7 x86 (32-bit) preview installer.
 ;
 ; Build (on Windows, after staging the Win7 package directory):
-;   ISCC.exe /DAppVersion=0.9.31 \
+;   ISCC.exe /DAppVersion=0.9.32 \
 ;            /DPkgDir=C:\path\to\molink-win7-x86-release \
 ;            /DOutputDir=C:\path\to\output \
 ;            /DLangFile=C:\path\to\ChineseSimplified.isl \
@@ -12,7 +12,7 @@
 ; and helper, the web UI, and the runtime DLLs.
 
 #ifndef AppVersion
-  #define AppVersion "0.9.31"
+  #define AppVersion "0.9.32"
 #endif
 #ifndef PkgDir
   #error PkgDir must point at the staged Win7 x86 package directory
@@ -86,6 +86,8 @@ Filename: "{sys}\sc.exe"; Parameters: "start moLinkSession"; Flags: runhidden; T
 Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent; Check: WebView2RuntimePresent
 
 [UninstallRun]
+Filename: "{sys}\taskkill.exe"; Parameters: "/F /T /IM moLink.exe"; Flags: runhidden; RunOnceId: "KillShell"
+Filename: "{sys}\taskkill.exe"; Parameters: "/F /T /IM molink-core.exe"; Flags: runhidden; RunOnceId: "KillCore"
 Filename: "{sys}\sc.exe"; Parameters: "stop moLinkSession"; Flags: runhidden; RunOnceId: "StopService"
 Filename: "{sys}\sc.exe"; Parameters: "delete moLinkSession"; Flags: runhidden; RunOnceId: "DeleteService"
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""moLink Core 28418"""; Flags: runhidden; RunOnceId: "DeleteFirewall"
@@ -115,4 +117,24 @@ begin
            'The native shell will not start. Use the "moLink (browser UI)" shortcut' + #13#10 +
            'with Firefox ESR 115 or Chrome 109, or install the WebView2 109 runtime.',
            mbInformation, MB_OK);
+end;
+
+// The shell hides to the tray on WM_CLOSE, so Restart Manager cannot close it.
+// Kill the tray app and the core before replacing files.
+procedure StopRunningApp();
+var
+  Code: Integer;
+begin
+  Exec(ExpandConstant('{sys}\sc.exe'), 'stop moLinkSession', '', SW_HIDE,
+       ewWaitUntilTerminated, Code);
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /T /IM moLink.exe', '',
+       SW_HIDE, ewWaitUntilTerminated, Code);
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /T /IM molink-core.exe', '',
+       SW_HIDE, ewWaitUntilTerminated, Code);
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  StopRunningApp();
+  Result := '';
 end;

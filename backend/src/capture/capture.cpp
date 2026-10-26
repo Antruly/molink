@@ -256,6 +256,12 @@ bool capture_base::tile_clock(std::vector<uint8_t>& out) {
   return true;
 }
 
+void capture_base::note_build_time(uint64_t us) {
+  // An exponential average keeps one slow keyframe from pinning the value.
+  const uint64_t previous = build_time_us_.load();
+  build_time_us_.store(previous == 0 ? us : (previous * 7 + us) / 8);
+}
+
 void capture_base::publish(std::shared_ptr<const captured_frame> frame) {
   stat_frames_.fetch_add(1);
   stat_bytes_.fetch_add(frame->payload.size());

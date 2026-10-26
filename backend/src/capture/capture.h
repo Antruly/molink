@@ -186,6 +186,14 @@ class capture_source {
   /// that cannot pace themselves may ignore this.
   virtual void set_target_fps(int fps) { (void)fps; }
 
+  /// The rate last requested by a client. 0 when the source does not pace.
+  virtual int target_fps() const { return 0; }
+
+  /// Smoothed time spent building and encoding one frame, in microseconds.
+  /// Clients use it to tell a slow host encoder from a slow link; 0 when the
+  /// source does not report it.
+  virtual uint64_t build_time_us() const { return 0; }
+
   /// Select the encoding preset. Global to the host, like the capture rate:
   /// the next frame for every session uses it. Sources that build their own
   /// payloads (the synthetic pattern) may ignore this.
@@ -286,7 +294,7 @@ class capture_base : public capture_source {
     set_display_awake(active);
   }
   void set_target_fps(int fps) override { target_fps_.store(clamp_fps(fps)); }
-  int target_fps() const { return target_fps_.load(); }
+  int target_fps() const override { return target_fps_.load(); }
   void set_quality(quality_mode mode) override { quality_.store(mode); }
   quality_mode quality() const override { return quality_.load(); }
 
@@ -307,6 +315,7 @@ class capture_base : public capture_source {
   void set_av1_allowed(bool allowed) override {
     av1_allowed_.store(allowed);
   }
+  uint64_t build_time_us() const override { return build_time_us_.load(); }
   void set_av1_settings(const av1_encoding_settings& settings) override {
     std::lock_guard<std::mutex> lock(av1_settings_mutex_);
     av1_settings_ = settings;
@@ -398,6 +407,8 @@ class capture_base : public capture_source {
   static int clamp_fps(int fps) { return fps < 1 ? 1 : (fps > 60 ? 60 : fps); }
 
   void publish(std::shared_ptr<const captured_frame> frame);
+  /// Records the CPU time spent building/encoding one frame (EMA, 1/8 weight).
+  void note_build_time(uint64_t us);
   /// Updates the per-cell freshness grid from a published frame's tiles.
   void update_cell_clock(const captured_frame& frame);
   void note_grab(bool full, uint16_t dirty_w, uint16_t dirty_h);
@@ -416,6 +427,8 @@ class capture_base : public capture_source {
   std::atomic<int> target_fps_{15};
   std::atomic<quality_mode> quality_{quality_mode::balanced};
   std::atomic<bool> av1_allowed_{false};
+  /// EMA of the build+encode time, read by the session layer.
+  std::atomic<uint64_t> build_time_us_{0};
   /// Forced keyframe cadence; 0 means the backends' 30 s safety refresh only.
   std::atomic<int> periodic_keyframe_ms_{30000};
   /// Settings arrive from the API thread; the capture thread copies them.

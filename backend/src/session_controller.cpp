@@ -1857,6 +1857,46 @@ void session_supervisor::run() {
       if (!live) options_.capture->set_active(false);
     }
 
+    // Once a second, report the rate the capture thread achieved and how long
+    // it spends building/encoding one frame. A client cannot tell a slow host
+    // from a static screen on its own; together with latency and dropped
+    // frames this lets its frame-rate controller lower the requested rate when
+    // the encoder (CPU) is the bottleneck.
+    if (options_.capture && options_.post && registry_->has_authenticated()) {
+      const capture_stats stats = options_.capture->stats();
+      const auto now = std::chrono::steady_clock::now();
+      if (last_capture_at_.time_since_epoch().count() == 0) {
+        last_capture_at_ = now;
+        last_capture_frames_ = stats.frames;
+      } else {
+        const double seconds =
+            std::chrono::duration<double>(now - last_capture_at_).count();
+        double fps = 0.0;
+        if (seconds > 0.0 && stats.frames >= last_capture_frames_) {
+          fps = static_cast<double>(stats.frames - last_capture_frames_) /
+                seconds;
+        }
+        last_capture_at_ = now;
+        last_capture_frames_ = stats.frames;
+        char text[160] = {};
+        std::snprintf(text, sizeof(text),
+                      "{\"type\":\"capture-stats\",\"fps\":%.1f,"
+                      "\"target_fps\":%d,\"build_ms\":%.1f}",
+                      fps, options_.capture->target_fps(),
+                      static_cast<double>(options_.capture->build_time_us()) /
+                          1000.0);
+        auto registry_ref = registry_;
+        auto post = options_.post;
+        const std::string message(text);
+        post([registry_ref, message] {
+          for (const session_info& peer : registry_ref->snapshot()) {
+            if (!peer.authenticated || !peer.transport) continue;
+            peer.transport->send_text(message);
+          }
+        });
+      }
+    }
+
     // Once a second, tell every session with a picture which 128 px cells
     // changed and when. A client compares this with the frames it applied and
     // asks for the cells it missed, so one lost refresh cannot leave a stale

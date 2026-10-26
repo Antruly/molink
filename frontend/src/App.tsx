@@ -7,7 +7,6 @@ import { SimpleHomeView } from './components/simple/SimpleHomeView'
 import { HostChatDock } from './components/HostChatDock'
 import { Logo } from './components/Logo'
 import { AccessRequestDialog } from './components/AccessRequestDialog'
-import { ServicePrompt } from './components/ServicePrompt'
 import { ResizeFrame } from './components/ResizeFrame'
 import { SessionView } from './components/SessionView'
 import { SettingsPanel } from './components/SettingsPanel'
@@ -156,7 +155,6 @@ export default function App() {
       {immersive ? null : <TitleBar />}
       <ResizeFrame />
       <AccessRequestDialog />
-      <ServicePrompt />
 
       {popout ? (
         <>

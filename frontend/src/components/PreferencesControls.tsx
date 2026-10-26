@@ -1,4 +1,5 @@
 import {
+  Activity,
   Check,
   Cpu,
   Gauge,
@@ -18,6 +19,7 @@ import {
   type Av1Settings,
   type ServerState,
 } from '../lib/api'
+import { FPS_CHOICES, parseFpsSetting } from '../lib/frame-rate'
 import { useAppStore, type QualityMode, type Theme } from '../store/app'
 import { ServicePanel } from './ServicePanel'
 import { WindowsSessionsPanel } from './WindowsSessionsPanel'
@@ -573,6 +575,8 @@ export function PreferencesControls({
   const setQuality = useAppStore((state) => state.setQualityWatermark)
   const qualityMode = useAppStore((state) => state.qualityMode)
   const setQualityMode = useAppStore((state) => state.setQualityMode)
+  const frameRate = useAppStore((state) => state.frameRate)
+  const setFrameRate = useAppStore((state) => state.setFrameRate)
   const lockTimeout = useAppStore((state) => state.lockTimeout)
   const setLockTimeout = useAppStore((state) => state.setLockTimeout)
   const server = useAppStore((state) => state.server)
@@ -678,6 +682,31 @@ export function PreferencesControls({
               onChange={setQuality}
               label={t('settings.watermark')}
             />
+          </div>
+
+          <div className="space-y-2">
+            <div className="flex items-center gap-2 text-[12px] font-medium text-ink">
+              <Activity size={14} className="text-accent" />
+              {t('settings.frameRate')}
+            </div>
+            <p className="text-[11px] leading-relaxed text-muted">
+              {t('settings.frameRateHint')}
+            </p>
+            <select
+              value={String(frameRate)}
+              onChange={(event) =>
+                setFrameRate(parseFpsSetting(event.target.value))
+              }
+              className="field"
+            >
+              {FPS_CHOICES.map((choice) => (
+                <option key={String(choice)} value={String(choice)}>
+                  {choice === 'auto'
+                    ? t('settings.frameRateAuto')
+                    : t('settings.frameRateValue', { count: choice })}
+                </option>
+              ))}
+            </select>
           </div>
 
           <div className="space-y-2">

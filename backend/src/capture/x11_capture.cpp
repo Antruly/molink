@@ -917,6 +917,7 @@ class x11_capture final : public capture_base {
       dirty_rect.valid = true;
     }
 
+    const auto build_start = std::chrono::steady_clock::now();
     std::vector<protocol::tile_blob> tiles;
     build_changed_tiles(frame_.data(), stride, width_, height_, tile,
                         previous_.data(), keyframe,
@@ -942,6 +943,10 @@ class x11_capture final : public capture_base {
                            &av1_payload, err, &av1_only)) {
       return false;
     }
+    note_build_time(static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - build_start)
+            .count()));
 
     auto frame = std::make_shared<captured_frame>();
     frame->seq = seq_++;

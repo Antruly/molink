@@ -161,17 +161,22 @@ AV1 不可用、观看端没有解码能力或单帧编码失败时，服务端�
 
 | 预设 | 格式 | zlib | 变化阈值 | 用途 |
 |---|---|---|---|---|
-| `smooth`（流畅） | `rgb565` | 固定 1 | 至少 16 | 优先帧率与包体积；16 位色，丢弃细小的颜色差异 |
+| `smooth`（流畅） | `rgb565` | 固定 1 | 至少 16 | 优先包体积；16 位色，丢弃细小的颜色差异 |
 | `balanced`（平衡，默认） | `bgra` | 自适应 | 使用配置值（默认 4） | 无损，和旧版本行为一致 |
 | `quality`（清晰） | `bgra` | 3/6/9 | 最多 1 | 优先画质，加大压缩力度 |
-| `raw`（原画不压缩） | `bgra` | 关闭 | 最多 1 | 预留：客户端可显式请求；1080p/30fps 的裸 BGRA 流量远超普通局域网，UI 不暴露 |
-| `game`（游戏） | `rgb565` | 固定 1 | 至少 16 | 60fps 优先，允许有损；等价于 `smooth` |
+| `raw`（原画不压缩） | `bgra` | 关闭 | 最多 1 | 预留：客户端可显式请求；1080p 的裸 BGRA 流量远超普通局域网，UI 不暴露 |
+| `game`（游戏） | `rgb565` | 固定 1 | 至少 16 | 允许有损；等价于 `smooth` |
 
+画质预设**只管画质**，不再隐含帧率。帧率由消息里的 `fps`（1..60）单独控制，
+与 `capture-fps` 等价；客户端默认按用户选择的“平均帧率”发送，只有检测到编码
+跟不上（主机经 `capture-stats` 上报的 `build_ms` 超出帧预算）或网络跟不上
+（RTT 升高、丢帧、拉帧完成率不足）时才自动降帧，恢复后再逐步回到设定值。
 `ultra`（超清）和 `lossless`（无损）映射到 `quality`：BGRA 原画 + zlib（无损，
-不是不压缩），客户端用保留的 `fps` 区分 15fps 与 30fps；`game` 映射到 `smooth`
-（16 位色 + 快速 zlib）。`raw` 只保留给显式请求不压缩的客户端。预设是**主机全局**的，与采集帧率相同：一个会话切换会影响同一主机
-上的所有会话。`auto` 不是 wire 协议的一部分，由客户端根据 RTT、拉帧完成率和吞吐量
-动态调整帧率（最高 30，稳定在 15 左右）和画质预设，并带迟滞。
+不是不压缩）；`raw` 只保留给显式请求不压缩的客户端。预设和采集帧率都是**主机全局**的：
+一个会话切换会影响同一主机上的所有会话。`auto` 不是 wire 协议的一部分，由客户端
+在画质档位之间自动切换（RTT、拉帧完成率、吞吐量，带迟滞）；“平均帧率 = 自适应”
+时按档位给出窗口：极速 5–25、流畅/平衡 10–25、清晰/超清/无损 15、游戏 30–60，
+负载不足时一律可降到 5。
 
 ---
 
@@ -233,6 +238,9 @@ AV1 不可用、观看端没有解码能力或单帧编码失败时，服务端�
 | `ping` | `t` | 应用层心跳，每 15 秒 |
 | `pong` | `t`, `server_ms` | 对客户端 ping 的回应 |
 | `access-requested` | `id` | 已登记免密请求，等待本机用户审批 |
+| `quality` | `mode`, `format`, `fps` | 画质/帧率切换的确认 |
+| `capture-stats` | `fps`, `target_fps`, `build_ms` | 每秒一次：主机实际发布帧率、目标帧率、单帧构建+编码耗时（EMA，毫秒）。客户端据此区分“屏幕没变化”和“主机编码不过来” |
+| `codec` | `av1`, `wire`, `decoded`, `full`（可选） | 本地核心代理每秒最多一次的解码统计；`full=true` 表示线路只传 AV1 全帧 |
 | `error` | `code`, `message` | 错误 |
 
 `welcome` 示例（真实屏幕）：
@@ -294,7 +302,7 @@ QUIC 会话（`transport=quic`）在一条双向 QUIC 流上复用完全相同�
 | `request-frame` | — | 请求一帧。服务端返回自上次以来所有未送达的帧；无变化时返回 0 瓦片帧 |
 | `request-keyframe` | — | 请求下一个捕获帧标记为关键帧（客户端丢失基准时使用） |
 | `capture-fps` | `fps` (1..60) | 调整主机的采集帧率（全局）；服务端回 `capture-fps` |
-| `quality` | `mode`（`smooth`/`balanced`/`quality`/`ultra`/`lossless`/`raw`/`game`），可选 `fps` | 切换主机的编码预设（全局）；`fps` 同时调整采集帧率（为兼容旧客户端保留）。服务端回 `quality`，带实际生效的 `mode` 与 `format` |
+| `quality` | `mode`（`smooth`/`balanced`/`quality`/`ultra`/`lossless`/`raw`/`game`），可选 `fps` | 切换主机的编码预设（全局）；`fps` 独立调整采集帧率（与画质无关）。服务端回 `quality`，带实际生效的 `mode`、`format` 与 `fps` |
 | `display` | `index` | 切换被控端显示器（全局）；服务端回 `display` 并发送新关键帧 |
 | `display-mode` | `width`, `height` | 请求主机切换显示模式；仅当 `welcome.tiles.can_set_display_mode` 不为 `false` 时可用（目前仅 DXGI 采集）。成功回 `display-mode` 并发送关键帧；后端不支持回 `display_mode_unsupported`，驱动拒绝回 `display_mode_failed`，两秒内重复请求回 `display_mode_busy` |
 | `input` | `events[]` | 指针/键盘事件；需要已鉴权，见 §4.3 |

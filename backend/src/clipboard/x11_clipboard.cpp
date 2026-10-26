@@ -248,22 +248,41 @@ class x11_clipboard final : public clipboard_service {
       take_file_ownership(paths);
     }
 
+    // One selection transfer at a time. When one is already running, requeue
+    // *every* remaining callback, not just the first: the others used to be
+    // destroyed with this local deque, so a second clipboard request in the
+    // same tick (for example the text poll and the page's file poll) never
+    // called back. The supervisor resets its in-flight flag inside that
+    // callback, so losing it disabled clipboard sync until the core restarted.
+    std::deque<text_callback> deferred_gets;
     for (text_callback& callback : gets) {
       if (getting_) {
-        // One transfer at a time; retry on the next tick.
-        std::lock_guard<std::mutex> lock(queue_mutex_);
-        pending_gets_.push_front(std::move(callback));
-        break;
+        deferred_gets.push_back(std::move(callback));
+        continue;
       }
       start_get(std::move(callback));
     }
+    if (!deferred_gets.empty()) {
+      std::lock_guard<std::mutex> lock(queue_mutex_);
+      while (!deferred_gets.empty()) {
+        pending_gets_.push_front(std::move(deferred_gets.back()));
+        deferred_gets.pop_back();
+      }
+    }
+    std::deque<files_callback> deferred_file_gets;
     for (files_callback& callback : file_gets) {
       if (getting_) {
-        std::lock_guard<std::mutex> lock(queue_mutex_);
-        pending_file_gets_.push_front(std::move(callback));
-        break;
+        deferred_file_gets.push_back(std::move(callback));
+        continue;
       }
       start_file_get(std::move(callback));
+    }
+    if (!deferred_file_gets.empty()) {
+      std::lock_guard<std::mutex> lock(queue_mutex_);
+      while (!deferred_file_gets.empty()) {
+        pending_file_gets_.push_front(std::move(deferred_file_gets.back()));
+        deferred_file_gets.pop_back();
+      }
     }
   }
 

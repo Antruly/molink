@@ -880,8 +880,10 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
               resp.end();
               return;
             }
+            // Matches the page's per-batch limit. The old 64 MiB cap made
+            // copying a video from Explorer fail with a silent 413.
             constexpr uint64_t kMaxClipboardFile =
-                64ull * 1024ull * 1024ull;
+                256ull * 1024ull * 1024ull;
             std::error_code ec;
             const std::filesystem::path fs_path(path);
             if (!std::filesystem::is_regular_file(fs_path, ec) || ec) {

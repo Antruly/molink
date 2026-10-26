@@ -237,6 +237,7 @@ class secure_capture final : public capture_base {
     frame_header.screen_h = static_cast<uint16_t>(height);
     frame_header.tile_w = tile;
     frame_header.tile_h = tile;
+    const auto build_start = std::chrono::steady_clock::now();
     std::vector<protocol::tile_blob> tiles;
     build_changed_tiles(pixels, stride, static_cast<uint16_t>(width),
                         static_cast<uint16_t>(height), tile, previous_.data(),
@@ -259,6 +260,10 @@ class secure_capture final : public capture_base {
                               &av1_payload, err, &av1_only)) {
       return false;
     }
+    note_build_time(static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - build_start)
+            .count()));
     auto frame = std::make_shared<captured_frame>();
     frame->seq = frame_header.frame_seq;
     frame->ts_us = static_cast<uint64_t>(

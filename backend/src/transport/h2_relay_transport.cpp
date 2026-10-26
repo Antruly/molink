@@ -44,10 +44,12 @@ h2_relay_transport::h2_relay_transport(std::string host, int port,
 
 h2_relay_transport::~h2_relay_transport() {
   closed_ = true;
+#if MOLINK_HAVE_H2_WS
   ws_.reset();
   h2_.reset();
   if (tcp_) tcp_->close();
   tcp_.reset();
+#endif
 }
 
 bool h2_relay_transport::is_open() const {
@@ -277,11 +279,13 @@ void h2_relay_transport::fail(const std::string& reason) {
 }
 
 void h2_relay_transport::stop_connecting() {
+#if MOLINK_HAVE_H2_WS
   if (timer_) {
     timer_->stop();
     timer_.reset();
   }
   if (tcp_) tcp_->close();
+#endif
 }
 
 }  // namespace molink

@@ -143,6 +143,10 @@ export class ClipboardFileSync {
         return
       }
       this.active = { id: message.id, file }
+      // The accept→done leg has no per-chunk acknowledgement; a stalled
+      // transfer used to leave `busy` set forever and blocked every later
+      // clipboard copy. The watchdog is re-armed as chunks go out.
+      this.armWatchdog(30000)
       void this.sendChunks(
         message.id,
         file,
@@ -153,7 +157,10 @@ export class ClipboardFileSync {
     if (message.action === 'done' && this.active &&
         message.id === this.active.id) {
       if (message.ok === false || !message.path) {
-        this.finish('clipboard_files_failed')
+        // Skip the file that failed and keep the rest of the selection
+        // moving; one unreadable file used to abort the whole copy.
+        this.active = null
+        this.sendNext()
         return
       }
       this.paths.push(message.path)
@@ -161,12 +168,19 @@ export class ClipboardFileSync {
       this.sendNext()
       return
     }
-    if (
-      (message.action === 'reject' || message.action === 'cancel') &&
-      (this.offerPending || (this.active && message.id === this.active.id))
-    ) {
-      this.finish('clipboard_files_failed')
-      return
+    if (message.action === 'reject' || message.action === 'cancel') {
+      const activeMatch = this.active !== null &&
+        message.id === this.active.id
+      if (activeMatch || this.offerPending) {
+        // Drop the failed item and continue the batch. An active transfer was
+        // already shifted off the queue at accept; a rejected offer is still
+        // its head.
+        this.offerPending = false
+        this.active = null
+        if (!activeMatch) this.queue.shift()
+        this.sendNext()
+        return
+      }
     }
     if (message.action === 'clipboard') {
       if (message.ok === false) {
@@ -213,12 +227,12 @@ export class ClipboardFileSync {
     this.armWatchdog()
   }
 
-  private armWatchdog(): void {
+  private armWatchdog(timeoutMs = 15000): void {
     if (this.watchdog !== null) window.clearTimeout(this.watchdog)
     this.watchdog = window.setTimeout(() => {
       this.watchdog = null
       if (this.busy) this.finish('clipboard_files_failed')
-    }, 15000)
+    }, timeoutMs)
   }
 
   private clearWatchdog(): void {
@@ -234,6 +248,8 @@ export class ClipboardFileSync {
     chunk: number,
   ): Promise<void> {
     let offset = 0
+    let sent = 0
+    this.armWatchdog(30000)
     while (offset < file.size) {
       const end = Math.min(file.size, offset + chunk)
       const bytes = file.data
@@ -241,14 +257,24 @@ export class ClipboardFileSync {
         : new Uint8Array(await file.file!.slice(offset, end).arrayBuffer())
       this.connection()?.sendFileChunk(id, offset, bytes)
       offset = end
+      sent += 1
+      // Re-arm every few megabytes so a long but healthy transfer is not
+      // mistaken for a stall, while a dead one still recovers.
+      if (sent % 16 === 0) this.armWatchdog(30000)
       // Yield so a large file does not freeze the UI thread.
       await new Promise((resolve) => window.setTimeout(resolve, 0))
     }
     this.connection()?.sendFileAction('complete', { id })
+    this.armWatchdog(30000)
   }
 
   private finish(error: string | null): void {
     this.clearWatchdog()
+    // Abort the host-side upload too; otherwise its .part file lingers and
+    // the next offer would reuse the same destination name.
+    if (error && this.active) {
+      this.connection()?.sendFileAction('cancel', { id: this.active.id })
+    }
     if (error) this.onError(error)
     this.busy = false
     this.processing = false

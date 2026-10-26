@@ -173,6 +173,11 @@ export interface ClientHandlers {
   onSessionEvent?: (event: SessionEvent) => void
   onDisplay?: (index: number) => void
   onAccessRequested?: (id: number) => void
+  /**
+   * Host capture rate and encoder build time, once per second. The frame-rate
+   * controller uses the build time to detect a CPU-bound encoder.
+   */
+  onCaptureStats?: (info: { fps: number; buildMs: number }) => void
   /** Every FRAME packet, including empty "nothing changed" responses. */
   onWireFrame?: () => void
   /** A frame was dropped because it was stale or overtaken by a newer one. */
@@ -206,6 +211,9 @@ interface ControlMessage {
   av1?: boolean
   wire?: number
   decoded?: number
+  /// Host capture rate and encoder build time in a `capture-stats` message.
+  fps?: number
+  build_ms?: number
   /// Emitted with a codec stat: the stream is AV1-only, not AV1 patches.
   full?: boolean
   from?: string
@@ -1001,6 +1009,12 @@ export class MolinkClient {
           hostMicrophone: message.host_microphone,
           startedMs: message.started_ms,
           message: message.message,
+        })
+        break
+      case 'capture-stats':
+        this.handlers.onCaptureStats?.({
+          fps: typeof message.fps === 'number' ? message.fps : 0,
+          buildMs: typeof message.build_ms === 'number' ? message.build_ms : 0,
         })
         break
       case 'codec':

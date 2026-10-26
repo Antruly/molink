@@ -6,7 +6,16 @@
 #include <memory>
 #include <string>
 
+#include <uvcpp/uvcpp_config.h>
+
 #include "transport/relay_session.h"
+
+// Set by CMake. Builds whose libuvcpp has no HTTP/2 keep the members below
+// compiled out: their headers (and the timer type) may not be installed, and a
+// unique_ptr member with an incomplete type cannot be destroyed.
+#ifndef MOLINK_HAVE_H2_WS
+#define MOLINK_HAVE_H2_WS 0
+#endif
 
 namespace uvcpp {
 class uvcpp_h2_connection;
@@ -66,11 +75,13 @@ class h2_relay_transport final
   uvcpp::uvcpp_loop* loop_ = nullptr;
   post_fn post_;
 
+#if MOLINK_HAVE_H2_WS
   std::unique_ptr<uvcpp::uvcpp_ssl_context> tls_;
   std::unique_ptr<uvcpp::uvcpp_tcp_client> tcp_;
   std::unique_ptr<uvcpp::uvcpp_h2_connection> h2_;
   std::unique_ptr<uvcpp::uvcpp_h2_ws_connection> ws_;
   std::unique_ptr<uvcpp::uvcpp_timer> timer_;
+#endif
   std::chrono::steady_clock::time_point deadline_{};
 
   bool started_ = false;

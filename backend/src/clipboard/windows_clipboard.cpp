@@ -78,7 +78,13 @@ class windows_clipboard final : public clipboard_service {
 
   void request_text(text_callback callback) override {
     std::string text;
-    if (OpenClipboard(nullptr)) {
+    // Clipboard managers and other apps hold the clipboard for short bursts;
+    // one failing OpenClipboard used to drop a whole sync round.
+    for (int attempt = 0; attempt < 5; ++attempt) {
+      if (!OpenClipboard(nullptr)) {
+        Sleep(10);
+        continue;
+      }
       if (IsClipboardFormatAvailable(CF_UNICODETEXT)) {
         HANDLE data = GetClipboardData(CF_UNICODETEXT);
         if (data != nullptr) {
@@ -90,13 +96,22 @@ class windows_clipboard final : public clipboard_service {
         }
       }
       CloseClipboard();
+      break;
     }
     if (callback) callback(std::move(text));
   }
 
   void request_files(files_callback callback) override {
     std::vector<clipboard_file> files;
-    if (OpenClipboard(nullptr)) {
+    bool opened = false;
+    for (int attempt = 0; attempt < 5; ++attempt) {
+      if (OpenClipboard(nullptr)) {
+        opened = true;
+        break;
+      }
+      Sleep(10);
+    }
+    if (opened) {
       if (IsClipboardFormatAvailable(CF_HDROP)) {
         HANDLE data = GetClipboardData(CF_HDROP);
         if (data != nullptr) {

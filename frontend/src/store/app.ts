@@ -35,6 +35,8 @@ import type {
   Welcome,
 } from '../lib/client'
 import { cleanDeviceNote, deviceNoteKey } from '../lib/device-note'
+import type { FpsSetting } from '../lib/frame-rate'
+import { parseFpsSetting } from '../lib/frame-rate'
 import type { Frame } from '../lib/protocol'
 import { forgetSessionScreenBuffer } from '../lib/screen-buffer'
 import {
@@ -49,9 +51,9 @@ import {
 
 export type Theme = 'light' | 'dark'
 export type AuthPhase = 'booting' | 'login' | 'locked' | 'ready'
-/// "auto" is resolved in the client into a concrete preset plus a frame rate.
-/// ultra/lossless use the raw BGRA preset (15/30 fps); game is the lossy
-/// frame-rate-first preset (60 fps).
+/// "auto" is resolved in the client into a concrete preset. A preset only
+/// controls picture quality; the average frame rate is a separate setting
+/// (`frameRate`).
 export type QualityMode =
   | 'turbo'
   | 'smooth'
@@ -100,6 +102,11 @@ export interface SessionTab {
   av1Full?: boolean
   av1WireBytes?: number
   av1DecodedBytes?: number
+  /// Host-reported capture rate and encoder build time (EMA), refreshed once
+  /// per second. The frame-rate controller uses the build time to notice a
+  /// slow encoder.
+  hostFps?: number
+  hostBuildMs?: number
   notice: string | null
   /// When the host must approve this session: epoch ms of the 60 s deadline.
   approvalDeadline: number | null
@@ -149,6 +156,9 @@ interface AppState {
   theme: Theme
   qualityWatermark: boolean
   qualityMode: QualityMode
+  /// Average frame rate: a fixed 5/10/15/25/45/60 or 'auto' (quality-tier
+  /// window adapted to the actual load). Independent from the quality preset.
+  frameRate: FpsSetting
   settingsOpen: boolean
   /// The native shell window is fullscreen but the app chrome stays visible.
   /// This is the title bar's fullscreen control, not session immersive mode.
@@ -184,6 +194,7 @@ interface AppState {
   toggleTheme: () => void
   setQualityWatermark: (enabled: boolean) => void
   setQualityMode: (mode: QualityMode) => void
+  setFrameRate: (fps: FpsSetting) => void
   setSettingsOpen: (open: boolean) => void
   setWindowFullscreen: (value: boolean) => void
   setImmersive: (value: boolean) => void
@@ -261,6 +272,7 @@ interface AppState {
 const THEME_KEY = 'molink.theme'
 const QUALITY_KEY = 'molink.quality'
 const QUALITY_MODE_KEY = 'molink.qualityMode'
+const FRAME_RATE_KEY = 'molink.frameRate'
 const RECENT_KEY = 'molink.recents'
 const HISTORY_VIEW_KEY = 'molink.historyView'
 const MODE_KEY = 'molink.sessionMode'
@@ -547,6 +559,7 @@ export const useAppStore = create<AppState>((set, get) => {
     theme: initialTheme(),
     qualityWatermark: readStorage(QUALITY_KEY) === '1',
     qualityMode: initialQualityMode(),
+    frameRate: parseFpsSetting(readStorage(FRAME_RATE_KEY)),
     settingsOpen: false,
     windowFullscreen: false,
     immersive: false,
@@ -592,6 +605,11 @@ export const useAppStore = create<AppState>((set, get) => {
     setQualityMode: (mode) => {
       writeStorage(QUALITY_MODE_KEY, mode)
       set({ qualityMode: mode })
+    },
+
+    setFrameRate: (fps) => {
+      writeStorage(FRAME_RATE_KEY, String(fps))
+      set({ frameRate: fps })
     },
 
     setSettingsOpen: (open) => set({ settingsOpen: open }),
@@ -1159,9 +1177,9 @@ export const useAppStore = create<AppState>((set, get) => {
             patchTab(id, { error: 'clipboard_unavailable' })
             return
           }
-          navigator.clipboard.writeText(text).catch(() => {
-            patchTab(id, { error: 'clipboard_write_failed' })
-          })
+          // A rejected write (unfocused or permissionless browser) is not
+          // actionable; do not cover the session with an error banner.
+          navigator.clipboard.writeText(text).catch(() => undefined)
         },
       }, id)
       runtimes.set(id, connection)

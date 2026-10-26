@@ -42,6 +42,9 @@ export interface TabPatch {
   av1Full?: boolean
   av1WireBytes?: number
   av1DecodedBytes?: number
+  /// Host-reported capture rate and encoder build time (EMA).
+  hostFps?: number
+  hostBuildMs?: number
   notice?: string | null
   approvalDeadline?: number | null
   retryAt?: number | null
@@ -77,11 +80,8 @@ export class SessionConnection {
   private clipboardTimer: number | null = null
   private lastClipboard = ''
   private clipboardFailures = 0
+  private clipboardRetryAt = 0
   private dropTimes: number[] = []
-  private presetFps = 0
-  private congested = false
-  private lastDropAt = 0
-  private congestionTimer: number | null = null
   private av1Timer: number | null = null
   private clipboardEnabled = true
   /// This viewer's machine name/ID, sent in hello so the shared chat can
@@ -144,7 +144,6 @@ export class SessionConnection {
             retryAt: null,
           })
           this.startClipboardSync()
-          this.startCongestionWatch()
           if (!this.foreground) this.startBackgroundPull()
           this.startFileSync()
           return
@@ -236,23 +235,24 @@ export class SessionConnection {
         })
       },
       onFrameDropped: () => {
-        const now = performance.now()
-        this.dropTimes.push(now)
-        this.lastDropAt = now
-        if (!this.congested) {
-          // Backlog: cut the host capture rate so new frames do not queue up
-          // behind the ones we are already dropping.
-          this.congested = true
-          this.client.setCaptureFps(8)
-        }
+        // Recorded as a congestion signal for the frame-rate controller in
+        // SessionView, which owns the single host-wide rate decision.
+        this.dropTimes.push(performance.now())
       },
+      onCaptureStats: (info) =>
+        this.sink.onPatch({
+          hostFps: info.fps,
+          hostBuildMs: info.buildMs,
+        }),
       onClipboard: (text) => {
         if (!this.clipboardEnabled) return
         // Only the remote the user is actively working in may write the local
         // clipboard; otherwise several tabs fight over it. Local -> remote
         // still broadcasts from every session below.
         if (!this.foreground) return
-        if (typeof document !== 'undefined' && !document.hasFocus()) return
+        // Do not require page focus: the whole point is to paste on this
+        // machine after copying on the remote, which usually happens after
+        // switching away. The write itself is still guarded by the sink.
         // Remember what we just wrote so the poll does not echo it back.
         this.lastClipboard = text
         this.sink.onClipboard(text)
@@ -365,12 +365,10 @@ export class SessionConnection {
     this.stopBackgroundPull()
     this.stopFileSync()
     this.stopClipboardSync()
-    this.stopCongestionWatch()
     this.lastClipboard = ''
     this.clipboardFailures = 0
+    this.clipboardRetryAt = 0
     this.dropTimes = []
-    this.congested = false
-    this.lastDropAt = 0
     this.frameTimes = []
     this.packetTimes = []
     this.byteWindow = []
@@ -402,7 +400,6 @@ export class SessionConnection {
     this.stopBackgroundPull()
     this.stopFileSync()
     this.stopClipboardSync()
-    this.stopCongestionWatch()
     this.client.disconnect()
   }
 
@@ -446,40 +443,31 @@ export class SessionConnection {
     this.client.reconnectNow()
   }
 
-  private startCongestionWatch(): void {
-    this.stopCongestionWatch()
-    this.congestionTimer = window.setInterval(() => {
-      if (!this.congested) return
-      if (performance.now() - this.lastDropAt <= 5000) return
-      this.congested = false
-      this.client.setCaptureFps(this.presetFps > 0 ? this.presetFps : 15)
-    }, 1000)
-  }
-
-  private stopCongestionWatch(): void {
-    if (this.congestionTimer !== null) {
-      window.clearInterval(this.congestionTimer)
-      this.congestionTimer = null
-    }
-  }
-
   private startClipboardSync(): void {
     this.stopClipboardSync()
     if (!this.clipboardEnabled) return
     const clipboard = navigator.clipboard
     if (!clipboard?.readText) return
     const poll = () => {
+      // Browsers require focus (and sometimes a gesture) for clipboard reads.
+      // A hidden window would only produce permission errors.
+      if (document.visibilityState === 'hidden') return
+      if (Date.now() < this.clipboardRetryAt) return
       clipboard.readText().then((text) => {
         this.clipboardFailures = 0
+        this.clipboardRetryAt = 0
         if (text !== '' && text !== this.lastClipboard) {
           this.lastClipboard = text
           this.client.sendClipboardSync(text)
         }
       }).catch(() => {
         this.clipboardFailures += 1
-        // Browsers require a gesture/permission for clipboard reads. Retry on
-        // the next interaction instead of spamming the console.
-        if (this.clipboardFailures >= 3) this.stopClipboardSync()
+        // Do not disable sync until the session reconnects: a temporary
+        // permission/focus failure used to stop text clipboard sync for good.
+        // Back off to one attempt every five seconds and recover on success.
+        if (this.clipboardFailures >= 3) {
+          this.clipboardRetryAt = Date.now() + 5000
+        }
       })
     }
     poll()
@@ -503,11 +491,6 @@ export class SessionConnection {
 
   sendInput(payload: Record<string, unknown>): void {
     this.client.sendInput(payload)
-  }
-
-  setCaptureFps(fps: number): void {
-    this.presetFps = fps
-    this.client.setCaptureFps(this.congested ? Math.min(fps, 8) : fps)
   }
 
   setQuality(mode: string, fps?: number): void {

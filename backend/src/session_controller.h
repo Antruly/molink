@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <functional>
 #include <memory>
@@ -157,6 +158,9 @@ class session_supervisor {
   std::atomic<bool> running_{false};
   /// Last AV1 policy value announced to the capture source (diagnostics).
   bool av1_allowed_ = false;
+  /// Capture-stats reporting: previous sample, to derive the achieved rate.
+  std::chrono::steady_clock::time_point last_capture_at_{};
+  uint64_t last_capture_frames_ = 0;
 };
 
 }  // namespace molink

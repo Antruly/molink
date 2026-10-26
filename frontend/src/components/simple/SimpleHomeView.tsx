@@ -1,8 +1,10 @@
+import { Monitor } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { ApiError, lookupDevice } from '../../lib/api'
 import { parseTarget } from '../../lib/target'
 import { useAppStore, type SessionIntent } from '../../store/app'
+import { ServiceNotice } from '../ServiceNotice'
 import { ConnectCard } from './ConnectCard'
 import { DeviceList, type DeviceItem } from './DeviceList'
 import { NoticePanel } from './NoticePanel'
@@ -16,6 +18,7 @@ export function SimpleHomeView() {
   const token = useAppStore((state) => state.token)
   const createSession = useAppStore((state) => state.createSession)
   const preferredMode = useAppStore((state) => state.preferredMode)
+  const device = useAppStore((state) => state.device)
   const forceRelay = useAppStore((state) => state.forceRelay)
   const setForceRelay = useAppStore((state) => state.setForceRelay)
 
@@ -54,6 +57,25 @@ export function SimpleHomeView() {
     )
     if (requestAccess) flash(t('simple.requestSent'))
     setError(null)
+  }
+
+  // Remote web access: control the machine whose UI this page is served by.
+  // The login token is a valid session token, so no code prompt is needed.
+  // Hidden in the local shell, where the user is already on this machine.
+  const controlHost = () => {
+    if (!token) return
+    const targetHost = window.location.hostname || server?.host || '127.0.0.1'
+    const targetPort =
+      Number(window.location.port) || server?.port || device?.port || 28418
+    createSession(
+      targetHost,
+      targetPort,
+      token,
+      device?.device_name || device?.device_id || t('simple.controlHost'),
+      false,
+      false,
+      preferredMode,
+    )
   }
 
   const connectInput = async () => {
@@ -127,6 +149,30 @@ export function SimpleHomeView() {
 
   return (
     <div className="mx-auto w-full max-w-7xl px-4 py-3 sm:px-6">
+      <ServiceNotice />
+
+      {!localMode && token ? (
+        <div className="mb-3 flex flex-wrap items-center gap-3 rounded-xl border border-line bg-panel/50 px-3 py-2">
+          <Monitor size={16} className="text-accent" />
+          <div className="min-w-0 flex-1">
+            <div className="text-[12px] font-medium text-ink">
+              {t('simple.controlHost')}
+            </div>
+            <div className="mt-0.5 text-[11px] leading-relaxed text-muted">
+              {t('simple.controlHostHint')}
+            </div>
+          </div>
+          <button
+            type="button"
+            className="btn btn-primary h-8 shrink-0 gap-1.5 px-3 text-[11px]"
+            onClick={controlHost}
+          >
+            <Monitor size={13} />
+            {t('simple.controlHost')}
+          </button>
+        </div>
+      ) : null}
+
       <div className="grid gap-3 lg:grid-cols-12">
         {localMode ? (
           <div className="lg:col-span-4">

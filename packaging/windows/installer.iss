@@ -1,7 +1,7 @@
 ; moLink Windows installer (Inno Setup 6).
 ;
 ; Build with:
-;   ISCC.exe /DAppVersion=0.9.31 \
+;   ISCC.exe /DAppVersion=0.9.32 \
 ;            /DPkgDir=C:\path\to\staged\pkg \
 ;            /DOutputDir=C:\path\to\build\package \
 ;            installer.iss
@@ -14,7 +14,7 @@
 ; add a rule; Windows prompts on first LAN listen instead.
 
 #ifndef AppVersion
-  #define AppVersion "0.9.31"
+  #define AppVersion "0.9.32"
 #endif
 #ifndef PkgDir
   #error PkgDir must point at the staged package directory
@@ -79,5 +79,29 @@ Filename: "{app}\molink-service.exe"; Parameters: "--install"; Flags: runhidden 
 Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
+Filename: "{sys}\taskkill.exe"; Parameters: "/F /T /IM moLink.exe"; Flags: runhidden; RunOnceId: "KillShell"
+Filename: "{sys}\taskkill.exe"; Parameters: "/F /T /IM molink-core.exe"; Flags: runhidden; RunOnceId: "KillCore"
 Filename: "{app}\molink-service.exe"; Parameters: "--uninstall"; Flags: runhidden waituntilterminated
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""moLink"""; Flags: runhidden
+
+[Code]
+// The shell hides to the tray on WM_CLOSE, so Windows' Restart Manager cannot
+// close it and Setup eventually asks the user to close a program that never
+// goes away. Kill the tray app and the core outright before replacing files.
+procedure StopRunningApp();
+var
+  Code: Integer;
+begin
+  Exec(ExpandConstant('{sys}\sc.exe'), 'stop moLinkSession', '', SW_HIDE,
+       ewWaitUntilTerminated, Code);
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /T /IM moLink.exe', '',
+       SW_HIDE, ewWaitUntilTerminated, Code);
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /T /IM molink-core.exe', '',
+       SW_HIDE, ewWaitUntilTerminated, Code);
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  StopRunningApp();
+  Result := '';
+end;

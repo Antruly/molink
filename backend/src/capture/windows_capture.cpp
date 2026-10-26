@@ -507,6 +507,7 @@ class windows_capture final : public capture_base {
     header.tile_w = tile;
     header.tile_h = tile;
 
+    const auto build_start = std::chrono::steady_clock::now();
     std::vector<protocol::tile_blob> tiles;
     build_changed_tiles(pixels.data(), stride, width_, height_, tile,
                         previous_.data(), keyframe, nullptr,
@@ -532,6 +533,10 @@ class windows_capture final : public capture_base {
                            &av1_payload, err, &av1_only)) {
       return;
     }
+    note_build_time(static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - build_start)
+            .count()));
 
     auto frame = std::make_shared<captured_frame>();
     frame->seq = seq_++;

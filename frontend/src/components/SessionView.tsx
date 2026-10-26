@@ -38,6 +38,12 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from 'react'
 import { useTranslation } from 'react-i18next'
+import {
+  FPS_CHOICES,
+  MIN_FPS,
+  fpsPlan,
+  parseFpsSetting,
+} from '../lib/frame-rate'
 import { codecName } from '../lib/protocol'
 import { shellInfo, windowAction } from '../lib/shell'
 import { openSessionWindow } from '../lib/windows'
@@ -198,22 +204,6 @@ const PROTOCOL_LABELS: Record<string, string> = {
   tcp: 'TCP',
 }
 
-const QUALITY_PROFILES: Record<
-  ResolvedQuality,
-  { fps: number; pullMs: number }
-> = {
-  turbo: { fps: 5, pullMs: 200 },
-  smooth: { fps: 30, pullMs: 33 },
-  balanced: { fps: 20, pullMs: 50 },
-  quality: { fps: 15, pullMs: 66 },
-  // Raw BGRA, no zlib. The frame rate is the only difference between the two
-  // lossless tiers: 15 fps keeps the bandwidth sane, 30 fps shows motion.
-  ultra: { fps: 15, pullMs: 66 },
-  lossless: { fps: 30, pullMs: 33 },
-  // Lossy 16-bit colour with fast zlib, frame rate first.
-  game: { fps: 60, pullMs: 16 },
-}
-
 export function SessionView({
   tab,
   popout = false,
@@ -227,6 +217,8 @@ export function SessionView({
   const setQualityWatermark = useAppStore((state) => state.setQualityWatermark)
   const qualityMode = useAppStore((state) => state.qualityMode)
   const setQualityMode = useAppStore((state) => state.setQualityMode)
+  const frameRate = useAppStore((state) => state.frameRate)
+  const setFrameRate = useAppStore((state) => state.setFrameRate)
   const setControlEnabled = useAppStore((state) => state.setControlEnabled)
   const closeTab = useAppStore((state) => state.closeTab)
   const createSession = useAppStore((state) => state.createSession)
@@ -313,17 +305,16 @@ export function SessionView({
     startY: number
   } | null>(null)
   const [autoTier, setAutoTier] = useState<ResolvedQuality>('balanced')
-  const [autoFps, setAutoFps] = useState(15)
   const sessionRootRef = useRef<HTMLDivElement>(null)
   const panPointer = useRef<{ x: number; y: number } | null>(null)
   const statsRef = useRef(tab.stats)
+  const hostRef = useRef({ fps: 0, buildMs: 0 })
   const autoModeRef = useRef<QualityMode>('balanced')
   const autoRef = useRef<{
     tier: ResolvedQuality | null
-    fps: number
     streak: number
     lastChange: number
-  }>({ tier: null, fps: 0, streak: 0, lastChange: 0 })
+  }>({ tier: null, streak: 0, lastChange: 0 })
   const keyboardRef = useRef<HTMLTextAreaElement>(null)
   const virtualPos = useRef({ x: 0.5, y: 0.5 })
   const touchPoints = useRef(new Map<number, { x: number; y: number }>())
@@ -341,13 +332,22 @@ export function SessionView({
 
   const resolvedMode: ResolvedQuality =
     qualityMode === 'auto' ? autoTier : qualityMode
-  const autoProfile = {
-    fps: autoFps,
-    pullMs: Math.max(16, Math.round(1000 / Math.max(1, autoFps))),
-  }
-  const activeProfile =
-    qualityMode === 'auto' ? autoProfile : QUALITY_PROFILES[resolvedMode]
-  const pullMs = activeProfile.pullMs
+  // Average frame rate: the user's choice (or the tier window in auto), then
+  // lowered by the load controller while the host or the link is saturated.
+  const [targetFps, setTargetFps] = useState(() =>
+    fpsPlan(frameRate, resolvedMode).start,
+  )
+  const targetFpsRef = useRef(targetFps)
+  const frameRateRef = useRef(frameRate)
+  const qualityModeRef = useRef(qualityMode)
+  const planRef = useRef(fpsPlan(frameRate, resolvedMode))
+  const fpsState = useRef({
+    target: targetFps,
+    good: 0,
+    bad: 0,
+    lastChange: 0,
+  })
+  const pullMs = Math.max(16, Math.round(1000 / Math.max(1, targetFps)))
 
   const connection = useCallback(
     () => sessionConnection(tab.id),
@@ -676,32 +676,66 @@ export function SessionView({
     return () => window.clearInterval(timer)
   }, [displayMode, virtualMouse])
 
-  // Keep the auto controller's view of the link fresh without restarting its
-  // interval on every stats patch.
+  // Keep the controllers' view of the link fresh without restarting their
+  // intervals on every stats patch.
   useEffect(() => {
     statsRef.current = tab.stats
   }, [tab.stats])
 
-  // Push the active preset after a short settle delay. Both the encoding mode
-  // and the capture rate are host-global, like the old capture-fps message.
+  useEffect(() => {
+    hostRef.current = {
+      fps: tab.hostFps ?? 0,
+      buildMs: tab.hostBuildMs ?? 0,
+    }
+  }, [tab.hostFps, tab.hostBuildMs])
+
+  useEffect(() => {
+    targetFpsRef.current = targetFps
+  }, [targetFps])
+
+  // Keep the plan and the adapted target in step. A user choice (rate or
+  // quality) starts at its own resting value; an automatic quality-tier change
+  // only clamps the current target into the new window, so a downgrade does
+  // not immediately raise the rate again.
+  useEffect(() => {
+    const plan = fpsPlan(frameRate, resolvedMode)
+    planRef.current = plan
+    const userChoice =
+      frameRateRef.current !== frameRate ||
+      qualityModeRef.current !== qualityMode
+    frameRateRef.current = frameRate
+    qualityModeRef.current = qualityMode
+    let next: number
+    if (userChoice) {
+      next = plan.start
+      fpsState.current = {
+        target: next,
+        good: 0,
+        bad: 0,
+        lastChange: performance.now(),
+      }
+    } else {
+      next = Math.min(plan.max, Math.max(plan.min, fpsState.current.target))
+      fpsState.current.target = next
+      fpsState.current.good = 0
+      fpsState.current.bad = 0
+    }
+    setTargetFps((current) => (current === next ? current : next))
+  }, [frameRate, qualityMode, resolvedMode])
+
+  // Push the active preset and the average rate after a short settle delay.
+  // Both are host-global, like the old capture-fps message.
   useEffect(() => {
     if (tab.phase !== 'live') return
     const timer = window.setTimeout(() => {
-      connection()?.setQuality(resolvedMode, activeProfile.fps)
+      connection()?.setQuality(resolvedMode, targetFps)
     }, 400)
     return () => window.clearTimeout(timer)
-  }, [
-    tab.phase,
-    tab.id,
-    connection,
-    resolvedMode,
-    activeProfile.fps,
-  ])
+  }, [tab.phase, tab.id, connection, resolvedMode, targetFps])
 
-  // Auto: the link decides both the preset and the frame rate. Weak samples
-  // lower the rate first and then the image tier; healthy samples raise the
-  // tier first and then the rate, capped at 30 fps (15 fps is the resting
-  // point). Two agreeing samples and a 3 s dwell prevent oscillation.
+  // Auto quality: the link only picks the image tier now; the frame rate has
+  // its own controller below. A tier is lowered only once the rate is already
+  // at the tier's floor, and raised when the link is healthy with headroom.
   useEffect(() => {
     if (tab.phase !== 'live' || qualityMode !== 'auto') {
       // Remember the preset we left so re-entering auto starts fresh.
@@ -710,7 +744,7 @@ export function SessionView({
     }
     if (autoModeRef.current !== qualityMode) {
       autoModeRef.current = qualityMode
-      autoRef.current = { tier: null, fps: 0, streak: 0, lastChange: 0 }
+      autoRef.current = { tier: null, streak: 0, lastChange: 0 }
     }
     const timer = window.setInterval(() => {
       // A hidden window does not pull frames, so it must not drive the
@@ -720,21 +754,21 @@ export function SessionView({
       const latency = stats.latencyMs
       const wireFps = stats.wireFps
       const bandwidth = stats.bytesPerSec
-
       // Compare the completed pull rate with the rate we asked for, so a
       // deliberately low target is not mistaken for a struggling link.
-      const expected = Math.max(1, autoFps)
+      const target = targetFpsRef.current
+      const floor = planRef.current.floor
       const underrunning =
-        wireFps > 0 && wireFps < Math.max(3, expected * 0.5)
+        wireFps > 0 && wireFps < Math.max(3, target * 0.5)
       const bad =
-        (latency !== null && latency > 220) ||
+        (latency !== null && latency > 260) ||
         underrunning ||
-        stats.dropped > 0
+        stats.dropped > 2
       const good =
         latency !== null &&
         latency < 90 &&
         stats.dropped === 0 &&
-        wireFps >= Math.min(12, expected)
+        wireFps >= Math.min(12, target)
 
       const order: ResolvedQuality[] = [
         'turbo',
@@ -742,45 +776,29 @@ export function SessionView({
         'balanced',
         'quality',
       ]
+      const index = order.indexOf(resolvedMode)
       let tier = resolvedMode
-      let fps = autoFps
-      if (bad) {
-        if (fps > 5) {
-          fps = Math.max(5, fps - 5)
-        } else {
-          const index = order.indexOf(resolvedMode)
-          if (index > 0) {
-            tier = order[index - 1]
-            fps = 15
-          } else {
-            tier = 'turbo'
-            fps = 5
-          }
-        }
-      } else if (good) {
-        const index = order.indexOf(resolvedMode)
-        if (
-          index >= 0 &&
-          index < order.length - 1 &&
-          bandwidth < 12 * 1024 * 1024
-        ) {
-          tier = order[index + 1]
-        } else if (fps < 30 && bandwidth < 20 * 1024 * 1024) {
-          fps = Math.min(30, fps + 5)
-        }
+      if (bad && target <= floor && index > 0) {
+        tier = order[index - 1]!
+      } else if (
+        good &&
+        index >= 0 &&
+        index < order.length - 1 &&
+        bandwidth < 12 * 1024 * 1024
+      ) {
+        tier = order[index + 1]!
       }
 
       const state = autoRef.current
-      if (tier === resolvedMode && fps === autoFps) {
+      if (tier === resolvedMode) {
         state.tier = null
         state.streak = 0
         return
       }
-      if (state.tier === tier && state.fps === fps) {
+      if (state.tier === tier) {
         state.streak += 1
       } else {
         state.tier = tier
-        state.fps = fps
         state.streak = 1
       }
       const now = performance.now()
@@ -789,11 +807,89 @@ export function SessionView({
         state.tier = null
         state.streak = 0
         setAutoTier(tier)
-        setAutoFps(fps)
       }
     }, 1000)
     return () => window.clearInterval(timer)
-  }, [tab.phase, tab.id, qualityMode, resolvedMode, autoFps])
+  }, [tab.phase, tab.id, qualityMode, resolvedMode])
+
+  // Average frame rate. The configured rate is the goal; the controller only
+  // leaves it when the host cannot encode fast enough (its reported build
+  // time) or the link cannot carry it (latency, drops, unanswered pulls).
+  // Reduction is quick and recovery is slow, so a burst cannot make the rate
+  // oscillate.
+  useEffect(() => {
+    if (tab.phase !== 'live') return
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'hidden') return
+      const plan = planRef.current
+      const state = fpsState.current
+      const target = state.target
+      const stats = statsRef.current
+      const host = hostRef.current
+      const intervalMs = 1000 / Math.max(1, target)
+      // 85 % of the frame budget; the rest covers grabbing and sending.
+      const cpuCeiling =
+        host.buildMs > 0
+          ? Math.max(MIN_FPS, Math.floor(850 / host.buildMs))
+          : Number.POSITIVE_INFINITY
+      const latencyBad = stats.latencyMs !== null && stats.latencyMs > 220
+      const dropBad = stats.dropped > 2
+      const underrun =
+        stats.wireFps > 0 && stats.wireFps < Math.max(3, target * 0.6)
+      const cpuBad = cpuCeiling < target
+      const bad = latencyBad || dropBad || underrun || cpuBad
+      // Matching the ceiling used above, so a rate that exactly fits the
+      // encoder counts as healthy instead of oscillating around it.
+      const good =
+        !bad &&
+        (stats.latencyMs === null || stats.latencyMs < 110) &&
+        (host.buildMs <= 0 || host.buildMs <= 0.85 * intervalMs)
+      const now = performance.now()
+      if (bad) {
+        state.good = 0
+        state.bad += 1
+        if (state.bad < 2 || now - state.lastChange < 1500) return
+        let next = Math.max(plan.min, Math.floor(target * 0.75))
+        // A link that only answers a fraction of the pulls has already told
+        // us its ceiling; jumping straight there avoids a long staircase.
+        if (underrun && stats.wireFps > 0) {
+          next = Math.min(next, Math.max(plan.min, Math.floor(stats.wireFps)))
+        }
+        if (cpuBad) next = Math.min(next, cpuCeiling)
+        next = Math.max(plan.min, Math.min(target - 1, next))
+        if (next >= target) return
+        state.target = next
+        state.bad = 0
+        state.lastChange = now
+        setTargetFps(next)
+      } else if (good) {
+        state.bad = 0
+        state.good += 1
+        if (
+          state.good < 4 ||
+          target >= plan.max ||
+          now - state.lastChange < 3000
+        ) {
+          return
+        }
+        // Never recover past what the encoder can actually sustain.
+        const next = Math.min(
+          plan.max,
+          target + (target < 20 ? 5 : 10),
+          cpuCeiling,
+        )
+        if (next <= target) return
+        state.target = next
+        state.good = 0
+        state.lastChange = now
+        setTargetFps(next)
+      } else {
+        state.good = 0
+        state.bad = 0
+      }
+    }, 1000)
+    return () => window.clearInterval(timer)
+  }, [tab.phase, tab.id])
 
   useEffect(() => {
     const element = surfaceRef.current
@@ -1893,6 +1989,28 @@ export function SessionView({
                   {t(`session.${mode}`)}
                 </button>
               ))}
+              <label
+                className="flex shrink-0 items-center gap-1 rounded-md border border-line bg-panel px-1.5 text-muted"
+                title={t('session.frameRate')}
+              >
+                <Activity size={12} />
+                <select
+                  value={String(frameRate)}
+                  onChange={(event) =>
+                    setFrameRate(parseFpsSetting(event.target.value))
+                  }
+                  aria-label={t('session.frameRate')}
+                  className="h-7 bg-transparent text-[11px] text-ink outline-none [&>option]:bg-surface [&>option]:text-ink"
+                >
+                  {FPS_CHOICES.map((choice) => (
+                    <option key={String(choice)} value={String(choice)}>
+                      {choice === 'auto'
+                        ? t('session.frameRateAuto')
+                        : t('session.frameRateValue', { count: choice })}
+                    </option>
+                  ))}
+                </select>
+              </label>
               <label
                 className="flex shrink-0 items-center gap-1 rounded-md border border-line bg-panel px-1.5 text-muted"
                 title={t('session.quality')}

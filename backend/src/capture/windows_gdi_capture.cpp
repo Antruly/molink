@@ -199,6 +199,7 @@ class gdi_capture final : public capture_base {
     header.tile_w = tile;
     header.tile_h = tile;
 
+    const auto build_start = std::chrono::steady_clock::now();
     std::vector<protocol::tile_blob> tiles;
     build_changed_tiles(pixels, stride, width_, height_, tile,
                         previous_.data(), keyframe, nullptr,
@@ -222,6 +223,10 @@ class gdi_capture final : public capture_base {
     std::string err;
     if (!encode_capture_frame(header, tiles, encoding, pixels, stride, payload,
                            &av1_payload, err, &av1_only)) return;
+    note_build_time(static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - build_start)
+            .count()));
 
     auto frame = std::make_shared<captured_frame>();
     frame->seq = seq_++;
