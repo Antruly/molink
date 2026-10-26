@@ -420,8 +420,10 @@ export class MolinkClient {
     // behind the same NAT, and a direct socket to it opens in milliseconds.
     // If it fails, the ICE proxy below is the fallback. Cross-NAT peers get the
     // public address (or none), so they still start with ICE.
-    const preferDirect = targetId !== '' && !forceRelay && !this.directFailed &&
-        !this.proxyFailed && port > 0 && isPrivateHost(host)
+    // Device-ID sessions always use the local core proxy: it owns the AV1
+    // decode capability, and a direct LAN socket would look like a tile-only
+    // client to the host, disabling AV1 for every session.
+    const preferDirect = false
     // A device-ID connection otherwise starts with ICE through the local core.
     // That core also runs the directory client and owns the UDP socket
     // libjuice needs. If the proxy cannot establish a path, fall back to the
@@ -1360,21 +1362,3 @@ export class MolinkClient {
   }
 }
 
-/// 10/8, 172.16/12, 192.168/16, 127/8, IPv6 ULA and link-local.
-function isPrivateHost(host: string): boolean {
-  const value = host.trim().replace(/^\[|\]$/g, '')
-  const ipv4 = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(value)
-  if (ipv4) {
-    const a = Number(ipv4[1])
-    const b = Number(ipv4[2])
-    return a === 10 || a === 127 ||
-        (a === 172 && b >= 16 && b <= 31) ||
-        (a === 192 && b === 168) ||
-        (a === 169 && b === 254)
-  }
-  const lower = value.toLowerCase()
-  return lower.startsWith('fc') || lower.startsWith('fd') ||
-      lower.startsWith('fe8') || lower.startsWith('fe9') ||
-      lower.startsWith('fea') || lower.startsWith('feb') ||
-      lower === '::1'
-}

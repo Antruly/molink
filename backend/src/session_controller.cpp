@@ -1797,6 +1797,7 @@ void session_supervisor::run() {
         av1_allowed_ = allow;
       }
       options_.capture->set_av1_allowed(allow);
+      if (!live) options_.capture->set_active(false);
     }
 
     // Once a second, tell every session with a picture which 128 px cells

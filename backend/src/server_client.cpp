@@ -775,9 +775,14 @@ bool server_client::request(bool post_method, const std::string& base_url,
   std::string target = parsed.base + path;
   if (!query.empty()) target += "?" + query;
 
+#if UVCPP_OPENSSL_ENABLE
+  // The HTTP client keeps a raw pointer to this context. Declare it first so
+  // the client is destroyed first; the other order frees the context before
+  // ~uvcpp_http_client runs and has crashed intermittently.
+  uvcpp::uvcpp_ssl_context tls_context(uvcpp::tls_mode::CLIENT);
+#endif
   uvcpp::uvcpp_http_client client;
 #if UVCPP_OPENSSL_ENABLE
-  uvcpp::uvcpp_ssl_context tls_context(uvcpp::tls_mode::CLIENT);
   if (parsed.tls) {
     const std::string ca_path =
         auth_ ? effective_server_ca(auth_->settings()) : std::string();
