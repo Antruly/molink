@@ -112,6 +112,7 @@ quality_profile quality_profile_for(quality_mode mode) {
       profile.format = tile_format::rgb565;
       profile.effort = compression_effort::fast;
       profile.minimum_change_threshold = 16;
+      profile.lossless = false;
       break;
     case quality_mode::quality:
       // Keep every colour bit, spend more CPU on zlib, and never ignore a
@@ -126,6 +127,7 @@ quality_profile quality_profile_for(quality_mode mode) {
       profile.format = tile_format::gray8;
       profile.effort = compression_effort::fast;
       profile.minimum_change_threshold = 24;
+      profile.lossless = false;
       break;
     case quality_mode::raw:
       // Original BGRA pixels, deliberately not deflated. Useful on a fast

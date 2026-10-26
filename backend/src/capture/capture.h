@@ -28,6 +28,10 @@ struct quality_profile {
   compression_effort effort = compression_effort::balanced;
   /// False for the "lossless" preset: send original BGRA tiles untouched.
   bool compress = true;
+  /// True when this preset must stay bit-exact (BGRA, optionally deflated).
+  /// The AV1 rectangle path is only allowed when this is false: SVT-AV1 is
+  /// 4:2:0 and even QP 0 is not lossless.
+  bool lossless = true;
   /// Raise the configured change threshold to at least this value (0 = leave).
   int minimum_change_threshold = 0;
   /// Lower a non-zero change threshold to at most this value (0 = leave).
