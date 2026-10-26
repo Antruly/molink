@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.9.23] — 2026-10-26
+
+### Fixed
+
+- 0.9.22 的 AV1 在 Windows/macOS 上编译失败：vcpkg 与 Homebrew 提供的是
+  SVT-AV1 4.x，公开 API 与 Ubuntu 的 1.7 不同（句柄初始化参数、`EbSvtIOFormat`
+  去掉宽高/色彩字段、`aq_mode`/`level_of_parallelism` 改名、预测结构枚举变了）。
+  编码器现在按头文件实际形状选择调用：1.7 与 4.1 都能编译，并都跑通了编码/解码
+  往返测试（4.1 需要 ALL_INTRA + hierarchical_levels≥2）。大屏编码线程数改为 4。
+- libuvcpp 未启用 TLS 时（macOS CI 的核心 job）整个 TLS 配置块不再编译，
+  改为报告“加密不可用”，不再因缺少 `ssl_error`/`ssl_context` 而构建失败。
+
 ## [0.9.22] — 2026-10-26
 
 ### Added

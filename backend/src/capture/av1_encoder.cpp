@@ -2,6 +2,11 @@
 
 #include <algorithm>
 #include <cstring>
+#include <type_traits>
+
+#if defined(MOLINK_HAVE_SVT_AV1)
+#include <EbSvtAv1Enc.h>
+#endif
 
 namespace molink {
 
@@ -12,8 +17,6 @@ int av1_padded_extent(int extent) {
 }
 
 #if defined(MOLINK_HAVE_SVT_AV1)
-
-#include <EbSvtAv1Enc.h>
 
 namespace {
 
@@ -28,6 +31,82 @@ inline void rgb_to_yuv(uint8_t r, uint8_t g, uint8_t b, uint8_t& y, int& cb,
   cb = ((-29 * r - 99 * g + 128 * b + 128) >> 8) + 128;
   cr = ((128 * r - 116 * g - 12 * b + 128) >> 8) + 128;
 }
+
+// The public API changed between SVT-AV1 1.x (Ubuntu) and 4.x (vcpkg,
+// Homebrew): handle creation lost its app-data argument, the IO struct lost
+// width/height and the colour fields (the config carries them now), and two
+// configuration fields were renamed. These overloads select the shape the
+// installed header provides, so the same source builds against both.
+template <typename Handle, typename Config>
+auto init_handle(Handle& handle, Config& config, int)
+    -> decltype(svt_av1_enc_init_handle(&handle, &config)) {
+  return svt_av1_enc_init_handle(&handle, &config);
+}
+template <typename Handle, typename Config>
+auto init_handle(Handle& handle, Config& config, long)
+    -> decltype(svt_av1_enc_init_handle(&handle, nullptr, &config)) {
+  return svt_av1_enc_init_handle(&handle, nullptr, &config);
+}
+
+template <typename Io>
+auto set_io_size(Io& io, int width, int height, int)
+    -> decltype(io.width = 0, void()) {
+  io.width = static_cast<uint32_t>(width);
+  io.height = static_cast<uint32_t>(height);
+}
+template <typename Io>
+void set_io_size(Io&, int, int, long) {}
+
+template <typename Io>
+auto set_io_format(Io& io, int)
+    -> decltype(io.color_fmt = EB_YUV420, void()) {
+  io.color_fmt = EB_YUV420;
+  io.bit_depth = EB_EIGHT_BIT;
+}
+template <typename Io>
+void set_io_format(Io&, long) {}
+
+template <typename Config>
+auto disable_aq(Config& config, int)
+    -> decltype(config.enable_adaptive_quantization = 0, void()) {
+  config.enable_adaptive_quantization = 0;
+}
+template <typename Config>
+auto disable_aq(Config& config, long) -> decltype(config.aq_mode = 0, void()) {
+  config.aq_mode = 0;
+}
+
+template <typename Config>
+auto set_parallelism(Config& config, int)
+    -> decltype(config.logical_processors = 0, void()) {
+  config.logical_processors = 4;
+}
+template <typename Config>
+auto set_parallelism(Config& config, long)
+    -> decltype(config.level_of_parallelism = 0, void()) {
+  config.level_of_parallelism = 4;
+}
+
+/// Low-delay prediction is value 1 in both the old (LOW_DELAY_B) and the new
+/// (LOW_DELAY) enum, so no version-specific enumerator is needed.
+template <typename Config>
+void set_low_delay(Config& config) {
+  config.pred_structure = static_cast<decltype(config.pred_structure)>(1);
+}
+
+/// The 1.x handle API takes an app-data pointer, the 4.x one does not. The
+/// same probe decides whether the encoder understands ALL_INTRA and the
+/// 2-5 hierarchical-level range; 1.x rejects both.
+template <typename H, typename C>
+auto probe_two_arg_init(int)
+    -> decltype(svt_av1_enc_init_handle(static_cast<H*>(nullptr),
+                                        static_cast<C*>(nullptr)),
+                std::true_type{});
+template <typename H, typename C>
+auto probe_two_arg_init(long) -> std::false_type;
+constexpr bool kModernApi =
+    decltype(probe_two_arg_init<EbComponentType*, EbSvtAv1EncConfiguration>(
+        0))::value;
 
 class svt_av1_encoder final : public av1_encoder {
  public:
@@ -63,10 +142,8 @@ class svt_av1_encoder final : public av1_encoder {
     io.y_stride = static_cast<uint32_t>(padded_w);
     io.cb_stride = static_cast<uint32_t>(padded_w / 2);
     io.cr_stride = static_cast<uint32_t>(padded_w / 2);
-    io.width = static_cast<uint32_t>(padded_w);
-    io.height = static_cast<uint32_t>(padded_h);
-    io.color_fmt = EB_YUV420;
-    io.bit_depth = EB_EIGHT_BIT;
+    set_io_size(io, padded_w, padded_h, 0);
+    set_io_format(io, 0);
 
     EbBufferHeaderType header{};
     header.size = sizeof(EbBufferHeaderType);
@@ -132,8 +209,7 @@ class svt_av1_encoder final : public av1_encoder {
  private:
   bool init(int width, int height, int qp, std::string& error) {
     EbSvtAv1EncConfiguration config{};
-    const EbErrorType handle_rc =
-        svt_av1_enc_init_handle(&handle_, nullptr, &config);
+    const EbErrorType handle_rc = init_handle(handle_, config, 0);
     if (handle_rc != EB_ErrorNone) {
       error = "svt-av1 init_handle failed (" + std::to_string(handle_rc) + ")";
       handle_ = nullptr;
@@ -146,13 +222,20 @@ class svt_av1_encoder final : public av1_encoder {
     // 13 is the fastest preset; 10 keeps a little more quality while still
     // fitting a rectangle in a frame budget on a desktop CPU.
     config.enc_mode = 10;
-    config.pred_structure = SVT_AV1_PRED_LOW_DELAY_B;
     config.intra_period_length = 1;
-    config.intra_refresh_type = SVT_AV1_KF_REFRESH;
-    config.hierarchical_levels = 0;
+    if constexpr (kModernApi) {
+      // 4.x: every picture is intra and hierarchical levels below 2 are
+      // rejected. ALL_INTRA is value 0 in the new enum.
+      config.pred_structure = static_cast<decltype(config.pred_structure)>(0);
+      config.hierarchical_levels = 2;
+    } else {
+      set_low_delay(config);
+      config.intra_refresh_type = SVT_AV1_KF_REFRESH;
+      config.hierarchical_levels = 0;
+    }
     config.rate_control_mode = SVT_AV1_RC_MODE_CQP_OR_CRF;
     config.qp = static_cast<uint32_t>(qp);
-    config.enable_adaptive_quantization = 0;
+    disable_aq(config, 0);
     config.look_ahead_distance = 0;
     config.encoder_color_format = EB_YUV420;
     config.encoder_bit_depth = 8;
@@ -161,7 +244,7 @@ class svt_av1_encoder final : public av1_encoder {
     config.matrix_coefficients = EB_CICP_MC_BT_709;
     config.color_range = EB_CR_FULL_RANGE;
     config.fast_decode = 1;
-    config.logical_processors = 4;
+    set_parallelism(config, 0);
     config.tile_columns = 0;
     config.tile_rows = 0;
 
