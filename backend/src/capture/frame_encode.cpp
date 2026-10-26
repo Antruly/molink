@@ -2,12 +2,16 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <thread>
 #include <utility>
 #include <vector>
 
+#include "capture/av1_encoder.h"
+#include "capture/av1_frame.h"
+#include "capture/dirty_rects.h"
 #include "compression.h"
 
 namespace molink {
@@ -214,10 +218,166 @@ void build_changed_tiles(const uint8_t* pixels, std::size_t stride,
   }
 }
 
+namespace {
+
+/// Grid cells covered by the changed tiles, in tile coordinates.
+std::vector<std::pair<int, int>> collect_dirty_cells(
+    const std::vector<protocol::tile_blob>& tiles, int tile_w, int tile_h) {
+  std::vector<std::pair<int, int>> cells;
+  for (const protocol::tile_blob& tile : tiles) {
+    if (tile.w == 0 || tile.h == 0) continue;
+    const int col0 = tile.x / tile_w;
+    const int col1 = (tile.x + tile.w - 1) / tile_w;
+    const int row0 = tile.y / tile_h;
+    const int row1 = (tile.y + tile.h - 1) / tile_h;
+    for (int row = row0; row <= row1; ++row) {
+      for (int col = col0; col <= col1; ++col) cells.emplace_back(col, row);
+    }
+  }
+  return cells;
+}
+
+/// Keeps coarsened rectangles from turning two distant changes into one
+/// mostly-clean rectangle: at least `min_percent` of the covered cells must
+/// actually have changed.
+bool dense_enough(const pixel_rect& rect,
+                  const std::vector<std::pair<int, int>>& cells, int tile_w,
+                  int tile_h, int min_percent) {
+  const int col0 = rect.x / tile_w;
+  const int col1 = (rect.x + rect.w - 1) / tile_w;
+  const int row0 = rect.y / tile_h;
+  const int row1 = (rect.y + rect.h - 1) / tile_h;
+  const int total = (col1 - col0 + 1) * (row1 - row0 + 1);
+  if (total <= 0) return false;
+  int dirty = 0;
+  for (const std::pair<int, int>& cell : cells) {
+    if (cell.first >= col0 && cell.first <= col1 && cell.second >= row0 &&
+        cell.second <= row1) {
+      ++dirty;
+    }
+  }
+  return dirty * 100 >= total * min_percent;
+}
+
+/// Removes the cells covered by `rects` from the tile payload. Delta tiles are
+/// one cell row tall, so the remaining pieces are horizontal runs of the
+/// original tile; each copy keeps the tile's BGRA rows intact.
+void subtract_av1_rects(std::vector<protocol::tile_blob>& tiles,
+                        const std::vector<pixel_rect>& rects, int tile_w,
+                        int tile_h) {
+  std::vector<protocol::tile_blob> out;
+  out.reserve(tiles.size());
+  for (protocol::tile_blob& tile : tiles) {
+    const int row0 = tile.y / tile_h;
+    const int row1 = (tile.y + tile.h - 1) / tile_h;
+    const int col0 = tile.x / tile_w;
+    const int col1 = (tile.x + tile.w - 1) / tile_w;
+    if (row0 != row1) {
+      out.push_back(std::move(tile));
+      continue;
+    }
+    std::vector<char> excluded(static_cast<std::size_t>(col1 - col0 + 1), 0);
+    bool any = false;
+    for (const pixel_rect& rect : rects) {
+      const int rect_row0 = rect.y / tile_h;
+      const int rect_row1 = (rect.y + rect.h - 1) / tile_h;
+      if (row0 < rect_row0 || row0 > rect_row1) continue;
+      const int rect_col0 = rect.x / tile_w;
+      const int rect_col1 = (rect.x + rect.w - 1) / tile_w;
+      for (int col = std::max(col0, rect_col0);
+           col <= std::min(col1, rect_col1); ++col) {
+        excluded[static_cast<std::size_t>(col - col0)] = 1;
+        any = true;
+      }
+    }
+    if (!any) {
+      out.push_back(std::move(tile));
+      continue;
+    }
+    for (int i = 0; i < static_cast<int>(excluded.size());) {
+      if (excluded[static_cast<std::size_t>(i)] != 0) {
+        ++i;
+        continue;
+      }
+      int end = i;
+      while (end + 1 < static_cast<int>(excluded.size()) &&
+             excluded[static_cast<std::size_t>(end + 1)] == 0) {
+        ++end;
+      }
+      const int start_x = (col0 + i) * tile_w;
+      const int end_x =
+          std::min((col0 + end + 1) * tile_w, tile.x + tile.w);
+      const int width = end_x - start_x;
+      if (width > 0) {
+        protocol::tile_blob sub;
+        sub.x = static_cast<uint16_t>(start_x);
+        sub.y = tile.y;
+        sub.w = static_cast<uint16_t>(width);
+        sub.h = tile.h;
+        sub.flags = tile.flags;
+        sub.data.resize(static_cast<std::size_t>(width) * tile.h * 4);
+        const std::size_t source_offset =
+            static_cast<std::size_t>(start_x - tile.x) * 4;
+        for (int row = 0; row < tile.h; ++row) {
+          std::memcpy(
+              sub.data.data() + static_cast<std::size_t>(row) * width * 4,
+              tile.data.data() +
+                  static_cast<std::size_t>(row) * tile.w * 4 + source_offset,
+              static_cast<std::size_t>(width) * 4);
+        }
+        out.push_back(std::move(sub));
+      }
+      i = end + 1;
+    }
+  }
+  tiles = std::move(out);
+}
+
+}  // namespace
+
 bool encode_capture_frame(protocol::frame_header& header,
                           std::vector<protocol::tile_blob>& tiles,
-                          const encode_options& options,
-                          std::vector<uint8_t>& payload, std::string& err) {
+                          const encode_options& options, const uint8_t* pixels,
+                          std::size_t stride, std::vector<uint8_t>& payload,
+                          std::vector<uint8_t>* av1_payload,
+                          std::string& err) {
+  if (av1_payload != nullptr) av1_payload->clear();
+  const bool keyframe = (header.flags & protocol::kFrameFlagKeyframe) != 0;
+  if (options.av1 != nullptr && av1_payload != nullptr && !keyframe &&
+      pixels != nullptr && stride > 0 && !tiles.empty() &&
+      header.tile_w > 0 && header.tile_h > 0) {
+    const std::vector<std::pair<int, int>> cells =
+        collect_dirty_cells(tiles, header.tile_w, header.tile_h);
+    const std::vector<pixel_rect> rects = merge_dirty_tiles(
+        cells, header.tile_w, header.tile_h, header.screen_w, header.screen_h,
+        static_cast<std::size_t>(std::max(1, options.av1_max_rects)));
+    const int min_area =
+        options.av1_min_area > 0
+            ? options.av1_min_area
+            : 2 * header.tile_w * header.tile_h;
+    std::vector<pixel_rect> chosen;
+    for (const pixel_rect& rect : rects) {
+      if (rect.w * rect.h < min_area) continue;
+      if (!dense_enough(rect, cells, header.tile_w, header.tile_h, 25)) {
+        continue;
+      }
+      chosen.push_back(rect);
+    }
+    if (!chosen.empty()) {
+      std::vector<uint8_t> patch;
+      std::string av1_error;
+      if (build_av1_frame_payload(header, *options.av1, pixels, stride, chosen,
+                                  options.av1_qp, patch, av1_error)) {
+        subtract_av1_rects(tiles, chosen, header.tile_w, header.tile_h);
+        *av1_payload = std::move(patch);
+        if (std::getenv("MOLINK_AV1_LOG") != nullptr) {
+          std::fprintf(stderr, "av1: %zu rect(s), %zu bytes, %zu base tiles\n",
+                       chosen.size(), av1_payload->size(), tiles.size());
+        }
+      }
+    }
+  }
+
   // Lossy repacking happens before compression so zlib sees the smaller,
   // lower-entropy pixel stream. It also means an incompressible frame still
   // ships 2 or 3 bytes per pixel instead of 4.
@@ -234,8 +394,6 @@ bool encode_capture_frame(protocol::frame_header& header,
     std::size_t raw_bytes = 0;
     for (const auto& tile : tiles) raw_bytes += tile.data.size();
 
-    const bool keyframe =
-        (header.flags & protocol::kFrameFlagKeyframe) != 0;
     const bool bulk = keyframe || tiles.size() > 24 || raw_bytes > 256 * 1024;
     const int level = choose_level(options.effort, bulk, tiles.size());
 

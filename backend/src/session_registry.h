@@ -18,6 +18,10 @@ struct session_info {
   std::string peer_ip;
   unsigned int peer_port = 0;
   bool authenticated = false;
+  /// The client advertised AV1 support in hello (the connect proxy injects it
+  /// when its core was built with dav1d). AV1 patches are only produced when
+  /// every authenticated session supports them.
+  bool av1 = false;
   /// Identity the client reported in hello; lets a shared chat label who sent
   /// each message when several viewers are connected.
   std::string client_name;

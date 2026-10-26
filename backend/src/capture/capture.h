@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "capture/av1_encoder.h"
 #include "capture/frame_encode.h"
 
 namespace molink {
@@ -58,6 +59,9 @@ struct captured_frame {
   uint16_t tile_h = 0;
   uint8_t codec = 0;  ///< protocol::codec of the payload
   std::vector<uint8_t> payload;
+  /// Optional AV1 patch for large changed rectangles (a complete FRAME
+  /// payload with codec::av1). Empty when AV1 is off or nothing qualified.
+  std::vector<uint8_t> av1_payload;
 };
 
 /// The pointer cursor as the display reports it. Cursor pixels are not part of
@@ -157,6 +161,11 @@ class capture_source {
   virtual void set_quality(quality_mode mode) { (void)mode; }
   virtual quality_mode quality() const { return quality_mode::balanced; }
 
+  /// Allow AV1 patches for the current session set. The session layer turns
+  /// this on only when every watching session can decode AV1; the preset must
+  /// also be a lossy one, since AV1 cannot preserve pixels bit-exactly.
+  virtual void set_av1_allowed(bool allowed) { (void)allowed; }
+
   /// Monitors this source can capture. Empty means the source is not ready or
   /// does not support selection (clients fall back to the whole screen).
   virtual std::vector<display_info> displays() const { return {}; }
@@ -241,6 +250,26 @@ class capture_base : public capture_source {
   /// Apply the preset's bounds to the configured change threshold.
   int quality_change_threshold(int configured) const;
 
+  void set_av1_allowed(bool allowed) override {
+    av1_allowed_.store(allowed);
+  }
+  /// Encoder to use for this frame, or nullptr when AV1 is off. Only the
+  /// capture thread calls this, so the lazily created encoder needs no lock.
+  /// The lossless presets never use AV1, and the monochrome turbo preset keeps
+  /// its colour out of it.
+  av1_encoder* av1_for_frame() {
+    if (!av1_allowed_.load()) return nullptr;
+    const quality_mode mode = quality_.load();
+    if (mode == quality_mode::turbo) return nullptr;
+    if (quality_profile_for(mode).lossless) return nullptr;
+    if (!av1_encoder_) {
+      std::string error;
+      av1_encoder_ = make_av1_encoder(&error);
+    }
+    return av1_encoder_.get();
+  }
+  int quality_av1_qp() const { return 32; }
+
   bool running() const override { return running_.load(); }
   virtual capture_stats stats() const override;
 
@@ -271,6 +300,9 @@ class capture_base : public capture_source {
   std::atomic<bool> running_{false};
   std::atomic<int> target_fps_{15};
   std::atomic<quality_mode> quality_{quality_mode::balanced};
+  std::atomic<bool> av1_allowed_{false};
+  /// Created lazily on the capture thread the first time AV1 is allowed.
+  std::shared_ptr<av1_encoder> av1_encoder_;
   std::atomic<uint64_t> stat_frames_{0};
   std::atomic<uint64_t> stat_keyframes_{0};
   std::atomic<uint64_t> stat_full_grabs_{0};

@@ -474,7 +474,8 @@ int main(int argc, char** argv) {
       server_client_state, registry, session_opts);
   register_http_routes(app, deps);
   app.websocket("/ws/session", make_ws_handler(registry, session_opts));
-  app.websocket("/ws/connect", make_connect_handler(p2p));
+  app.websocket("/ws/connect", make_connect_handler(
+      p2p, [&app](std::function<void()> fn) { app.post(std::move(fn)); }));
 
   if (!web_root.empty()) {
     uvcpp::uvcpp_web_static_options static_options;

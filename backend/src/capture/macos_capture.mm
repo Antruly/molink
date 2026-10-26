@@ -291,10 +291,14 @@ class macos_capture final : public capture_base {
     encoding.compress = options_.compress && quality_compress();
     encoding.format = quality_format();
     encoding.effort = quality_effort();
+    encoding.av1 = av1_for_frame();
+    encoding.av1_qp = quality_av1_qp();
+    std::vector<uint8_t> av1_payload;
 
     std::vector<uint8_t> payload;
     std::string err;
-    if (!encode_capture_frame(header, tiles, encoding, payload, err)) {
+    if (!encode_capture_frame(header, tiles, encoding, pixels.data(), stride, payload,
+                           &av1_payload, err)) {
       return;
     }
 
@@ -308,6 +312,7 @@ class macos_capture final : public capture_base {
     frame->tile_h = tile;
     frame->codec = header.codec;
     frame->payload = std::move(payload);
+    frame->av1_payload = std::move(av1_payload);
     publish(std::move(frame));
     have_previous_ = true;
   }

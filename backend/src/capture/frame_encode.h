@@ -40,10 +40,20 @@ enum class compression_effort : uint8_t {
   best,
 };
 
+class av1_encoder;
+
 struct encode_options {
   bool compress = true;
   tile_format format = tile_format::bgra;
   compression_effort effort = compression_effort::balanced;
+  /// When set, large changed rectangles are encoded as AV1 and removed from
+  /// the tile payload. The caller must pass the current screen pixels; the
+  /// AV1 patch is returned separately and sent after the base frame.
+  av1_encoder* av1 = nullptr;
+  int av1_qp = 32;
+  int av1_max_rects = 4;
+  /// Minimum rectangle area in pixels; 0 means two capture tiles.
+  int av1_min_area = 0;
 };
 
 /// Splits @p pixels into changed tiles and coalesces horizontally adjacent
@@ -65,9 +75,15 @@ void build_changed_tiles(const uint8_t* pixels, std::size_t stride,
 /// actually used: bgra/rgb24/rgb565 for raw tiles, or the matching deflate_*
 /// codec when deflate made the frame smaller. A lossy format is never reverted
 /// to bgra just because zlib did not help; the packed form is still smaller.
+/// `pixels`/`stride` describe the current screen (BGRA) and are only read when
+/// `options.av1` is set. When AV1 applies, the covered rectangles are removed
+/// from @p tiles and a standalone AV1 FRAME payload is written to
+/// @p av1_payload (which may be null to disable AV1 for this call).
 bool encode_capture_frame(protocol::frame_header& header,
                           std::vector<protocol::tile_blob>& tiles,
-                          const encode_options& options,
-                          std::vector<uint8_t>& payload, std::string& err);
+                          const encode_options& options, const uint8_t* pixels,
+                          std::size_t stride, std::vector<uint8_t>& payload,
+                          std::vector<uint8_t>* av1_payload,
+                          std::string& err);
 
 }  // namespace molink

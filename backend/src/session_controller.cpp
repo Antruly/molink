@@ -245,6 +245,21 @@ bool send_frame_payload(session_transport* transport,
   return true;
 }
 
+/// Sends one captured frame and, when the client can decode it, the AV1 patch
+/// for its large changed rectangles. The patch follows the base frame because
+/// the page applies it as a tile refresh over the image just painted.
+void send_frame_with_av1(session_transport* transport,
+                         const std::shared_ptr<session_info>& session,
+                         const captured_frame& frame) {
+  send_frame_payload(transport, session,
+                     frame.keyframe ? protocol::kPacketFlagKeyframe : 0,
+                     frame.ts_us, frame.payload);
+  if (session->av1 && !frame.av1_payload.empty()) {
+    send_frame_payload(transport, session, protocol::kPacketFlagTileRefresh,
+                       frame.ts_us, frame.av1_payload);
+  }
+}
+
 /// A frame with no tiles. It still advances the wire sequence, which tells the
 /// client "nothing changed" without leaving its request in flight forever.
 void send_empty_frame(session_transport* transport,
@@ -345,7 +360,9 @@ bool send_tile_refresh(session_transport* transport,
   encoding.format = tile_format::bgra;
   encoding.effort = compression_effort::fast;
   std::vector<uint8_t> payload;
-  if (!encode_capture_frame(header, tiles, encoding, payload, err)) {
+  // Tile refreshes are already a patch; never split them into AV1 here.
+  if (!encode_capture_frame(header, tiles, encoding, nullptr, 0, payload,
+                            nullptr, err)) {
     return false;
   }
   return send_frame_payload(transport, session,
@@ -528,9 +545,7 @@ void send_capture_frame(session_transport* transport,
     }
     session->last_capture_seq = seq;
     if (frame->keyframe) session->has_image = true;
-    send_frame_payload(transport, session,
-                       frame->keyframe ? protocol::kPacketFlagKeyframe : 0,
-                       frame->ts_us, frame->payload);
+    send_frame_with_av1(transport, session, *frame);
   }
 }
 
@@ -1039,7 +1054,11 @@ void session_controller::on_text(const std::string& text) {
       transport->close(transport_close::policy, "invalid token");
       return;
     }
+    session->av1 = bool_field(j, "av1", false);
     registry_->set_authenticated(session);
+    // A session without AV1 must stop patches immediately; the supervisor
+    // turns them back on once every session can decode them again.
+    if (!session->av1 && options_.capture) options_.capture->set_av1_allowed(false);
     if (locked_for_peer) options_.lock->unlock();
     if (options_.lock) options_.lock->record_success(peer_ip);
     if (options_.capture) options_.capture->set_active(true);
@@ -1751,6 +1770,23 @@ void session_supervisor::run() {
       std::this_thread::sleep_for(tick);
     }
     if (!running_.load()) break;
+
+    // AV1 patches are only safe when every watching session can decode them:
+    // a tile-only viewer would miss the rectangles removed from the base
+    // frame. Re-evaluate once a second as sessions come and go.
+    if (options_.capture) {
+      bool live = false;
+      bool all_av1 = true;
+      for (const session_info& peer : registry_->snapshot()) {
+        if (!peer.authenticated) continue;
+        live = true;
+        if (!peer.av1) {
+          all_av1 = false;
+          break;
+        }
+      }
+      options_.capture->set_av1_allowed(live && all_av1);
+    }
 
     // Push local (host) clipboard changes to every watching session. Remote
     // updates already marked their hash before set_text, so they are skipped.

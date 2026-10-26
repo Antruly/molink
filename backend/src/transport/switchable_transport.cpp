@@ -19,6 +19,30 @@ bool is_file_data(const uint8_t* data, std::size_t len) {
          data[5] == static_cast<uint8_t>(protocol::packet_type::file_data);
 }
 
+/// AV1 patches are large (one message per changed rectangle) and UDP
+/// fragmentation cannot repair a missing fragment, so keep them on the relay
+/// just like file bytes. Tile frames are small enough to stay on ICE.
+bool is_av1_frame(const uint8_t* data, std::size_t len) {
+  return data != nullptr &&
+         len >= protocol::kPacketHeaderSize + protocol::kFrameHeaderSize &&
+         std::memcmp(data, protocol::kMagic, sizeof(protocol::kMagic)) == 0 &&
+         data[5] == static_cast<uint8_t>(protocol::packet_type::frame) &&
+         data[protocol::kPacketHeaderSize + 6] ==
+             static_cast<uint8_t>(protocol::codec::av1);
+}
+
+/// A keyframe is the only frame a client cannot recover without: if its UDP
+/// fragments are lost the picture never appears. Keep it on the reliable
+/// relay path; deltas and tile refreshes stay on ICE.
+bool is_keyframe(const uint8_t* data, std::size_t len) {
+  return data != nullptr &&
+         len >= protocol::kPacketHeaderSize + protocol::kFrameHeaderSize &&
+         std::memcmp(data, protocol::kMagic, sizeof(protocol::kMagic)) == 0 &&
+         data[5] == static_cast<uint8_t>(protocol::packet_type::frame) &&
+         (data[protocol::kPacketHeaderSize + 7] &
+          protocol::kFrameFlagKeyframe) != 0;
+}
+
 }  // namespace
 
 switchable_transport::switchable_transport(
@@ -48,7 +72,9 @@ bool switchable_transport::send_text(const std::string& text) {
 }
 
 bool switchable_transport::send_binary(const uint8_t* data, std::size_t len) {
-  if (is_file_data(data, len) && relay_ && relay_->is_open()) {
+  if ((is_file_data(data, len) || is_av1_frame(data, len) ||
+       is_keyframe(data, len)) &&
+      relay_ && relay_->is_open()) {
     return relay_->send_binary(data, len);
   }
   return active_ && active_->send_binary(data, len);
