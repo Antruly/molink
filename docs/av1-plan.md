@@ -73,10 +73,28 @@ SVT-AV1 初版参数：low-delay、preset 10–13、CBR 或 QP、8-bit 4:2:0；
 - Win10 x64 主机 + Win10/浏览器客户端；Win7 x86 客户端确认回退瓦片；
 - 断线/关键帧恢复：AV1 矩形与现有 keyframe 逻辑共存。
 
+## 进度（2026-10-26）
+
+- 已完成：`merge_dirty_tiles()`（脏瓦片合并、数量上限、覆盖/不重叠单测）、
+  `av1_encoder` 抽象与 SVT-AV1 实现（4:2:0 full-range BT.709、intra keyframe、
+  按尺寸复用）、dav1d 往返测试。默认构建不启用，不影响现有瓦片路径。
+- SVT-AV1 的低延迟流水线会延迟一帧输出，单帧调用 `pic_send_done=1` 也不会
+  flush；实现里对同一矩形发送两次并丢弃上一次留下的重复帧，测试覆盖复用与
+  改尺寸。
+- 待做：能力协商（hello/welcome）、捕获端把大矩形从基础帧里拆出来走 AV1、
+  客户端 core 用 dav1d 解码后按现有 tile 路径交给页面、WebCodecs 回退。
+
 ## 当前环境记录
 
-- Linux 运行库已有 `libSvtAv1Enc.so.1`、`libdav1d.so.7`；开发头文件未安装
-  （`libsvtav1-dev` 可安装，dav1d 头文件需要 `libdav1d-dev`）。
+- Linux 运行库已有 `libSvtAv1Enc.so.1`、`libdav1d.so.7`；开发头文件未安装，
+  但不装 root 也能取到：
+  `apt-get download libsvtav1-dev libdav1d-dev`，`dpkg-deb -x` 到
+  `/tmp/molink-av1-sdk/root`，再给 `usr/lib/x86_64-linux-gnu` 建指向系统
+  `libSvtAv1Enc.so.1` / `libdav1d.so.7` 的 `.so` 符号链接即可。
+- 构建：`cmake -S backend -B backend/build -DMOLINK_ENABLE_AV1=ON
+  -DMOLINK_AV1_SDK=/tmp/molink-av1-sdk/root`；`ctest` 会多跑
+  `dirty_rects` 和 `av1_roundtrip` 两个测试。默认（`MOLINK_ENABLE_AV1=OFF`）
+  不链接任何 AV1 库。
 - 本机 Chrome 155 支持 WebCodecs；在 headless `about:blank` 里 `VideoDecoder`
   未暴露，需要用 127.0.0.1 页面/真实窗口再确认 4:2:0/4:4:4 profile 支持。
 - Win7 x86 构建继续不链接 AV1，客户端回退瓦片。

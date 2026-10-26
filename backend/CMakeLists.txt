@@ -152,6 +152,8 @@ set(MOLINK_CORE_SOURCES
   src/capture/windows_gdi_capture.cpp
   src/capture/windows_secure_capture.cpp
   src/capture/frame_encode.cpp
+  src/capture/dirty_rects.cpp
+  src/capture/av1_encoder.cpp
   src/clipboard/x11_clipboard.cpp
   src/clipboard/windows_clipboard.cpp
   src/access_requests.cpp
@@ -190,6 +192,54 @@ if(APPLE)
     src/clipboard/macos_clipboard.mm)
 endif()
 
+# AV1 rectangle encoding is optional. SVT-AV1 encodes large changed
+# rectangles; dav1d decodes them on the receiving core. Without either library
+# the build keeps the tile path and the encoder interface reports itself
+# unavailable.
+#
+# The development packages are enough; point MOLINK_AV1_SDK at an unpacked
+# tree (usr/include + usr/lib/<triplet>) when they are not installed:
+#
+#   cmake -S backend -B backend/build -DMOLINK_ENABLE_AV1=ON \
+#     -DMOLINK_AV1_SDK=/path/to/av1-sdk
+option(MOLINK_ENABLE_AV1
+  "Enable AV1 rectangle encoding (needs SVT-AV1, dav1d)" OFF)
+set(MOLINK_AV1_SDK "" CACHE PATH
+  "Unpacked AV1 dev tree (usr/include, usr/lib) when the packages are absent")
+set(MOLINK_SVT_AV1_FOUND 0)
+set(MOLINK_DAV1D_FOUND 0)
+if(MOLINK_ENABLE_AV1)
+  if(MOLINK_AV1_SDK)
+    find_path(SVT_AV1_INCLUDE_DIR EbSvtAv1Enc.h
+      HINTS "${MOLINK_AV1_SDK}/usr/include" PATH_SUFFIXES svt-av1)
+    find_path(DAV1D_INCLUDE_DIR dav1d/dav1d.h
+      HINTS "${MOLINK_AV1_SDK}/usr/include")
+    find_library(SVT_AV1_LIBRARY NAMES SvtAv1Enc
+      HINTS "${MOLINK_AV1_SDK}/usr/lib/x86_64-linux-gnu"
+            "${MOLINK_AV1_SDK}/usr/lib")
+    find_library(DAV1D_LIBRARY NAMES dav1d
+      HINTS "${MOLINK_AV1_SDK}/usr/lib/x86_64-linux-gnu"
+            "${MOLINK_AV1_SDK}/usr/lib")
+  else()
+    find_path(SVT_AV1_INCLUDE_DIR EbSvtAv1Enc.h PATH_SUFFIXES svt-av1)
+    find_path(DAV1D_INCLUDE_DIR dav1d/dav1d.h)
+    find_library(SVT_AV1_LIBRARY NAMES SvtAv1Enc)
+    find_library(DAV1D_LIBRARY NAMES dav1d)
+  endif()
+  if(SVT_AV1_INCLUDE_DIR AND SVT_AV1_LIBRARY)
+    set(MOLINK_SVT_AV1_FOUND 1)
+  endif()
+  if(DAV1D_INCLUDE_DIR AND DAV1D_LIBRARY)
+    set(MOLINK_DAV1D_FOUND 1)
+  endif()
+  if(NOT MOLINK_SVT_AV1_FOUND)
+    message(STATUS "molink: SVT-AV1 not found; AV1 encoding disabled")
+  endif()
+  if(NOT MOLINK_DAV1D_FOUND)
+    message(STATUS "molink: dav1d not found; AV1 decoding disabled")
+  endif()
+endif()
+
 if(MOLINK_BUILD_CORE)
   add_executable(molink-core ${MOLINK_CORE_SOURCES})
   target_include_directories(molink-core PRIVATE src)
@@ -208,6 +258,18 @@ if(MOLINK_BUILD_CORE)
   else()
     target_compile_definitions(molink-core PRIVATE MOLINK_HAVE_OPENSSL=0)
     message(STATUS "molink: OpenSSL not found; encrypted transport disabled")
+  endif()
+
+  if(MOLINK_SVT_AV1_FOUND)
+    target_compile_definitions(molink-core PRIVATE MOLINK_HAVE_SVT_AV1=1)
+    target_include_directories(molink-core PRIVATE ${SVT_AV1_INCLUDE_DIR})
+    target_link_libraries(molink-core PRIVATE ${SVT_AV1_LIBRARY})
+    message(STATUS "molink: AV1 rectangle encoding enabled (SVT-AV1)")
+  endif()
+  if(MOLINK_DAV1D_FOUND)
+    target_compile_definitions(molink-core PRIVATE MOLINK_HAVE_DAV1D=1)
+    target_link_libraries(molink-core PRIVATE ${DAV1D_LIBRARY})
+    message(STATUS "molink: AV1 rectangle decoding enabled (dav1d)")
   endif()
 
   # Linux screen capture. X11/XShm is the first backend; a PipeWire portal
@@ -322,6 +384,42 @@ endforeach()
 enable_testing()
 add_test(NAME protocol COMMAND molink-core-protocol-test)
 
+# Rectangle merging is pure computation: no libuvcpp and no AV1 SDK needed.
+add_executable(molink-core-dirty-rects-test
+  tests/dirty_rects_test.cpp
+  src/capture/dirty_rects.cpp
+)
+target_include_directories(molink-core-dirty-rects-test PRIVATE src)
+set_target_properties(molink-core-dirty-rects-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
+  string(TOUPPER "${uvp_config}" uvp_config_upper)
+  set_target_properties(molink-core-dirty-rects-test PROPERTIES
+    "RUNTIME_OUTPUT_DIRECTORY_${uvp_config_upper}" "${CMAKE_BINARY_DIR}")
+endforeach()
+add_test(NAME dirty_rects COMMAND molink-core-dirty-rects-test)
+
+# The round-trip test needs both halves of the AV1 SDK.
+if(MOLINK_SVT_AV1_FOUND AND MOLINK_DAV1D_FOUND)
+  add_executable(molink-core-av1-test
+    tests/av1_roundtrip_test.cpp
+    src/capture/av1_encoder.cpp
+  )
+  target_include_directories(molink-core-av1-test PRIVATE
+    src ${SVT_AV1_INCLUDE_DIR} ${DAV1D_INCLUDE_DIR})
+  target_compile_definitions(molink-core-av1-test PRIVATE MOLINK_HAVE_SVT_AV1=1)
+  target_link_libraries(molink-core-av1-test PRIVATE
+    ${SVT_AV1_LIBRARY} ${DAV1D_LIBRARY})
+  set_target_properties(molink-core-av1-test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+  foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
+    string(TOUPPER "${uvp_config}" uvp_config_upper)
+    set_target_properties(molink-core-av1-test PROPERTIES
+      "RUNTIME_OUTPUT_DIRECTORY_${uvp_config_upper}" "${CMAKE_BINARY_DIR}")
+  endforeach()
+  add_test(NAME av1_roundtrip COMMAND molink-core-av1-test)
+endif()
+
 if (MSVC)
   # MSVC reads a source without a BOM in the system code page. On a Chinese
   # Windows install that is GBK (936), so a UTF-8 source with Chinese comments
@@ -331,9 +429,17 @@ if (MSVC)
     target_compile_options(molink-core PRIVATE /W4 /permissive- /utf-8)
   endif()
   target_compile_options(molink-core-protocol-test PRIVATE /W4 /permissive- /utf-8)
+  target_compile_options(molink-core-dirty-rects-test PRIVATE /W4 /permissive- /utf-8)
+  if(TARGET molink-core-av1-test)
+    target_compile_options(molink-core-av1-test PRIVATE /W4 /permissive- /utf-8)
+  endif()
 else()
   if(MOLINK_BUILD_CORE)
     target_compile_options(molink-core PRIVATE -Wall -Wextra -Wpedantic)
   endif()
   target_compile_options(molink-core-protocol-test PRIVATE -Wall -Wextra -Wpedantic)
+  target_compile_options(molink-core-dirty-rects-test PRIVATE -Wall -Wextra -Wpedantic)
+  if(TARGET molink-core-av1-test)
+    target_compile_options(molink-core-av1-test PRIVATE -Wall -Wextra -Wpedantic)
+  endif()
 endif()
