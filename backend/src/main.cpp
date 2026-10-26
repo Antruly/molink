@@ -253,7 +253,7 @@ int main(int argc, char** argv) {
   if (!tls.ok()) {
     std::fprintf(stderr, "molink tls: %s\n", tls.error.c_str());
   }
-  const bool tls_enabled = auth->settings().encrypt_lan && tls.ok();
+  bool tls_enabled = auth->settings().encrypt_lan && tls.ok();
   // Only the shell receives this token (through the ready line). It gates the
   // loopback web UI when allow_web_client is off.
   const std::string client_token = generate_token();

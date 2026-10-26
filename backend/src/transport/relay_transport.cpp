@@ -5,8 +5,11 @@
 #include <thread>
 #include <utility>
 
-#include <ssl/uvcpp_ssl_context.h>
+#include <uvcpp/uvcpp_config.h>
 #include <webapp/uvcpp_web_ws_client.h>
+#if UVCPP_OPENSSL_ENABLE
+#include <ssl/uvcpp_ssl_context.h>
+#endif
 
 namespace molink {
 
@@ -96,12 +99,17 @@ void relay_transport::close(int code, const std::string& reason) {
 }
 
 void relay_transport::thread_main() {
+#if UVCPP_OPENSSL_ENABLE
+  // Must outlive `client`: the WebSocket keeps a pointer to this context and
+  // uses it from its destructor.
   uvcpp::uvcpp_ssl_context tls(uvcpp::tls_mode::CLIENT);
+#endif
   uvcpp::uvcpp_web_ws_client client;
 
   std::fprintf(stderr, "relay: connecting\n");
   std::fflush(stderr);
   if (url_.rfind("wss://", 0) == 0) {
+#if UVCPP_OPENSSL_ENABLE
     tls.set_verify_mode(uvcpp::tls_verify_mode::PEER_STRICT);
     if (!ca_path_.empty() && !tls.load_ca_file(ca_path_)) {
       std::fprintf(stderr, "relay: cannot load CA %s\n", ca_path_.c_str());
@@ -112,6 +120,14 @@ void relay_transport::thread_main() {
       return;
     }
     client.set_ssl_context(&tls);
+#else
+    std::fprintf(stderr, "relay: this build has no TLS; a wss:// relay is unavailable\n");
+    std::fflush(stderr);
+    closed_ = true;
+    running_ = false;
+    deliver_close(transport_close::policy, "this build has no TLS");
+    return;
+#endif
   }
 
   client.on_text([this](const std::string& text) {

@@ -125,7 +125,8 @@ bool generate_identity(const std::string& cert_path, const std::string& key_path
          nullptr;
   }
   if (ok) ok = X509_set_pubkey(cert, key) == 1;
-  X509_NAME* name = X509_get_subject_name(cert);
+  // OpenSSL 3 returns a const pointer; the setters still take a mutable one.
+  X509_NAME* name = const_cast<X509_NAME*>(X509_get_subject_name(cert));
   const std::string cn = common_name.empty() ? "moLink" : common_name;
   if (ok && name != nullptr) {
     ok = X509_NAME_add_entry_by_txt(
