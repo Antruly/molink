@@ -219,9 +219,15 @@ export function DeviceList({
     currentPage * pageSize,
     (currentPage + 1) * pageSize,
   )
-  useEffect(() => {
+  // Switching tabs or card/list views starts at the first page. Adjusting the
+  // state during render (instead of in an effect) avoids an extra commit and
+  // the cascading render the hooks lint rule warns about.
+  const pageKey = `${tab}:${historyView}`
+  const [lastPageKey, setLastPageKey] = useState(pageKey)
+  if (lastPageKey !== pageKey) {
+    setLastPageKey(pageKey)
     setPage(0)
-  }, [tab, historyView])
+  }
 
   const isSaved = (item: DeviceItem) =>
     savedDevices.some(

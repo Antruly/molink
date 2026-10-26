@@ -488,6 +488,18 @@ int main(int argc, char** argv) {
   std::signal(SIGINT, on_signal);
   std::signal(SIGTERM, on_signal);
 
+#if !UVCPP_OPENSSL_ENABLE
+  // The core may have its own OpenSSL (it generates the device certificate),
+  // but HTTPS is served by libuvcpp. A libuvcpp built without TLS has no
+  // enable_ssl at all, so the settings must report encryption as unavailable
+  // instead of failing to compile or silently serving plain HTTP.
+  if (tls_enabled) {
+    std::fprintf(stderr,
+                 "molink tls: libuvcpp was built without TLS; encryption is "
+                 "unavailable\n");
+    tls_enabled = false;
+  }
+#endif
   if (tls_enabled) {
     app.enable_ssl(tls.cert_path, tls.key_path);
     if (!app.ssl_error().empty()) {

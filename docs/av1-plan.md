@@ -87,7 +87,11 @@ SVT-AV1 初版参数：low-delay、preset 10–13、CBR 或 QP、8-bit 4:2:0；
   flush；实现里对同一矩形发送两次并丢弃上一次留下的重复帧，测试覆盖复用与
   改尺寸。
 - 待做：能力协商（hello/welcome）、捕获端把大矩形从基础帧里拆出来走 AV1、
-  客户端 core 用 dav1d 解码后按现有 tile 路径交给页面、WebCodecs 回退。
+  客户端 core 用 dav1d 解码后按现有 tile 路径交给页面。
+- 2026-10-26 实测 WebCodecs：同一段 AV1 码流 Chrome 能解（128×128），
+  WebKitGTK 2.50/2.52 的 `VideoDecoder` 全部返回 Decode error（各种 level、
+  av1C description、硬/软解选项都试过），所以原生壳层不能依赖 WebCodecs，
+  客户端 core 必须带 dav1d 解码；浏览器端以后可以再加 WebCodecs 快路。
 
 ## 当前环境记录
 
