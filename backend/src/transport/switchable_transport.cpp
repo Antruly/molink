@@ -34,6 +34,23 @@ bool is_av1_frame(const uint8_t* data, std::size_t len) {
 /// A keyframe is the only frame a client cannot recover without: if its UDP
 /// fragments are lost the picture never appears. Keep it on the reliable
 /// relay path; deltas and tile refreshes stay on ICE.
+/// Tile refreshes are the repair for pixels the client missed; losing them
+/// over UDP defeats the whole compensation path, so they take the relay too.
+bool is_tile_refresh(const uint8_t* data, std::size_t len) {
+  return data != nullptr &&
+         len >= protocol::kPacketHeaderSize + protocol::kFrameHeaderSize &&
+         std::memcmp(data, protocol::kMagic, sizeof(protocol::kMagic)) == 0 &&
+         data[5] == static_cast<uint8_t>(protocol::packet_type::frame) &&
+         (data[6] & static_cast<uint8_t>(protocol::kPacketFlagTileRefresh)) != 0;
+}
+
+/// Repair requests must reach the host; one lost UDP datagram would otherwise
+/// leave the stale rectangle untouched until something else drops.
+bool is_compensation_text(const std::string& text) {
+  return text.find("\"type\":\"request-tiles\"") != std::string::npos ||
+         text.find("\"type\":\"request-keyframe\"") != std::string::npos;
+}
+
 bool is_keyframe(const uint8_t* data, std::size_t len) {
   return data != nullptr &&
          len >= protocol::kPacketHeaderSize + protocol::kFrameHeaderSize &&
@@ -68,12 +85,15 @@ bool switchable_transport::is_open() const {
 }
 
 bool switchable_transport::send_text(const std::string& text) {
+  if (is_compensation_text(text) && relay_ && relay_->is_open()) {
+    return relay_->send_text(text);
+  }
   return active_ && active_->send_text(text);
 }
 
 bool switchable_transport::send_binary(const uint8_t* data, std::size_t len) {
   if ((is_file_data(data, len) || is_av1_frame(data, len) ||
-       is_keyframe(data, len)) &&
+       is_keyframe(data, len) || is_tile_refresh(data, len)) &&
       relay_ && relay_->is_open()) {
     return relay_->send_binary(data, len);
   }

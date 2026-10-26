@@ -23,6 +23,8 @@ export const PacketType = {
   audio: 0x13,
   /** Voice-call PCM: 48 kHz mono little-endian 16-bit, both directions. */
   voice: 0x14,
+  /** Per-cell freshness map from the host (see packet_type::tile_clock). */
+  tileClock: 0x15,
   control: 0x7f,
   ping: 0x80,
   pong: 0x81,

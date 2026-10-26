@@ -88,6 +88,9 @@ class connect_proxy final
       nlohmann::json hello = nlohmann::json::parse(text);
       if (!hello.is_object()) return text;
       hello["av1"] = true;
+      if (std::getenv("MOLINK_AV1_LOG") != nullptr) {
+        std::fprintf(stderr, "proxy: injected av1 into hello\n");
+      }
       return hello.dump();
     } catch (...) {
       return text;

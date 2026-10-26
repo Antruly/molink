@@ -84,6 +84,10 @@ enum class packet_type : uint8_t {
   audio = 0x13,
   /// Voice-call PCM: 48 kHz mono little-endian 16-bit, both directions.
   voice = 0x14,
+  /// Per-cell freshness map: u16 cols, u16 rows, u16 cell, u16 reserved,
+  /// then cols*rows u64 capture timestamps (microseconds, little-endian).
+  /// Lets a client find tiles whose newest pixels it never received.
+  tile_clock = 0x15,
   control = 0x7f,    ///< JSON control payload, session-scoped
   ping = 0x80,       ///< empty payload
   pong = 0x81,       ///< empty payload

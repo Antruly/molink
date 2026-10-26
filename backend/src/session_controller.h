@@ -147,6 +147,8 @@ class session_supervisor {
   session_options options_;
   std::thread thread_;
   std::atomic<bool> running_{false};
+  /// Last AV1 policy value announced to the capture source (diagnostics).
+  bool av1_allowed_ = false;
 };
 
 }  // namespace molink

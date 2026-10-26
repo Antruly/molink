@@ -1055,6 +1055,9 @@ void session_controller::on_text(const std::string& text) {
       return;
     }
     session->av1 = bool_field(j, "av1", false);
+    if (std::getenv("MOLINK_AV1_LOG") != nullptr) {
+      std::fprintf(stderr, "host: session av1=%d\n", session->av1 ? 1 : 0);
+    }
     registry_->set_authenticated(session);
     // A session without AV1 must stop patches immediately; the supervisor
     // turns them back on once every session can decode them again.
@@ -1419,6 +1422,9 @@ void session_controller::on_text(const std::string& text) {
         rects.push_back({static_cast<int>(x), static_cast<int>(y),
                          static_cast<int>(w), static_cast<int>(h)});
       }
+    }
+    if (std::getenv("MOLINK_AV1_LOG") != nullptr) {
+      std::fprintf(stderr, "host: request-tiles for %zu rect(s)\n", rects.size());
     }
     std::string refresh_error;
     if (!send_tile_refresh(transport.get(), session, options_, rects,
@@ -1785,7 +1791,41 @@ void session_supervisor::run() {
           break;
         }
       }
-      options_.capture->set_av1_allowed(live && all_av1);
+      const bool allow = live && all_av1;
+      if (std::getenv("MOLINK_AV1_LOG") != nullptr && allow != av1_allowed_) {
+        std::fprintf(stderr, "host: av1 allowed=%d\n", allow ? 1 : 0);
+        av1_allowed_ = allow;
+      }
+      options_.capture->set_av1_allowed(allow);
+    }
+
+    // Once a second, tell every session with a picture which 128 px cells
+    // changed and when. A client compares this with the frames it applied and
+    // asks for the cells it missed, so one lost refresh cannot leave a stale
+    // rectangle on screen forever.
+    if (options_.capture && options_.post && registry_->has_authenticated()) {
+      std::vector<uint8_t> clock;
+      if (options_.capture->tile_clock(clock)) {
+        auto registry_ref = registry_;
+        auto post = options_.post;
+        const uint64_t now = epoch_us();
+        post([registry_ref, clock = std::move(clock), now] {
+          for (const session_info& peer : registry_ref->snapshot()) {
+            if (!peer.authenticated || !peer.transport || !peer.has_image) {
+              continue;
+            }
+            std::vector<uint8_t> bytes;
+            std::string error;
+            if (!protocol::encode_packet_into(
+                    bytes,
+                    static_cast<uint8_t>(protocol::packet_type::tile_clock), 0,
+                    peer.id, 0, now, clock.data(), clock.size(), error)) {
+              continue;
+            }
+            peer.transport->send_binary(bytes.data(), bytes.size());
+          }
+        });
+      }
     }
 
     // Push local (host) clipboard changes to every watching session. Remote

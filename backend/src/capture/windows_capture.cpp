@@ -484,6 +484,7 @@ class windows_capture final : public capture_base {
     encoding.effort = quality_effort();
     encoding.av1 = av1_for_frame();
     encoding.av1_qp = quality_av1_qp();
+    encoding.av1_grayscale = quality_av1_grayscale();
     std::vector<uint8_t> av1_payload;
 
     std::vector<uint8_t> payload;

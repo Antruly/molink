@@ -12,7 +12,7 @@ bool build_av1_frame_payload(const protocol::frame_header& header,
                              std::size_t stride,
                              const std::vector<pixel_rect>& rects, int qp,
                              std::vector<uint8_t>& payload,
-                             std::string& error) {
+                             std::string& error, bool grayscale) {
   payload.clear();
   if (bgra == nullptr || rects.empty()) return false;
   std::vector<protocol::tile_blob> tiles;
@@ -21,14 +21,38 @@ bool build_av1_frame_payload(const protocol::frame_header& header,
     const uint8_t* source =
         bgra + static_cast<std::size_t>(rect.y) * stride +
         static_cast<std::size_t>(rect.x) * 4;
+    std::size_t source_stride = stride;
+    std::vector<uint8_t> gray;
+    if (grayscale) {
+      // The turbo preset is monochrome: give AV1 luminance-only pixels so the
+      // rectangles keep the preset's look.
+      gray.resize(static_cast<std::size_t>(rect.w) * rect.h * 4);
+      for (int row = 0; row < rect.h; ++row) {
+        const uint8_t* in =
+            source + static_cast<std::size_t>(row) * stride;
+        uint8_t* out =
+            gray.data() + static_cast<std::size_t>(row) * rect.w * 4;
+        for (int col = 0; col < rect.w; ++col) {
+          const uint8_t luma = static_cast<uint8_t>(
+              (in[col * 4 + 2] * 77 + in[col * 4 + 1] * 150 +
+               in[col * 4] * 29) >> 8);
+          out[col * 4 + 0] = luma;
+          out[col * 4 + 1] = luma;
+          out[col * 4 + 2] = luma;
+          out[col * 4 + 3] = 255;
+        }
+      }
+      source = gray.data();
+      source_stride = static_cast<std::size_t>(rect.w) * 4;
+    }
     protocol::tile_blob tile;
     tile.x = static_cast<uint16_t>(rect.x);
     tile.y = static_cast<uint16_t>(rect.y);
     tile.w = static_cast<uint16_t>(rect.w);
     tile.h = static_cast<uint16_t>(rect.h);
     tile.flags = protocol::kTileFlagChanged;
-    if (!encoder.encode_intra(source, stride, rect.w, rect.h, qp, tile.data,
-                              error)) {
+    if (!encoder.encode_intra(source, source_stride, rect.w, rect.h, qp,
+                              tile.data, error)) {
       return false;
     }
     if (tile.data.empty()) continue;

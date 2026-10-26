@@ -51,6 +51,8 @@ struct encode_options {
   /// AV1 patch is returned separately and sent after the base frame.
   av1_encoder* av1 = nullptr;
   int av1_qp = 32;
+  /// Encode the rectangles as luminance-only (the turbo preset).
+  bool av1_grayscale = false;
   int av1_max_rects = 4;
   /// Minimum rectangle area in pixels; 0 means two capture tiles.
   int av1_min_area = 0;

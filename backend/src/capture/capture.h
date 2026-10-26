@@ -29,10 +29,15 @@ struct quality_profile {
   compression_effort effort = compression_effort::balanced;
   /// False for the "lossless" preset: send original BGRA tiles untouched.
   bool compress = true;
-  /// True when this preset must stay bit-exact (BGRA, optionally deflated).
-  /// The AV1 rectangle path is only allowed when this is false: SVT-AV1 is
-  /// 4:2:0 and even QP 0 is not lossless.
+  /// True when this preset wants bit-exact tiles. AV1 still runs for large
+  /// rectangles on these presets, but at a near-lossless QP; small changes
+  /// (text, UI) stay on the bit-exact tile path.
   bool lossless = true;
+  /// AV1 quantizer for this preset: 1 is near-lossless, 63 the worst. SVT's
+  /// minimum accepted QP is 1 in 4.x.
+  int av1_qp = 24;
+  /// The turbo preset is monochrome; AV1 must encode grayscale pixels.
+  bool av1_grayscale = false;
   /// Raise the configured change threshold to at least this value (0 = leave).
   int minimum_change_threshold = 0;
   /// Lower a non-zero change threshold to at most this value (0 = leave).
@@ -166,6 +171,13 @@ class capture_source {
   /// also be a lossy one, since AV1 cannot preserve pixels bit-exactly.
   virtual void set_av1_allowed(bool allowed) { (void)allowed; }
 
+  /// Per-128px-cell capture timestamps of the newest pixels, as a binary
+  /// tile-clock payload. False when the source has no grid yet.
+  virtual bool tile_clock(std::vector<uint8_t>& out) {
+    (void)out;
+    return false;
+  }
+
   /// Monitors this source can capture. Empty means the source is not ready or
   /// does not support selection (clients fall back to the whole screen).
   virtual std::vector<display_info> displays() const { return {}; }
@@ -259,19 +271,22 @@ class capture_base : public capture_source {
   /// its colour out of it.
   av1_encoder* av1_for_frame() {
     if (!av1_allowed_.load()) return nullptr;
-    const quality_mode mode = quality_.load();
-    if (mode == quality_mode::turbo) return nullptr;
-    if (quality_profile_for(mode).lossless) return nullptr;
     if (!av1_encoder_) {
       std::string error;
       av1_encoder_ = make_av1_encoder(&error);
     }
     return av1_encoder_.get();
   }
-  int quality_av1_qp() const { return 32; }
+  int quality_av1_qp() const {
+    return quality_profile_for(quality_.load()).av1_qp;
+  }
+  bool quality_av1_grayscale() const {
+    return quality_profile_for(quality_.load()).av1_grayscale;
+  }
 
   bool running() const override { return running_.load(); }
   virtual capture_stats stats() const override;
+  bool tile_clock(std::vector<uint8_t>& out) override;
 
   bool cursor(cursor_snapshot& out) const override;
 
@@ -285,6 +300,8 @@ class capture_base : public capture_source {
   static int clamp_fps(int fps) { return fps < 1 ? 1 : (fps > 60 ? 60 : fps); }
 
   void publish(std::shared_ptr<const captured_frame> frame);
+  /// Updates the per-cell freshness grid from a published frame's tiles.
+  void update_cell_clock(const captured_frame& frame);
   void note_grab(bool full, uint16_t dirty_w, uint16_t dirty_h);
   void set_cursor(cursor_snapshot snapshot);
 
@@ -303,6 +320,10 @@ class capture_base : public capture_source {
   std::atomic<bool> av1_allowed_{false};
   /// Created lazily on the capture thread the first time AV1 is allowed.
   std::shared_ptr<av1_encoder> av1_encoder_;
+  /// Newest capture timestamp per 128 px cell, protected by mutex_.
+  std::vector<uint64_t> cell_clock_;
+  uint16_t clock_cols_ = 0;
+  uint16_t clock_rows_ = 0;
   std::atomic<uint64_t> stat_frames_{0};
   std::atomic<uint64_t> stat_keyframes_{0};
   std::atomic<uint64_t> stat_full_grabs_{0};

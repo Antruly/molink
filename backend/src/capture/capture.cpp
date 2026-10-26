@@ -113,12 +113,15 @@ quality_profile quality_profile_for(quality_mode mode) {
       profile.effort = compression_effort::fast;
       profile.minimum_change_threshold = 16;
       profile.lossless = false;
+      profile.av1_qp = 32;
       break;
     case quality_mode::quality:
       // Keep every colour bit, spend more CPU on zlib, and never ignore a
       // visual change that the default threshold would have skipped.
       profile.format = tile_format::bgra;
       profile.effort = compression_effort::best;
+      profile.lossless = true;
+      profile.av1_qp = 4;
       profile.maximum_change_threshold = 1;
       break;
     case quality_mode::turbo:
@@ -128,6 +131,8 @@ quality_profile quality_profile_for(quality_mode mode) {
       profile.effort = compression_effort::fast;
       profile.minimum_change_threshold = 24;
       profile.lossless = false;
+      profile.av1_qp = 36;
+      profile.av1_grayscale = true;
       break;
     case quality_mode::raw:
       // Original BGRA pixels, deliberately not deflated. Useful on a fast
@@ -136,12 +141,15 @@ quality_profile quality_profile_for(quality_mode mode) {
       profile.format = tile_format::bgra;
       profile.effort = compression_effort::fast;
       profile.compress = false;
+      profile.lossless = true;
+      profile.av1_qp = 1;
       profile.maximum_change_threshold = 1;
       break;
     case quality_mode::balanced:
     default:
       profile.format = tile_format::bgra;
       profile.effort = compression_effort::balanced;
+      profile.av1_qp = 22;
       break;
   }
   return profile;
@@ -181,12 +189,64 @@ std::shared_ptr<const captured_frame> capture_base::find(uint32_t seq) const {
   return nullptr;
 }
 
+void capture_base::update_cell_clock(const captured_frame& frame) {
+  protocol::parsed_frame parsed;
+  std::string error;
+  if (!protocol::parse_frame_payload(frame.payload.data(), frame.payload.size(),
+                                     parsed, error)) {
+    return;
+  }
+  const int cols = (static_cast<int>(frame.width) + 127) / 128;
+  const int rows = (static_cast<int>(frame.height) + 127) / 128;
+  if (cols <= 0 || rows <= 0) return;
+  if (cols != clock_cols_ || rows != clock_rows_) {
+    clock_cols_ = static_cast<uint16_t>(cols);
+    clock_rows_ = static_cast<uint16_t>(rows);
+    cell_clock_.assign(static_cast<std::size_t>(cols) * rows, 0);
+  }
+  for (const protocol::tile_view& tile : parsed.tiles) {
+    if (tile.w == 0 || tile.h == 0) continue;
+    const int col0 = tile.x / 128;
+    const int col1 = (tile.x + tile.w - 1) / 128;
+    const int row0 = tile.y / 128;
+    const int row1 = (tile.y + tile.h - 1) / 128;
+    for (int row = row0; row <= row1 && row < rows; ++row) {
+      for (int col = col0; col <= col1 && col < cols; ++col) {
+        cell_clock_[static_cast<std::size_t>(row) * cols + col] = frame.ts_us;
+      }
+    }
+  }
+}
+
+bool capture_base::tile_clock(std::vector<uint8_t>& out) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (clock_cols_ == 0 || clock_rows_ == 0 || cell_clock_.empty()) return false;
+  out.resize(8 + cell_clock_.size() * 8);
+  auto put16 = [&out](std::size_t at, uint16_t value) {
+    out[at] = static_cast<uint8_t>(value & 0xff);
+    out[at + 1] = static_cast<uint8_t>(value >> 8);
+  };
+  put16(0, clock_cols_);
+  put16(2, clock_rows_);
+  put16(4, 128);
+  put16(6, 0);
+  for (std::size_t i = 0; i < cell_clock_.size(); ++i) {
+    const uint64_t value = cell_clock_[i];
+    for (int byte = 0; byte < 8; ++byte) {
+      out[8 + i * 8 + byte] =
+          static_cast<uint8_t>(value >> (8 * byte));
+    }
+  }
+  return true;
+}
+
 void capture_base::publish(std::shared_ptr<const captured_frame> frame) {
   stat_frames_.fetch_add(1);
   stat_bytes_.fetch_add(frame->payload.size());
   if (frame->keyframe) stat_keyframes_.fetch_add(1);
 
   std::lock_guard<std::mutex> lock(mutex_);
+  update_cell_clock(*frame);
   latest_ = frame;
   history_bytes_ += frame->payload.size();
   history_.push_back(std::move(frame));

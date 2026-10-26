@@ -288,6 +288,8 @@ export class MolinkClient {
   private lastKeyframeRequest = 0
   /// Last keyframe request made because no picture exists yet.
   private lastKeyframeRecovery = 0
+  /// Last tile-clock-driven refresh request, to keep it to one per second.
+  private lastClockRequest = 0
   /// Last capture timestamp applied per 128 px screen cell, in microseconds.
   /// A dropped frame only asks for the tiles no newer frame has covered.
   private tileAppliedAt = new Map<string, number>()
@@ -1033,6 +1035,10 @@ export class MolinkClient {
         }
         return
       }
+      if (packet.type === PacketType.tileClock) {
+        this.handleTileClock(packet.payload)
+        return
+      }
       if (packet.type !== PacketType.frame) return
       this.pendingFrame = false
       this.missedFrameResponses = 0
@@ -1158,6 +1164,54 @@ export class MolinkClient {
 
     this.noteApplied(frame, tsUs)
     this.handlers.onFrame?.(frame, byteLength)
+  }
+
+  /// The host's per-cell freshness map. Cells whose newest pixels are more
+  /// than a second newer than what this client applied were missed on the
+  /// wire; ask for them again. A lost tile refresh therefore repairs itself
+  /// on the next clock instead of leaving a stale rectangle on screen.
+  private handleTileClock(payload: Uint8Array): void {
+    if (payload.byteLength < 8) return
+    const view = new DataView(payload.buffer, payload.byteOffset,
+                              payload.byteLength)
+    const cols = view.getUint16(0, true)
+    const rows = view.getUint16(2, true)
+    const cell = view.getUint16(4, true)
+    if (cols === 0 || rows === 0 || cell !== 128) return
+    if (payload.byteLength < 8 + cols * rows * 8) return
+    if (!this.hasImage) {
+      this.requestKeyframeThrottled()
+      return
+    }
+    const now = performance.now()
+    if (now - this.lastClockRequest < 1000) return
+    const tiles: Array<{ x: number; y: number; w: number; h: number }> = []
+    for (let row = 0; row < rows; row += 1) {
+      let runStart = -1
+      for (let col = 0; col <= cols; col += 1) {
+        let staleCell = false
+        if (col < cols) {
+          const hostTs = Number(
+            view.getBigUint64(8 + (row * cols + col) * 8, true),
+          )
+          const applied = this.tileAppliedAt.get(`${col},${row}`) ?? 0
+          staleCell = hostTs > applied + 1_000_000
+        }
+        if (staleCell && runStart < 0) runStart = col
+        if (!staleCell && runStart >= 0) {
+          tiles.push({
+            x: runStart * cell,
+            y: row * cell,
+            w: (col - runStart) * cell,
+            h: cell,
+          })
+          runStart = -1
+        }
+      }
+    }
+    if (tiles.length === 0) return
+    this.lastClockRequest = now
+    this.sendJson({ type: 'request-tiles', tiles: tiles.slice(0, 64) })
   }
 
   private tileCellKeys(x: number, y: number, w: number, h: number): string[] {

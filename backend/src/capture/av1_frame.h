@@ -21,7 +21,7 @@ bool build_av1_frame_payload(const protocol::frame_header& header,
                              std::size_t stride,
                              const std::vector<pixel_rect>& rects, int qp,
                              std::vector<uint8_t>& payload,
-                             std::string& error);
+                             std::string& error, bool grayscale = false);
 
 /// Decodes an AV1 FRAME payload into raw BGRA tiles with the same rectangles.
 /// The client core uses this before forwarding to a page that cannot decode

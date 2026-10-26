@@ -367,7 +367,8 @@ bool encode_capture_frame(protocol::frame_header& header,
       std::vector<uint8_t> patch;
       std::string av1_error;
       if (build_av1_frame_payload(header, *options.av1, pixels, stride, chosen,
-                                  options.av1_qp, patch, av1_error)) {
+                                  options.av1_qp, patch, av1_error,
+                                  options.av1_grayscale)) {
         subtract_av1_rects(tiles, chosen, header.tile_w, header.tile_h);
         *av1_payload = std::move(patch);
         if (std::getenv("MOLINK_AV1_LOG") != nullptr) {
