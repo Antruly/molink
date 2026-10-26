@@ -761,21 +761,20 @@ export function SessionView({
       const underrunning =
         wireFps > 0 && wireFps < Math.max(3, target * 0.5)
       const bad =
-        (latency !== null && latency > 260) ||
+        (latency !== null && latency > 300) ||
         underrunning ||
-        stats.dropped > 2
+        stats.dropped > 5
       const good =
         latency !== null &&
         latency < 90 &&
         stats.dropped === 0 &&
         wireFps >= Math.min(12, target)
 
-      const order: ResolvedQuality[] = [
-        'turbo',
-        'smooth',
-        'balanced',
-        'quality',
-      ]
+      // Auto never picks the grayscale turbo preset: flipping the whole
+      // picture between monochrome and colour every few seconds is far more
+      // jarring than a lower frame rate. Turbo stays a manual choice; auto
+      // moves between the colour tiers only.
+      const order: ResolvedQuality[] = ['smooth', 'balanced', 'quality']
       const index = order.indexOf(resolvedMode)
       let tier = resolvedMode
       if (bad && target <= floor && index > 0) {
@@ -801,8 +800,14 @@ export function SessionView({
         state.tier = tier
         state.streak = 1
       }
+      // Slow, asymmetric hysteresis: three bad samples to step down, five
+      // good ones to step back up, with a long dwell so a marginal link
+      // cannot make the picture change tiers every few seconds.
       const now = performance.now()
-      if (state.streak >= 2 && now - state.lastChange >= 3000) {
+      const downgrade = order.indexOf(tier) < order.indexOf(resolvedMode)
+      const needed = downgrade ? 3 : 5
+      const dwell = downgrade ? 6000 : 10000
+      if (state.streak >= needed && now - state.lastChange >= dwell) {
         state.lastChange = now
         state.tier = null
         state.streak = 0

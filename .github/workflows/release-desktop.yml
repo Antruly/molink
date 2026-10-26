@@ -8,7 +8,7 @@ permissions:
   contents: write
 
 # Linux and Windows download the prebuilt libuvcpp archive (UVCPP_VERSION,
-# default 1.8.6); macOS has no prebuilt asset yet and builds it from the
+# default 1.8.7); macOS has no prebuilt asset yet and builds it from the
 # UVCPP_REPO repository variable. Then the core, frontend and platform shell
 # are built and attached to the release.
 jobs:
@@ -38,7 +38,7 @@ jobs:
         shell: bash
         env:
           UVCPP_VERSION: ${{ vars.UVCPP_VERSION }}
-        run: ./packaging/fetch-uvcpp.sh linux-x64 "${UVCPP_VERSION:-1.8.6}" "$RUNNER_TEMP/uvcpp"
+        run: ./packaging/fetch-uvcpp.sh linux-x64 "${UVCPP_VERSION:-1.8.7}" "$RUNNER_TEMP/uvcpp"
 
       - name: Build packages
         env:
@@ -81,7 +81,7 @@ jobs:
         shell: bash
         env:
           UVCPP_VERSION: ${{ vars.UVCPP_VERSION }}
-        run: ./packaging/fetch-uvcpp.sh msvc-x64 "${UVCPP_VERSION:-1.8.6}" "$RUNNER_TEMP/uvcpp"
+        run: ./packaging/fetch-uvcpp.sh msvc-x64 "${UVCPP_VERSION:-1.8.7}" "$RUNNER_TEMP/uvcpp"
 
       # The archive ships zlib.h (libuvcpp's public headers include it) but no
       # zlib library, and molink compresses tiles itself. Build a static zlib
