@@ -88,6 +88,10 @@ export interface SessionTab {
   errorCode?: string | null
   /// "relay" or "p2p" for a device-ID session.
   transport?: string
+  /// The client core is decoding AV1 patches for this session.
+  av1Active?: boolean
+  av1WireBytes?: number
+  av1DecodedBytes?: number
   notice: string | null
   /// When the host must approve this session: epoch ms of the 60 s deadline.
   approvalDeadline: number | null

@@ -151,6 +151,8 @@ export interface ClientHandlers {
   onError: (message: string, code?: string) => void
   /// "relay" or "p2p" for a device-ID session.
   onTransport?: (mode: string) => void
+  /** The client core decoded an AV1 patch (wire and decoded byte counts). */
+  onCodec?: (info: { wireBytes: number; decodedBytes: number }) => void
   onCursor: (shape: CursorShape) => void
   onCursorPosition: (position: CursorPosition) => void
   onClipboard: (text: string) => void
@@ -185,6 +187,9 @@ interface ControlMessage {
   index?: number
   action?: string
   ok?: boolean
+  av1?: boolean
+  wire?: number
+  decoded?: number
   from?: string
   ts?: number
   name?: string
@@ -951,6 +956,15 @@ export class MolinkClient {
           startedMs: message.started_ms,
           message: message.message,
         })
+        break
+      case 'codec':
+        if (message.av1 === true) {
+          this.handlers.onCodec?.({
+            wireBytes: typeof message.wire === 'number' ? message.wire : 0,
+            decodedBytes:
+              typeof message.decoded === 'number' ? message.decoded : 0,
+          })
+        }
         break
       case 'transport':
         if (typeof message.mode === 'string') {

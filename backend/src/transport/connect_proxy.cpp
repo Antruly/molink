@@ -2,9 +2,11 @@
 
 #include <nlohmann/json.hpp>
 
+#include <chrono>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <deque>
 #include <mutex>
 #include <string>
@@ -248,16 +250,49 @@ class connect_proxy final
         packet = std::move(binary_queue_.front());
         binary_queue_.pop_front();
       }
+      const bool av1 = packet_is_av1(packet);
+      const std::size_t wire = packet.size();
       std::vector<uint8_t> out = transcode(std::move(packet));
       if (out.empty()) continue;
+      const std::size_t decoded = out.size();
+      bool announce = false;
+      if (av1) {
+        const auto now = std::chrono::steady_clock::now();
+        if (last_stat_.time_since_epoch().count() == 0 ||
+            now - last_stat_ >= std::chrono::seconds(1)) {
+          last_stat_ = now;
+          announce = true;
+        }
+      }
       std::weak_ptr<connect_proxy> weak = weak_from_this();
       std::vector<uint8_t> bytes = std::move(out);
-      post_([weak, bytes = std::move(bytes)] {
+      post_([weak, bytes = std::move(bytes), announce, wire, decoded] {
         if (auto self = weak.lock()) {
+          if (announce) self->send_codec_stat(wire, decoded);
           self->send_to_browser(bytes.data(), bytes.size());
         }
       });
     }
+  }
+
+  static bool packet_is_av1(const std::vector<uint8_t>& bytes) {
+    return bytes.size() >=
+               protocol::kPacketHeaderSize + protocol::kFrameHeaderSize &&
+           std::memcmp(bytes.data(), protocol::kMagic,
+                       sizeof(protocol::kMagic)) == 0 &&
+           bytes[5] == static_cast<uint8_t>(protocol::packet_type::frame) &&
+           bytes[protocol::kPacketHeaderSize + 6] ==
+               static_cast<uint8_t>(protocol::codec::av1);
+  }
+
+  /// Tells the page that the client core is decoding AV1 patches, so the UI
+  /// can show an indicator; the page itself never sees the AV1 bytes.
+  void send_codec_stat(std::size_t wire, std::size_t decoded) {
+    if (closed_ || browser_ == nullptr) return;
+    const std::string text = "{\"type\":\"codec\",\"av1\":true,\"wire\":" +
+                             std::to_string(wire) + ",\"decoded\":" +
+                             std::to_string(decoded) + "}";
+    browser_->send_text(text.data(), text.size());
   }
 
   void send_to_browser(const uint8_t* data, std::size_t len) {
@@ -329,6 +364,7 @@ class connect_proxy final
   std::deque<std::vector<uint8_t>> binary_queue_;
   bool worker_started_ = false;
   bool stopping_ = false;
+  std::chrono::steady_clock::time_point last_stat_{};
   std::shared_ptr<session_transport> transport_;
   std::deque<std::string> pending_text_;
   std::deque<std::vector<uint8_t>> pending_binary_;

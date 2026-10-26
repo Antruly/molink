@@ -2478,6 +2478,14 @@ export function SessionView({
               <span className="chip" title={t('session.transport')}>
                 {transportLabel}
               </span>
+              {tab.av1Active ? (
+                <span
+                  className="chip text-emerald-500"
+                  title={`AV1 ${tab.av1WireBytes ?? 0} B wire → ${tab.av1DecodedBytes ?? 0} B decoded`}
+                >
+                  AV1
+                </span>
+              ) : null}
               {tab.welcome?.security ? (
                 <span
                   className={
@@ -2746,7 +2754,7 @@ export function SessionView({
             : tab.transport === 'relay'
               ? t('session.relay')
               : t('session.direct')
-        }</span>
+        }{tab.av1Active ? ' · AV1' : ''}</span>
         <span>
           {tab.controlEnabled
             ? t('session.controlOnHint')

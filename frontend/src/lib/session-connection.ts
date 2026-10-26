@@ -32,6 +32,10 @@ export interface TabPatch {
   error?: string | null
   errorCode?: string | null
   transport?: string
+  /// The client core decoded an AV1 patch within the last few seconds.
+  av1Active?: boolean
+  av1WireBytes?: number
+  av1DecodedBytes?: number
   notice?: string | null
   approvalDeadline?: number | null
   retryAt?: number | null
@@ -72,6 +76,7 @@ export class SessionConnection {
   private congested = false
   private lastDropAt = 0
   private congestionTimer: number | null = null
+  private av1Timer: number | null = null
   private clipboardEnabled = true
   /// This viewer's machine name/ID, sent in hello so the shared chat can
   /// attribute its messages. Empty for a plain browser.
@@ -184,6 +189,20 @@ export class SessionConnection {
       onError: (message, code) =>
         this.sink.onPatch({ error: message, errorCode: code ?? null, notice: null }),
       onTransport: (mode) => this.sink.onPatch({ transport: mode }),
+      onCodec: (info) => {
+        // Patches arrive continuously while a lossy preset is in use; the
+        // badge disappears if none have arrived for five seconds.
+        if (this.av1Timer !== null) window.clearTimeout(this.av1Timer)
+        this.sink.onPatch({
+          av1Active: true,
+          av1WireBytes: info.wireBytes,
+          av1DecodedBytes: info.decodedBytes,
+        })
+        this.av1Timer = window.setTimeout(() => {
+          this.av1Timer = null
+          this.sink.onPatch({ av1Active: false })
+        }, 5000)
+      },
       onCursor: (cursorShape) => this.sink.onPatch({ cursorShape }),
       onCursorPosition: (cursorPosition) =>
         this.sink.onPatch({ cursorPosition }),
@@ -334,6 +353,7 @@ export class SessionConnection {
     this.packetTimes = []
     this.byteWindow = []
     this.latency = null
+    this.stopAv1Indicator()
     this.frames = 0
     this.lastWirePatch = 0
     this.sink.onPatch({
@@ -346,7 +366,16 @@ export class SessionConnection {
                         this.forceRelay, this.clientName, this.clientId)
   }
 
+  private stopAv1Indicator(): void {
+    if (this.av1Timer !== null) {
+      window.clearTimeout(this.av1Timer)
+      this.av1Timer = null
+    }
+    this.sink.onPatch({ av1Active: false })
+  }
+
   disconnect(): void {
+    this.stopAv1Indicator()
     this.stopBackgroundPull()
     this.stopFileSync()
     this.stopClipboardSync()
