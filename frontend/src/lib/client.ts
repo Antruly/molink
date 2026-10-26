@@ -242,6 +242,10 @@ async function inflateTile(data: Uint8Array): Promise<Uint8Array> {
   return new Uint8Array(await new Response(stream).arrayBuffer())
 }
 
+/// Frame timestamps older than this are ignored when estimating the host clock
+/// offset, so a bad estimate or a host clock step recovers within this window.
+const kFrameClockWindowMs = 10_000
+
 export class MolinkClient {
   private ws: WebSocket | null = null
   private handlers: Partial<ClientHandlers> = {}
@@ -278,6 +282,14 @@ export class MolinkClient {
   /// host) must not be mistaken for an ICE failure and retried.
   private lastErrorCode = ''
   private lastErrorMessage = ''
+  /// Estimated local-minus-host wall-clock difference plus the fastest network
+  /// transit, in milliseconds, measured from frame capture timestamps. Frame
+  /// freshness must not assume the two machines have synchronized clocks: a
+  /// one-second skew used to drop every frame as stale. The pong's `server_ms`
+  /// cannot be used for this — the host fills it from a monotonic clock, not
+  /// the wall clock.
+  private frameClockOffset = 0
+  private frameClockSamples: { at: number; offset: number }[] = []
   /// Session token from the last welcome. Reconnecting with it does not spend
   /// another use of the host's temporary verification code.
   private resumeToken = ''
@@ -307,6 +319,8 @@ export class MolinkClient {
     this.lastErrorCode = ''
     this.lastErrorMessage = ''
     this.resumeToken = ''
+    this.frameClockOffset = 0
+    this.frameClockSamples = []
     this.lastConnect = { host, port, token, requestAccess, targetId,
                         forceRelay, clientName, clientId }
     this.openSocket()
@@ -538,6 +552,33 @@ export class MolinkClient {
 
   isLive(): boolean {
     return this.ws !== null && this.ws.readyState === WebSocket.OPEN
+  }
+
+  /// Records a frame's capture time so frame ages can be measured on the
+  /// host's clock. The host stamps frames with its wall clock, so the client
+  /// cannot subtract them from its own `Date.now()` directly. The fastest
+  /// frame in the window is the one least delayed by the network, so the
+  /// minimum arrival-minus-capture is the best available skew estimate.
+  private noteFrameClock(tsUs: number): void {
+    if (!Number.isFinite(tsUs) || tsUs <= 0) return
+    const now = Date.now()
+    const samples = this.frameClockSamples
+    samples.push({ at: now, offset: now - tsUs / 1000 })
+    const cutoff = now - kFrameClockWindowMs
+    let first = 0
+    while (first < samples.length && samples[first].at < cutoff) first += 1
+    if (first > 0) samples.splice(0, first)
+    let offset = samples[0].offset
+    for (const sample of samples) {
+      if (sample.offset < offset) offset = sample.offset
+    }
+    this.frameClockOffset = offset
+  }
+
+  /// How much longer this frame took than the fastest frame in the window,
+  /// in milliseconds. Negative values mean it was faster than the minimum.
+  private frameAgeMs(tsUs: number): number {
+    return Date.now() - this.frameClockOffset - tsUs / 1000
   }
 
   /** Asks for one synthetic frame. Returns false while one is in flight. */
@@ -876,6 +917,7 @@ export class MolinkClient {
       if (packet.type !== PacketType.frame) return
       this.pendingFrame = false
       const frame = parseFramePayload(packet.payload)
+      this.noteFrameClock(packet.tsUs)
       if ((packet.flags & PacketFlag.tileRefresh) !== 0) {
         if (!this.hasImage) {
           this.requestKeyframeThrottled()
@@ -901,7 +943,7 @@ export class MolinkClient {
       // A frame that spent more than a second in flight is worse than a
       // skipped one: showing it late causes visible lag. Drop it and ask for
       // a fresh keyframe instead.
-      if (Date.now() - packet.tsUs / 1000 > 1000) {
+      if (this.frameAgeMs(packet.tsUs) > 1000) {
         this.handlers.onFrameDropped?.()
         this.queueTileRefresh(frame, packet.tsUs)
         return
@@ -951,7 +993,7 @@ export class MolinkClient {
   ): Promise<void> {
     if (!refresh && (frame.flags & FrameFlag.keyframe) === 0) {
       if (frame.frameSeq < this.latestFrameSeq ||
-          Date.now() - tsUs / 1000 > 1000) {
+          this.frameAgeMs(tsUs) > 1000) {
         this.handlers.onFrameDropped?.()
         this.queueTileRefresh(frame, tsUs)
         return
