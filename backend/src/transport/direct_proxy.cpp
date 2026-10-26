@@ -38,6 +38,7 @@
 #endif
 
 #include "capture/av1_frame.h"
+#include "compression.h"
 #include "protocol/frame_packet.h"
 #include "transport/h2_ws_transport.h"
 #include "transport/peer_transports.h"
@@ -817,6 +818,30 @@ class direct_proxy final : public std::enable_shared_from_this<direct_proxy> {
                        (static_cast<uint32_t>(packet.payload[2]) << 16) |
                        (static_cast<uint32_t>(packet.payload[3]) << 24);
     header.codec = static_cast<uint8_t>(protocol::codec::bgra);
+    // A decoded AV1 keyframe is full-screen BGRA (tens of megabytes on a 4K
+    // desktop). Sending it raw over the local WebSocket blocks the app loop
+    // and forces the page to handle a huge message; deflate it on the worker
+    // instead. The page already inflates deflate_bgra asynchronously.
+    if (compression_available() && !tiles.empty()) {
+      std::vector<std::vector<uint8_t>> packed(tiles.size());
+      bool compressed = true;
+      std::string deflate_error;
+      for (std::size_t i = 0; i < tiles.size(); ++i) {
+        if (tiles[i].data.empty() ||
+            !deflate_buffer(tiles[i].data.data(), tiles[i].data.size(), 1,
+                            packed[i], deflate_error) ||
+            packed[i].size() >= tiles[i].data.size()) {
+          compressed = false;
+          break;
+        }
+      }
+      if (compressed) {
+        for (std::size_t i = 0; i < tiles.size(); ++i) {
+          tiles[i].data = std::move(packed[i]);
+        }
+        header.codec = static_cast<uint8_t>(protocol::codec::deflate_bgra);
+      }
+    }
     header.flags = packet.payload[7];
     header.screen_w = static_cast<uint16_t>(
         packet.payload[8] | (packet.payload[9] << 8));
