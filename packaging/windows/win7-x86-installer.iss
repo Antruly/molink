@@ -1,7 +1,7 @@
 ; moLink Windows 7 x86 (32-bit) preview installer.
 ;
 ; Build (on Windows, after staging the Win7 package directory):
-;   ISCC.exe /DAppVersion=0.9.25 \
+;   ISCC.exe /DAppVersion=0.9.26 \
 ;            /DPkgDir=C:\path\to\molink-win7-x86-release \
 ;            /DOutputDir=C:\path\to\output \
 ;            /DLangFile=C:\path\to\ChineseSimplified.isl \
@@ -12,7 +12,7 @@
 ; and helper, the web UI, and the runtime DLLs.
 
 #ifndef AppVersion
-  #define AppVersion "0.9.25"
+  #define AppVersion "0.9.26"
 #endif
 #ifndef PkgDir
   #error PkgDir must point at the staged Win7 x86 package directory
