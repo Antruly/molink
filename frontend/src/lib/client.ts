@@ -246,12 +246,33 @@ async function inflateTile(data: Uint8Array): Promise<Uint8Array> {
 /// offset, so a bad estimate or a host clock step recovers within this window.
 const kFrameClockWindowMs = 10_000
 
+/// How long a frame request may stay unanswered before the pull loop retries
+/// it. ICE/P2P sessions ride UDP, so a request or its reply can be lost; with
+/// no retry the session would sit on "waiting for the first frame" forever.
+const kFrameRequestTimeoutMs = 1000
+
+/// How often a session without a picture may ask for another keyframe. A large
+/// keyframe takes seconds to cross a slow link, so asking faster than that
+/// only makes the host encode more of them.
+const kKeyframeRecoveryMs = 3000
+
+/// The ICE/P2P handshake rides UDP. If the hello or its welcome is lost the
+/// session would never start, so the hello is resent until a welcome arrives.
+/// A repeated hello is idempotent on the host (it does not spend another use
+/// of the verification code).
+const kHelloRetryMs = 2000
+const kHelloAttempts = 5
+
 export class MolinkClient {
   private ws: WebSocket | null = null
   private handlers: Partial<ClientHandlers> = {}
   private pendingFrame = false
+  /// When the unanswered frame request was sent, for the retry timeout.
+  private pendingFrameAt = 0
   private latestFrameSeq = -1
   private lastKeyframeRequest = 0
+  /// Last keyframe request made because no picture exists yet.
+  private lastKeyframeRecovery = 0
   /// Last capture timestamp applied per 128 px screen cell, in microseconds.
   /// A dropped frame only asks for the tiles no newer frame has covered.
   private tileAppliedAt = new Map<string, number>()
@@ -293,6 +314,10 @@ export class MolinkClient {
   /// Session token from the last welcome. Reconnecting with it does not spend
   /// another use of the host's temporary verification code.
   private resumeToken = ''
+  /// The hello sent on this socket, kept for retries over a lossy ICE path.
+  private helloPayload: Record<string, unknown> | null = null
+  private helloTimer: number | null = null
+  private helloAttempts = 0
   private retryAttempts = 0
   private retryTimer: number | null = null
   private autoRetryTimer: number | null = null
@@ -356,8 +381,11 @@ export class MolinkClient {
     this.closedByUser = false
     this.hasImage = false
     this.pendingFrame = false
+    this.pendingFrameAt = 0
     this.latestFrameSeq = -1
     this.lastKeyframeRequest = 0
+    this.lastKeyframeRecovery = 0
+    this.stopHelloRetry()
     this.tileAppliedAt.clear()
     this.pendingTiles.clear()
     this.frameQueue = Promise.resolve()
@@ -415,7 +443,7 @@ export class MolinkClient {
       } else {
         // Send the code as well: if the host restarted, the resume token is
         // unknown and the code still authenticates in the same round trip.
-        this.sendJson({
+        this.helloPayload = {
           type: 'hello',
           token,
           ...(this.resumeToken ? { session: this.resumeToken } : {}),
@@ -423,7 +451,8 @@ export class MolinkClient {
           ...(clientId ? { device_id: clientId } : {}),
           client: 'molink-web',
           protocol: 1,
-        })
+        }
+        this.sendHello()
       }
     }
 
@@ -442,6 +471,7 @@ export class MolinkClient {
 
     ws.onclose = (event: CloseEvent) => {
       this.stopPing()
+      this.stopHelloRetry()
       this.pendingFrame = false
       this.ws = null
       // Wrong code / locked host / denied request: the host answered and
@@ -543,6 +573,7 @@ export class MolinkClient {
     this.closedByUser = true
     this.stopRetryTimers()
     this.stopPing()
+    this.stopHelloRetry()
     const ws = this.ws
     this.ws = null
     if (ws && ws.readyState <= WebSocket.OPEN) {
@@ -581,10 +612,40 @@ export class MolinkClient {
     return Date.now() - this.frameClockOffset - tsUs / 1000
   }
 
+  /// Sends the hello and keeps resending it until a welcome arrives. The ICE
+  /// path is UDP, so either direction can be lost without notice.
+  private sendHello(): void {
+    if (this.helloPayload === null || !this.isLive()) return
+    this.sendJson(this.helloPayload)
+    this.helloAttempts += 1
+    if (this.helloTimer !== null) return
+    this.helloTimer = window.setInterval(() => {
+      if (this.helloPayload === null || this.helloAttempts >= kHelloAttempts) {
+        this.stopHelloRetry()
+        return
+      }
+      this.sendHello()
+    }, kHelloRetryMs)
+  }
+
+  private stopHelloRetry(): void {
+    if (this.helloTimer !== null) {
+      window.clearInterval(this.helloTimer)
+      this.helloTimer = null
+    }
+    this.helloPayload = null
+    this.helloAttempts = 0
+  }
+
   /** Asks for one synthetic frame. Returns false while one is in flight. */
   requestFrame(): boolean {
-    if (!this.isLive() || this.pendingFrame) return false
+    if (!this.isLive()) return false
+    if (this.pendingFrame &&
+        Date.now() - this.pendingFrameAt < kFrameRequestTimeoutMs) {
+      return false
+    }
     this.pendingFrame = true
+    this.pendingFrameAt = Date.now()
     this.sendJson({ type: 'request-frame' })
     return true
   }
@@ -741,6 +802,7 @@ export class MolinkClient {
             welcome.session_token !== '') {
           this.resumeToken = welcome.session_token
         }
+        this.stopHelloRetry()
         this.handlers.onWelcome?.(welcome)
         this.retryAttempts = 0
         this.stopRetryTimers()
@@ -755,7 +817,9 @@ export class MolinkClient {
         break
       }
       case 'hello_required':
-        // Expected before our hello is processed; nothing to report.
+        // The host asks for authentication; resend in case the first hello
+        // was lost on the UDP path (a duplicate hello is harmless).
+        this.sendHello()
         break
       case 'access-requested':
         this.handlers.onAccessRequested?.(message.id ?? 0)
@@ -871,6 +935,13 @@ export class MolinkClient {
         this.lastErrorCode = code
         this.lastErrorMessage =
             typeof message.message === 'string' ? message.message : code
+        if (/hello/i.test(this.lastErrorMessage)) {
+          // A request outraced our hello (a UDP reordering/loss race): send
+          // it again instead of failing the whole session.
+          this.sendHello()
+        } else {
+          this.stopHelloRetry()
+        }
         this.handlers.onError?.(
           this.lastErrorMessage || code || 'error', code || undefined)
         break
@@ -942,8 +1013,10 @@ export class MolinkClient {
       const keyframe = (frame.flags & FrameFlag.keyframe) !== 0
       // A frame that spent more than a second in flight is worse than a
       // skipped one: showing it late causes visible lag. Drop it and ask for
-      // a fresh keyframe instead.
-      if (this.frameAgeMs(packet.tsUs) > 1000) {
+      // a fresh keyframe instead. Keyframes are exempt: a large first
+      // keyframe can take seconds over a slow or lossy link, and dropping it
+      // would leave the session with no picture at all.
+      if (!keyframe && this.frameAgeMs(packet.tsUs) > 1000) {
         this.handlers.onFrameDropped?.()
         this.queueTileRefresh(frame, packet.tsUs)
         return
@@ -1021,7 +1094,13 @@ export class MolinkClient {
       } else if (!this.hasImage) {
         // A delta cannot be drawn over an image that does not exist yet. The
         // server requests a keyframe on our behalf; the next frames will carry
-        // it.
+        // it. If that keyframe was lost on the UDP path, ask again, but leave
+        // it time to arrive instead of piling up more encodes.
+        const now = performance.now()
+        if (now - this.lastKeyframeRecovery >= kKeyframeRecoveryMs) {
+          this.lastKeyframeRecovery = now
+          this.requestKeyframe()
+        }
         return
       }
     }
