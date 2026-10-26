@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.9.24] — 2026-10-26
+
+### Fixed
+
+- Windows 的 0.9.23 安装包运行 AV1 会话时提示缺少 `fastfeat.dll`：vcpkg 的
+  SVT-AV1 4.1 把 `third_party/fastfeat` 作为独立 DLL 链接，而打包只带了
+  `SvtAv1Enc.dll` / `dav1d.dll`。Windows 包现在一并写入 `fastfeat.dll`；
+  macOS 若存在 `libfastfeat` 也会一起放进 dmg。
+
 ## [0.9.23] — 2026-10-26
 
 ### Fixed

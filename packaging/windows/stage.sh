@@ -55,7 +55,8 @@ done
 # release build enabled it.
 if [ -n "${VCPKG_INSTALLATION_ROOT:-}" ]; then
   for dll in "$VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin/SvtAv1Enc.dll" \
-             "$VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin/dav1d.dll"; do
+             "$VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin/dav1d.dll" \
+             "$VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin/fastfeat.dll"; do
     [ -f "$dll" ] && cp "$dll" "$PKG/"
   done
 fi

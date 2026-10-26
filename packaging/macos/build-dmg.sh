@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
-VERSION=${VERSION:-0.9.23}
+VERSION=${VERSION:-0.9.24}
 ARCH=${ARCH:-$(uname -m)}
 BUILD=${BUILD_DIR:-$ROOT/build/macos}
 APP="$BUILD/moLink.app"
@@ -62,7 +62,7 @@ if [ -n "${OPENSSL_LIB_DIR:-}" ] && [ -d "$OPENSSL_LIB_DIR" ]; then
 fi
 # AV1: SVT-AV1 encodes on hosts, dav1d decodes on clients.
 if [ -n "$AV1_PREFIX" ]; then
-  for pattern in 'libSvtAv1Enc*.dylib' 'libdav1d*.dylib'; do
+  for pattern in 'libSvtAv1Enc*.dylib' 'libdav1d*.dylib' 'libfastfeat*.dylib'; do
     cp -P "$AV1_PREFIX/lib"/$pattern "$APP/Contents/MacOS/" 2>/dev/null || true
   done
 fi
@@ -101,7 +101,7 @@ if command -v otool >/dev/null 2>&1; then
     [ -f "$binary" ] || continue
     while read -r dep; do
       case "$dep" in
-        *uvcpp*|*llhttp*|*libuv*|*libssl*|*libcrypto*|*SvtAv1*|*dav1d*)
+        *uvcpp*|*llhttp*|*libuv*|*libssl*|*libcrypto*|*SvtAv1*|*dav1d*|*fastfeat*)
           install_name_tool -change "$dep" "@loader_path/$(basename "$dep")" \
             "$binary" 2>/dev/null || true
           ;;
