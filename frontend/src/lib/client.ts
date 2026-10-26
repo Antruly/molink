@@ -31,7 +31,12 @@ export interface Welcome {
   protocol: number
   service: string
   version: string
+  /** Wire protocol: websocket | quic | udp | tcp. */
   transport: string
+  /** How the bytes reach the host: direct | p2p | relay. Older cores omit
+   *  it; callers fall back to transport (relay is the only legacy mixed-in
+   *  value). */
+  transport_path?: string
   displays?: DisplayInfo[]
   display_index?: number
   tiles: {
@@ -149,10 +154,19 @@ export interface ClientHandlers {
   onFrame: (frame: Frame, byteLength: number) => void
   onLatency: (ms: number) => void
   onError: (message: string, code?: string) => void
-  /// "relay" or "p2p" for a device-ID session.
-  onTransport?: (mode: string) => void
-  /** The client core decoded an AV1 patch (wire and decoded byte counts). */
-  onCodec?: (info: { wireBytes: number; decodedBytes: number }) => void
+  /// Live path/protocol changes, e.g. relay switching to ICE. `mode` is the
+  /// legacy "relay"/"p2p" flag; `path` and `protocol` are the two axes the UI
+  /// labels separately.
+  onTransport?: (mode: string, path?: string, protocol?: string) => void
+  /**
+   * The client core decoded AV1 (wire and decoded byte counts). `fullFrame`
+   * means the stream carries only AV1, without a tile image underneath.
+   */
+  onCodec?: (info: {
+    wireBytes: number
+    decodedBytes: number
+    fullFrame: boolean
+  }) => void
   onCursor: (shape: CursorShape) => void
   onCursorPosition: (position: CursorPosition) => void
   onClipboard: (text: string) => void
@@ -184,12 +198,16 @@ interface ControlMessage {
   visible?: boolean
   text?: string
   mode?: string
+  /// Wire protocol in a `transport` message (websocket | quic | udp | tcp).
+  protocol?: string
   index?: number
   action?: string
   ok?: boolean
   av1?: boolean
   wire?: number
   decoded?: number
+  /// Emitted with a codec stat: the stream is AV1-only, not AV1 patches.
+  full?: boolean
   from?: string
   ts?: number
   name?: string
@@ -991,12 +1009,17 @@ export class MolinkClient {
             wireBytes: typeof message.wire === 'number' ? message.wire : 0,
             decodedBytes:
               typeof message.decoded === 'number' ? message.decoded : 0,
+            fullFrame: message.full === true,
           })
         }
         break
       case 'transport':
         if (typeof message.mode === 'string') {
-          this.handlers.onTransport?.(message.mode)
+          this.handlers.onTransport?.(
+            message.mode,
+            typeof message.path === 'string' ? message.path : undefined,
+            typeof message.protocol === 'string' ? message.protocol : undefined,
+          )
         }
         break
       case 'error': {
@@ -1188,8 +1211,24 @@ export class MolinkClient {
     // A keyframe with no tiles would mean an empty screen; nothing to draw.
     if (frame.tiles.length === 0) return
 
-    this.noteApplied(frame, tsUs)
-    this.handlers.onFrame?.(frame, byteLength)
+    // A repair (tile refresh) snapshots the host's current pixels. A delta
+    // that was already in flight when the repair was produced has an older
+    // capture timestamp, and painting it would put the stale pixels back.
+    // Skip any tile whose cells already hold newer pixels; the tile clock
+    // repairs the skipped cells if they are genuinely behind.
+    let tiles = frame.tiles
+    if (!refresh) {
+      tiles = frame.tiles.filter((tile) =>
+        !this.tileCellKeys(tile.x, tile.y, tile.w, tile.h).some(
+          (key) => (this.tileAppliedAt.get(key) ?? 0) > tsUs,
+        ),
+      )
+      if (tiles.length === 0) return
+    }
+    const painted = tiles === frame.tiles ? frame : { ...frame, tiles }
+
+    this.noteApplied(painted, tsUs)
+    this.handlers.onFrame?.(painted, byteLength)
   }
 
   /// The host's per-cell freshness map. Cells whose newest pixels are more

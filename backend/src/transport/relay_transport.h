@@ -11,7 +11,7 @@
 #include <thread>
 #include <utility>
 
-#include "transport/session_transport.h"
+#include "transport/relay_session.h"
 
 namespace molink {
 
@@ -21,7 +21,7 @@ namespace molink {
 /// text/binary messages; there is no ICE and no fragmentation. The libuvcpp
 /// WebSocket client owns its own loop, so it runs on a small thread: sends are
 /// queued from the app loop, and inbound messages are posted back to it.
-class relay_transport final : public session_transport {
+class relay_transport final : public relay_session {
  public:
   using post_fn = std::function<void(std::function<void()>)>;
 
@@ -32,7 +32,11 @@ class relay_transport final : public session_transport {
                   bool relay_protocol = true);
   ~relay_transport() override;
 
-  const char* name() const override { return "relay"; }
+  /// The wire protocol to the relay endpoint, not the path: the relay will
+  /// later be able to carry QUIC or another protocol without changing how the
+  /// session is classified.
+  const char* name() const override { return "websocket"; }
+  const char* path() const override { return "relay"; }
   std::string peer_ip() const override { return "relay"; }
   unsigned int peer_port() const override { return 0; }
 

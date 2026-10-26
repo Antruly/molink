@@ -46,15 +46,19 @@ struct encode_options {
   bool compress = true;
   tile_format format = tile_format::bgra;
   compression_effort effort = compression_effort::balanced;
-  /// When set, large changed rectangles are encoded as AV1 and removed from
-  /// the tile payload. The caller must pass the current screen pixels; the
-  /// AV1 patch is returned separately and sent after the base frame.
+  /// When set, changed rectangles are encoded as AV1. In full-frame mode every
+  /// changed rectangle is AV1 and the tile payload is emptied; otherwise only
+  /// large rectangles become a patch and are removed from the tile payload.
+  /// The caller must pass the current screen pixels.
   av1_encoder* av1 = nullptr;
+  /// AV1 carries the whole picture (tiles are only a fallback).
+  bool av1_full_frame = false;
   int av1_qp = 32;
   /// Encode the rectangles as luminance-only (the turbo preset).
   bool av1_grayscale = false;
   /// Cap on the AV1-encoded area per frame, percent of the screen (100 = no
-  /// cap). The uncapped rectangles stay in the tile payload.
+  /// cap). The uncapped rectangles stay in the tile payload. Ignored in
+  /// full-frame mode, which has to encode every changed rectangle.
   int av1_max_area_percent = 100;
   int av1_max_rects = 4;
   /// Minimum rectangle area in pixels; 0 means two capture tiles.
@@ -81,14 +85,15 @@ void build_changed_tiles(const uint8_t* pixels, std::size_t stride,
 /// codec when deflate made the frame smaller. A lossy format is never reverted
 /// to bgra just because zlib did not help; the packed form is still smaller.
 /// `pixels`/`stride` describe the current screen (BGRA) and are only read when
-/// `options.av1` is set. When AV1 applies, the covered rectangles are removed
-/// from @p tiles and a standalone AV1 FRAME payload is written to
-/// @p av1_payload (which may be null to disable AV1 for this call).
+/// `options.av1` is set. In full-frame mode every changed rectangle is encoded
+/// into @p av1_payload, @p tiles is cleared and @p av1_only is set; otherwise
+/// the covered rectangles are removed from @p tiles and the patch is returned
+/// separately. @p av1_payload may be null to disable AV1 for this call.
 bool encode_capture_frame(protocol::frame_header& header,
                           std::vector<protocol::tile_blob>& tiles,
                           const encode_options& options, const uint8_t* pixels,
                           std::size_t stride, std::vector<uint8_t>& payload,
                           std::vector<uint8_t>* av1_payload,
-                          std::string& err);
+                          std::string& err, bool* av1_only = nullptr);
 
 }  // namespace molink

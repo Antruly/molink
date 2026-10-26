@@ -28,6 +28,32 @@ struct app_settings {
   bool service_desired_running = true;
   std::string device_name;
 
+  /// Host-side AV1 encoding. When on, the capture thread encodes the changed
+  /// picture as AV1 and the page paints the core's decode of it.
+  bool av1_enabled = true;
+  /// True: AV1 is the only picture path, so every changed rectangle is AV1 and
+  /// the tile payload is left empty. Tiles are then a pure fallback for
+  /// clients that cannot decode AV1. False keeps the older split, where only
+  /// large rectangles become AV1 patches on top of a tile frame.
+  bool av1_full_frame = true;
+  /// "auto" or an id reported by av1_encoder_devices(): "gpu-nvenc" when an
+  /// AV1-capable NVIDIA driver is present, "cpu-svt" otherwise.
+  std::string av1_device = "auto";
+  /// "auto" | "fast" | "balanced" | "quality". Auto scales the SVT-AV1 preset
+  /// with the detected logical processors.
+  std::string av1_speed = "auto";
+  /// 0 = follow the quality preset, otherwise 1..63 (lower is better).
+  int av1_qp = 0;
+  /// 0 = follow the quality preset, otherwise 1..100 (% of the screen).
+  int av1_max_area_percent = 0;
+  /// 0 = derive from the CPU, otherwise 1..64 encoder threads.
+  int av1_threads = 0;
+
+  /// Host capture keyframe interval in seconds. 0 = off; the built-in 30 s
+  /// safety refresh still runs. 1..60 forces a full keyframe at that cadence
+  /// (1 s is the most real-time, at a large bandwidth cost).
+  int keyframe_interval_seconds = 0;
+
   /// Master switch for the remote directory. Off means LAN/direct only.
   bool server_enabled = true;
   /// Built-in directory is used when this is empty (and the switch is on).

@@ -108,7 +108,7 @@ jobs:
 
       - name: Fetch prebuilt libuvcpp
         shell: bash
-        run: ./packaging/fetch-uvcpp.sh msvc-x64 "${UVCPP_VERSION:-1.8.5}" "$RUNNER_TEMP/uvcpp"
+        run: ./packaging/fetch-uvcpp.sh msvc-x64 "${UVCPP_VERSION:-1.8.6}" "$RUNNER_TEMP/uvcpp"
 
       # The archive has zlib.h but no zlib library; the core compresses tiles
       # itself, so build a static zlib to keep compression in the CI build.

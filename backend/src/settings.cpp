@@ -166,6 +166,25 @@ app_settings load_settings() {
       settings.encrypt_lan = parse_bool(value, false);
     } else if (key == "service_desired_running") {
       settings.service_desired_running = parse_bool(value, true);
+    } else if (key == "av1_enabled") {
+      settings.av1_enabled = parse_bool(value, true);
+    } else if (key == "av1_full_frame") {
+      settings.av1_full_frame = parse_bool(value, true);
+    } else if (key == "av1_device") {
+      settings.av1_device = value.empty() ? "auto" : value;
+    } else if (key == "av1_speed") {
+      if (value == "auto" || value == "fast" || value == "balanced" ||
+          value == "quality") {
+        settings.av1_speed = value;
+      }
+    } else if (key == "av1_qp") {
+      settings.av1_qp = parse_int(value, 0);
+    } else if (key == "av1_max_area_percent") {
+      settings.av1_max_area_percent = parse_int(value, 0);
+    } else if (key == "av1_threads") {
+      settings.av1_threads = parse_int(value, 0);
+    } else if (key == "keyframe_interval_seconds") {
+      settings.keyframe_interval_seconds = parse_int(value, 0);
     } else if (key == "device_name") {
       if (!value.empty()) settings.device_name = value;
     } else if (key == "server_enabled") {
@@ -197,6 +216,18 @@ app_settings load_settings() {
   if (settings.temp_remaining > settings.temp_uses) {
     settings.temp_remaining = settings.temp_uses;
   }
+  if (settings.av1_qp < 0 || settings.av1_qp > 63) settings.av1_qp = 0;
+  if (settings.av1_max_area_percent < 0 ||
+      settings.av1_max_area_percent > 100) {
+    settings.av1_max_area_percent = 0;
+  }
+  if (settings.av1_threads < 0 || settings.av1_threads > 64) {
+    settings.av1_threads = 0;
+  }
+  if (settings.keyframe_interval_seconds < 0 ||
+      settings.keyframe_interval_seconds > 60) {
+    settings.keyframe_interval_seconds = 0;
+  }
   // Discovery cannot be on without remote access.
   if (!settings.allow_remote_access) settings.discovery_enabled = false;
   return settings;
@@ -225,6 +256,15 @@ void save_settings(const app_settings& settings) {
   stream << "encrypt_lan=" << (settings.encrypt_lan ? 1 : 0) << "\n";
   stream << "service_desired_running="
          << (settings.service_desired_running ? 1 : 0) << "\n";
+  stream << "av1_enabled=" << (settings.av1_enabled ? 1 : 0) << "\n";
+  stream << "av1_full_frame=" << (settings.av1_full_frame ? 1 : 0) << "\n";
+  stream << "av1_device=" << settings.av1_device << "\n";
+  stream << "av1_speed=" << settings.av1_speed << "\n";
+  stream << "av1_qp=" << settings.av1_qp << "\n";
+  stream << "av1_max_area_percent=" << settings.av1_max_area_percent << "\n";
+  stream << "av1_threads=" << settings.av1_threads << "\n";
+  stream << "keyframe_interval_seconds="
+         << settings.keyframe_interval_seconds << "\n";
   stream << "device_name=" << settings.device_name << "\n";
   stream << "avatar=" << settings.avatar << "\n";
   stream << "server_enabled=" << (settings.server_enabled ? 1 : 0) << "\n";

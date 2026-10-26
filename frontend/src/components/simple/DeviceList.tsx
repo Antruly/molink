@@ -7,14 +7,17 @@ import {
   List,
   MessageSquare,
   Monitor,
+  PencilLine,
   Star,
   Trash2,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { lookupDevices, type PeerStatus } from '../../lib/api'
 import { platformEmoji } from '../../lib/avatar'
+import { deviceNoteKey } from '../../lib/device-note'
 import { formatRelative } from '../../lib/format'
 import { useAppStore, type SessionIntent } from '../../store/app'
+import { DeviceNoteDialog } from '../DeviceNoteDialog'
 import { Avatar } from './Avatar'
 
 export interface DeviceItem {
@@ -56,10 +59,13 @@ export function DeviceList({
   const saveDevice = useAppStore((state) => state.saveDevice)
   const removeSavedDevice = useAppStore((state) => state.removeSavedDevice)
   const patchSavedDevice = useAppStore((state) => state.patchSavedDevice)
+  const deviceNotes = useAppStore((state) => state.deviceNotes)
+  const setDeviceNote = useAppStore((state) => state.setDeviceNote)
   const historyView = useAppStore((state) => state.historyView)
   const setHistoryView = useAppStore((state) => state.setHistoryView)
 
   const [tab, setTab] = useState<Tab>('recent')
+  const [noteItem, setNoteItem] = useState<DeviceItem | null>(null)
   const [peers, setPeers] = useState<Record<string, PeerStatus>>({})
   const [nowTick, setNowTick] = useState(() => Date.now())
 
@@ -314,6 +320,24 @@ export function DeviceList({
     )
   }
 
+  const noteFor = (item: DeviceItem): string =>
+    deviceNotes[deviceNoteKey(item.label)] ?? ''
+
+  const noteButton = (item: DeviceItem) => (
+    <button
+      type="button"
+      className="grid h-7 w-7 place-items-center rounded-md text-muted transition hover:bg-panel hover:text-ink"
+      title={t('deviceNote.edit')}
+      aria-label={t('deviceNote.edit')}
+      onClick={(event) => {
+        event.stopPropagation()
+        setNoteItem(item)
+      }}
+    >
+      <PencilLine size={13} />
+    </button>
+  )
+
   const starButton = (item: DeviceItem) => {
     const saved = isSaved(item)
     return (
@@ -454,11 +478,14 @@ export function DeviceList({
                     <div className="flex items-center gap-1.5">
                       {onlineDot(item)}
                       <span className="truncate text-[13px] font-medium text-ink">
-                        {item.label}
+                        {noteFor(item) || item.label}
                       </span>
                     </div>
-                    <div className="mt-0.5 truncate font-mono text-[10px] text-muted">
-                      {item.id ? item.id : `${item.host}:${item.port}`}
+                    <div className="mt-0.5 truncate text-[10px] text-muted">
+                      {noteFor(item) ? `${item.label} · ` : ''}
+                      <span className="font-mono">
+                        {item.id ? item.id : `${item.host}:${item.port}`}
+                      </span>
                     </div>
                     <div className="mt-0.5 flex items-center gap-1 text-[10px] text-muted">
                       <span>{platformEmoji(item.platform)}</span>
@@ -472,6 +499,7 @@ export function DeviceList({
                     </div>
                   </div>
                   <div className="flex items-center opacity-0 transition group-hover:opacity-100">
+                    {noteButton(item)}
                     {forgetButton(item)}
                     {starButton(item)}
                   </div>
@@ -482,7 +510,8 @@ export function DeviceList({
                   </span>
                   <div className="flex items-center">
                     {quickActions(item)}
-                    <span className="ml-1 opacity-0 transition group-hover:opacity-100">
+                    <span className="ml-1 flex items-center opacity-0 transition group-hover:opacity-100">
+                      {noteButton(item)}
                       {forgetButton(item)}
                       {starButton(item)}
                     </span>
@@ -522,10 +551,15 @@ export function DeviceList({
                         <div className="min-w-0">
                           <div className="flex items-center gap-1.5">
                             {onlineDot(item)}
-                            <span className="truncate font-medium text-ink">{item.label}</span>
+                            <span className="truncate font-medium text-ink">
+                              {noteFor(item) || item.label}
+                            </span>
                           </div>
-                          <div className="font-mono text-[10px] text-muted">
-                            {item.id || item.host}
+                          <div className="truncate text-[10px] text-muted">
+                            {noteFor(item) ? `${item.label} · ` : ''}
+                            <span className="font-mono">
+                              {item.id || item.host}
+                            </span>
                           </div>
                         </div>
                       </div>
@@ -539,6 +573,7 @@ export function DeviceList({
                     <td>
                       <div className="flex justify-end gap-0.5">
                         {quickActions(item)}
+                        {noteButton(item)}
                         {forgetButton(item)}
                         {starButton(item)}
                       </div>
@@ -585,6 +620,16 @@ export function DeviceList({
           </div>
         </div>
       ) : null}
+
+      <DeviceNoteDialog
+        open={noteItem !== null}
+        name={noteItem?.label ?? ''}
+        value={noteItem ? noteFor(noteItem) : ''}
+        onClose={() => setNoteItem(null)}
+        onSave={(note) => {
+          if (noteItem) setDeviceNote(noteItem.label, note)
+        }}
+      />
     </section>
   )
 }

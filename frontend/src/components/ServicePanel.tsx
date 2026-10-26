@@ -9,7 +9,15 @@ import {
 
 /// Settings view for the optional Windows session service. Starting/stopping
 /// uses the service DACL; install/uninstall still prompt for UAC.
-export function ServicePanel({ token }: { token: string }) {
+/// `showUnavailable` keeps the section visible on platforms without the
+/// service (Linux/macOS) so the entry does not silently disappear.
+export function ServicePanel({
+  token,
+  showUnavailable = false,
+}: {
+  token: string
+  showUnavailable?: boolean
+}) {
   const { t } = useTranslation()
   const [status, setStatus] = useState<ServiceStatus | null>(null)
   const [busy, setBusy] = useState(false)
@@ -48,7 +56,25 @@ export function ServicePanel({ token }: { token: string }) {
     }
   }
 
-  if (!status?.available) return null
+  if (!status) return null
+  if (!status.available) {
+    if (!showUnavailable) return null
+    return (
+      <div className="space-y-2">
+        <div className="flex items-center gap-2 text-[12px] font-medium text-ink">
+          <Server size={14} className="text-accent" />
+          {t('service.panelTitle')}
+        </div>
+        <p className="text-[11px] leading-relaxed text-muted">
+          {t('service.platformUnsupported')}
+        </p>
+      </div>
+    )
+  }
+  const autostart = status.autostart === true
+  const title = autostart
+    ? t('service.autostartTitle')
+    : t('service.panelTitle')
   const state = !status.installed
     ? t('service.notInstalled')
     : status.running
@@ -59,7 +85,7 @@ export function ServicePanel({ token }: { token: string }) {
     <div className="space-y-2">
       <div className="flex items-center gap-2 text-[12px] font-medium text-ink">
         <Server size={14} className="text-accent" />
-        {t('service.panelTitle')}
+        {title}
         <button
           type="button"
           className="btn btn-quiet ml-auto h-7 w-7 !px-0"
@@ -81,7 +107,7 @@ export function ServicePanel({ token }: { token: string }) {
             disabled={busy}
             onClick={() => void act('install')}
           >
-            {t('service.install')}
+            {autostart ? t('service.enableAutostart') : t('service.install')}
           </button>
         ) : (
           <>
@@ -114,14 +140,14 @@ export function ServicePanel({ token }: { token: string }) {
               onClick={() => void act('uninstall')}
             >
               <Trash2 size={12} />
-              {t('service.uninstall')}
+              {autostart ? t('service.disableAutostart') : t('service.uninstall')}
             </button>
           </>
         )}
       </div>
       {note ? <p className="text-[11px] text-warn">{note}</p> : null}
       <p className="text-[11px] leading-relaxed text-muted">
-        {t('service.panelHint')}
+        {autostart ? t('service.autostartHint') : t('service.panelHint')}
       </p>
     </div>
   )

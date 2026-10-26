@@ -85,7 +85,15 @@ export function ServicePrompt() {
     }
   }
 
-  if (!localMode || dismissed || !status?.available || status.installed) {
+  // `autostart` is the Linux systemd login service; the lock-screen prompt
+  // only applies to the Windows session helper.
+  if (
+    !localMode ||
+    dismissed ||
+    !status?.available ||
+    status.autostart ||
+    status.installed
+  ) {
     return null
   }
 

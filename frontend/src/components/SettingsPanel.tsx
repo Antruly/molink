@@ -1,4 +1,16 @@
-import { Copy, Eye, EyeOff, RefreshCw, Server, ShieldCheck, X } from 'lucide-react'
+import {
+  Copy,
+  Eye,
+  EyeOff,
+  Info,
+  Monitor,
+  Network,
+  RefreshCw,
+  Server,
+  Settings2,
+  ShieldCheck,
+  X,
+} from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
@@ -9,6 +21,7 @@ import {
   type ServerConfig,
 } from '../lib/api'
 import { useAppStore } from '../store/app'
+import { AboutPanel } from './AboutPanel'
 import { PreferencesControls } from './PreferencesControls'
 
 function Switch({
@@ -132,7 +145,7 @@ function SecurityControls({
   }
 
   return (
-    <div className="mt-6 space-y-4 border-t border-line-soft pt-4">
+    <div className="space-y-4">
       <div className="flex items-center gap-2 text-[12px] font-medium text-ink">
         <ShieldCheck size={14} className="text-accent" />
         {t('settings.security')}
@@ -510,7 +523,7 @@ function ServerControls() {
   }
 
   return (
-    <div className="mt-6 space-y-3 border-t border-line-soft pt-4">
+    <div className="mt-2 space-y-3 border-t border-line-soft pt-4">
       <div className="flex items-center gap-2 text-[12px] font-medium text-ink">
         <Server size={14} className="text-accent" />
         {t('settings.server')}
@@ -721,17 +734,38 @@ function ServerControls() {
   )
 }
 
+type SettingsSection =
+  | 'general'
+  | 'security'
+  | 'network'
+  | 'display'
+  | 'service'
+  | 'about'
+
+const SETTINGS_SECTIONS: {
+  id: SettingsSection
+  label: string
+  icon: typeof Settings2
+}[] = [
+  { id: 'general', label: 'settings.tabGeneral', icon: Settings2 },
+  { id: 'security', label: 'settings.tabSecurity', icon: ShieldCheck },
+  { id: 'network', label: 'settings.tabNetwork', icon: Network },
+  { id: 'display', label: 'settings.tabDisplay', icon: Monitor },
+  { id: 'service', label: 'settings.tabService', icon: Server },
+  { id: 'about', label: 'settings.tabAbout', icon: Info },
+]
+
 export function SettingsPanel() {
   const { t } = useTranslation()
   const open = useAppStore((state) => state.settingsOpen)
   const setOpen = useAppStore((state) => state.setSettingsOpen)
-  const device = useAppStore((state) => state.device)
   const localMode = useAppStore((state) => state.localMode)
   const security = useAppStore((state) => state.security)
   const refreshSecurity = useAppStore((state) => state.refreshSecurity)
   const saveSecurity = useAppStore((state) => state.saveSecurity)
   const setLongTermCode = useAppStore((state) => state.setLongTermCode)
   const setAuthCode = useAppStore((state) => state.setAuthCode)
+  const [section, setSection] = useState<SettingsSection>('general')
 
   useEffect(() => {
     if (!open) return
@@ -756,9 +790,12 @@ export function SettingsPanel() {
         if (event.target === event.currentTarget) setOpen(false)
       }}
     >
-      <div className="max-h-[90vh] w-full max-w-md overflow-y-auto rounded-2xl border border-line bg-surface p-5 shadow-2xl">
-        <div className="mb-5 flex items-center justify-between">
-          <h2 className="text-base font-semibold">{t('settings.title')}</h2>
+      <div className="flex max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-line bg-surface shadow-2xl">
+        <div className="flex shrink-0 items-center justify-between border-b border-line-soft px-5 py-3">
+          <div className="flex items-center gap-2">
+            <Settings2 size={16} className="text-accent" />
+            <h2 className="text-base font-semibold">{t('settings.title')}</h2>
+          </div>
           <button
             type="button"
             onClick={() => setOpen(false)}
@@ -769,32 +806,79 @@ export function SettingsPanel() {
           </button>
         </div>
 
-        <PreferencesControls />
+        <div className="flex min-h-0 flex-1 flex-col md:flex-row">
+          <nav className="flex shrink-0 gap-1 overflow-x-auto border-b border-line-soft bg-panel/30 p-2 md:w-44 md:flex-col md:border-b-0 md:border-r">
+            {SETTINGS_SECTIONS.map(({ id, label, icon: Icon }) => (
+              <button
+                key={id}
+                type="button"
+                onClick={() => setSection(id)}
+                aria-current={section === id ? 'page' : undefined}
+                className={
+                  'flex shrink-0 items-center gap-2 rounded-lg px-3 py-2 text-left text-[12px] transition ' +
+                  (section === id
+                    ? 'bg-accent-soft font-medium text-accent'
+                    : 'text-muted hover:bg-panel hover:text-ink')
+                }
+              >
+                <Icon size={15} />
+                {t(label)}
+              </button>
+            ))}
+          </nav>
 
-        {localMode && security ? (
-          <SecurityControls
-            key={`${security.allow_remote_access}:${security.allow_web_client}:${security.discovery_enabled}:${security.device_name}:${security.long_term_code}`}
-            settings={security}
-            onSave={saveSecurity}
-            onLongTerm={setLongTermCode}
-            onCustomCode={(uses, value) => setAuthCode('multi', uses, value)}
-          />
-        ) : null}
+          <div className="min-h-0 flex-1 overflow-y-auto p-5">
+            {section === 'general' ? (
+              <PreferencesControls section="general" />
+            ) : null}
 
-        {localMode ? <ServerControls /> : null}
+            {section === 'security' ? (
+              localMode && security ? (
+                <SecurityControls
+                  key={`${security.allow_remote_access}:${security.allow_web_client}:${security.discovery_enabled}:${security.device_name}:${security.long_term_code}`}
+                  settings={security}
+                  onSave={saveSecurity}
+                  onLongTerm={setLongTermCode}
+                  onCustomCode={(uses, value) =>
+                    setAuthCode('multi', uses, value)
+                  }
+                />
+              ) : (
+                <p className="text-[12px] leading-relaxed text-muted">
+                  {t('settings.localOnly')}
+                </p>
+              )
+            ) : null}
 
-        <div className="mt-6 border-t border-line-soft pt-4 text-[11px] leading-relaxed text-muted">
-          <div className="flex justify-between">
-            <span>{t('settings.version')}</span>
-            <span className="font-mono">{device?.version ?? '—'}</span>
-          </div>
-          <div className="mt-1 flex justify-between">
-            <span>{t('settings.protocol')}</span>
-            <span className="font-mono">v1</span>
-          </div>
-          <div className="mt-1 flex justify-between">
-            <span>{t('settings.license')}</span>
-            <span>MIT</span>
+            {section === 'network' ? (
+              localMode ? (
+                <div className="space-y-5">
+                  <PreferencesControls section="network" />
+                  <ServerControls />
+                </div>
+              ) : (
+                <p className="text-[12px] leading-relaxed text-muted">
+                  {t('settings.localOnly')}
+                </p>
+              )
+            ) : null}
+
+            {section === 'display' ? (
+              <PreferencesControls section="display" />
+            ) : null}
+
+            {section === 'service' ? (
+              localMode ? (
+                <PreferencesControls section="service" />
+              ) : (
+                <p className="text-[12px] leading-relaxed text-muted">
+                  {t('settings.localOnly')}
+                </p>
+              )
+            ) : null}
+
+            {section === 'about' ? <AboutPanel /> : null}
+
           </div>
         </div>
       </div>

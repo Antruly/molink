@@ -27,6 +27,13 @@
 #include <webapp/uvcpp_web_app.h>
 #include <webapp/uvcpp_web_json.h>
 
+#ifndef MOLINK_HAVE_NVENC
+#define MOLINK_HAVE_NVENC 0
+#endif
+#if MOLINK_HAVE_NVENC
+#include "capture/nvenc_av1_encoder.h"
+#endif
+
 #include "config.h"
 #include "discovery.h"
 #include "identity.h"
@@ -230,9 +237,13 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
     // headers. Gating the HTML entry point plus the state/device/login APIs is
     // enough; a browser cannot use the UI without the HTML and cannot obtain a
     // session token without the client token.
+    // /api/transports is the capability advertisement peer cores fetch before
+    // they open a data channel; gating it behind the shell token would make
+    // core-to-core transport negotiation impossible. It exposes only ports
+    // and availability, which /healthz already implies.
     const bool gated = path == "/" || path == "/index.html" ||
                        path == "/api/state" || path == "/api/login" ||
-                       path == "/api/device" || path == "/api/transports";
+                       path == "/api/device";
     const std::string* query_client = req.query("client");
     const bool token_ok =
         req.header("X-MoLink-Client") == deps.client_token ||
@@ -274,8 +285,7 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
     const bool ui_or_login =
         path == "/healthz" ? false
                            : ((!api && !websocket) || path == "/api/state" ||
-                              path == "/api/login" ||
-                              path == "/api/transports");
+                              path == "/api/login");
     if (!ui_or_login) {
       next();
       return;
@@ -484,7 +494,7 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
   // pick the first transport it supports. Reserved entries are advertised with
   // available=false so clients do not try a port this build does not listen on.
   app.get("/api/transports",
-          [deps](uvcpp_web_request&, uvcpp_web_response& resp,
+          [deps](uvcpp_web_request& req, uvcpp_web_response& resp,
                  uvcpp_web_next) {
             const int web_port = effective_port(deps);
             const auto port_of = [&deps](std::atomic<int> network_settings::*field,
@@ -509,6 +519,15 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
               j["preferred"].push_back(name);
             }
             j["web"]["path"] = "/ws/session";
+            // Public material for cert pinning on the data channels. The
+            // fingerprint is checked by the client before the PEM becomes a
+            // trusted CA; exposing a public certificate is harmless.
+            if (!deps.cert_fingerprint.empty()) {
+              j["tls_fingerprint"] = deps.cert_fingerprint;
+            }
+            if (!deps.tls_cert_pem.empty()) {
+              j["tls_cert"] = deps.tls_cert_pem;
+            }
             j["ports"]["web"] = web_port;
             j["ports"]["http3"] = http3_port;
             j["ports"]["quic"] = quic_port;
@@ -529,14 +548,22 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
             };
             add("websocket", "web", true, false, web_port,
                 "browser baseline; /ws/session");
-            add("http2", "api", deps.http2_available, false, web_port,
-                "h2c prior knowledge on the web port");
-            add("http3", "api", false, true, http3_port,
-                "needs TLS + QUIC front-end");
-            add("quic", "data", false, true, quic_port,
-                "direct data channel (planned)");
-            add("tcp", "data", false, false, tcp_data_port,
-                "direct data channel (planned)");
+            add("http2", "data", deps.http2_available, false, web_port,
+                "WebSocket over HTTP/2 (RFC 8441) on the web port");
+            add("http3", "data",
+                deps.http3_available && deps.http3_available->load(), true,
+                http3_port, "WebSocket over HTTP/3 (RFC 9220)");
+            // While remote access is off the listener stays on loopback, so
+            // only a loopback caller can actually reach it.
+            const bool quic_reachable =
+                deps.quic_available && deps.quic_available->load() &&
+                (is_loopback_peer(req.peer_ip()) ||
+                 (deps.auth && deps.auth->settings().allow_remote_access));
+            add("quic", "data", quic_reachable, true, quic_port,
+                "MOLK session stream over QUIC");
+            add("tcp", "data",
+                deps.tcp_available && deps.tcp_available->load(), true,
+                tcp_data_port, "MOLK session stream over TLS/TCP");
             add("udp", "data", false, false, udp_port,
                 "direct data channel (planned)");
             resp.set_header("Cache-Control", "no-store").json(j);
@@ -1217,6 +1244,8 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
             j["desired"] =
                 deps.auth ? deps.auth->settings().service_desired_running
                           : true;
+            j["platform"] = status.platform;
+            j["autostart"] = status.autostart;
             if (!status.error.empty()) j["error"] = status.error;
             resp.set_header("Cache-Control", "no-store").json(j);
             resp.end();
@@ -1279,6 +1308,184 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
            [service_action](uvcpp_web_request& req, uvcpp_web_response& resp,
                             uvcpp_web_next) {
              service_action(req, resp, "restart");
+           });
+
+  // ---- AV1 encoder settings -------------------------------------------
+  // Host-only: the encoder lives on the machine producing the picture. The
+  // active quality preset still supplies the defaults, so "auto" keeps the
+  // adaptive behaviour and the explicit values only override it.
+  auto encoding_json = [deps]() {
+    uvcpp_json j;
+    const app_settings settings =
+        deps.auth ? deps.auth->settings() : app_settings{};
+    j["available"] = av1_encode_available();
+    j["enabled"] = settings.av1_enabled;
+    j["full_frame"] = settings.av1_full_frame;
+    j["device"] = settings.av1_device;
+    j["speed"] = settings.av1_speed;
+    j["qp"] = settings.av1_qp;
+    j["max_area_percent"] = settings.av1_max_area_percent;
+    j["threads"] = settings.av1_threads;
+    j["keyframe_interval_seconds"] = settings.keyframe_interval_seconds;
+    j["devices"] = uvcpp_json::array();
+    for (const av1_encoder_device& device : av1_encoder_devices()) {
+      uvcpp_json item;
+      item["id"] = device.id;
+      item["name"] = device.name;
+      item["hardware"] = device.hardware;
+      item["available"] = device.available;
+      if (!device.detail.empty()) item["detail"] = device.detail;
+      j["devices"].push_back(std::move(item));
+    }
+    if (deps.capture) {
+      const quality_mode mode = deps.capture->quality();
+      const quality_profile profile = quality_profile_for(mode);
+      j["active_quality"] = quality_mode_name(mode);
+      uvcpp_json effective;
+      effective["speed"] = settings.av1_speed;
+      bool hardware = false;
+      for (const av1_encoder_device& device : av1_encoder_devices()) {
+        if (!device.hardware || !device.available) continue;
+        if (settings.av1_device == "auto" ||
+            settings.av1_device == device.id) {
+          hardware = true;
+          break;
+        }
+      }
+      effective["hardware"] = hardware;
+      int enc_mode =
+          av1_enc_mode_for(settings.av1_speed, settings.av1_threads);
+      if (hardware) {
+#if MOLINK_HAVE_NVENC
+        enc_mode = nvenc_preset_for(settings.av1_speed);
+#else
+        enc_mode = 0;
+#endif
+      }
+      effective["enc_mode"] = enc_mode;
+      effective["threads"] =
+          hardware ? 0 : av1_threads_for(settings.av1_threads);
+      effective["qp"] = settings.av1_qp >= 1 && settings.av1_qp <= 63
+                            ? settings.av1_qp
+                            : profile.av1_qp;
+      // Full-frame AV1 must cover every changed rectangle, so the area cap
+      // does not apply there.
+      effective["max_area_percent"] =
+          settings.av1_full_frame
+              ? 100
+              : (settings.av1_max_area_percent >= 1 &&
+                         settings.av1_max_area_percent <= 100
+                     ? settings.av1_max_area_percent
+                     : profile.av1_max_area_percent);
+      j["effective"] = effective;
+    }
+    return j;
+  };
+  app.get("/api/encoding",
+          [encoding_json](uvcpp_web_request& req, uvcpp_web_response& resp,
+                          uvcpp_web_next) {
+            if (!is_loopback_peer(req.peer_ip())) {
+              resp.status(403).json_str(R"({"code":"loopback_only"})");
+              resp.end();
+              return;
+            }
+            resp.set_header("Cache-Control", "no-store").json(encoding_json());
+            resp.end();
+          });
+  app.post("/api/encoding",
+           [deps, encoding_json](uvcpp_web_request& req,
+                                 uvcpp_web_response& resp,
+                                 uvcpp_web_next) {
+             if (!is_loopback_peer(req.peer_ip())) {
+               resp.status(403).json_str(R"({"code":"loopback_only"})");
+               resp.end();
+               return;
+             }
+             if (!deps.auth) {
+               resp.status(503).json_str(
+                   R"({"code":"settings_unavailable"})");
+               resp.end();
+               return;
+             }
+             const app_settings before = deps.auth->settings();
+             auto query_bool = [&req](const char* name, bool fallback) {
+               const std::string* value = req.query(name);
+               if (value == nullptr) return fallback;
+               return *value == "1" || *value == "true" ||
+                      *value == "yes";
+             };
+             auto query_int = [&req](const char* name, int fallback) {
+               const std::string* value = req.query(name);
+               if (value == nullptr) return fallback;
+               try {
+                 return std::stoi(*value);
+               } catch (...) {
+                 return fallback;
+               }
+             };
+             const bool enabled = query_bool("enabled", before.av1_enabled);
+             const bool full_frame =
+                 query_bool("full_frame", before.av1_full_frame);
+             const std::string* device_value = req.query("device");
+             std::string device =
+                 device_value != nullptr ? *device_value : before.av1_device;
+             const std::string* speed_value = req.query("speed");
+             std::string speed =
+                 speed_value != nullptr ? *speed_value : before.av1_speed;
+             const int qp = query_int("qp", before.av1_qp);
+             const int max_area =
+                 query_int("max_area_percent", before.av1_max_area_percent);
+             const int threads = query_int("threads", before.av1_threads);
+             const int keyframe_interval = query_int(
+                 "keyframe_interval_seconds",
+                 before.keyframe_interval_seconds);
+
+             if (speed != "auto" && speed != "fast" && speed != "balanced" &&
+                 speed != "quality") {
+               resp.status(400).json_str(R"({"code":"invalid_speed"})");
+               resp.end();
+               return;
+             }
+             if (qp < 0 || qp > 63 || max_area < 0 || max_area > 100 ||
+                 threads < 0 || threads > 64 || keyframe_interval < 0 ||
+                 keyframe_interval > 60) {
+               resp.status(400).json_str(R"({"code":"invalid_av1_params"})");
+               resp.end();
+               return;
+             }
+             bool known_device = device == "auto";
+             for (const av1_encoder_device& candidate :
+                  av1_encoder_devices()) {
+               if (candidate.id == device && candidate.available) {
+                 known_device = true;
+                 break;
+               }
+             }
+             // Keep a saved CPU choice valid on a build without SVT-AV1, so
+             // the preference survives a reinstall of the same core.
+             if (!known_device && device == "cpu-svt") known_device = true;
+             if (!known_device) {
+               resp.status(400).json_str(R"({"code":"invalid_device"})");
+               resp.end();
+               return;
+             }
+             deps.auth->set_av1_encoding(enabled, device, speed, qp,
+                                         max_area, threads, full_frame);
+             deps.auth->set_keyframe_interval_seconds(keyframe_interval);
+             if (deps.capture) {
+               av1_encoding_settings applied;
+               applied.device = device;
+               applied.speed = speed;
+               applied.qp = qp;
+               applied.max_area_percent = max_area;
+               applied.threads = threads;
+               applied.full_frame = full_frame;
+               deps.capture->set_av1_settings(applied);
+               deps.capture->set_keyframe_interval_ms(
+                   keyframe_interval > 0 ? keyframe_interval * 1000 : 30000);
+             }
+             resp.set_header("Cache-Control", "no-store").json(encoding_json());
+             resp.end();
            });
 
   app.get("/api/settings",
@@ -1352,6 +1559,13 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
              deps.auth->set_allow_access_requests(access_requests);
              deps.auth->set_transport_security(encrypt_remote, encrypt_lan);
              const app_settings after = deps.auth->settings();
+             if (deps.on_access_changed &&
+                 after.allow_remote_access != before.allow_remote_access) {
+               // The QUIC listener cannot attribute a UDP peer, so it binds
+               // loopback while remote access is off and moves to the
+               // configured interface when the switch flips.
+               deps.on_access_changed(after.allow_remote_access);
+             }
              if (deps.discovery) {
                deps.discovery->set_enabled(after.allow_remote_access &&
                                            after.discovery_enabled);
@@ -1641,6 +1855,10 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
             j["capabilities"]["synthetic_frames"] =
                 deps.capture != nullptr && !deps.capture->is_real();
             j["capabilities"]["websocket"] = true;
+            j["capabilities"]["quic"] =
+                deps.quic_available && deps.quic_available->load();
+            j["capabilities"]["http3"] =
+                deps.http3_available && deps.http3_available->load();
             if (deps.input) {
               j["input"]["backend"] = deps.input->backend();
               j["input"]["available"] = deps.input->available();

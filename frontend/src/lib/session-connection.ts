@@ -9,6 +9,10 @@ import {
 } from './client'
 import type { Frame } from './protocol'
 import { ClipboardFileSync } from './clipboard-sync'
+import {
+  applyFrameToSession,
+  forgetSessionScreenBuffer,
+} from './screen-buffer'
 
 export interface Stats {
   /** Frames that were actually painted in the last second. */
@@ -34,6 +38,8 @@ export interface TabPatch {
   transport?: string
   /// The client core decoded an AV1 patch within the last few seconds.
   av1Active?: boolean
+  /// True when the wire carries AV1 only, not AV1 patches over a tile image.
+  av1Full?: boolean
   av1WireBytes?: number
   av1DecodedBytes?: number
   notice?: string | null
@@ -86,7 +92,8 @@ export class SessionConnection {
   /// have checked "force relay").
   private forceRelay = false
   /// The active tab keeps the full-rate pull loop in SessionView; every other
-  /// live tab pulls slowly here so it stays current without painting.
+  /// live tab pulls slowly here. Frames still land in that session's composited
+  /// buffer, so switching back is instant instead of a black canvas.
   private foreground = true
   private backgroundTimer: number | null = null
   /// Files copied on this machine are pushed to every remote session, in the
@@ -96,7 +103,12 @@ export class SessionConnection {
   private fileSyncPaused = false
   private readonly listeners = new Set<SessionEventListener>()
 
-  constructor(private readonly sink: SessionSink) {
+  constructor(
+    private readonly sink: SessionSink,
+    /// Tab id owning the composited back buffer. It outlives this component,
+    /// so a tab switch can paint immediately.
+    private readonly sessionKey = '',
+  ) {
     this.client.setHandlers({
       onPhase: (phase, detail) => {
         if (phase === 'error') {
@@ -176,6 +188,10 @@ export class SessionConnection {
         }
       },
       onFrame: (frame, bytes) => {
+        // Compose into the session buffer even while the tab is in the
+        // background: the pull loop keeps every live tab current, and a
+        // switch then shows the last picture instead of an empty canvas.
+        applyFrameToSession(this.sessionKey, frame)
         const now = performance.now()
         this.frames += 1
         this.frameTimes.push(now)
@@ -188,13 +204,19 @@ export class SessionConnection {
       },
       onError: (message, code) =>
         this.sink.onPatch({ error: message, errorCode: code ?? null, notice: null }),
-      onTransport: (mode) => this.sink.onPatch({ transport: mode }),
+      onTransport: (mode, path, protocol) =>
+        this.sink.onPatch({
+          transport: mode,
+          ...(path ? { path } : {}),
+          ...(protocol ? { protocol } : {}),
+        }),
       onCodec: (info) => {
         // Patches arrive continuously while a lossy preset is in use; the
         // badge disappears if none have arrived for five seconds.
         if (this.av1Timer !== null) window.clearTimeout(this.av1Timer)
         this.sink.onPatch({
           av1Active: true,
+          av1Full: info.fullFrame,
           av1WireBytes: info.wireBytes,
           av1DecodedBytes: info.decodedBytes,
         })
@@ -354,6 +376,7 @@ export class SessionConnection {
     this.byteWindow = []
     this.latency = null
     this.stopAv1Indicator()
+    forgetSessionScreenBuffer(this.sessionKey)
     this.frames = 0
     this.lastWirePatch = 0
     this.sink.onPatch({
@@ -384,17 +407,18 @@ export class SessionConnection {
   }
 
   /// Called when this tab becomes (or stops being) the visible one. The
-  /// inactive tabs keep pulling at 1 fps so their frame in the store stays
-  /// current and the session never goes idle; only the foreground view pulls
-  /// at full rate.
+  /// inactive tabs keep pulling at 1 fps so their back buffer and stored frame
+  /// stay current and the session never goes idle; only the foreground view
+  /// pulls at full rate.
   setForeground(active: boolean): void {
     if (this.foreground === active) return
     this.foreground = active
     if (active) {
       this.stopBackgroundPull()
-      // The full-rate pull loop is owned by SessionView; ask for a fresh
-      // keyframe so the switch shows a complete picture immediately.
-      this.client.requestKeyframe()
+      // The full-rate pull loop is owned by SessionView. The session buffer
+      // already holds the last picture, so a fresh frame is enough: forcing a
+      // keyframe here made every tab switch re-encode the whole screen (and a
+      // full-screen AV1 keyframe is expensive on the host).
       this.client.requestFrame()
       // Focus also pulls the remote clipboard once, so a text copied while
       // this tab was in the background becomes available locally.

@@ -253,6 +253,27 @@ void auth_state::set_service_desired_running(bool enabled) {
   persist_locked();
 }
 
+void auth_state::set_av1_encoding(bool enabled, std::string device,
+                                  std::string speed, int qp,
+                                  int max_area_percent, int threads,
+                                  bool full_frame) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  settings_.av1_enabled = enabled;
+  settings_.av1_full_frame = full_frame;
+  settings_.av1_device = std::move(device);
+  settings_.av1_speed = std::move(speed);
+  settings_.av1_qp = qp;
+  settings_.av1_max_area_percent = max_area_percent;
+  settings_.av1_threads = threads;
+  persist_locked();
+}
+
+void auth_state::set_keyframe_interval_seconds(int seconds) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  settings_.keyframe_interval_seconds = seconds;
+  persist_locked();
+}
+
 bool auth_state::set_server(std::string url, std::string invite,
                             std::string ca, bool enabled, std::string& err) {
   auto trim = [](std::string value) {

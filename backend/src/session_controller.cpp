@@ -245,19 +245,35 @@ bool send_frame_payload(session_transport* transport,
   return true;
 }
 
-/// Sends one captured frame and, when the client can decode it, the AV1 patch
-/// for its large changed rectangles. The patch follows the base frame because
-/// the page applies it as a tile refresh over the image just painted.
-void send_frame_with_av1(session_transport* transport,
+/// Sends one captured frame.
+///
+/// In full-frame AV1 mode the captured picture is the AV1 payload alone; the
+/// base tile payload is empty and is not sent, so the wire never carries the
+/// same image twice. In the older split mode the tile frame goes first and the
+/// AV1 patch follows as a tile refresh over the image just painted.
+///
+/// Returns false when the frame could not be given to this session at all
+/// (an AV1-only picture for a viewer that cannot decode AV1).
+bool send_frame_with_av1(session_transport* transport,
                          const std::shared_ptr<session_info>& session,
                          const captured_frame& frame) {
-  send_frame_payload(transport, session,
-                     frame.keyframe ? protocol::kPacketFlagKeyframe : 0,
-                     frame.ts_us, frame.payload);
+  if (frame.av1_only) {
+    if (!session->av1 || frame.av1_payload.empty()) return false;
+    return send_frame_payload(
+        transport, session,
+        frame.keyframe ? protocol::kPacketFlagKeyframe : 0, frame.ts_us,
+        frame.av1_payload);
+  }
+  if (!send_frame_payload(transport, session,
+                          frame.keyframe ? protocol::kPacketFlagKeyframe : 0,
+                          frame.ts_us, frame.payload)) {
+    return false;
+  }
   if (session->av1 && !frame.av1_payload.empty()) {
     send_frame_payload(transport, session, protocol::kPacketFlagTileRefresh,
                        frame.ts_us, frame.av1_payload);
   }
+  return true;
 }
 
 /// A frame with no tiles. It still advances the wire sequence, which tells the
@@ -518,17 +534,24 @@ void send_capture_frame(session_transport* transport,
              s <= latest->seq && rects.size() < 64; ++s) {
           const auto missed = opt.capture->find(s);
           if (!missed) continue;
-          protocol::parsed_frame parsed;
-          std::string parse_error;
-          if (!protocol::parse_frame_payload(missed->payload.data(),
-                                             missed->payload.size(), parsed,
-                                             parse_error)) {
-            continue;
-          }
-          for (const auto& tile : parsed.tiles) {
-            if (rects.size() >= 64) break;
-            rects.push_back({tile.x, tile.y, tile.w, tile.h});
-          }
+          // The base payload has the AV1 rectangles removed. Include the
+          // patch's rectangles too, otherwise the cheap recovery skips
+          // exactly the largest changed areas.
+          auto collect = [&rects](const std::vector<uint8_t>& payload) {
+            if (payload.empty()) return;
+            protocol::parsed_frame parsed;
+            std::string parse_error;
+            if (!protocol::parse_frame_payload(payload.data(), payload.size(),
+                                               parsed, parse_error)) {
+              return;
+            }
+            for (const auto& tile : parsed.tiles) {
+              if (rects.size() >= 64) break;
+              rects.push_back({tile.x, tile.y, tile.w, tile.h});
+            }
+          };
+          collect(missed->payload);
+          collect(missed->av1_payload);
         }
         std::string refresh_error;
         if (send_tile_refresh(transport, session, opt, rects,
@@ -541,6 +564,17 @@ void send_capture_frame(session_transport* transport,
       session->last_capture_seq = -1;
       opt.capture->request_keyframe();
       send_empty_frame(transport, session, latest->width, latest->height, false);
+      return;
+    }
+    if (frame->av1_only && !session->av1) {
+      // A viewer that cannot decode AV1 joined while the capture was already
+      // building AV1-only frames. Drop back to "no picture" so the next poll
+      // replays a tile keyframe; the supervisor turns AV1 off for the next
+      // capture because not every session supports it.
+      session->has_image = false;
+      session->last_capture_seq = -1;
+      opt.capture->request_keyframe();
+      send_empty_frame(transport, session, frame->width, frame->height, false);
       return;
     }
     session->last_capture_seq = seq;
@@ -563,10 +597,25 @@ void send_welcome(session_transport* transport, const session_info& session,
   j["protocol"] = protocol::kProtocolVersion;
   j["service"] = MOLINK_CORE_SERVICE;
   j["version"] = opt.version;
+  // `transport` stays the wire protocol for older clients; `transport_path`
+  // is the orthogonal axis (direct / p2p / relay), so a relayed QUIC session
+  // reads as path=relay, protocol=quic.
   j["transport"] = transport->name();
+  j["transport_path"] = transport->path();
+  // The host's alternatives, not just the protocol this session happened to
+  // use: a QUIC session still has the WebSocket door for older clients.
   j["transports"] = uvcpp_json::array();
-  j["transports"].push_back(transport->name());
-  if (opt.http2_available && std::string(transport->name()) == "websocket") {
+  j["transports"].push_back("websocket");
+  if (opt.quic_available && opt.quic_available->load()) {
+    j["transports"].push_back("quic");
+  }
+  if (opt.tcp_available && opt.tcp_available->load()) {
+    j["transports"].push_back("tcp");
+  }
+  if (opt.http3_available && opt.http3_available->load()) {
+    j["transports"].push_back("http3");
+  }
+  if (opt.http2_available) {
     j["transports"].push_back("http2");
   }
   const int web_port = opt.bound_port ? opt.bound_port->load() : 0;
@@ -631,14 +680,18 @@ void send_welcome(session_transport* transport, const session_info& session,
   if (!opt.cert_fingerprint.empty()) {
     j["tls_fingerprint"] = opt.cert_fingerprint;
   }
-  // e2e: direct WSS to this host's certificate; relay: the directory's outer
-  // WSS only; none: plain direct/LAN or raw P2P control.
+  // e2e: direct TLS to this host's certificate (WSS, or QUIC which is always
+  // TLS); relay: the directory's outer TLS only; none: plain direct/LAN or raw
+  // P2P control.
   const std::string transport_name = transport->name();
+  const std::string transport_path = transport->path();
   std::string security = "none";
-  if (opt.tls_enabled && transport_name == "websocket") {
-    security = "e2e";
-  } else if (transport_name == "relay") {
+  if (transport_path == "relay") {
     security = "relay";
+  } else if (transport_name == "quic" || transport_name == "http3" ||
+             transport_name == "tcp" ||
+             (opt.tls_enabled && transport_name == "websocket")) {
+    security = "e2e";
   }
   j["security"] = security;
   std::string welcome_name = opt.device_name;
@@ -1791,7 +1844,11 @@ void session_supervisor::run() {
           break;
         }
       }
-      const bool allow = live && all_av1;
+      // The host settings page can switch AV1 off entirely; it still only
+      // runs when every watching client can decode it.
+      const bool enabled =
+          !options_.auth || options_.auth->settings().av1_enabled;
+      const bool allow = enabled && live && all_av1;
       if (std::getenv("MOLINK_AV1_LOG") != nullptr && allow != av1_allowed_) {
         std::fprintf(stderr, "host: av1 allowed=%d\n", allow ? 1 : 0);
         av1_allowed_ = allow;

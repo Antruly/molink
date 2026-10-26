@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <cstdio>
 #include <deque>
 #include <memory>
 #include <mutex>
@@ -40,7 +41,8 @@ struct quality_profile {
   bool av1_grayscale = false;
   /// Upper bound on the AV1-encoded area per frame, as a percentage of the
   /// screen. Encoding a full 2520x1680 frame at a near-lossless QP cannot fit
-  /// a capture frame budget, so the rest stays on the tile path.
+  /// a capture frame budget, so the rest stays on the tile path. Ignored by
+  /// full-frame mode, where every changed rectangle must be covered.
   int av1_max_area_percent = 100;
   /// Raise the configured change threshold to at least this value (0 = leave).
   int minimum_change_threshold = 0;
@@ -68,9 +70,15 @@ struct captured_frame {
   uint16_t tile_h = 0;
   uint8_t codec = 0;  ///< protocol::codec of the payload
   std::vector<uint8_t> payload;
-  /// Optional AV1 patch for large changed rectangles (a complete FRAME
-  /// payload with codec::av1). Empty when AV1 is off or nothing qualified.
+  /// Optional AV1 picture (a complete FRAME payload with codec::av1). Covers
+  /// every changed rectangle when full-frame AV1 is on, otherwise only the
+  /// large ones that were removed from `payload`. Empty when AV1 is off or
+  /// nothing qualified.
   std::vector<uint8_t> av1_payload;
+  /// True when `av1_payload` is the whole picture and `payload` carries no
+  /// tiles. The session then sends only the AV1 packet; sending both would
+  /// waste the link on a duplicate image.
+  bool av1_only = false;
 };
 
 /// The pointer cursor as the display reports it. Cursor pixels are not part of
@@ -127,6 +135,20 @@ struct capture_options {
   int display_index = 0;
 };
 
+/// Host-level AV1 knobs from the settings page. `qp` and `max_area_percent`
+/// are 0 when the active quality preset should decide.
+struct av1_encoding_settings {
+  std::string device = "auto";
+  std::string speed = "auto";
+  int qp = 0;
+  int max_area_percent = 0;
+  int threads = 0;
+  /// AV1-only frames: every changed rectangle goes through the AV1 encoder and
+  /// the tile payload is empty. Tiles are then only used when AV1 cannot run
+  /// (no encoder, a viewer without a decoder, or an encode failure).
+  bool full_frame = true;
+};
+
 /// Picks a tile edge from the detected CPU width: smaller tiles spread updates
 /// more evenly and lower latency on strong machines; larger tiles reduce
 /// per-tile overhead on weak ones.
@@ -175,6 +197,17 @@ class capture_source {
   /// also be a lossy one, since AV1 cannot preserve pixels bit-exactly.
   virtual void set_av1_allowed(bool allowed) { (void)allowed; }
 
+  /// Host preference for the AV1 encoder (device, speed, QP and area caps).
+  /// Applied on the capture thread with the next frame.
+  virtual void set_av1_settings(const av1_encoding_settings& settings) {
+    (void)settings;
+  }
+
+  /// Forced full-keyframe cadence in milliseconds. 0 disables it; backends may
+  /// still run their built-in safety refresh. 1000 means one keyframe per
+  /// second (the most real-time, at a large bandwidth cost).
+  virtual void set_keyframe_interval_ms(int ms) { (void)ms; }
+
   /// Per-128px-cell capture timestamps of the newest pixels, as a binary
   /// tile-clock payload. False when the source has no grid yet.
   virtual bool tile_clock(std::vector<uint8_t>& out) {
@@ -212,6 +245,11 @@ class capture_source {
 
   /// True when frames come from a real display rather than the test pattern.
   virtual bool is_real() const = 0;
+
+  /// True only for the Windows secure-desktop helper. Normal desktop sessions
+  /// prefer DXGI even when the service is installed; the helper is reserved
+  /// for Winlogon/the lock screen, where DXGI cannot capture.
+  virtual bool is_secure_desktop() const { return false; }
 
   virtual capture_stats stats() const = 0;
 
@@ -269,25 +307,78 @@ class capture_base : public capture_source {
   void set_av1_allowed(bool allowed) override {
     av1_allowed_.store(allowed);
   }
+  void set_av1_settings(const av1_encoding_settings& settings) override {
+    std::lock_guard<std::mutex> lock(av1_settings_mutex_);
+    av1_settings_ = settings;
+  }
+  void set_keyframe_interval_ms(int ms) override {
+    periodic_keyframe_ms_.store(ms < 0 ? 0 : ms);
+  }
+  /// The forced cadence; backends fall back to 30 s when this is 0.
+  int periodic_keyframe_ms() const { return periodic_keyframe_ms_.load(); }
   /// Encoder to use for this frame, or nullptr when AV1 is off. Only the
   /// capture thread calls this, so the lazily created encoder needs no lock.
-  /// The lossless presets never use AV1, and the monochrome turbo preset keeps
-  /// its colour out of it.
+  /// A device/speed/thread change recreates it on the next frame.
   av1_encoder* av1_for_frame() {
     if (!av1_allowed_.load()) return nullptr;
-    if (!av1_encoder_) {
-      std::string error;
-      av1_encoder_ = make_av1_encoder(&error);
+    av1_encoding_settings settings;
+    {
+      std::lock_guard<std::mutex> lock(av1_settings_mutex_);
+      settings = av1_settings_;
+    }
+    const bool same_config =
+        encoder_configured_ && settings.device == encoder_device_ &&
+        settings.speed == encoder_speed_ &&
+        settings.threads == encoder_threads_;
+    if (av1_encoder_ && same_config) return av1_encoder_.get();
+    if (!av1_encoder_ && same_config) return nullptr;
+    av1_encoder_.reset();
+    av1_encoder_config config;
+    config.device = settings.device;
+    config.speed = settings.speed;
+    config.threads = settings.threads;
+    std::string error;
+    av1_encoder_ = make_av1_encoder(config, &error);
+    encoder_configured_ = true;
+    encoder_device_ = settings.device;
+    encoder_speed_ = settings.speed;
+    encoder_threads_ = settings.threads;
+    if (!av1_encoder_ && !error.empty()) {
+      std::fprintf(stderr, "molink: %s\n", error.c_str());
     }
     return av1_encoder_.get();
   }
   int quality_av1_qp() const {
+    av1_encoding_settings settings;
+    {
+      std::lock_guard<std::mutex> lock(av1_settings_mutex_);
+      settings = av1_settings_;
+    }
+    if (settings.qp >= 1 && settings.qp <= 63) return settings.qp;
     return quality_profile_for(quality_.load()).av1_qp;
   }
   bool quality_av1_grayscale() const {
     return quality_profile_for(quality_.load()).av1_grayscale;
   }
+  /// True when AV1 should carry the entire picture instead of only patches.
+  bool quality_av1_full_frame() const {
+    av1_encoding_settings settings;
+    {
+      std::lock_guard<std::mutex> lock(av1_settings_mutex_);
+      settings = av1_settings_;
+    }
+    return settings.full_frame;
+  }
   int quality_av1_max_area_percent() const {
+    av1_encoding_settings settings;
+    {
+      std::lock_guard<std::mutex> lock(av1_settings_mutex_);
+      settings = av1_settings_;
+    }
+    if (settings.max_area_percent >= 1 &&
+        settings.max_area_percent <= 100) {
+      return settings.max_area_percent;
+    }
     return quality_profile_for(quality_.load()).av1_max_area_percent;
   }
 
@@ -325,8 +416,18 @@ class capture_base : public capture_source {
   std::atomic<int> target_fps_{15};
   std::atomic<quality_mode> quality_{quality_mode::balanced};
   std::atomic<bool> av1_allowed_{false};
+  /// Forced keyframe cadence; 0 means the backends' 30 s safety refresh only.
+  std::atomic<int> periodic_keyframe_ms_{30000};
+  /// Settings arrive from the API thread; the capture thread copies them.
+  mutable std::mutex av1_settings_mutex_;
+  av1_encoding_settings av1_settings_;
   /// Created lazily on the capture thread the first time AV1 is allowed.
   std::shared_ptr<av1_encoder> av1_encoder_;
+  /// The configuration the current encoder (or failed attempt) was built for.
+  bool encoder_configured_ = false;
+  std::string encoder_device_;
+  std::string encoder_speed_;
+  int encoder_threads_ = 0;
   /// Newest capture timestamp per 128 px cell, protected by mutex_.
   std::vector<uint64_t> cell_clock_;
   uint16_t clock_cols_ = 0;

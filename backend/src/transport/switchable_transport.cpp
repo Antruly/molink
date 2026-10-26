@@ -51,6 +51,16 @@ bool is_compensation_text(const std::string& text) {
          text.find("\"type\":\"request-keyframe\"") != std::string::npos;
 }
 
+/// The tile clock is the host's side of the same repair loop. It is one small
+/// packet per second, so the reliable path costs nothing; keeping it off ICE
+/// means a lossy link cannot silence the clock that is supposed to notice the
+/// very losses it creates.
+bool is_tile_clock(const uint8_t* data, std::size_t len) {
+  return data != nullptr && len >= protocol::kPacketHeaderSize &&
+         std::memcmp(data, protocol::kMagic, sizeof(protocol::kMagic)) == 0 &&
+         data[5] == static_cast<uint8_t>(protocol::packet_type::tile_clock);
+}
+
 bool is_keyframe(const uint8_t* data, std::size_t len) {
   return data != nullptr &&
          len >= protocol::kPacketHeaderSize + protocol::kFrameHeaderSize &&
@@ -58,6 +68,16 @@ bool is_keyframe(const uint8_t* data, std::size_t len) {
          data[5] == static_cast<uint8_t>(protocol::packet_type::frame) &&
          (data[protocol::kPacketHeaderSize + 7] &
           protocol::kFrameFlagKeyframe) != 0;
+}
+
+/// The binary packets that must ride the relay even after ICE takes over.
+/// The receiving side has to accept exactly this set from the relay; it used
+/// to accept only file_data, which silently dropped every keyframe, AV1
+/// patch, tile refresh and tile clock after the P2P switch.
+bool rides_relay(const uint8_t* data, std::size_t len) {
+  return is_file_data(data, len) || is_av1_frame(data, len) ||
+         is_keyframe(data, len) || is_tile_refresh(data, len) ||
+         is_tile_clock(data, len);
 }
 
 }  // namespace
@@ -69,7 +89,11 @@ switchable_transport::switchable_transport(
 }
 
 const char* switchable_transport::name() const {
-  return active_ ? active_->name() : "relay";
+  return active_ ? active_->name() : "websocket";
+}
+
+const char* switchable_transport::path() const {
+  return active_ ? active_->path() : "relay";
 }
 
 std::string switchable_transport::peer_ip() const {
@@ -92,9 +116,7 @@ bool switchable_transport::send_text(const std::string& text) {
 }
 
 bool switchable_transport::send_binary(const uint8_t* data, std::size_t len) {
-  if ((is_file_data(data, len) || is_av1_frame(data, len) ||
-       is_keyframe(data, len) || is_tile_refresh(data, len)) &&
-      relay_ && relay_->is_open()) {
+  if (rides_relay(data, len) && relay_ && relay_->is_open()) {
     return relay_->send_binary(data, len);
   }
   return active_ && active_->send_binary(data, len);
@@ -124,14 +146,17 @@ void switchable_transport::wire(
   auto source = transport.get();
   transport->set_handlers(
       [this, source](const std::string& text) {
-        if (closed_ || active_.get() != source || !text_) return;
+        if (closed_ || !text_) return;
+        // After the P2P switch the relay carries the packets that must not be
+        // lost: file data, keyframes, AV1 patches, tile refreshes and the
+        // tile clock. Repair requests travel the other way on the same path.
+        // Everything else still arrives on the active transport.
+        if (active_.get() != source && !is_compensation_text(text)) return;
         text_(text);
       },
       [this, source](const uint8_t* data, std::size_t len) {
         if (closed_ || !binary_) return;
-        // The relay only stays alive for file data after the P2P switch;
-        // everything else arrives on the active transport.
-        if (active_.get() != source && !is_file_data(data, len)) return;
+        if (active_.get() != source && !rides_relay(data, len)) return;
         binary_(data, len);
       },
       [this, source](int code, const std::string& reason) {

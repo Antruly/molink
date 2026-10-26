@@ -106,6 +106,7 @@ class secure_capture final : public capture_base {
 
   std::string backend() const override { return "secure-desktop"; }
   bool is_real() const override { return true; }
+  bool is_secure_desktop() const override { return secure_desktop_; }
   std::vector<display_info> displays() const override {
     display_info info;
     info.name = "Secure desktop";
@@ -155,7 +156,17 @@ class secure_capture final : public capture_base {
         }
       }
       std::string err;
-      capture_frame(err);
+      if (capture_frame(err)) {
+        if (!last_error.empty()) {
+          std::fprintf(stderr, "molink capture: secure capture recovered\n");
+          last_error.clear();
+        }
+      } else if (!err.empty() && err != last_error) {
+        // The helper may have stopped; without this line the session simply
+        // froze with no clue in the core log.
+        std::fprintf(stderr, "molink capture: %s\n", err.c_str());
+        last_error = err;
+      }
       // GDI + a large pipe copy is much heavier than DXGI. The lock screen
       // only needs a slow refresh, but a normal desktop should feel live.
       const int cap = secure_desktop_ ? 8 : 15;
@@ -206,7 +217,15 @@ class secure_capture final : public capture_base {
       previous_.assign(static_cast<std::size_t>(width) * height * 4, 0);
       have_previous_ = false;
     }
-    const bool keyframe = !have_previous_ || keyframe_requested_.exchange(false);
+    const auto now = std::chrono::steady_clock::now();
+    const int interval_ms =
+        periodic_keyframe_ms() > 0 ? periodic_keyframe_ms() : 30000;
+    const bool refresh_due =
+        now - last_full_ > std::chrono::milliseconds(interval_ms);
+    const bool keyframe = !have_previous_ ||
+                          keyframe_requested_.exchange(false) ||
+                          refresh_due;
+    if (keyframe) last_full_ = now;
     const uint16_t tile = std::max<uint16_t>(
         64, options_.tile_size == 0 ? 256 : options_.tile_size);
     protocol::frame_header frame_header;
@@ -232,10 +251,12 @@ class secure_capture final : public capture_base {
     encoding.av1_qp = quality_av1_qp();
     encoding.av1_grayscale = quality_av1_grayscale();
     encoding.av1_max_area_percent = quality_av1_max_area_percent();
+    encoding.av1_full_frame = quality_av1_full_frame();
     std::vector<uint8_t> av1_payload;
+    bool av1_only = false;
     std::vector<uint8_t> payload;
     if (!encode_capture_frame(frame_header, tiles, encoding, pixels, stride, payload,
-                              &av1_payload, err)) {
+                              &av1_payload, err, &av1_only)) {
       return false;
     }
     auto frame = std::make_shared<captured_frame>();
@@ -252,6 +273,7 @@ class secure_capture final : public capture_base {
     frame->codec = frame_header.codec;
     frame->payload = std::move(payload);
     frame->av1_payload = std::move(av1_payload);
+    frame->av1_only = av1_only;
     publish(std::move(frame));
     have_previous_ = true;
     return true;
@@ -264,7 +286,10 @@ class secure_capture final : public capture_base {
   std::vector<uint8_t> previous_;
   mutable std::mutex pixels_mutex_;
   bool have_previous_ = false;
+  std::chrono::steady_clock::time_point last_full_{};
   uint32_t seq_ = 0;
+  /// Last distinct helper/capture error, so the log shows it once.
+  std::string last_error;
   std::thread thread_;
 };
 

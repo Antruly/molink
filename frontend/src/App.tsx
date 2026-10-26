@@ -3,7 +3,6 @@ import { useEffect, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { AppHeader } from './components/AppHeader'
 import { AuthGate } from './components/AuthGate'
-import { HomeView } from './components/HomeView'
 import { SimpleHomeView } from './components/simple/SimpleHomeView'
 import { HostChatDock } from './components/HostChatDock'
 import { Logo } from './components/Logo'
@@ -12,7 +11,6 @@ import { ServicePrompt } from './components/ServicePrompt'
 import { ResizeFrame } from './components/ResizeFrame'
 import { SessionView } from './components/SessionView'
 import { SettingsPanel } from './components/SettingsPanel'
-import { TabBar } from './components/TabBar'
 import { TitleBar } from './components/TitleBar'
 import { useAppStore } from './store/app'
 
@@ -41,7 +39,6 @@ export default function App() {
   const theme = useAppStore((state) => state.theme)
   const authPhase = useAppStore((state) => state.authPhase)
   const activeTabId = useAppStore((state) => state.activeTabId)
-  const uiMode = useAppStore((state) => state.uiMode)
   const tabs = useAppStore((state) => state.tabs)
   const boot = useAppStore((state) => state.boot)
   const refreshState = useAppStore((state) => state.refreshState)
@@ -178,7 +175,6 @@ export default function App() {
       ) : (
         <>
           {popout || immersive ? null : <AppHeader showHome />}
-          {popout || immersive ? null : <TabBar />}
           <main className="flex min-h-0 flex-1 flex-col">
             {popout ? (
               active ? (
@@ -188,7 +184,7 @@ export default function App() {
               )
             ) : showHome ? (
               <div className="min-h-0 flex-1 overflow-y-auto">
-                {uiMode === 'simple' ? <SimpleHomeView /> : <HomeView />}
+                <SimpleHomeView />
               </div>
             ) : active ? (
               <SessionView key={active.id} tab={active} />
@@ -199,7 +195,7 @@ export default function App() {
             )}
           </main>
           <SettingsPanel />
-          {popout ? null : <HostChatDock />}
+          {!popout && showHome ? <HostChatDock /> : null}
         </>
       )}
     </div>

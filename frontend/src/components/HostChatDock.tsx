@@ -1,4 +1,4 @@
-import { MessageSquare, Phone, PhoneOff, Send, X } from 'lucide-react'
+import { GripHorizontal, MessageSquare, Phone, PhoneOff, Send, X } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
@@ -41,6 +41,20 @@ export function HostChatDock() {
   const [callSeconds, setCallSeconds] = useState(0)
   const cursorRef = useRef(0)
   const openRef = useRef(false)
+  // The dock is a floating card: both the collapsed bubble and the open card
+  // can be dragged anywhere in the window.
+  const [pos, setPos] = useState<{ x: number; y: number } | null>(null)
+  const panelRef = useRef<HTMLDivElement>(null)
+  const ballRef = useRef<HTMLButtonElement>(null)
+  const drag = useRef<{
+    offsetX: number
+    offsetY: number
+    startX: number
+    startY: number
+    moved: boolean
+    target: HTMLElement
+  } | null>(null)
+  const suppressClick = useRef(false)
   const listRef = useRef<HTMLDivElement>(null)
   const pollRef = useRef<() => Promise<void>>(async () => {})
   const ringingRef = useRef(false)
@@ -48,6 +62,19 @@ export function HostChatDock() {
   useEffect(() => {
     openRef.current = open
   }, [open])
+
+  // Keep the card inside the window when it opens from a dragged bubble (or
+  // the window shrinks).
+  useEffect(() => {
+    if (!open || !pos) return
+    const element = panelRef.current
+    if (!element) return
+    const maxX = Math.max(4, window.innerWidth - element.offsetWidth - 4)
+    const maxY = Math.max(4, window.innerHeight - element.offsetHeight - 4)
+    if (pos.x > maxX || pos.y > maxY) {
+      setPos({ x: Math.min(pos.x, maxX), y: Math.min(pos.y, maxY) })
+    }
+  }, [open, pos])
 
   useEffect(() => {
     if (!localMode || !token) return
@@ -164,6 +191,59 @@ export function HostChatDock() {
     return `${minutes}:${String(seconds % 60).padStart(2, '0')}`
   }
 
+  const beginDrag = (
+    event: React.PointerEvent<HTMLElement>,
+    target: HTMLElement | null,
+  ) => {
+    if (!target) return
+    event.preventDefault()
+    event.stopPropagation()
+    const rect = target.getBoundingClientRect()
+    drag.current = {
+      offsetX: event.clientX - rect.left,
+      offsetY: event.clientY - rect.top,
+      startX: event.clientX,
+      startY: event.clientY,
+      moved: false,
+      target,
+    }
+    setPos({ x: rect.left, y: rect.top })
+    event.currentTarget.setPointerCapture(event.pointerId)
+  }
+
+  const moveDrag = (event: React.PointerEvent<HTMLElement>) => {
+    const state = drag.current
+    if (!state) return
+    if (
+      !state.moved &&
+      Math.hypot(event.clientX - state.startX, event.clientY - state.startY) > 4
+    ) {
+      state.moved = true
+    }
+    const width = state.target.offsetWidth
+    const height = state.target.offsetHeight
+    setPos({
+      x: Math.min(
+        Math.max(event.clientX - state.offsetX, 4),
+        Math.max(4, window.innerWidth - width - 4),
+      ),
+      y: Math.min(
+        Math.max(event.clientY - state.offsetY, 4),
+        Math.max(4, window.innerHeight - height - 4),
+      ),
+    })
+  }
+
+  const endDrag = () => {
+    const state = drag.current
+    drag.current = null
+    if (!state?.moved) return
+    suppressClick.current = true
+    window.setTimeout(() => {
+      suppressClick.current = false
+    }, 0)
+  }
+
   const send = async () => {
     const value = text.trim()
     if (value === '' || !token) return
@@ -250,10 +330,22 @@ export function HostChatDock() {
       ) : null}
       {open ? (
         <div
+          ref={panelRef}
           data-local-input="true"
-          className="fixed bottom-4 right-4 z-50 flex h-[440px] w-[min(92vw,340px)] flex-col overflow-hidden rounded-2xl border border-line bg-surface/95 shadow-2xl backdrop-blur"
+          className={
+            'fixed z-50 flex h-[440px] w-[min(92vw,340px)] flex-col overflow-hidden rounded-2xl border border-line bg-surface/95 shadow-2xl backdrop-blur ' +
+            (pos ? '' : 'bottom-4 right-4')
+          }
+          style={pos ? { left: pos.x, top: pos.y } : undefined}
         >
-          <div className="flex h-10 shrink-0 items-center gap-2 border-b border-line-soft px-3">
+          <div
+            className="flex h-10 shrink-0 cursor-move touch-none items-center gap-2 border-b border-line-soft px-3"
+            onPointerDown={(event) => beginDrag(event, panelRef.current)}
+            onPointerMove={moveDrag}
+            onPointerUp={endDrag}
+            onPointerCancel={endDrag}
+          >
+            <GripHorizontal size={13} className="text-muted/60" />
             <MessageSquare size={14} className="text-accent" />
             <span className="text-[12px] font-medium">{t('chat.title')}</span>
             <span className="chip ml-1 !px-1.5 !py-0 text-[9px]">
@@ -261,6 +353,7 @@ export function HostChatDock() {
             </span>
             <button
               type="button"
+              onPointerDown={(event) => event.stopPropagation()}
               onClick={() => setOpen(false)}
               className="ml-auto grid h-6 w-6 place-items-center rounded-md text-muted transition hover:bg-panel hover:text-ink"
               aria-label={t('chat.close')}
@@ -342,13 +435,26 @@ export function HostChatDock() {
         </div>
       ) : (
         <button
+          ref={ballRef}
           type="button"
           data-local-input="true"
+          onPointerDown={(event) => beginDrag(event, ballRef.current)}
+          onPointerMove={moveDrag}
+          onPointerUp={endDrag}
+          onPointerCancel={endDrag}
           onClick={() => {
+            if (suppressClick.current) {
+              suppressClick.current = false
+              return
+            }
             setUnread(0)
             setOpen(true)
           }}
-          className="fixed bottom-4 right-4 z-50 grid h-12 w-12 place-items-center rounded-full border border-line bg-surface text-accent shadow-xl transition hover:border-accent/50 hover:bg-panel"
+          className={
+            'fixed z-50 grid h-12 w-12 cursor-move touch-none place-items-center rounded-full border border-line bg-surface text-accent shadow-xl transition hover:border-accent/50 hover:bg-panel ' +
+            (pos ? '' : 'bottom-4 right-4')
+          }
+          style={pos ? { left: pos.x, top: pos.y } : undefined}
           title={t('chat.title')}
           aria-label={t('chat.title')}
         >

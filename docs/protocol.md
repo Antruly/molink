@@ -117,7 +117,7 @@
 | 1 | `bgra` | 原始 32 位 BGRA，自上而下逐行；`byte_length` 必须 ≥ `w*h*4` |
 | 2 | `png` | 单瓦片 PNG |
 | 3 | `h264` | Annex-B 码流（规划中） |
-| 4 | `av1` | OBU（规划中） |
+| 4 | `av1` | AV1 OBU：每个瓦片是一条可独立解码的 intra 流；解码后按 `x/y/w/h` 贴回画面 |
 | 5 | `deflate_bgra` | zlib(deflate) 压缩的 BGRA 瓦片 |
 | 6 | `rgb24` | 原始 24 位 RGB（R、G、B），丢弃 alpha |
 | 7 | `rgb565` | 原始 16 位 RGB565，小端 |
@@ -142,7 +142,20 @@
 - 浏览器原生只支持 `DecompressionStream("deflate")`，所以服务端不直接发 Brotli；桌面客户端如需要 Brotli，应在传输协商中单独约定 codec，而不是复用 codec 5。
 - 帧内所有瓦片使用同一种 codec，不混合。
 
-### 3.5 画质预设与有损格式
+### 3.5 AV1 的两种发送方式
+
+服务端只有在 `hello.av1 = true`（本地核心代理确认 dav1d 可用）且设置里启用 AV1
+时才会生成 AV1。默认的**全帧模式**（`av1_full_frame=1`）里，每个 FRAME 包只包含
+AV1：本帧所有变化矩形都编码进 AV1 瓦片，基础瓦片数组为空，不会再同时发送同一画面
+的瓦片。关键帧是覆盖整屏的单条 AV1 intra 流，并带 `KEYFRAME` 包标志与帧头标志，
+接收端可据此重新建立画面。旧的分块模式（`av1_full_frame=0`）保留兼容：先发基础
+瓦片帧，再发一个带 `tileRefresh` 包标志的 AV1 补丁，补丁覆盖从基础瓦片中移除的
+大块区域。
+
+AV1 不可用、观看端没有解码能力或单帧编码失败时，服务端自动回到普通瓦片帧；
+`hello.av1` 为假的会话永远只收到瓦片。
+
+### 3.6 画质预设与有损格式
 
 `quality` 控制消息（见 §4.2）把主机编码切换到以下预设之一：
 
@@ -216,7 +229,7 @@
 | type | 字段 | 说明 |
 |---|---|---|
 | `hello_required` | `protocol`, `service`, `version` | 等待鉴权 |
-| `welcome` | `session`, `session_id`, `session_token`, `protocol`, `service`, `version`, `transport`, `tiles`, `displays`, `display_index` | 鉴权成功；`displays` 为可切换显示器列表；`session_token` 用于重连免扣验证码次数 |
+| `welcome` | `session`, `session_id`, `session_token`, `protocol`, `service`, `version`, `transport`, `transport_path`, `transports`, `transport_ports`, `tiles`, `displays`, `display_index` | 鉴权成功；`transport` 是线路协议（websocket/quic/udp），`transport_path` 是数据通路（direct/p2p/relay），两者独立；`displays` 为可切换显示器列表；`session_token` 用于重连免扣验证码次数 |
 | `ping` | `t` | 应用层心跳，每 15 秒 |
 | `pong` | `t`, `server_ms` | 对客户端 ping 的回应 |
 | `access-requested` | `id` | 已登记免密请求，等待本机用户审批 |
@@ -233,6 +246,7 @@
   "service": "moLink Core",
   "version": "0.8.0",
   "transport": "websocket",
+  "transport_path": "direct",
   "tiles": {
     "codec": "deflate-bgra",
     "screen_w": 2880,
@@ -256,6 +270,18 @@
 （`smooth`/`balanced`/`quality`/`raw`）；`input` 表示本机是否支持输入注入；
 `clipboard` 表示本机是否支持剪贴板同步；`can_set_display_mode` 表示该采集后端
 能否执行 `display-mode`（`secure-desktop`、`gdi`、X11 与合成帧均为 `false`）。
+
+`transport` 与 `transport_path` 是两个正交的轴：前者是线路协议（`websocket`、
+`quic`、`udp`、`tcp`），后者是数据通路（`direct` = 对端直接连到本 core，
+`p2p` = ICE 打洞后的 UDP，`relay` = 目录中转）。因此一条“中继上的 QUIC 会话”
+应当是 `transport_path=relay` + `transport=quic`，而不是一个新的混合取值。
+UI 用两个独立标签分别显示。旧 core 没有 `transport_path`，其 `transport=relay`
+表示通路、`transport=udp` 表示 P2P，客户端需要兼容这个旧含义。
+
+QUIC 会话（`transport=quic`）在一条双向 QUIC 流上复用完全相同的 MOLK 包；
+文本控制消息包在 `packet_type::control`（`0x7f`）里，鉴权仍是第一条 `hello`，
+因为 QUIC 没有 URL 可以带 `?token=`。主机在 `--quic-port`（默认 `28420`）监听，
+`/api/transports` 中 `quic.available=true` 时才对外宣告。
 
 **客户端 → 服务端**
 
@@ -513,24 +539,29 @@ CORS 只对本地开发来源 `http://localhost:1420`、`http://127.0.0.1:1420` 
   "transports": [
     {"name":"websocket","role":"web","available":true,"secure":false,
      "port":28418,"note":"browser baseline; /ws/session"},
-    {"name":"http2","role":"api","available":false,"secure":false,
-     "port":28418,"note":"h2c prior knowledge on the web port"},
-    {"name":"http3","role":"api","available":false,"secure":true,
-     "port":28419,"note":"needs TLS + QUIC front-end"},
-    {"name":"quic","role":"data","available":false,"secure":true,
-     "port":28420,"note":"direct data channel (planned)"},
-    {"name":"tcp","role":"data","available":false,"secure":false,
-     "port":28421,"note":"direct data channel (planned)"},
+    {"name":"http2","role":"data","available":true,"secure":false,
+     "port":28418,"note":"WebSocket over HTTP/2 (RFC 8441) on the web port"},
+    {"name":"http3","role":"data","available":true,"secure":true,
+     "port":28419,"note":"WebSocket over HTTP/3 (RFC 9220)"},
+    {"name":"quic","role":"data","available":true,"secure":true,
+     "port":28420,"note":"MOLK session stream over QUIC"},
+    {"name":"tcp","role":"data","available":true,"secure":false,
+     "port":28421,"note":"MOLK session stream over TCP"},
     {"name":"udp","role":"data","available":false,"secure":false,
      "port":28422,"note":"direct data channel (planned)"}
   ]
 }
 ```
 
-- 选择规则：客户端按 `preferred` 顺序取第一个自己支持且 `available: true` 的项；当前所有客户端都会落到 `websocket`。
-- WebSocket `welcome` 同时带 `transport`、`transports` 与 `transport_ports`，已连接的客户端不需要再走一次 HTTP。
+- 选择规则：客户端按 `preferred` 顺序取第一个自己支持且 `available: true` 的项。浏览器的 WebSocket API 通常只走 h1；桌面对桌面的 `/ws/direct` 代理先探测本接口，按 **QUIC → TCP → HTTP/2 → WebSocket** 的阶梯连接，前一级握手失败才降级。`MOLINK_QUIC=0` 可跳过 QUIC。HTTP/2 会话是 web 端口上的 RFC 8441 extended CONNECT（h2c 先验知识；有证书时 ALPN `h2`），与 h1 的 `/ws/session` 共用同一路径。
+- `http3` 条目是一项 WebSocket-over-HTTP/3 服务（RFC 9220，ALPN `h3`，端口 28419）：支持它的浏览器或 peer core 可以直接连；普通浏览器仍会落到 `websocket`。
+- `/api/transports` 不需要鉴权，peer core 在建立数据通道前就靠它协商。远程访问关闭时 QUIC 监听只绑回环地址，非回环调用方看到 `quic.available=false`。
+- WebSocket `welcome` 同时带 `transport`、`transport_path`、`transports` 与 `transport_ports`，已连接的客户端不需要再走一次 HTTP。
+- 中继端点由目录的 `POST /v1/connect/relay` 返回（`relay.endpoints`：协议、端口、是否 TLS），客户端按 `quic → http3 → tcp → http2 → udp → websocket` 选择；TCP/QUIC 中继握手是一行 `{"connect_id","token"}` 后接原始 MOLK 流，HTTP/2 中继是设备端口上的 RFC 8441 WebSocket（TLS/ALPN `h2` 或 h2c）承载同一行握手与消息，HTTP/3 中继用 WebSocket-over-H3 承载同一行握手与消息，UDP 中继用同一行 JSON 握手，之后是按 ICE 相同格式分片的 1200 字节数据报。
+- 内网直连：`GET /v1/devices?id=` 在请求方与目标同一公网 IP（或回环）时返回 `address`、`quic_port`、`tcp_port`、`tls_fingerprint`、`tls_cert`；客户端先直连 QUIC、再试 TCP，成功后关闭 ICE/中继。端口为 0 表示该监听未启动；心跳会用 0 清除已失效的端口。
+- 证书固定：`GET /api/transports` 带 `tls_fingerprint`/`tls_cert`，`POST /v1/connect/relay` 也带 `tls_cert`；客户端把证书写入临时 CA 文件并校验指纹后，用 `PEER` 校验 QUIC/TCP/HTTP3 数据通道。TCP 数据端口是 TLS-only。
 - 浏览器 WebSocket API 基于 HTTP/1.1，h2/h3 不会替代它；h2c 只对桌面/命令行客户端有意义，HTTP/3 需要 TLS 证书与独立 QUIC 前端。
-- 直连数据通道（QUIC/TCP/UDP）接入后只把对应条目的 `available` 置真，协商字段和端口表不变。
+- 中继目前用 WebSocket 到目录服务；通路（`relay`）与协议（`websocket`/`quic`）是两回事，目录端支持 QUIC 中转后只需把 `protocol` 换成 `quic`，会话层不变。
 
 ---
 

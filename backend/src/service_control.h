@@ -10,6 +10,11 @@ struct service_status_info {
   bool available = false;
   bool installed = false;
   bool running = false;
+  /// "windows" for the session helper, "linux" for the systemd user service.
+  std::string platform;
+  /// True when the service is a login autostart (systemd), not a background
+  /// helper that the core itself starts and stops.
+  bool autostart = false;
   std::string error;
 };
 

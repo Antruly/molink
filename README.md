@@ -2,7 +2,7 @@
 
 跨平台远程桌面。Web 优先，一套后台 + 浏览器壳层，桌面端直连，移动端经服务端中转。
 
-> 版本 0.9.30 · MIT · 协议版本 1
+> 官方网站：[ssvr.top/molink](https://ssvr.top/molink) · 版本 0.9.30 · MIT · 协议版本 1
 
 ![主页（亮色）](docs/screenshots/home-light.png)
 ![会话页（合成测试帧）](docs/screenshots/session-light.png)
@@ -32,7 +32,10 @@
 | 连接质量水印（默认关闭） | ✅ |
 | 瓦片 zlib 压缩（codec 5） | ✅ 真实桌面实测 94 → 7.4 Mbps |
 | Linux Wayland / PipeWire | ⏳ 回退合成帧 |
-| H.264 / AV1 + WebCodecs | ⏳ |
+| AV1 大区域编码 | ✅ SVT-AV1（CPU）或 NVIDIA NVENC（GPU，auto 优先）；逐矩形独立 intra，高变化区域省带宽 |
+| HTTP/2 WebSocket（RFC 8441） | ✅ 直连与会话中继；h2c / TLS ALPN h2，和 h1、QUIC、TCP 并列 |
+| 开机自启（Linux systemd user service） | ✅ 设置 → 服务；安装/卸载/启动/停止/重启，登录后打开桌面壳层 |
+| H.264 / WebCodecs | ⏳ |
 | 设备目录 / 按 ID 连接（moLink Server） | ✅ 注册/心跳/在线状态/HTTPS；桌面端已接入 |
 | 中继 / TURN、WebRTC/P2P、UDP 直连、移动端 | ⏳ 二阶段后续 |
 
@@ -67,7 +70,7 @@ coturn 或 libjuice 自带的 `juice_server`（见服务端仓库 `docs/p2p-rela
 ```
 
 - **molink-core**：C++20 + libuvcpp 后台。负责 HTTP/WS 接口、三平台捕获/注入/剪贴板、瓦片帧编码与会话管理。
-- **传输抽象**：`transport/session_transport.h` 定义文本/二进制/关闭/对端信息接口；`session_controller` 只依赖该接口，WebSocket 是第一个实现。后续接 TCP/QUIC 时新增一个 transport 实现和监听器即可，会话状态机、鉴权、帧回放、输入和剪贴板逻辑都不用改。
+- **传输抽象**：`transport/session_transport.h` 定义文本/二进制/关闭/对端信息接口，并区分线路协议（`name()`）与数据通路（`path()`）；`session_controller` 只依赖该接口，WebSocket、ICE/UDP 与 QUIC（`quic_transport` + `quic_listener`）共用同一套会话状态机、鉴权、帧回放、输入和剪贴板逻辑。
 - **frontend/**：React 19 + TypeScript + Vite + Tailwind 4 + Zustand + react-i18next。
 - **shell/**：三个平台各自的原生壳层（Linux GTK/WebKitGTK、Windows WebView2、macOS WKWebView），启动并监管 `molink-core`，加载核心托管的前端。
 - **moLink Server**：设备目录与管理服务位于独立仓库
@@ -183,15 +186,20 @@ moLink 使用自己的端口段，避开 RustDesk 的 21115–21119 和 TeamView
 | 端口 | 协议 | 用途 | 状态 |
 |---:|---|---|---|
 | `28418` | TCP | 网页/API：HTTP/1.1 + WebSocket；桌面客户端可协商 h2c | 正在使用 |
-| `28419` | UDP | HTTP/3（QUIC）网页/API | 预留 |
-| `28420` | UDP | QUIC 直连数据 | 预留 |
-| `28421` | TCP | TCP 直连数据 | 预留 |
+| `28419` | UDP | HTTP/3 WebSocket 会话（RFC 9220，extended CONNECT） | 正在使用（libuvcpp 1.8.4+） |
+| `28420` | UDP | QUIC 直连数据：一条双向 QUIC 流承载 MOLK 会话 | 正在使用（远程访问开启时对外监听） |
+| `28421` | TCP | TCP 直连数据：同一套 MOLK 流分帧 | 正在使用（按远程访问开关逐连接放行） |
 | `28422` | UDP | UDP 直连数据 | 预留 |
 
 - **Web 端最低走 WebSocket**：浏览器 WebSocket API 基于 HTTP/1.1，这是基线，不会因为服务端支持 h2/h3 而改变。
 - **HTTP/2**：libuvcpp 已编入 nghttp2，但当前 1.8.x 的 h2c 请求派发在实测中无响应，因此暂不启用，`/api/transports` 中 `http2.available=false`。
-- **HTTP/3 / QUIC / TCP / UDP 直连数据**：libuvcpp 已编入 QUIC、ngtcp2、nghttp3，端口和协商元数据已就位；数据面尚未接入，因此这些条目暂报 `available=false`。
-- 客户端先读 `GET /api/transports`（无需鉴权）或 WebSocket `welcome` 里的 `transports` / `transport_ports`，按 `preferred` 顺序选择第一个自己支持且 `available=true` 的传输。当前所有客户端都会落到 `websocket`；以后把对应数据通道接上，只需把该条目的 `available` 置真，协商逻辑不变。
+- **QUIC 数据通道**：主机在 `28420/udp` 上用设备证书监听，一条双向流承载完整 MOLK 会话（文本控制消息包在 `control` 包里，二进制帧不变）。直连 IP 会话由本地 core 的 `/ws/direct` 代理先探测 `GET /api/transports`，`quic.available=true` 时改用 QUIC，否则回退 WebSocket；设备 ID 会话仍走 ICE/中继。
+- **TCP 直连数据**：`28421/tcp` 接受同一套 MOLK 流，**TLS-only**（设备证书）；桌面 core 的直连阶梯是 QUIC → TCP → WebSocket，前一级失败才降级，两种直连都按主机广告的证书做固定。按远程访问开关逐连接放行，回环始终允许。
+- **内网设备 ID 直连**：目录向同一公网 IP 的请求方返回目标的局域网地址与 `quic_port`/`tcp_port`，客户端先直连 QUIC、再试 TCP，失败才进入 ICE/中继；`relay=only` 跳过这条捷径。
+- **HTTP/3 会话**：`28419/udp` 上以 ALPN `h3` 接受 WebSocket-over-HTTP/3（RFC 9220）。支持它的浏览器/客户端可直接用这个入口，会话控制器与鉴权不变；`welcome.transport=http3`、`transport_path=direct`。旧版 libuvcpp（<1.8.4）没有 h3 WebSocket 头，监听会报不可用。
+- **UDP 直连数据**：仍走 ICE，独立 UDP 数据面尚未接入，条目报 `available=false`。
+- 客户端先读 `GET /api/transports`（无需鉴权）或 WebSocket `welcome` 里的 `transports` / `transport_ports`，按 `preferred` 顺序选择第一个自己支持且 `available=true` 的传输。浏览器始终是 `websocket`；peer core 会优先使用 QUIC。
+- **通路与协议分行显示**：会话工具栏用两个标签，`DIRECT`/`P2P`/`RELAY` 表示数据怎么到达主机，`WS`/`QUIC`/`UDP` 表示线路协议；`welcome` 里对应 `transport_path` 与 `transport`。
 - 端口优先级：命令行（`--port`、`--http3-port`、`--quic-port`、`--tcp-data-port`、`--udp-port`）> 配置目录中的同名文件 > 默认值。网页/WS 与 UDP 数据端口也能在「偏好设置 → 网络端口」修改，保存后重启生效。
 - 配置目录：Linux `~/.config/molink/`、macOS `~/Library/Application Support/moLink/`、Windows `%APPDATA%\moLink\`。
 
@@ -291,9 +299,11 @@ AppImage 首次使用需要 `chmod +x`，并依赖系统的 GTK 3 与 WebKitGTK 
 
 推送 `v*` 标签会触发 `.github/workflows/release-desktop.yml`，四个 job（Linux、Windows、
 macOS、Win7 x86）并行构建并把产物附加到同一个 Release。Linux/Windows 直接下载
-libuvcpp 预编译包（仓库变量 `UVCPP_VERSION`，默认 `1.8.5`）；macOS 仍从源码构建，需要
+libuvcpp 预编译包（仓库变量 `UVCPP_VERSION`，默认 `1.8.6`）；macOS 仍从源码构建，需要
 仓库变量 `UVCPP_REPO`；Win7 x86 下载 libuvcpp 1.8.5 kit 与 GCC 13，产出 zip 和 Inno
-Setup 安装器。
+Setup 安装器。NVENC 头文件已 vendored 在 `backend/third_party/ffnvcodec`，运行时从
+NVIDIA 驱动加载 `nvEncodeAPI64.dll` / `libnvidia-encode.so.1`，不需要额外 SDK；没有
+AV1 能力的 NVIDIA GPU 时自动回退 SVT-AV1。
 
 ## 许可证
 

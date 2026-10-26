@@ -12,6 +12,7 @@ import {
   List,
   Monitor,
   MousePointer2,
+  PencilLine,
   RefreshCw,
   Server,
   SquarePen,
@@ -21,8 +22,10 @@ import {
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { ApiError, lookupDevice } from '../lib/api'
+import { deviceNoteKey } from '../lib/device-note'
 import { formatDisplayId } from '../lib/format'
 import { useAppStore, type RecentConnection } from '../store/app'
+import { DeviceNoteDialog } from './DeviceNoteDialog'
 import { ServiceCard } from './ServiceCard'
 
 const params = new URLSearchParams(window.location.search)
@@ -65,6 +68,8 @@ export function HomeView() {
   const setAuthCode = useAppStore((state) => state.setAuthCode)
   const recents = useAppStore((state) => state.recents)
   const forgetRecent = useAppStore((state) => state.forgetRecent)
+  const deviceNotes = useAppStore((state) => state.deviceNotes)
+  const setDeviceNote = useAppStore((state) => state.setDeviceNote)
   const nearby = useAppStore((state) => state.nearby)
   const refreshDiscovery = useAppStore((state) => state.refreshDiscovery)
   const refreshDevice = useAppStore((state) => state.refreshDevice)
@@ -76,6 +81,7 @@ export function HomeView() {
   const serverState = useAppStore((state) => state.server)
   const setSettingsOpen = useAppStore((state) => state.setSettingsOpen)
 
+  const [noteRecent, setNoteRecent] = useState<RecentConnection | null>(null)
   const [rememberCode, setRememberCode] = useState(true)
   const [host, setHost] = useState('')
   const [port, setPort] = useState(params.get('port') ?? '28418')
@@ -279,6 +285,9 @@ export function HomeView() {
       preferredMode,
     )
   }
+
+  const noteFor = (recent: RecentConnection): string =>
+    deviceNotes[deviceNoteKey(recent.label)] ?? ''
 
   const prefillFromRecent = (recent: RecentConnection) => {
     setHost(recent.host)
@@ -962,10 +971,15 @@ export function HomeView() {
                   </div>
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-[13px] font-medium text-ink">
-                      {recent.label}
+                      {noteFor(recent) || recent.label}
                     </div>
-                    <div className="mt-0.5 truncate font-mono text-[10px] text-muted">
-                      {recent.id ? formatDisplayId(recent.id) : `${recent.host}:${recent.port}`}
+                    <div className="mt-0.5 truncate text-[10px] text-muted">
+                      {noteFor(recent) ? `${recent.label} · ` : ''}
+                      <span className="font-mono">
+                        {recent.id
+                          ? formatDisplayId(recent.id)
+                          : `${recent.host}:${recent.port}`}
+                      </span>
                     </div>
                   </div>
                   {recent.token ? (
@@ -997,6 +1011,15 @@ export function HomeView() {
                     aria-label={t('home.prefill')}
                   >
                     <SquarePen size={12} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setNoteRecent(recent)}
+                    className="btn btn-quiet h-7 w-7 !px-0"
+                    title={t('deviceNote.edit')}
+                    aria-label={t('deviceNote.edit')}
+                  >
+                    <PencilLine size={12} />
                   </button>
                   <button
                     type="button"
@@ -1036,7 +1059,7 @@ export function HomeView() {
                 >
                   <div className="flex items-center gap-1.5">
                     <span className="truncate text-[13px] text-ink">
-                      {recent.label}
+                      {noteFor(recent) || recent.label}
                     </span>
                     {recent.token ? (
                       <span className="chip chip-on !px-1.5 !py-0 text-[9px]">
@@ -1044,8 +1067,13 @@ export function HomeView() {
                       </span>
                     ) : null}
                   </div>
-                  <div className="mt-0.5 flex gap-2 font-mono text-[10px] text-muted">
-                    <span>
+                  <div className="mt-0.5 flex gap-2 text-[10px] text-muted">
+                    {noteFor(recent) ? (
+                      <span className="max-w-[12rem] truncate">
+                        {recent.label}
+                      </span>
+                    ) : null}
+                    <span className="font-mono">
                       {recent.id ? formatDisplayId(recent.id) : `${recent.host}:${recent.port}`}
                     </span>
                     <span>·</span>
@@ -1063,6 +1091,15 @@ export function HomeView() {
                 </button>
                 <button
                   type="button"
+                  onClick={() => setNoteRecent(recent)}
+                  className="grid h-7 w-7 place-items-center rounded-md text-muted/60 transition hover:bg-panel hover:text-ink"
+                  aria-label={t('deviceNote.edit')}
+                  title={t('deviceNote.edit')}
+                >
+                  <PencilLine size={13} />
+                </button>
+                <button
+                  type="button"
                   onClick={() => forgetRecent(recent.at)}
                   className="grid h-7 w-7 place-items-center rounded-md text-muted/60 transition hover:bg-danger/10 hover:text-danger"
                   aria-label={t('home.forget')}
@@ -1075,6 +1112,16 @@ export function HomeView() {
           </ul>
         )}
       </section>
+
+      <DeviceNoteDialog
+        open={noteRecent !== null}
+        name={noteRecent?.label ?? ''}
+        value={noteRecent ? noteFor(noteRecent) : ''}
+        onClose={() => setNoteRecent(null)}
+        onSave={(note) => {
+          if (noteRecent) setDeviceNote(noteRecent.label, note)
+        }}
+      />
     </div>
   )
 }

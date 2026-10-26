@@ -76,7 +76,7 @@ int main() {
                               /*force_opaque=*/false, 0, tiles);
 
   std::string error;
-  auto encoder = molink::make_av1_encoder(&error);
+  auto encoder = molink::make_av1_encoder(molink::av1_encoder_config{}, &error);
   expect(encoder != nullptr, "AV1 encoder available: " + error);
   if (encoder == nullptr) {
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
@@ -140,6 +140,77 @@ int main() {
                                           av1_payload.size(), decoded, error),
          "AV1 patch decodes: " + error);
   expect(!decoded.empty(), "decoded patch has tiles");
+
+  // ---- Full-frame mode: AV1 is the whole picture, tiles are only a fallback.
+  // Both the small and the large change must be covered, and the base payload
+  // must carry no tiles (the session sends the AV1 packet alone).
+  {
+    std::vector<uint8_t> previous = pixels;
+    fill_rect(pixels, kStride, 0, 0, 256, 256, 30, 60, 200);
+    fill_rect(pixels, kStride, 300, 300, 32, 32, 200, 200, 40);
+    molink::protocol::frame_header delta = header;
+    delta.flags = molink::protocol::kFrameFlagPartial;
+    std::vector<molink::protocol::tile_blob> delta_tiles;
+    molink::build_changed_tiles(pixels.data(), kStride, kSize, kSize, 128,
+                                previous.data(), /*keyframe=*/false, nullptr,
+                                /*force_opaque=*/false, 0, delta_tiles);
+    molink::encode_options full = options;
+    full.av1_full_frame = true;
+    std::vector<uint8_t> full_payload;
+    std::vector<uint8_t> full_av1;
+    bool av1_only = false;
+    expect(molink::encode_capture_frame(delta, delta_tiles, full,
+                                        pixels.data(), kStride, full_payload,
+                                        &full_av1, error, &av1_only),
+           "full-frame delta encodes: " + error);
+    expect(av1_only, "full-frame delta is AV1-only");
+    expect(delta_tiles.empty(), "full-frame delta sends no base tiles");
+    molink::protocol::parsed_frame full_base;
+    expect(molink::protocol::parse_frame_payload(full_payload.data(),
+                                                 full_payload.size(),
+                                                 full_base, error),
+           "full-frame base payload parses: " + error);
+    expect(full_base.tiles.empty(), "full-frame base payload is empty");
+    molink::protocol::parsed_frame full_patch;
+    expect(molink::protocol::parse_frame_payload(full_av1.data(),
+                                                 full_av1.size(),
+                                                 full_patch, error),
+           "full-frame AV1 payload parses: " + error);
+    expect(covered(128, 128, full_patch.tiles),
+           "full-frame AV1 covers the large change");
+    expect(covered(310, 310, full_patch.tiles),
+           "full-frame AV1 covers the small change too");
+
+    // A keyframe has to bootstrap a viewer that has no picture: one rect over
+    // the whole screen and the keyframe flag preserved for the receiver.
+    std::vector<uint8_t> key_tiles_pixels = pixels;
+    molink::protocol::frame_header key_header = header;
+    key_header.flags = molink::protocol::kFrameFlagKeyframe;
+    std::vector<molink::protocol::tile_blob> key_tiles;
+    molink::build_changed_tiles(pixels.data(), kStride, kSize, kSize, 128,
+                                key_tiles_pixels.data(), /*keyframe=*/true,
+                                nullptr, /*force_opaque=*/false, 0, key_tiles);
+    std::vector<uint8_t> key_payload;
+    std::vector<uint8_t> key_av1;
+    bool key_av1_only = false;
+    expect(molink::encode_capture_frame(key_header, key_tiles, full,
+                                        pixels.data(), kStride, key_payload,
+                                        &key_av1, error, &key_av1_only),
+           "full-frame keyframe encodes: " + error);
+    expect(key_av1_only, "full-frame keyframe is AV1-only");
+    molink::protocol::parsed_frame key_patch;
+    expect(molink::protocol::parse_frame_payload(key_av1.data(),
+                                                 key_av1.size(), key_patch,
+                                                 error),
+           "full-frame keyframe AV1 parses: " + error);
+    expect((key_patch.header.flags & molink::protocol::kFrameFlagKeyframe) != 0,
+           "full-frame keyframe keeps the keyframe flag");
+    expect(!key_patch.tiles.empty() && key_patch.tiles[0].x == 0 &&
+               key_patch.tiles[0].y == 0 &&
+               key_patch.tiles[0].w == kSize &&
+               key_patch.tiles[0].h == kSize,
+           "full-frame keyframe covers the whole screen");
+  }
 
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;

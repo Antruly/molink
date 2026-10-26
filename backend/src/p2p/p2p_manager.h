@@ -20,6 +20,14 @@
 #include "session_controller.h"
 #include "session_registry.h"
 #include "transport/juice_transport.h"
+#include "transport/h2_relay_transport.h"
+#include "transport/h3_relay_transport.h"
+#include "transport/quic_relay_transport.h"
+#include "transport/udp_relay_transport.h"
+#include "transport/stream_transport.h"
+#include "transport/relay_ladder.h"
+#include "transport/relay_session.h"
+#include "transport/relay_stream_transport.h"
 #include "transport/relay_transport.h"
 #include "transport/switchable_transport.h"
 
@@ -59,6 +67,8 @@ class p2p_manager {
                error_fn error);
 
  private:
+  struct lan_attempt;
+
   struct outgoing {
     std::shared_ptr<ice_agent> agent;
     std::string target;
@@ -72,9 +82,11 @@ class p2p_manager {
     uint64_t created_ms = 0;
     ready_fn ready;
     error_fn error;
-    std::shared_ptr<relay_transport> relay;
+    std::shared_ptr<relay_session> relay;
     std::shared_ptr<switchable_transport> switcher;
     std::shared_ptr<juice_transport> ice;
+    /// Same-NAT direct attempt (QUIC, then TCP) running beside ICE/relay.
+    std::shared_ptr<lan_attempt> lan;
   };
 
   struct incoming {
@@ -86,7 +98,7 @@ class p2p_manager {
     bool relay_delivered = false;
     bool ice_delivered = false;
     uint64_t created_ms = 0;
-    std::shared_ptr<relay_transport> relay;
+    std::shared_ptr<relay_session> relay;
     std::shared_ptr<switchable_transport> switcher;
   };
 
@@ -103,10 +115,35 @@ class p2p_manager {
   void deliver_outgoing(uint64_t id);
   void finish_incoming(const std::string& connect_id, const std::string& error);
   void deliver_incoming(const std::string& connect_id);
-  void start_relay_outgoing(uint64_t id, std::string url, std::string ca);
+  /// Build the highest-preference relay transport the endpoint list offers:
+  /// TCP now, WebSocket as the baseline. QUIC joins once its endpoint exists.
+  std::shared_ptr<relay_session> make_relay(
+      const server_client::relay_info& info);
+  /// Same-NAT direct path: query the directory, then try QUIC and TCP before
+  /// the relay/ICE paths deliver. `id` is the outgoing entry.
+  void start_lan_direct(uint64_t id, server_client::device_lan_info info);
+  void start_lan_quic(uint64_t id,
+                      const std::shared_ptr<lan_attempt>& attempt);
+  void start_lan_tcp(uint64_t id,
+                     const std::shared_ptr<lan_attempt>& attempt);
+  void on_lan_quic(uint64_t id, const std::shared_ptr<lan_attempt>& attempt,
+                   int status);
+  void on_lan_tcp(uint64_t id, const std::shared_ptr<lan_attempt>& attempt,
+                  int status);
+  void deliver_lan(uint64_t id, const std::shared_ptr<lan_attempt>& attempt,
+                   std::shared_ptr<stream_transport> link);
+  /// Drop a same-NAT attempt without telling the session (another transport
+  /// won); used when relay/ICE delivers first.
+  void abort_lan(outgoing& entry);
+  void abort_attempt(const std::shared_ptr<lan_attempt>& attempt);
+  /// End a live LAN transport because its socket failed.
+  void lan_fail(const std::shared_ptr<lan_attempt>& attempt,
+                const std::string& reason);
+  void lan_tcp_pump(const std::shared_ptr<lan_attempt>& attempt);
+  void start_relay_outgoing(uint64_t id, server_client::relay_info info);
   void on_outgoing_relay_ready(uint64_t id);
-  void start_relay_incoming(const std::string& connect_id, std::string url,
-                            std::string ca);
+  void start_relay_incoming(const std::string& connect_id,
+                            server_client::relay_info info);
   void on_incoming_relay_ready(const std::string& connect_id);
 
   static std::pair<std::string, unsigned int> parse_endpoint(
@@ -117,6 +154,10 @@ class p2p_manager {
   std::shared_ptr<server_client> server_;
   std::shared_ptr<session_registry> registry_;
   session_options options_;
+  /// Cleared in the destructor so late LAN callbacks never touch a dead
+  /// manager.
+  std::shared_ptr<std::atomic<bool>> alive_ =
+      std::make_shared<std::atomic<bool>>(true);
   std::string stun_host_;
   uint16_t stun_port_ = 3478;
 

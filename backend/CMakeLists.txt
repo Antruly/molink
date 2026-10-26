@@ -39,6 +39,11 @@ option(MOLINK_BUILD_CORE
 set(MOLINK_UVCPP_PREFIX "" CACHE PATH
   "Unpacked libuvcpp release archive (include/ and lib/, bin/ on Windows)")
 
+# The UDP relay transport calls libuv directly. Linux links the system libuv;
+# a Windows release archive that statically links libuv does not expose it, so
+# that one transport is omitted instead of failing the whole build.
+set(MOLINK_HAVE_UDP_RELAY 1)
+
 if(MOLINK_BUILD_CORE)
   if(MOLINK_UVCPP_PREFIX)
     # CI uses the release archive directly instead of building libuvcpp from
@@ -63,6 +68,18 @@ if(MOLINK_BUILD_CORE)
       set_target_properties(uvcpp_prebuilt PROPERTIES
         IMPORTED_IMPLIB "${_uvp_implib}"
         IMPORTED_LOCATION "${_uvp_dll}")
+      find_library(_uvp_uv NAMES uv libuv
+        PATHS "${MOLINK_UVCPP_PREFIX}/lib" NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
+      if(_uvp_uv)
+        set_target_properties(uvcpp_prebuilt PROPERTIES
+          INTERFACE_LINK_LIBRARIES "${_uvp_uv}")
+      else()
+        # The 1.8.6 MSVC archive statically links libuv and ships no uv.lib.
+        # Keep the core linkable; the relay ladder falls back to QUIC/TCP/H2/WS.
+        set(MOLINK_HAVE_UDP_RELAY 0)
+        message(STATUS
+          "molink: libuvcpp archive has no uv.lib; UDP relay transport omitted")
+      endif()
     else()
       find_file(_uvp_so NAMES libuvcpp.so libuvcpp.dylib
         PATHS "${MOLINK_UVCPP_PREFIX}/lib" NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
@@ -177,9 +194,24 @@ set(MOLINK_CORE_SOURCES
   src/transport/ws_transport.cpp
   src/transport/juice_transport.cpp
   src/transport/relay_transport.cpp
+  src/transport/relay_stream_transport.cpp
+  src/transport/quic_relay_transport.cpp
+  src/transport/udp_relay_transport.cpp
+  src/transport/h3_relay_transport.cpp
+  src/transport/tls_pin.cpp
+  src/transport/relay_ladder.cpp
   src/transport/switchable_transport.cpp
   src/transport/connect_proxy.cpp
   src/transport/direct_proxy.cpp
+  src/transport/stream_transport.cpp
+  src/transport/quic_listener.cpp
+  src/transport/h3_ws_listener.cpp
+  src/transport/h3_ws_transport.cpp
+  src/transport/web_ws_transport.cpp
+  src/transport/h2_ws_transport.cpp
+  src/transport/h2_relay_transport.cpp
+  src/transport/tcp_listener.cpp
+  src/transport/peer_transports.cpp
   src/p2p/ice_agent.cpp
   src/p2p/p2p_manager.cpp
   src/util.cpp
@@ -242,7 +274,28 @@ if(MOLINK_ENABLE_AV1)
   endif()
 endif()
 
+# NVIDIA NVENC AV1 rectangles. The header is vendored under third_party, so
+# the feature is available on any build with the NVIDIA driver at runtime; the
+# encoder is loaded with LoadLibrary/dlopen and no import library is needed.
+option(MOLINK_ENABLE_NVENC "Enable NVIDIA NVENC AV1 rectangles" ON)
+set(MOLINK_NVENC_SDK "" CACHE PATH
+  "Optional ffnvcodec include tree (contains ffnvcodec/nvEncodeAPI.h)")
+set(MOLINK_HAVE_NVENC 0)
+if(MOLINK_ENABLE_NVENC)
+  find_path(NVENC_INCLUDE_DIR ffnvcodec/nvEncodeAPI.h
+    HINTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party"
+          "${MOLINK_NVENC_SDK}/include")
+  if(NVENC_INCLUDE_DIR AND EXISTS
+     "${NVENC_INCLUDE_DIR}/ffnvcodec/nvEncodeAPI.h")
+    set(MOLINK_HAVE_NVENC 1)
+    list(APPEND MOLINK_CORE_SOURCES src/capture/nvenc_av1_encoder.cpp)
+  endif()
+endif()
+
 if(MOLINK_BUILD_CORE)
+  if(NOT MOLINK_HAVE_UDP_RELAY)
+    list(REMOVE_ITEM MOLINK_CORE_SOURCES src/transport/udp_relay_transport.cpp)
+  endif()
   add_executable(molink-core ${MOLINK_CORE_SOURCES})
   target_include_directories(molink-core PRIVATE src)
 
@@ -252,6 +305,29 @@ if(MOLINK_BUILD_CORE)
   # OpenSSL generates the per-device certificate. Builds without it (some
   # macOS runner images) keep the encryption settings but report the identity
   # as unavailable instead of failing the whole release.
+  # HTTP/3 WebSocket sessions (RFC 9220) need the h3 WebSocket header that
+  # libuvcpp releases started shipping in 1.8.4. Without it the listener still
+  # builds but start() reports HTTP/3 as unavailable.
+  set(MOLINK_HAVE_H3_WS 0)
+  if(UVP_UVCPP_PREFIX AND EXISTS
+     "${UVP_UVCPP_PREFIX}/include/http3/uvcpp_h3_ws_connection.h")
+    set(MOLINK_HAVE_H3_WS 1)
+  endif()
+  target_compile_definitions(molink-core PRIVATE
+    MOLINK_HAVE_H3_WS=${MOLINK_HAVE_H3_WS})
+
+  # HTTP/2 WebSocket (RFC 8441) needs both the h2 WS connection and the
+  # webapp's transport-agnostic extended CONNECT session (libuvcpp 1.8.6).
+  set(MOLINK_HAVE_H2_WS 0)
+  if(UVP_UVCPP_PREFIX AND EXISTS
+     "${UVP_UVCPP_PREFIX}/include/http2/uvcpp_h2_ws_connection.h"
+     AND EXISTS "${UVP_UVCPP_PREFIX}/include/webapp/uvcpp_web_ws.h")
+    set(MOLINK_HAVE_H2_WS 1)
+  endif()
+  target_compile_definitions(molink-core PRIVATE
+    MOLINK_HAVE_H2_WS=${MOLINK_HAVE_H2_WS}
+    MOLINK_HAVE_UDP_RELAY=${MOLINK_HAVE_UDP_RELAY})
+
   find_package(OpenSSL QUIET)
   if(OpenSSL_FOUND)
     target_link_libraries(molink-core PRIVATE OpenSSL::SSL OpenSSL::Crypto)
@@ -273,6 +349,16 @@ if(MOLINK_BUILD_CORE)
     target_include_directories(molink-core PRIVATE ${DAV1D_INCLUDE_DIR})
     target_link_libraries(molink-core PRIVATE ${DAV1D_LIBRARY})
     message(STATUS "molink: AV1 rectangle decoding enabled (dav1d)")
+  endif()
+  if(MOLINK_HAVE_NVENC)
+    target_compile_definitions(molink-core PRIVATE MOLINK_HAVE_NVENC=1)
+    target_include_directories(molink-core PRIVATE ${NVENC_INCLUDE_DIR})
+    if(WIN32)
+      target_link_libraries(molink-core PRIVATE d3d11 dxgi dxguid)
+    else()
+      target_link_libraries(molink-core PRIVATE ${CMAKE_DL_LIBS})
+    endif()
+    message(STATUS "molink: NVIDIA NVENC AV1 encoder enabled")
   endif()
 
   # Linux screen capture. X11/XShm is the first backend; a PipeWire portal
@@ -402,6 +488,47 @@ foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
 endforeach()
 add_test(NAME dirty_rects COMMAND molink-core-dirty-rects-test)
 
+# The relay/ICE split is pure routing: no libuvcpp and no sockets.
+add_executable(molink-core-switchable-test
+  tests/switchable_transport_test.cpp
+  src/transport/switchable_transport.cpp
+  src/protocol/frame_packet.cpp
+)
+target_include_directories(molink-core-switchable-test PRIVATE src)
+set_target_properties(molink-core-switchable-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
+  string(TOUPPER "${uvp_config}" uvp_config_upper)
+  set_target_properties(molink-core-switchable-test PROPERTIES
+    "RUNTIME_OUTPUT_DIRECTORY_${uvp_config_upper}" "${CMAKE_BINARY_DIR}")
+endforeach()
+add_test(NAME switchable COMMAND molink-core-switchable-test)
+
+# NVENC smoke test: encodes one rectangle and writes the AV1 OBU. Exit 77 on
+# machines without an AV1-capable NVIDIA GPU (CTest marks it skipped).
+if(MOLINK_HAVE_NVENC)
+  add_executable(molink-core-nvenc-test
+    tests/nvenc_test.cpp
+    src/capture/nvenc_av1_encoder.cpp
+  )
+  target_include_directories(molink-core-nvenc-test PRIVATE
+    src ${NVENC_INCLUDE_DIR})
+  if(WIN32)
+    target_link_libraries(molink-core-nvenc-test PRIVATE d3d11 dxgi dxguid)
+  else()
+    target_link_libraries(molink-core-nvenc-test PRIVATE ${CMAKE_DL_LIBS})
+  endif()
+  set_target_properties(molink-core-nvenc-test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+  foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
+    string(TOUPPER "${uvp_config}" uvp_config_upper)
+    set_target_properties(molink-core-nvenc-test PROPERTIES
+      "RUNTIME_OUTPUT_DIRECTORY_${uvp_config_upper}" "${CMAKE_BINARY_DIR}")
+  endforeach()
+  add_test(NAME nvenc COMMAND molink-core-nvenc-test)
+  set_tests_properties(nvenc PROPERTIES SKIP_RETURN_CODE 77)
+endif()
+
 # The round-trip test needs both halves of the AV1 SDK.
 if(MOLINK_SVT_AV1_FOUND AND MOLINK_DAV1D_FOUND)
   add_executable(molink-core-av1-test
@@ -476,6 +603,84 @@ if(MOLINK_SVT_AV1_FOUND AND MOLINK_DAV1D_FOUND)
   add_test(NAME frame_encode_av1 COMMAND molink-core-frame-encode-av1-test)
 endif()
 
+# QUIC transport loopback: one QUIC bidirectional stream carries MOLK packets
+# between a server and a client on 127.0.0.1. It needs libuvcpp built with QUIC
+# (ngtcp2 + the OpenSSL 3.2 QUIC API) and OpenSSL for the loopback certificate.
+# When libuvcpp reports QUIC disabled the binary still builds, prints SKIP and
+# exits 77, which CTest records as skipped.
+if(MOLINK_BUILD_CORE AND OpenSSL_FOUND)
+  add_executable(molink-core-quic-loopback-test
+    tests/quic_loopback_test.cpp
+    src/transport/stream_transport.cpp
+    src/transport/quic_listener.cpp
+    src/protocol/frame_packet.cpp
+    src/tls_identity.cpp
+  )
+  target_include_directories(molink-core-quic-loopback-test PRIVATE src)
+  target_compile_definitions(molink-core-quic-loopback-test PRIVATE
+    MOLINK_HAVE_OPENSSL=1)
+  if(UVP_UVCPP_PREFIX)
+    target_include_directories(molink-core-quic-loopback-test PRIVATE
+      "${UVP_UVCPP_PREFIX}/include")
+    target_link_directories(molink-core-quic-loopback-test PRIVATE
+      "${UVP_UVCPP_PREFIX}/lib")
+  endif()
+  target_link_libraries(molink-core-quic-loopback-test PRIVATE
+    ${UVP_UVCPP_TARGET} OpenSSL::SSL OpenSSL::Crypto)
+  if(MINGW AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
+     CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)
+    target_link_libraries(molink-core-quic-loopback-test PRIVATE stdc++fs)
+  endif()
+  set_target_properties(molink-core-quic-loopback-test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+    BUILD_RPATH "$<TARGET_FILE_DIR:${UVP_UVCPP_TARGET}>")
+  foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
+    string(TOUPPER "${uvp_config}" uvp_config_upper)
+    set_target_properties(molink-core-quic-loopback-test PROPERTIES
+      "RUNTIME_OUTPUT_DIRECTORY_${uvp_config_upper}" "${CMAKE_BINARY_DIR}")
+  endforeach()
+  if(UNIX AND NOT APPLE)
+    # libuvcpp.so needs libllhttp.so from its own directory and carries no
+    # RUNPATH, so keep a legacy RPATH: unlike RUNPATH it is inherited by
+    # indirect dependencies.
+    target_link_options(molink-core-quic-loopback-test PRIVATE
+      "LINKER:--disable-new-dtags")
+  endif()
+  add_test(NAME quic_loopback COMMAND molink-core-quic-loopback-test)
+  set_tests_properties(quic_loopback PROPERTIES SKIP_RETURN_CODE 77)
+endif()
+
+# Relay endpoint fallback is pure sequencing; it links libuvcpp only because
+# the ladder owns the per-attempt timer.
+if(MOLINK_BUILD_CORE)
+  add_executable(molink-core-relay-ladder-test
+    tests/relay_ladder_test.cpp
+    src/transport/relay_ladder.cpp
+  )
+  target_include_directories(molink-core-relay-ladder-test PRIVATE src)
+  if(UVP_UVCPP_PREFIX)
+    target_include_directories(molink-core-relay-ladder-test PRIVATE
+      "${UVP_UVCPP_PREFIX}/include")
+    target_link_directories(molink-core-relay-ladder-test PRIVATE
+      "${UVP_UVCPP_PREFIX}/lib")
+  endif()
+  target_link_libraries(molink-core-relay-ladder-test PRIVATE
+    ${UVP_UVCPP_TARGET})
+  set_target_properties(molink-core-relay-ladder-test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+    BUILD_RPATH "$<TARGET_FILE_DIR:${UVP_UVCPP_TARGET}>")
+  foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
+    string(TOUPPER "${uvp_config}" uvp_config_upper)
+    set_target_properties(molink-core-relay-ladder-test PROPERTIES
+      "RUNTIME_OUTPUT_DIRECTORY_${uvp_config_upper}" "${CMAKE_BINARY_DIR}")
+  endforeach()
+  if(UNIX AND NOT APPLE)
+    target_link_options(molink-core-relay-ladder-test PRIVATE
+      "LINKER:--disable-new-dtags")
+  endif()
+  add_test(NAME relay_ladder COMMAND molink-core-relay-ladder-test)
+endif()
+
 if (MSVC)
   # MSVC reads a source without a BOM in the system code page. On a Chinese
   # Windows install that is GBK (936), so a UTF-8 source with Chinese comments
@@ -486,6 +691,14 @@ if (MSVC)
   endif()
   target_compile_options(molink-core-protocol-test PRIVATE /W4 /permissive- /utf-8)
   target_compile_options(molink-core-dirty-rects-test PRIVATE /W4 /permissive- /utf-8)
+  if(TARGET molink-core-quic-loopback-test)
+    target_compile_options(molink-core-quic-loopback-test PRIVATE
+      /W4 /permissive- /utf-8)
+  endif()
+  if(TARGET molink-core-relay-ladder-test)
+    target_compile_options(molink-core-relay-ladder-test PRIVATE
+      /W4 /permissive- /utf-8)
+  endif()
   if(TARGET molink-core-av1-test)
     target_compile_options(molink-core-av1-test PRIVATE /W4 /permissive- /utf-8)
   endif()
@@ -503,6 +716,14 @@ else()
   endif()
   target_compile_options(molink-core-protocol-test PRIVATE -Wall -Wextra -Wpedantic)
   target_compile_options(molink-core-dirty-rects-test PRIVATE -Wall -Wextra -Wpedantic)
+  if(TARGET molink-core-quic-loopback-test)
+    target_compile_options(molink-core-quic-loopback-test PRIVATE
+      -Wall -Wextra -Wpedantic)
+  endif()
+  if(TARGET molink-core-relay-ladder-test)
+    target_compile_options(molink-core-relay-ladder-test PRIVATE
+      -Wall -Wextra -Wpedantic)
+  endif()
   if(TARGET molink-core-av1-test)
     target_compile_options(molink-core-av1-test PRIVATE -Wall -Wextra -Wpedantic)
   endif()

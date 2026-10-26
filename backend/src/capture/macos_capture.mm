@@ -132,8 +132,11 @@ class macos_capture final : public capture_base {
       std::string grab_error;
       if (grab(pixels, grab_error)) {
         const bool key = keyframe_requested_.exchange(false) || !have_previous_;
+        const int interval_ms =
+            periodic_keyframe_ms() > 0 ? periodic_keyframe_ms() : 30000;
         const bool refresh_due =
-            std::chrono::steady_clock::now() - last_full > std::chrono::seconds(30);
+            std::chrono::steady_clock::now() - last_full >
+            std::chrono::milliseconds(interval_ms);
         publish_frame(pixels, key || refresh_due);
         if (key || refresh_due) last_full = std::chrono::steady_clock::now();
       } else if (!grab_error.empty()) {
@@ -295,12 +298,14 @@ class macos_capture final : public capture_base {
     encoding.av1_qp = quality_av1_qp();
     encoding.av1_grayscale = quality_av1_grayscale();
     encoding.av1_max_area_percent = quality_av1_max_area_percent();
+    encoding.av1_full_frame = quality_av1_full_frame();
     std::vector<uint8_t> av1_payload;
+    bool av1_only = false;
 
     std::vector<uint8_t> payload;
     std::string err;
     if (!encode_capture_frame(header, tiles, encoding, pixels.data(), stride, payload,
-                           &av1_payload, err)) {
+                           &av1_payload, err, &av1_only)) {
       return;
     }
 
@@ -315,6 +320,7 @@ class macos_capture final : public capture_base {
     frame->codec = header.codec;
     frame->payload = std::move(payload);
     frame->av1_payload = std::move(av1_payload);
+    frame->av1_only = av1_only;
     publish(std::move(frame));
     have_previous_ = true;
   }

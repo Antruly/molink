@@ -34,7 +34,9 @@ import type {
   CursorShape,
   Welcome,
 } from '../lib/client'
+import { cleanDeviceNote, deviceNoteKey } from '../lib/device-note'
 import type { Frame } from '../lib/protocol'
+import { forgetSessionScreenBuffer } from '../lib/screen-buffer'
 import {
   SessionConnection,
   type Stats,
@@ -86,10 +88,16 @@ export interface SessionTab {
   error: string | null
   /// Machine-readable error code from the host (e.g. unauthorized).
   errorCode?: string | null
-  /// "relay" or "p2p" for a device-ID session.
+  /// "relay" or "p2p" for a device-ID session (legacy live mode).
   transport?: string
+  /// Data path reported live by the local core: direct | p2p | relay.
+  path?: string
+  /// Wire protocol reported live: websocket | quic | udp | tcp.
+  protocol?: string
   /// The client core is decoding AV1 patches for this session.
   av1Active?: boolean
+  /// The stream is AV1-only (no tile image underneath).
+  av1Full?: boolean
   av1WireBytes?: number
   av1DecodedBytes?: number
   notice: string | null
@@ -153,6 +161,10 @@ interface AppState {
   forceRelay: boolean
   uiMode: UiMode
   savedDevices: SavedDevice[]
+  /// User notes keyed by the normalized device name. Saved devices, recents,
+  /// LAN peers and the online list all read the same map, so giving a machine
+  /// a note updates every card that shows it.
+  deviceNotes: Record<string, string>
   authPhase: AuthPhase
   localMode: boolean
   token: string
@@ -184,6 +196,8 @@ interface AppState {
   saveDevice: (device: Omit<SavedDevice, 'key' | 'savedAt'> & { key?: string }) => void
   patchSavedDevice: (id: string, patch: Partial<SavedDevice>) => void
   removeSavedDevice: (key: string) => void
+  /// Empty note removes the entry for that device name.
+  setDeviceNote: (name: string, note: string) => void
   setServerEnabled: (enabled: boolean) => Promise<boolean>
   setAvatarValue: (avatar: string) => Promise<boolean>
   /// Join another device's code, or ask the directory for a fresh one.
@@ -252,6 +266,7 @@ const HISTORY_VIEW_KEY = 'molink.historyView'
 const MODE_KEY = 'molink.sessionMode'
 const UI_MODE_KEY = 'molink.uiMode'
 const SAVED_DEVICES_KEY = 'molink.savedDevices'
+const DEVICE_NOTES_KEY = 'molink.deviceNotes'
 const CONNECT_DRAFT_KEY = 'molink.connectDraft'
 const EMPTY_STATS: Stats = {
   fps: 0,
@@ -395,6 +410,30 @@ function initialSavedDevices(): SavedDevice[] {
   }
 }
 
+function sanitizeDeviceNotes(
+  value: unknown,
+): Record<string, string> {
+  const notes: Record<string, string> = {}
+  if (value === null || typeof value !== 'object') return notes
+  for (const [name, note] of Object.entries(
+    value as Record<string, unknown>,
+  )) {
+    if (typeof note !== 'string') continue
+    const key = deviceNoteKey(name)
+    const clean = cleanDeviceNote(note)
+    if (key && clean) notes[key] = clean
+  }
+  return notes
+}
+
+function initialDeviceNotes(): Record<string, string> {
+  try {
+    return sanitizeDeviceNotes(JSON.parse(readStorage(DEVICE_NOTES_KEY)))
+  } catch {
+    return {}
+  }
+}
+
 const runtimes = new Map<string, SessionConnection>()
 let nextId = 1
 
@@ -459,6 +498,7 @@ export const useAppStore = create<AppState>((set, get) => {
         uiMode: get().uiMode,
         savedDevices: saved,
         recents: get().recents,
+        deviceNotes: get().deviceNotes,
         connectDraft: get().connectDraft,
       }).catch(() => undefined)
     }, 400)
@@ -515,6 +555,7 @@ export const useAppStore = create<AppState>((set, get) => {
     forceRelay: readStorage('molink.forceRelay') === '1',
     uiMode: initialUiMode(),
     savedDevices: initialSavedDevices(),
+    deviceNotes: initialDeviceNotes(),
     authPhase: 'booting',
     localMode: false,
     token: '',
@@ -635,6 +676,14 @@ export const useAppStore = create<AppState>((set, get) => {
           next.recents = prefs.recents.slice(0, 8)
           writeStorage(RECENT_KEY, JSON.stringify(next.recents))
         }
+        const notes = sanitizeDeviceNotes(prefs.deviceNotes)
+        if (Object.keys(notes).length > 0) {
+          next.deviceNotes = { ...get().deviceNotes, ...notes }
+          writeStorage(
+            DEVICE_NOTES_KEY,
+            JSON.stringify(next.deviceNotes),
+          )
+        }
         const draft = prefs.connectDraft
         if (draft && typeof draft.input === 'string' &&
             typeof draft.code === 'string' &&
@@ -685,6 +734,23 @@ export const useAppStore = create<AppState>((set, get) => {
       const list = get().savedDevices.filter((device) => device.key !== key)
       writeStorage(SAVED_DEVICES_KEY, JSON.stringify(list))
       set({ savedDevices: list })
+      schedulePersist()
+    },
+
+    setDeviceNote: (name, note) => {
+      const key = deviceNoteKey(name)
+      if (!key) return
+      const value = cleanDeviceNote(note)
+      const notes = { ...get().deviceNotes }
+      if (value) {
+        notes[key] = value
+      } else if (!(key in notes)) {
+        return
+      } else {
+        delete notes[key]
+      }
+      writeStorage(DEVICE_NOTES_KEY, JSON.stringify(notes))
+      set({ deviceNotes: notes })
       schedulePersist()
     },
 
@@ -1097,7 +1163,7 @@ export const useAppStore = create<AppState>((set, get) => {
             patchTab(id, { error: 'clipboard_write_failed' })
           })
         },
-      })
+      }, id)
       runtimes.set(id, connection)
       setForegroundRuntime(id)
       if (get().localMode) {
@@ -1141,6 +1207,7 @@ export const useAppStore = create<AppState>((set, get) => {
       const connection = runtimes.get(id)
       connection?.disconnect()
       runtimes.delete(id)
+      forgetSessionScreenBuffer(id)
       set((state) => {
         const index = state.tabs.findIndex((tab) => tab.id === id)
         const tabs = state.tabs.filter((tab) => tab.id !== id)

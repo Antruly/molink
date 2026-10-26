@@ -1,4 +1,13 @@
-import { Monitor, FolderUp, MessageSquare, Send, KeyRound } from 'lucide-react'
+import {
+  Eye,
+  EyeOff,
+  FolderUp,
+  KeyRound,
+  MessageSquare,
+  Monitor,
+  Send,
+} from 'lucide-react'
+import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { SessionIntent } from '../../store/app'
 
@@ -34,6 +43,7 @@ export function ConnectCard({
   onSubmit: () => void
 }) {
   const { t } = useTranslation()
+  const [showCode, setShowCode] = useState(false)
   const requestAccess = code.trim() === ''
   return (
     <section className="card h-full p-3">
@@ -98,11 +108,20 @@ export function ConnectCard({
               value={code}
               onChange={(event) => setCode(event.target.value)}
               placeholder={t('simple.codePlaceholder')}
-              type="password"
+              type={showCode ? 'text' : 'password'}
               autoComplete="new-password"
               spellCheck={false}
               aria-label={t('simple.codePlaceholder')}
             />
+            <button
+              type="button"
+              className="grid h-5 w-5 shrink-0 place-items-center rounded text-muted transition hover:bg-panel hover:text-ink"
+              onClick={() => setShowCode((value) => !value)}
+              title={showCode ? t('home.hide') : t('home.show')}
+              aria-label={showCode ? t('home.hide') : t('home.show')}
+            >
+              {showCode ? <EyeOff size={12} /> : <Eye size={12} />}
+            </button>
           </label>
           <span className="text-[10px] text-muted">
             {requestAccess ? t('simple.requestHint') : t('simple.codeHint')}

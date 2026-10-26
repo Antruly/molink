@@ -5,6 +5,7 @@ frontend/dist/
 
 # C++ 构建
 backend/build/
+backend/build-*/
 squashfs-root/
 shell/*/build/
 squashfs-root/

@@ -197,12 +197,6 @@ std::shared_ptr<const captured_frame> capture_base::find(uint32_t seq) const {
 }
 
 void capture_base::update_cell_clock(const captured_frame& frame) {
-  protocol::parsed_frame parsed;
-  std::string error;
-  if (!protocol::parse_frame_payload(frame.payload.data(), frame.payload.size(),
-                                     parsed, error)) {
-    return;
-  }
   const int cols = (static_cast<int>(frame.width) + 127) / 128;
   const int rows = (static_cast<int>(frame.height) + 127) / 128;
   if (cols <= 0 || rows <= 0) return;
@@ -211,18 +205,33 @@ void capture_base::update_cell_clock(const captured_frame& frame) {
     clock_rows_ = static_cast<uint16_t>(rows);
     cell_clock_.assign(static_cast<std::size_t>(cols) * rows, 0);
   }
-  for (const protocol::tile_view& tile : parsed.tiles) {
-    if (tile.w == 0 || tile.h == 0) continue;
-    const int col0 = tile.x / 128;
-    const int col1 = (tile.x + tile.w - 1) / 128;
-    const int row0 = tile.y / 128;
-    const int row1 = (tile.y + tile.h - 1) / 128;
-    for (int row = row0; row <= row1 && row < rows; ++row) {
-      for (int col = col0; col <= col1 && col < cols; ++col) {
-        cell_clock_[static_cast<std::size_t>(row) * cols + col] = frame.ts_us;
+  auto mark = [this, cols, rows, &frame](const std::vector<uint8_t>& payload) {
+    if (payload.empty()) return;
+    protocol::parsed_frame parsed;
+    std::string error;
+    if (!protocol::parse_frame_payload(payload.data(), payload.size(), parsed,
+                                       error)) {
+      return;
+    }
+    for (const protocol::tile_view& tile : parsed.tiles) {
+      if (tile.w == 0 || tile.h == 0) continue;
+      const int col0 = tile.x / 128;
+      const int col1 = (tile.x + tile.w - 1) / 128;
+      const int row0 = tile.y / 128;
+      const int row1 = (tile.y + tile.h - 1) / 128;
+      for (int row = row0; row <= row1 && row < rows; ++row) {
+        for (int col = col0; col <= col1 && col < cols; ++col) {
+          cell_clock_[static_cast<std::size_t>(row) * cols + col] =
+              frame.ts_us;
+        }
       }
     }
-  }
+  };
+  // The base frame has the AV1 rectangles removed, so parse the patch too.
+  // Otherwise a lost AV1 patch would never look stale to the clock and the
+  // rectangle would stay frozen until an unrelated full keyframe.
+  mark(frame.payload);
+  mark(frame.av1_payload);
 }
 
 bool capture_base::tile_clock(std::vector<uint8_t>& out) {
@@ -255,12 +264,13 @@ void capture_base::publish(std::shared_ptr<const captured_frame> frame) {
   std::lock_guard<std::mutex> lock(mutex_);
   update_cell_clock(*frame);
   latest_ = frame;
-  history_bytes_ += frame->payload.size();
+  history_bytes_ += frame->payload.size() + frame->av1_payload.size();
   history_.push_back(std::move(frame));
   while (history_.size() > kHistoryMaxFrames ||
          history_bytes_ > kHistoryMaxBytes) {
     const auto& oldest = history_.front();
-    history_bytes_ -= oldest->payload.size();
+    history_bytes_ -=
+        oldest->payload.size() + oldest->av1_payload.size();
     history_.pop_front();
   }
 }
@@ -305,15 +315,21 @@ std::shared_ptr<capture_source> start_capture(const capture_options& options,
   if (allow_display) {
 #if defined(_WIN32)
     // When the session service is installed it launches a SYSTEM helper in the
-    // active console session; that helper can also see the Winlogon desktop.
+    // active console session; that helper is the only source that can see the
+    // Winlogon desktop. On a normal Default desktop its GDI capture is slower
+    // and misses DWM-composited regions (stale wallpaper blocks), so prefer
+    // DXGI there and keep the helper only for the lock/login screen.
     if (query_session_service().installed && running_in_console_session()) {
       std::unique_ptr<capture_source> secure =
           make_windows_secure_capture(options);
       if (secure) {
         std::string secure_error;
         if (secure->start(secure_error)) {
-          note = "capture: secure-desktop";
-          return secure;
+          if (secure->is_secure_desktop()) {
+            note = "capture: secure-desktop";
+            return secure;
+          }
+          secure->stop();
         }
       }
     }

@@ -3,11 +3,28 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <deque>
 #include <fstream>
 #include <future>
+#include <memory>
 #include <utility>
 
+#include <net/uvcpp_net_read.h>
+#include <net/uvcpp_tcp_client.h>
+#include <ssl/uvcpp_ssl_context.h>
+#include <uvcpp/uvcpp_config.h>
+#if UVCPP_QUIC_ENABLE
+#include <handle/uvcpp_loop.h>
+#include <quic/uvcpp_quic_client.h>
+#include <quic/uvcpp_quic_connection.h>
+#endif
+
+#ifndef MOLINK_HAVE_UDP_RELAY
+#define MOLINK_HAVE_UDP_RELAY 1
+#endif
+
 #include "settings.h"
+#include "transport/tls_pin.h"
 #include "util.h"
 
 namespace molink {
@@ -30,7 +47,30 @@ void plog(const std::string& message) {
   if (out) out << message << "\n";
 }
 
+constexpr std::size_t kLanTcpBacklogBytes = 8u * 1024u * 1024u;
+
 }  // namespace
+
+/// One same-NAT direct attempt: QUIC first, TCP as the second rung. The
+/// transport's closures capture this object, so it outlives the outgoing
+/// entry after delivery.
+struct p2p_manager::lan_attempt {
+  std::string address;
+  int quic_port = 0;
+  int tcp_port = 0;
+#if UVCPP_QUIC_ENABLE
+  std::shared_ptr<uvcpp::uvcpp_ssl_context> tls;
+  std::shared_ptr<uvcpp::uvcpp_quic_client> quic;
+#endif
+  std::shared_ptr<uvcpp::uvcpp_tcp_client> tcp;
+  std::shared_ptr<uvcpp::uvcpp_ssl_context> tcp_tls;
+  std::string ca_path;
+  std::shared_ptr<stream_transport> link;
+  std::deque<std::string> queue;
+  std::size_t queued = 0;
+  bool writing = false;
+  bool closed = false;
+};
 
 p2p_manager::p2p_manager(uvcpp::uvcpp_loop* loop, post_fn post,
                          std::shared_ptr<server_client> server,
@@ -63,7 +103,10 @@ p2p_manager::p2p_manager(uvcpp::uvcpp_loop* loop, post_fn post,
   }
 }
 
-p2p_manager::~p2p_manager() { stop(); }
+p2p_manager::~p2p_manager() {
+  alive_->store(false);
+  stop();
+}
 
 void p2p_manager::start() {
   if (running_.exchange(true)) return;
@@ -241,6 +284,26 @@ void p2p_manager::connect(const std::string& target, bool relay_only,
   if (!relay_only) entry.agent = make_agent();
   outgoing_.emplace(id, std::move(entry));
 
+  // Same-NAT direct path: ask the directory for the target's LAN address and
+  // data ports. It only fills them for a requester behind the same public IP.
+  // `relay=only` means the user asked for a relayed path, so do not bypass it.
+  if (!relay_only) enqueue([this, id, target] {
+    server_client::device_lan_info info;
+    std::string error;
+    if (!server_->lookup_device(target, info, error)) {
+      plog("lan lookup failed: " + error);
+      return;
+    }
+    if (info.address.empty() ||
+        (info.quic_port <= 0 && info.tcp_port <= 0)) {
+      return;
+    }
+    plog("lan candidate " + info.address + " quic=" +
+         std::to_string(info.quic_port) + " tcp=" +
+         std::to_string(info.tcp_port));
+    post_([this, id, info] { start_lan_direct(id, info); });
+  });
+
   if (relay_only) {
     // No ICE: create the signaling session only so both sides can obtain a
     // relay token and pair. The offer is a placeholder; the target's ICE will
@@ -259,15 +322,16 @@ void p2p_manager::connect(const std::string& target, bool relay_only,
         if (found == outgoing_.end() || found->second.finished) return;
         found->second.connect_id = connect_id;
       });
-      std::string url;
-      std::string ca;
-      if (!server_->relay_create(connect_id, url, ca, error)) {
+      server_client::relay_info info;
+      if (!server_->relay_create(connect_id, info, error)) {
         plog("relay_create failed: " + error);
         post_([this, id, error] { finish_outgoing(id, error); });
         return;
       }
-      plog("relay url " + url.substr(0, url.find('?')));
-      post_([this, id, url, ca] { start_relay_outgoing(id, url, ca); });
+      plog("relay url " + info.url.substr(0, info.url.find('?')));
+      post_([this, id, info = std::move(info)]() mutable {
+        start_relay_outgoing(id, std::move(info));
+      });
     });
     return;
   }
@@ -310,13 +374,14 @@ void p2p_manager::connect(const std::string& target, bool relay_only,
                                                entry->second.created_ms};
           });
           // Relay first: open the data path in parallel with hole punching.
-          std::string url;
-          std::string ca;
-          if (!server_->relay_create(connect_id, url, ca, error)) {
+          server_client::relay_info info;
+          if (!server_->relay_create(connect_id, info, error)) {
             plog("relay unavailable: " + error);
             return;
           }
-          post_([this, id, url, ca] { start_relay_outgoing(id, url, ca); });
+          post_([this, id, info = std::move(info)]() mutable {
+            start_relay_outgoing(id, std::move(info));
+          });
         });
       },
       [this, id](int state) {
@@ -336,13 +401,416 @@ void p2p_manager::connect(const std::string& target, bool relay_only,
   }
 }
 
-void p2p_manager::start_relay_outgoing(uint64_t id, std::string url,
-                                       std::string ca) {
+std::shared_ptr<relay_session> p2p_manager::make_relay(
+    const server_client::relay_info& info) {
+  // One factory per advertised endpoint, in the directory's preference order.
+  // relay_ladder starts them one at a time and moves on when an attempt fails
+  // before pairing, so a blocked UDP port falls through to TCP and then WS.
+  std::vector<relay_ladder::factory> factories;
+  uvcpp::uvcpp_loop* loop = loop_;
+  post_fn post = post_;
+  for (const server_client::relay_endpoint& endpoint : info.endpoints) {
+    if (endpoint.protocol == "quic" && endpoint.port > 0 &&
+        !endpoint.host.empty()) {
+      plog("relay endpoint quic " + endpoint.host + ":" +
+           std::to_string(endpoint.port));
+      factories.push_back([endpoint, info, loop, post] {
+        return std::make_shared<quic_relay_transport>(
+            endpoint.host, endpoint.port, info.connect_id, info.token,
+            info.ca_path, loop, post);
+      });
+    } else if (endpoint.protocol == "tcp" && endpoint.port > 0 &&
+               !endpoint.host.empty()) {
+      plog("relay endpoint tcp " + endpoint.host + ":" +
+           std::to_string(endpoint.port));
+      factories.push_back([endpoint, info, loop, post] {
+        return std::make_shared<relay_stream_transport>(
+            "tcp", endpoint.host, endpoint.port, info.connect_id, info.token,
+            info.ca_path, endpoint.secure, loop, post);
+      });
+#if MOLINK_HAVE_H3_WS
+    } else if (endpoint.protocol == "http3" && endpoint.port > 0 &&
+               !endpoint.host.empty()) {
+      plog("relay endpoint http3 " + endpoint.host + ":" +
+           std::to_string(endpoint.port));
+      factories.push_back([endpoint, info, loop, post] {
+        return std::make_shared<h3_relay_transport>(
+            endpoint.host, endpoint.port, info.connect_id, info.token,
+            info.ca_path, loop, post);
+      });
+#endif
+#if MOLINK_HAVE_H2_WS
+    } else if (endpoint.protocol == "http2" && endpoint.port > 0 &&
+               !endpoint.host.empty()) {
+      plog("relay endpoint http2 " + endpoint.host + ":" +
+           std::to_string(endpoint.port));
+      factories.push_back([endpoint, info, loop, post] {
+        return std::make_shared<h2_relay_transport>(
+            endpoint.host, endpoint.port, info.connect_id, info.token,
+            info.ca_path, endpoint.secure, loop, post);
+      });
+#endif
+#if MOLINK_HAVE_UDP_RELAY
+    } else if (endpoint.protocol == "udp" && endpoint.port > 0 &&
+               !endpoint.host.empty()) {
+      plog("relay endpoint udp " + endpoint.host + ":" +
+           std::to_string(endpoint.port));
+      factories.push_back([endpoint, info, loop, post] {
+        return std::make_shared<udp_relay_transport>(
+            endpoint.host, endpoint.port, info.connect_id, info.token, loop,
+            post);
+      });
+#endif
+    } else if (endpoint.protocol == "websocket") {
+      factories.push_back([info, post] {
+        return std::make_shared<relay_transport>(info.url, info.ca_path, post);
+      });
+    }
+  }
+  if (factories.empty()) {
+    factories.push_back([info, post] {
+      return std::make_shared<relay_transport>(info.url, info.ca_path, post);
+    });
+  }
+  return std::make_shared<relay_ladder>(loop_, std::move(factories));
+}
+
+void p2p_manager::abort_attempt(
+    const std::shared_ptr<lan_attempt>& attempt) {
+  if (!attempt || attempt->closed) return;
+  attempt->closed = true;
+  attempt->queue.clear();
+  attempt->queued = 0;
+#if UVCPP_QUIC_ENABLE
+  if (attempt->quic && attempt->quic->connection() != nullptr) {
+    attempt->quic->connection()->close();
+  }
+#endif
+  if (attempt->tcp) attempt->tcp->close();
+}
+
+void p2p_manager::abort_lan(outgoing& entry) {
+  std::shared_ptr<lan_attempt> attempt = entry.lan;
+  entry.lan.reset();
+  abort_attempt(attempt);
+}
+
+void p2p_manager::lan_fail(const std::shared_ptr<lan_attempt>& attempt,
+                           const std::string& reason) {
+  if (!attempt || attempt->closed) return;
+  attempt->closed = true;
+  attempt->queue.clear();
+  attempt->queued = 0;
+#if UVCPP_QUIC_ENABLE
+  if (attempt->quic && attempt->quic->connection() != nullptr) {
+    // on_close reports peer_closed through the transport's callbacks.
+    attempt->quic->connection()->close();
+    return;
+  }
+#endif
+  if (attempt->tcp) {
+    std::shared_ptr<uvcpp::uvcpp_tcp_client> tcp = attempt->tcp;
+    // Defer: peer_closed runs the session's close handler synchronously, and
+    // this may be called from inside a send.
+    tcp->close([attempt, reason] {
+      if (attempt->link) attempt->link->peer_closed(reason);
+    });
+    return;
+  }
+  if (attempt->link) attempt->link->peer_closed(reason);
+}
+
+void p2p_manager::lan_tcp_pump(const std::shared_ptr<lan_attempt>& attempt) {
+  if (!attempt || attempt->writing || attempt->queue.empty() ||
+      attempt->closed || !attempt->tcp) {
+    return;
+  }
+  auto chunk = std::make_shared<std::string>(std::move(attempt->queue.front()));
+  attempt->queue.pop_front();
+  const std::size_t size = chunk->size();
+  attempt->writing = true;
+  std::shared_ptr<std::atomic<bool>> alive = alive_;
+  const int status = attempt->tcp->write(
+      chunk->data(), chunk->size(),
+      [this, alive, attempt, chunk, size](int write_status) {
+        if (!alive->load()) return;
+        attempt->writing = false;
+        attempt->queued -= size;
+        if (write_status != 0) {
+          lan_fail(attempt, "LAN TCP write failed");
+          return;
+        }
+        lan_tcp_pump(attempt);
+      });
+  if (status != 0) {
+    attempt->writing = false;
+    attempt->queued -= size;
+    lan_fail(attempt, "LAN TCP write failed");
+  }
+}
+
+void p2p_manager::start_lan_direct(uint64_t id,
+                                   server_client::device_lan_info info) {
+  auto it = outgoing_.find(id);
+  if (it == outgoing_.end() || it->second.finished ||
+      it->second.delivered) {
+    return;
+  }
+  if (info.address.empty()) return;
+  auto attempt = std::make_shared<lan_attempt>();
+  attempt->address = info.address;
+  attempt->quic_port = info.quic_port;
+  attempt->tcp_port = info.tcp_port;
+  if (!info.tls_cert.empty()) {
+    pinned_certificate pin =
+        pin_certificate(info.tls_cert, info.tls_fingerprint);
+    if (!pin.ok()) {
+      plog("lan certificate rejected: " + pin.error);
+      return;
+    }
+    attempt->ca_path = pin.ca_path;
+    plog("lan pinned certificate " + pin.fingerprint);
+  }
+  it->second.lan = attempt;
+  if (info.quic_port > 0) {
+    start_lan_quic(id, attempt);
+  } else if (info.tcp_port > 0) {
+    start_lan_tcp(id, attempt);
+  }
+}
+
+void p2p_manager::start_lan_quic(
+    uint64_t id, const std::shared_ptr<lan_attempt>& attempt) {
+#if !UVCPP_QUIC_ENABLE
+  (void)id;
+  start_lan_tcp(id, attempt);
+#else
+  if (!attempt || attempt->closed) return;
+  attempt->tls = std::make_shared<uvcpp::uvcpp_ssl_context>(
+      uvcpp::tls_mode::CLIENT);
+  // No authenticated fingerprint yet: the LAN lookup rides plain HTTP. This is
+  // encrypted but not peer-verified, like the direct /ws/direct QUIC path.
+  if (!attempt->ca_path.empty() &&
+      attempt->tls->load_ca_file(attempt->ca_path)) {
+    attempt->tls->set_verify_mode(uvcpp::tls_verify_mode::PEER);
+  } else {
+    attempt->tls->set_verify_mode(uvcpp::tls_verify_mode::NONE);
+  }
+  attempt->tls->set_alpn_protos({"molink"});
+  attempt->quic = std::make_shared<uvcpp::uvcpp_quic_client>(loop_);
+  attempt->quic->set_ssl_context(attempt->tls.get());
+  attempt->quic->set_alpn_protos({"molink"});
+  std::shared_ptr<std::atomic<bool>> alive = alive_;
+  const int status = attempt->quic->connect(
+      attempt->address.c_str(), attempt->quic_port,
+      [this, alive, id, attempt](int connect_status) {
+        if (alive->load()) on_lan_quic(id, attempt, connect_status);
+      });
+  if (status != 0) {
+    plog("lan quic start failed (" + std::to_string(status) + ")");
+    start_lan_tcp(id, attempt);
+  }
+#endif
+}
+
+void p2p_manager::on_lan_quic(uint64_t id,
+                              const std::shared_ptr<lan_attempt>& attempt,
+                              int status) {
+#if UVCPP_QUIC_ENABLE
+  if (!attempt || attempt->closed) return;
+  auto it = outgoing_.find(id);
+  if (it == outgoing_.end() || it->second.finished ||
+      it->second.delivered) {
+    attempt->closed = true;
+    if (attempt->quic && attempt->quic->connection() != nullptr) {
+      attempt->quic->connection()->close();
+    }
+    return;
+  }
+  uvcpp::uvcpp_quic_connection* connection =
+      attempt->quic ? attempt->quic->connection() : nullptr;
+  if (status != 0 || connection == nullptr) {
+    plog("lan quic failed (" + std::to_string(status) + ")");
+    if (connection != nullptr) connection->close();
+    start_lan_tcp(id, attempt);
+    return;
+  }
+  const int64_t stream_id = connection->open_stream(true);
+  if (stream_id < 0) {
+    plog("lan quic open_stream failed");
+    connection->close();
+    start_lan_tcp(id, attempt);
+    return;
+  }
+  auto link = std::make_shared<stream_transport>(
+      [attempt, connection, stream_id](const uint8_t* data, std::size_t len) {
+        if (attempt->closed || !attempt->quic) return false;
+        return connection->write_stream(
+                   stream_id, reinterpret_cast<const char*>(data), len,
+                   false) == 0;
+      },
+      [attempt, connection](int, const std::string&) {
+        attempt->closed = true;
+        connection->close();
+      },
+      "quic", attempt->address,
+      static_cast<unsigned int>(attempt->quic_port));
+  attempt->link = link;
+
+  uvcpp::uvcpp_quic_connection::callbacks callbacks;
+  callbacks.on_read = [attempt](uvcpp::uvcpp_quic_connection&, int64_t,
+                                const uvcpp::net_read_result& result) {
+    if (attempt->closed || !attempt->link) return;
+    if (result.event == uvcpp::net_read_event::DATA) {
+      attempt->link->feed(
+          reinterpret_cast<const uint8_t*>(result.data), result.size);
+    } else {
+      attempt->link->peer_closed("LAN QUIC stream closed");
+    }
+  };
+  callbacks.on_close = [attempt](uvcpp::uvcpp_quic_connection&, int code) {
+    if (attempt->link) {
+      attempt->link->peer_closed("LAN QUIC connection closed (" +
+                                 std::to_string(code) + ")");
+    }
+  };
+  connection->set_callbacks(callbacks);
+  deliver_lan(id, attempt, link);
+#endif
+}
+
+void p2p_manager::start_lan_tcp(
+    uint64_t id, const std::shared_ptr<lan_attempt>& attempt) {
+  if (!attempt || attempt->closed) return;
+  if (attempt->tcp_port <= 0) {
+    plog("lan direct failed: no TCP endpoint");
+    return;
+  }
+  if (attempt->tcp) return;
+  attempt->tcp = std::make_shared<uvcpp::uvcpp_tcp_client>(loop_);
+#if UVCPP_OPENSSL_ENABLE
+  attempt->tcp_tls = std::make_shared<uvcpp::uvcpp_ssl_context>(
+      uvcpp::tls_mode::CLIENT);
+  if (!attempt->ca_path.empty() &&
+      attempt->tcp_tls->load_ca_file(attempt->ca_path)) {
+    attempt->tcp_tls->set_verify_mode(uvcpp::tls_verify_mode::PEER);
+  } else {
+    attempt->tcp_tls->set_verify_mode(uvcpp::tls_verify_mode::NONE);
+  }
+  if (attempt->tcp->enable_tls(attempt->tcp_tls.get()) != 0) {
+    plog("lan tcp TLS setup failed");
+    attempt->tcp.reset();
+    attempt->tcp_tls.reset();
+    return;
+  }
+#else
+  plog("lan tcp needs a TLS-enabled build");
+  attempt->tcp.reset();
+  return;
+#endif
+  std::shared_ptr<std::atomic<bool>> alive = alive_;
+  const int status = attempt->tcp->connect(
+      attempt->address.c_str(), attempt->tcp_port,
+      [this, alive, id, attempt](int connect_status) {
+        if (alive->load()) on_lan_tcp(id, attempt, connect_status);
+      });
+  if (status != 0) {
+    plog("lan tcp start failed (" + std::to_string(status) + ")");
+    attempt->tcp.reset();
+  }
+}
+
+void p2p_manager::on_lan_tcp(uint64_t id,
+                             const std::shared_ptr<lan_attempt>& attempt,
+                             int status) {
+  if (!attempt || attempt->closed || !attempt->tcp) return;
+  auto it = outgoing_.find(id);
+  if (it == outgoing_.end() || it->second.finished ||
+      it->second.delivered) {
+    attempt->closed = true;
+    attempt->tcp->close();
+    return;
+  }
+  if (status != 0) {
+    plog("lan tcp failed (" + std::to_string(status) + ")");
+    return;
+  }
+  auto link = std::make_shared<stream_transport>(
+      [this, attempt](const uint8_t* data, std::size_t len) {
+        if (attempt->closed || !attempt->tcp) return false;
+        if (attempt->queued + len > kLanTcpBacklogBytes) {
+          lan_fail(attempt, "LAN TCP backlog exceeded");
+          return false;
+        }
+        attempt->queue.emplace_back(reinterpret_cast<const char*>(data), len);
+        attempt->queued += len;
+        lan_tcp_pump(attempt);
+        return true;
+      },
+      [attempt](int, const std::string&) {
+        attempt->closed = true;
+        if (attempt->tcp) attempt->tcp->close();
+      },
+      "tcp", attempt->address,
+      static_cast<unsigned int>(attempt->tcp_port));
+  attempt->link = link;
+
+  attempt->tcp->set_on_close([attempt] {
+    attempt->closed = true;
+    if (attempt->link) attempt->link->peer_closed("LAN TCP closed");
+  });
+  attempt->tcp->read_start_events(
+      [attempt](uvcpp::uvcpp_tcp_client&, const uvcpp::net_read_result& r) {
+        if (r.event != uvcpp::net_read_event::DATA) return;
+        if (!attempt->closed && attempt->link) {
+          attempt->link->feed(reinterpret_cast<const uint8_t*>(r.data),
+                              r.size);
+        }
+      });
+  plog("lan tcp connected " + attempt->address + ":" +
+       std::to_string(attempt->tcp_port));
+  deliver_lan(id, attempt, link);
+}
+
+void p2p_manager::deliver_lan(uint64_t id,
+                              const std::shared_ptr<lan_attempt>& attempt,
+                              std::shared_ptr<stream_transport> link) {
+  auto it = outgoing_.find(id);
+  if (it == outgoing_.end() || it->second.finished) {
+    abort_attempt(attempt);
+    return;
+  }
+  if (it->second.delivered) {
+    abort_lan(it->second);
+    return;
+  }
+  outgoing& entry = it->second;
+  entry.delivered = true;
+  if (entry.agent) entry.agent->close();
+  if (entry.relay) {
+    entry.relay->close(transport_close::normal, "LAN direct session");
+  }
+  entry.relay.reset();
+  entry.switcher.reset();
+  {
+    std::lock_guard<std::mutex> lock(outgoing_mutex_);
+    outgoing_poll_.erase(id);
+  }
+  const std::string target = entry.target;
+  const std::string protocol = link->name();
+  ready_fn ready = std::move(entry.ready);
+  entry.ready = nullptr;
+  outgoing_.erase(it);
+  plog("lan direct " + protocol + " ready for " + target);
+  if (ready) ready(link);
+}
+
+void p2p_manager::start_relay_outgoing(uint64_t id,
+                                       server_client::relay_info info) {
   auto it = outgoing_.find(id);
   if (it == outgoing_.end() || it->second.finished) return;
   plog("relay start outgoing " + it->second.target);
-  auto relay = std::make_shared<relay_transport>(std::move(url), std::move(ca),
-                                                 post_);
+  auto relay = make_relay(info);
   auto switcher = std::make_shared<switchable_transport>(relay);
   it->second.relay = relay;
   it->second.switcher = switcher;
@@ -356,6 +824,7 @@ void p2p_manager::on_outgoing_relay_ready(uint64_t id) {
   outgoing& entry = it->second;
   if (entry.delivered || entry.ice_completed) return;
   plog("relay ready for " + entry.target + ", delivering session");
+  abort_lan(entry);
   entry.delivered = true;
   ready_fn ready = std::move(entry.ready);
   entry.ready = nullptr;
@@ -407,6 +876,7 @@ void p2p_manager::deliver_outgoing(uint64_t id) {
   }
 
   // The relay is not ready yet: use ICE directly and ignore a late relay.
+  abort_lan(entry);
   entry.delivered = true;
   entry.ice = ice;
   entry.finished = true;
@@ -428,6 +898,7 @@ void p2p_manager::finish_outgoing(uint64_t id, const std::string& error) {
     return;
   }
   entry.finished = true;
+  abort_lan(entry);
   if (entry.delivered) {
     // The proxy already owns a live relay session; an ICE failure must not
     // tear it down.
@@ -467,15 +938,14 @@ void p2p_manager::start_incoming(const signal_session_info& session) {
   // Open the relay in parallel with ICE; whichever path is ready first starts
   // the session, and the relay switches to ICE when the checks complete.
   enqueue([this, connect_id = session.connect_id] {
-    std::string url;
-    std::string ca;
+    server_client::relay_info info;
     std::string error;
-    if (!server_->relay_create(connect_id, url, ca, error)) {
+    if (!server_->relay_create(connect_id, info, error)) {
       plog("incoming relay unavailable: " + error);
       return;
     }
-    post_([this, connect_id, url, ca] {
-      start_relay_incoming(connect_id, url, ca);
+    post_([this, connect_id, info = std::move(info)]() mutable {
+      start_relay_incoming(connect_id, std::move(info));
     });
   });
 
@@ -517,12 +987,11 @@ void p2p_manager::start_incoming(const signal_session_info& session) {
 }
 
 void p2p_manager::start_relay_incoming(const std::string& connect_id,
-                                       std::string url, std::string ca) {
+                                       server_client::relay_info info) {
   auto it = incoming_.find(connect_id);
   if (it == incoming_.end() || it->second.finished) return;
   plog("relay start incoming " + connect_id);
-  auto relay = std::make_shared<relay_transport>(std::move(url), std::move(ca),
-                                                 post_);
+  auto relay = make_relay(info);
   auto switcher = std::make_shared<switchable_transport>(relay);
   it->second.relay = relay;
   it->second.switcher = switcher;

@@ -2,10 +2,19 @@
 
 #include <algorithm>
 #include <cstring>
+#include <thread>
 #include <type_traits>
+#include <utility>
 
 #if defined(MOLINK_HAVE_SVT_AV1)
 #include <EbSvtAv1Enc.h>
+#endif
+
+#ifndef MOLINK_HAVE_NVENC
+#define MOLINK_HAVE_NVENC 0
+#endif
+#if MOLINK_HAVE_NVENC
+#include "capture/nvenc_av1_encoder.h"
 #endif
 
 namespace molink {
@@ -14,6 +23,28 @@ int av1_padded_extent(int extent) {
   // SVT-AV1 wants at least 64 pixels and works on 8-pixel blocks for 4:2:0.
   const int minimum = std::max(extent, 64);
   return (minimum + 7) & ~7;
+}
+
+int av1_threads_for(int configured) {
+  if (configured > 0) return std::clamp(configured, 1, 64);
+  const unsigned cores = std::thread::hardware_concurrency();
+  if (cores == 0) return 4;
+  return std::clamp(static_cast<int>(cores) / 2, 2, 8);
+}
+
+int av1_enc_mode_for(const std::string& speed, int threads) {
+  // 13 is the fastest SVT-AV1 preset and 10 is the sharpest of the real-time
+  // range. A rectangle inside a capture frame cannot afford the slower ones.
+  if (speed == "fast") return 13;
+  if (speed == "balanced") return 12;
+  if (speed == "quality") return 10;
+  // Stay conservative: the previous default was 12 on every machine. Auto
+  // only sharpens on very large CPUs and drops to the fastest preset on small
+  // ones, so a rectangle still fits inside the capture frame budget.
+  const int resolved = av1_threads_for(threads);
+  if (resolved >= 8) return 11;
+  if (resolved >= 4) return 12;
+  return 13;
 }
 
 #if defined(MOLINK_HAVE_SVT_AV1)
@@ -77,14 +108,14 @@ auto disable_aq(Config& config, long) -> decltype(config.aq_mode = 0, void()) {
 }
 
 template <typename Config>
-auto set_parallelism(Config& config, int)
+auto set_parallelism(Config& config, int processors, int)
     -> decltype(config.logical_processors = 0, void()) {
-  config.logical_processors = 4;
+  config.logical_processors = static_cast<uint32_t>(processors);
 }
 template <typename Config>
-auto set_parallelism(Config& config, long)
+auto set_parallelism(Config& config, int processors, long)
     -> decltype(config.level_of_parallelism = 0, void()) {
-  config.level_of_parallelism = 4;
+  config.level_of_parallelism = static_cast<uint32_t>(processors);
 }
 
 /// Low-delay prediction is value 1 in both the old (LOW_DELAY_B) and the new
@@ -110,6 +141,9 @@ constexpr bool kModernApi =
 
 class svt_av1_encoder final : public av1_encoder {
  public:
+  explicit svt_av1_encoder(av1_encoder_config config)
+      : config_(std::move(config)) {}
+
   ~svt_av1_encoder() override { shutdown(); }
 
   bool encode_intra(const uint8_t* bgra, std::size_t stride, int width,
@@ -219,9 +253,8 @@ class svt_av1_encoder final : public av1_encoder {
     config.source_height = static_cast<uint32_t>(height);
     config.frame_rate_numerator = 30;
     config.frame_rate_denominator = 1;
-    // 13 is the fastest preset; 12 keeps a little more quality and is still
-    // fast enough for a rectangle inside a capture frame budget.
-    config.enc_mode = 12;
+    // The speed preset follows the user's choice; auto scales with the CPU.
+    config.enc_mode = av1_enc_mode_for(config_.speed, config_.threads);
     config.intra_period_length = 1;
     if constexpr (kModernApi) {
       // 4.x: every picture is intra and hierarchical levels below 2 are
@@ -244,7 +277,7 @@ class svt_av1_encoder final : public av1_encoder {
     config.matrix_coefficients = EB_CICP_MC_BT_709;
     config.color_range = EB_CR_FULL_RANGE;
     config.fast_decode = 1;
-    set_parallelism(config, 0);
+    set_parallelism(config, av1_threads_for(config_.threads), 0);
     config.tile_columns = 0;
     config.tile_rows = 0;
 
@@ -348,6 +381,7 @@ class svt_av1_encoder final : public av1_encoder {
     return true;
   }
 
+  av1_encoder_config config_;
   EbComponentType* handle_ = nullptr;
   /// The duplicate picture left in SVT's one-frame pipeline by the last call.
   bool stale_pending_ = false;
@@ -361,14 +395,76 @@ class svt_av1_encoder final : public av1_encoder {
 
 }  // namespace
 
-std::shared_ptr<av1_encoder> make_av1_encoder(std::string* error) {
+std::vector<av1_encoder_device> av1_encoder_devices() {
+  std::vector<av1_encoder_device> devices;
+#if MOLINK_HAVE_NVENC
+  for (auto& device : nvenc_av1_devices()) {
+    devices.push_back(std::move(device));
+  }
+#endif
+  devices.push_back({"cpu-svt", "CPU · SVT-AV1", false, true, ""});
+  return devices;
+}
+
+bool av1_encode_available() { return true; }
+
+std::shared_ptr<av1_encoder> make_av1_encoder(
+    const av1_encoder_config& config, std::string* error) {
   if (error != nullptr) error->clear();
-  return std::make_shared<svt_av1_encoder>();
+#if MOLINK_HAVE_NVENC
+  if (config.device == "auto" || config.device == "gpu-nvenc") {
+    std::string gpu_error;
+    if (auto gpu = make_nvenc_av1_encoder(config, &gpu_error)) {
+      return gpu;
+    }
+    if (config.device == "gpu-nvenc") {
+      if (error != nullptr) *error = gpu_error;
+      return nullptr;
+    }
+  }
+#endif
+  if (config.device != "auto" && config.device != "cpu-svt") {
+    if (error != nullptr) {
+      *error = "av1: unsupported encoder device '" + config.device + "'";
+    }
+    return nullptr;
+  }
+  return std::make_shared<svt_av1_encoder>(config);
 }
 
 #else
 
-std::shared_ptr<av1_encoder> make_av1_encoder(std::string* error) {
+std::vector<av1_encoder_device> av1_encoder_devices() {
+#if MOLINK_HAVE_NVENC
+  return nvenc_av1_devices();
+#else
+  return {};
+#endif
+}
+
+bool av1_encode_available() {
+#if MOLINK_HAVE_NVENC
+  return nvenc_av1_available();
+#else
+  return false;
+#endif
+}
+
+std::shared_ptr<av1_encoder> make_av1_encoder(
+    const av1_encoder_config& config, std::string* error) {
+  if (error != nullptr) error->clear();
+#if MOLINK_HAVE_NVENC
+  if (config.device == "auto" || config.device == "gpu-nvenc") {
+    std::string gpu_error;
+    if (auto gpu = make_nvenc_av1_encoder(config, &gpu_error)) {
+      return gpu;
+    }
+    if (config.device == "gpu-nvenc") {
+      if (error != nullptr) *error = gpu_error;
+      return nullptr;
+    }
+  }
+#endif
   if (error != nullptr) {
     *error = "this build has no SVT-AV1 encoder";
   }

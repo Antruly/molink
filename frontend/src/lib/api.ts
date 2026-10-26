@@ -132,6 +132,8 @@ export interface UiPreferences {
   uiMode?: 'simple' | 'advanced'
   savedDevices?: SavedDevicePreference[]
   recents?: RecentPreference[]
+  /// Notes shared by device name (normalized name -> note).
+  deviceNotes?: Record<string, string>
   /// Last values typed into the simple connect form.
   connectDraft?: { input: string; code: string }
 }
@@ -281,6 +283,87 @@ export function postUiState(
   )
 }
 
+export interface Av1Device {
+  id: string
+  name: string
+  hardware: boolean
+  available: boolean
+  detail?: string
+}
+
+export interface Av1Effective {
+  speed: string
+  enc_mode: number
+  threads: number
+  qp: number
+  max_area_percent: number
+  hardware?: boolean
+}
+
+export interface Av1Settings {
+  available: boolean
+  enabled: boolean
+  /// AV1 carries the whole picture; tiles are only a fallback.
+  full_frame: boolean
+  device: string
+  speed: 'auto' | 'fast' | 'balanced' | 'quality'
+  qp: number
+  max_area_percent: number
+  threads: number
+  keyframe_interval_seconds: number
+  devices: Av1Device[]
+  active_quality?: string
+  effective?: Av1Effective
+}
+
+export interface Av1SettingsUpdate {
+  enabled?: boolean
+  full_frame?: boolean
+  device?: string
+  speed?: Av1Settings['speed']
+  qp?: number
+  max_area_percent?: number
+  threads?: number
+  keyframe_interval_seconds?: number
+}
+
+export function fetchAv1Settings(token: string): Promise<Av1Settings> {
+  return request<Av1Settings>('/api/encoding', {}, token)
+}
+
+export function postAv1Settings(
+  token: string,
+  update: Av1SettingsUpdate,
+): Promise<Av1Settings> {
+  const query = new URLSearchParams()
+  if (update.enabled !== undefined) {
+    query.set('enabled', update.enabled ? '1' : '0')
+  }
+  if (update.full_frame !== undefined) {
+    query.set('full_frame', update.full_frame ? '1' : '0')
+  }
+  if (update.device !== undefined) query.set('device', update.device)
+  if (update.speed !== undefined) query.set('speed', update.speed)
+  if (update.qp !== undefined) query.set('qp', String(update.qp))
+  if (update.max_area_percent !== undefined) {
+    query.set('max_area_percent', String(update.max_area_percent))
+  }
+  if (update.threads !== undefined) {
+    query.set('threads', String(update.threads))
+  }
+  if (update.keyframe_interval_seconds !== undefined) {
+    query.set(
+      'keyframe_interval_seconds',
+      String(update.keyframe_interval_seconds),
+    )
+  }
+  return request<Av1Settings>(
+    `/api/encoding?${query.toString()}`,
+    { method: 'POST' },
+    token,
+  )
+}
+
 export interface NetworkPorts {
   tcp_port: number
   udp_port: number
@@ -407,6 +490,8 @@ export interface ServiceStatus {
   installed: boolean
   running: boolean
   desired: boolean
+  platform?: string
+  autostart?: boolean
   error?: string
 }
 

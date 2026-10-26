@@ -1,17 +1,21 @@
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
+#include <future>
 #include <iostream>
 #include <iterator>
 #include <string>
 #include <thread>
 
 #include <net/uvcpp_tcp_client.h>
+#include <uvcpp/uvcpp_config.h>
 #include <webapp/uvcpp_web_app.h>
 #include <webapp/uvcpp_web_json.h>
+#include <webapp/uvcpp_web_ws.h>
 
 #include "api.h"
 #include "audio/audio.h"
@@ -35,12 +39,16 @@
 #include "p2p/p2p_manager.h"
 #include "transport/connect_proxy.h"
 #include "transport/direct_proxy.h"
+#include "transport/h3_ws_listener.h"
+#include "transport/quic_listener.h"
+#include "transport/tcp_listener.h"
 #include "ui_store.h"
 #include "session_registry.h"
 #include "util.h"
 #include "version.h"
 #include "service_control.h"
 #include "session_controller.h"
+#include "transport/web_ws_transport.h"
 #include "transport/ws_transport.h"
 
 #ifdef _WIN32
@@ -146,8 +154,9 @@ void print_ready(const molink::core_config& cfg, int port,
                  const std::string& capture_backend,
                  const std::string& input_backend,
                  const std::string& device_id, bool http2_available,
-                 int tile_size, int change_threshold, bool tls_enabled,
-                 const std::string& cert_fingerprint) {
+                 bool quic_available, bool tcp_available,
+                 bool http3_available, int tile_size, int change_threshold,
+                 bool tls_enabled, const std::string& cert_fingerprint) {
   uvcpp::uvcpp_json j;
   j["event"] = "ready";
   j["service"] = MOLINK_CORE_SERVICE;
@@ -165,6 +174,9 @@ void print_ready(const molink::core_config& cfg, int port,
   j["session_scheme"] = tls_enabled ? "wss" : "ws";
   j["transports"] = uvcpp::uvcpp_json::array();
   j["transports"].push_back("websocket");
+  if (quic_available) j["transports"].push_back("quic");
+  if (tcp_available) j["transports"].push_back("tcp");
+  if (http3_available) j["transports"].push_back("http3");
   if (http2_available) j["transports"].push_back("http2");
   j["ports"]["web"] = port;
   j["ports"]["http3"] = cfg.http3_port;
@@ -287,20 +299,39 @@ int main(int argc, char** argv) {
                         : choose_tile_size();
   capture_opts.change_threshold = cfg.change_threshold;
   capture_opts.compress = !cfg.no_compress;
+#if defined(_WIN32)
   // Start the optional session service first: it launches the secure-desktop
-  // helper, which start_capture() may prefer over DXGI.
+  // helper, which start_capture() may prefer over DXGI. On Linux the service
+  // is a systemd login autostart for the desktop shell; the core must not
+  // start it from inside the app or it would spawn a second instance.
   std::string service_error;
   if (auth->settings().service_desired_running) {
     start_session_service(service_error);
   } else {
     stop_session_service(service_error);
   }
+#endif
   std::string capture_note;
   std::shared_ptr<capture_source> capture =
       start_capture(capture_opts, !cfg.no_capture, capture_note);
   if (!capture) {
     std::cerr << "molink-core: " << capture_note << "\n";
     return 1;
+  }
+  {
+    const app_settings prefs = auth->settings();
+    av1_encoding_settings av1;
+    av1.device = prefs.av1_device;
+    av1.speed = prefs.av1_speed;
+    av1.qp = prefs.av1_qp;
+    av1.max_area_percent = prefs.av1_max_area_percent;
+    av1.threads = prefs.av1_threads;
+    av1.full_frame = prefs.av1_full_frame;
+    capture->set_av1_settings(av1);
+    capture->set_keyframe_interval_ms(
+        prefs.keyframe_interval_seconds > 0
+            ? prefs.keyframe_interval_seconds * 1000
+            : 30000);
   }
 
   if (!cfg.port_explicit) {
@@ -420,10 +451,13 @@ int main(int argc, char** argv) {
     client->close();
   });
 
-  // h2c is available in libuvcpp but its request dispatch hangs against the
-  // curl h2c client in the 1.8.x builds we tested, so it stays off until that
-  // is verified. `/api/transports` reports http2 as unavailable in this
-  // build; the client negotiation ladder already knows where it will sit.
+#if MOLINK_HAVE_H2_WS
+  // HTTP/2 WebSocket (RFC 8441) runs on the same web port as h1: h2c uses
+  // prior knowledge for cleartext peers, TLS/ALPN h2 when the listener has a
+  // certificate. The extended CONNECT route below feeds the same
+  // session_controller as h1/h3.
+  app.set_http2_enabled(true).set_h2c_enabled(true);
+#endif
 
   const std::string web_root = resolve_web_root(cfg);
   auto bound_port = std::make_shared<std::atomic<int>>(cfg.port);
@@ -448,6 +482,13 @@ int main(int argc, char** argv) {
   deps.clipboard = clipboard;
   deps.device_id = identity.device_id;
   deps.cert_fingerprint = tls.fingerprint;
+  if (!tls.cert_path.empty()) {
+    std::ifstream cert_file(tls.cert_path, std::ios::binary);
+    if (cert_file) {
+      deps.tls_cert_pem.assign(std::istreambuf_iterator<char>(cert_file),
+                               std::istreambuf_iterator<char>());
+    }
+  }
   deps.client_token = client_token;
   deps.auth = auth;
   deps.access_requests = access_requests;
@@ -469,18 +510,117 @@ int main(int argc, char** argv) {
   session_opts.bound_port = bound_port;
   session_opts.http2_available = deps.http2_available;
   session_opts.tile_size = capture_opts.tile_size;
+
+  // The QUIC listener starts on the app loop after start(), so capability
+  // reporting and the welcome read a shared flag instead of a copied bool.
+  auto quic_available = std::make_shared<std::atomic<bool>>(false);
+  auto http3_available = std::make_shared<std::atomic<bool>>(false);
+  // Whether this build/host can run QUIC at all. Distinct from "currently
+  // listening": with remote access off the listener binds loopback, so it is
+  // on but not reachable from the network.
+  auto quic_supported = std::make_shared<std::atomic<bool>>(false);
+  deps.quic_available = quic_available;
+  deps.http3_available = http3_available;
+  session_opts.quic_available = quic_available;
+  session_opts.http3_available = http3_available;
+  // A QUIC client has no URL to put a token in: it opens a stream and sends
+  // the same hello JSON as a browser, so the controller starts unauthenticated
+  // and authenticates on that first text message.
+  auto quic_sessions = std::make_shared<quic_listener>(
+      app.loop(), tls.cert_path, tls.key_path,
+      [registry, session_opts](std::shared_ptr<stream_transport> transport) {
+        auto controller = std::make_shared<session_controller>(
+            registry, std::move(transport), session_opts);
+        controller->start(nullptr);
+      });
+  auto tcp_available = std::make_shared<std::atomic<bool>>(false);
+  deps.tcp_available = tcp_available;
+  session_opts.tcp_available = tcp_available;
+  // TCP can see the peer address, so it binds the configured interface and
+  // enforces the remote-access switch per connection instead of rebinding.
+  auto tcp_sessions = std::make_shared<tcp_listener>(
+      app.loop(), tls.cert_path, tls.key_path,
+      [registry, session_opts, auth](
+                      std::shared_ptr<stream_transport> transport) {
+        if (!auth->settings().allow_remote_access &&
+            !is_loopback_peer(transport->peer_ip())) {
+          transport->close(transport_close::policy,
+                           "LAN access disabled");
+          return;
+        }
+        auto controller = std::make_shared<session_controller>(
+            registry, std::move(transport), session_opts);
+        controller->start(nullptr);
+      });
+
+  auto http3_sessions = std::make_shared<h3_ws_listener>(
+      app.loop(), tls.cert_path, tls.key_path,
+      [registry, session_opts](std::shared_ptr<session_transport> transport) {
+        auto controller = std::make_shared<session_controller>(
+            registry, std::move(transport), session_opts);
+        controller->start(nullptr);
+      },
+      [&app](std::function<void()> fn) { app.post(std::move(fn)); });
+  deps.on_access_changed = [quic_sessions, quic_available, quic_supported,
+                            http3_sessions, http3_available,
+                            bind_host = cfg.host,
+                            quic_port = cfg.quic_port,
+                            http3_port = cfg.http3_port](bool allow_remote) {
+    if (!quic_supported->load()) return;
+    quic_sessions->stop();
+    const std::string ip =
+        allow_remote ? bind_host : std::string("127.0.0.1");
+    std::string error;
+    if (quic_sessions->start(ip, quic_port, error)) {
+      quic_available->store(true);
+    } else {
+      quic_available->store(false);
+      std::fprintf(stderr, "molink quic: %s\n", error.c_str());
+    }
+    if (http3_sessions) {
+      http3_sessions->stop();
+      std::string http3_error;
+      if (http3_sessions->start(ip, http3_port, http3_error)) {
+        http3_available->store(true);
+      } else {
+        http3_available->store(false);
+      }
+    }
+  };
+
   auto p2p = std::make_shared<p2p_manager>(
       app.loop(),
       [&app](std::function<void()> fn) { app.post(std::move(fn)); },
       server_client_state, registry, session_opts);
   register_http_routes(app, deps);
   app.websocket("/ws/session", make_ws_handler(registry, session_opts));
+#if MOLINK_HAVE_H2_WS
+  // The same endpoint on an HTTP/2 or HTTP/3 extended CONNECT. The route
+  // table is separate from the h1 Upgrade table, so both stay available.
+  app.websocket_connect(
+      "/ws/session",
+      [registry, session_opts](uvcpp::uvcpp_web_ws_request& request,
+                               uvcpp::uvcpp_web_ws_session& session) {
+        auto transport = std::make_shared<web_ws_transport>(
+            session.transport() == uvcpp::uvcpp_http_version::HVER_30
+                ? "http3"
+                : "http2");
+        transport->set_peer(request.peer_ip(), request.peer_port());
+        auto controller =
+            std::make_shared<session_controller>(registry, transport,
+                                                 session_opts);
+        transport->attach(&session);
+        const std::string* token = request.query("token");
+        controller->start(token);
+      });
+#endif
   app.websocket("/ws/connect", make_connect_handler(
       p2p, [&app](std::function<void()> fn) { app.post(std::move(fn)); }));
   // Typed-IP sessions go through this core as well, so AV1 patches can be
   // decoded before they reach the page.
   app.websocket("/ws/direct", make_direct_handler(
-      [&app](std::function<void()> fn) { app.post(std::move(fn)); }));
+      [&app](std::function<void()> fn) { app.post(std::move(fn)); },
+      app.loop()));
 
   if (!web_root.empty()) {
     uvcpp::uvcpp_web_static_options static_options;
@@ -540,6 +680,80 @@ int main(int argc, char** argv) {
 
   const int port = app.bound_port();
   bound_port->store(port);
+
+#if UVCPP_QUIC_ENABLE
+  // The QUIC endpoint creates UV handles, so it must be started on the loop
+  // thread. Wait for the answer: the ready line and /api/transports advertise
+  // QUIC only once it is actually accepting.
+  {
+    auto started = std::make_shared<std::promise<std::string>>();
+    auto started_future = started->get_future();
+    quic_listener* listener = quic_sessions.get();
+    // QUIC peers cannot be attributed to an address through libuvcpp's API,
+    // so with remote access off the listener stays on loopback instead of
+    // guessing. Enabling remote access rebinds it live through
+    // api_deps::on_access_changed.
+    std::string bind_host =
+        auth->settings().allow_remote_access ? cfg.host : "127.0.0.1";
+    app.post([listener, bind_host, port = cfg.quic_port, started] {
+      std::string error;
+      const bool ok = listener->start(bind_host, port, error);
+      started->set_value(ok ? std::string() : error);
+    });
+    const std::string quic_error = started_future.get();
+    if (quic_error.empty()) {
+      quic_supported->store(true);
+      quic_available->store(true);
+    } else {
+      std::fprintf(stderr, "molink quic: %s\n", quic_error.c_str());
+    }
+  }
+#endif
+
+  // HTTP/3 WebSocket sessions (RFC 9220). Browsers that speak WS over h3 and
+  // peer cores can use this door; the session controller is the same one.
+  {
+    auto started = std::make_shared<std::promise<std::string>>();
+    auto started_future = started->get_future();
+    h3_ws_listener* listener = http3_sessions.get();
+    std::string bind_host =
+        auth->settings().allow_remote_access ? cfg.host : "127.0.0.1";
+    app.post([listener, bind_host, port = cfg.http3_port, started] {
+      std::string error;
+      const bool ok = listener->start(bind_host, port, error);
+      started->set_value(ok ? std::string() : error);
+    });
+    const std::string error = started_future.get();
+    if (error.empty()) {
+      http3_available->store(true);
+    } else {
+      std::fprintf(stderr, "molink http3: %s\n", error.c_str());
+    }
+  }
+
+  {
+    auto started = std::make_shared<std::promise<std::string>>();
+    auto started_future = started->get_future();
+    tcp_listener* listener = tcp_sessions.get();
+    app.post([listener, host = cfg.host, port = cfg.tcp_data_port, started] {
+      std::string error;
+      const bool ok = listener->start(host, port, error);
+      started->set_value(ok ? std::string() : error);
+    });
+    const std::string tcp_error = started_future.get();
+    if (tcp_error.empty()) {
+      tcp_available->store(true);
+    } else {
+      std::fprintf(stderr, "molink tcp: %s\n", tcp_error.c_str());
+    }
+  }
+
+  // Advertise only ports whose listeners actually came up: a same-NAT peer
+  // must not waste a handshake on a dead endpoint.
+  server_client_state->set_data_ports(
+      quic_available->load() ? network->quic_port.load() : 0,
+      tcp_available->load() ? network->tcp_data_port.load() : 0);
+  server_client_state->set_tls_identity(deps.tls_cert_pem, tls.fingerprint);
   server_client_state->start();
   p2p->start();
   discovery->set_web_port(port);
@@ -572,8 +786,10 @@ int main(int argc, char** argv) {
     print_ready(cfg, port, auth->local_session_token(), client_token,
                 capture->backend(), input ? input->backend() : "none",
                 identity.device_id, deps.http2_available,
-                capture_opts.tile_size, capture_opts.change_threshold,
-                tls_enabled, tls.fingerprint);
+                quic_available->load(), tcp_available->load(),
+                http3_available->load(), capture_opts.tile_size,
+                capture_opts.change_threshold, tls_enabled,
+                tls.fingerprint);
   } else {
     std::cerr << MOLINK_CORE_SERVICE << " " MOLINK_VERSION << " listening on "
               << format_url_host(cfg.host) << ":" << port << "\n"
@@ -588,6 +804,15 @@ int main(int argc, char** argv) {
               << " (change threshold " << cfg.change_threshold << ")\n"
               << "  device:  " << identity.device_id << "\n"
               << "  lock:    " << lock_timeout << " s idle\n"
+              << "  quic:    " << cfg.quic_port
+              << (quic_available->load() ? " (sessions)" : " (unavailable)")
+              << "\n"
+              << "  tcp:     " << cfg.tcp_data_port
+              << (tcp_available->load() ? " (sessions)" : " (unavailable)")
+              << "\n"
+              << "  http3:   " << cfg.http3_port
+              << (http3_available->load() ? " (sessions)" : " (unavailable)")
+              << "\n"
               << "  udp:     " << cfg.udp_port << " (reserved)\n"
               << "  input:   " << (input ? input->backend() : "disabled")
               << "\n"
@@ -608,13 +833,30 @@ int main(int argc, char** argv) {
 
   if (parent_watch.joinable()) parent_watch.join();
   supervisor.stop();
+  // Close the QUIC endpoint on the loop thread before the loop goes away.
+  {
+    auto stopped = std::make_shared<std::promise<void>>();
+    auto stopped_future = stopped->get_future();
+    quic_listener* listener = quic_sessions.get();
+    tcp_listener* tcp = tcp_sessions.get();
+    h3_ws_listener* http3 = http3_sessions.get();
+    app.post([listener, tcp, http3, stopped] {
+      listener->stop();
+      tcp->stop();
+      http3->stop();
+      stopped->set_value();
+    });
+    stopped_future.wait_for(std::chrono::seconds(2));
+  }
   discovery->set_enabled(false);
   capture->stop();
   clipboard.reset();
+#if defined(_WIN32)
   // Stop the helper only on a real exit. It is started above when the user
   // asked for it, and the app's own lifetime defines when it is no longer
-  // needed.
+  // needed. The Linux systemd unit is managed by the user manager instead.
   stop_session_service(service_error);
+#endif
   p2p->stop();
   server_client_state->stop();
   app.stop();

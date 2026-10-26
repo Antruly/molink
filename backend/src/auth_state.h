@@ -63,6 +63,12 @@ class auth_state {
   /// sessions have separate defaults (remote on, LAN off).
   void set_transport_security(bool encrypt_remote, bool encrypt_lan);
   void set_service_desired_running(bool enabled);
+  /// Host AV1 encoder preference. Values are validated by the caller.
+  void set_av1_encoding(bool enabled, std::string device, std::string speed,
+                        int qp, int max_area_percent, int threads,
+                        bool full_frame);
+  /// Host capture keyframe cadence in seconds; 0 = off.
+  void set_keyframe_interval_seconds(int seconds);
   /// Phase-2 directory: the switch is independent from the custom URL (an
   /// empty URL with the switch on means the built-in default).
   bool set_server(std::string url, std::string invite, std::string ca,

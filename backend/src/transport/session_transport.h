@@ -34,9 +34,15 @@ class session_transport {
 
   virtual ~session_transport() = default;
 
-  /// Stable identifier for logs, diagnostics and the transport negotiation
-  /// response ("websocket", "tcp", "quic"...).
+  /// The wire protocol carrying this session ("websocket", "quic", "udp",
+  /// "tcp"). This is what the welcome reports as `transport` and what the UI
+  /// labels next to the path.
   virtual const char* name() const = 0;
+  /// How the bytes reach the peer, independent of the wire protocol:
+  /// "direct" (the peer connected to this core), "p2p" (ICE-selected UDP
+  /// between two cores) or "relay" (a directory relays the session). A relay
+  /// can carry any protocol, so this must not be inferred from name().
+  virtual const char* path() const { return "direct"; }
   virtual std::string peer_ip() const = 0;
   virtual unsigned int peer_port() const = 0;
 

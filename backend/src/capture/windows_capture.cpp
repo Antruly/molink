@@ -146,6 +146,12 @@ class windows_capture final : public capture_base {
     auto next_allowed = std::chrono::steady_clock::now();
     auto last_full = std::chrono::steady_clock::now();
     std::vector<uint8_t> pixels;
+    // The last successful grab is still the current desktop whenever DXGI
+    // reports no new frame. Kept for on-demand keyframes while the screen is
+    // static (a new viewer, an evicted replay history or the periodic full
+    // refresh must not wait for the user to move the mouse).
+    bool pixels_valid = false;
+    std::string last_grab_error;
 
     while (running_.load()) {
       if (!active_.load()) {
@@ -162,6 +168,7 @@ class windows_capture final : public capture_base {
             create_staging(switch_error)) {
           output_index_.store(requested_output);
           keyframe_requested_.store(true);
+          pixels_valid = false;
           last_full = std::chrono::steady_clock::now();
         } else {
           std::fprintf(stderr, "molink capture: display switch: %s\n",
@@ -179,12 +186,18 @@ class windows_capture final : public capture_base {
       const bool got = grab(pixels, grab_error);
       update_cursor();
       if (got) {
+        pixels_valid = true;
+        last_grab_error.clear();
         const bool key = keyframe_requested_.exchange(false) || !have_previous_;
+        const int interval_ms =
+            periodic_keyframe_ms() > 0 ? periodic_keyframe_ms() : 30000;
         const bool refresh_due =
-            std::chrono::steady_clock::now() - last_full > std::chrono::seconds(30);
+            std::chrono::steady_clock::now() - last_full >
+            std::chrono::milliseconds(interval_ms);
         publish_frame(pixels, key || refresh_due);
         if (key || refresh_due) last_full = std::chrono::steady_clock::now();
       } else if (grab_error == "access_lost") {
+        pixels_valid = false;
         safe_release(dup_);
         safe_release(staging_);
         have_previous_ = false;
@@ -194,6 +207,29 @@ class windows_capture final : public capture_base {
           std::fprintf(stderr, "molink capture: %s\n", retry_error.c_str());
           std::this_thread::sleep_for(std::chrono::seconds(1));
         }
+      } else if (grab_error.empty()) {
+        // DXGI only hands out a frame when the desktop changes. A keyframe
+        // request (new viewer, evicted history) or the periodic refresh would
+        // otherwise wait forever on a static screen; the retained pixels are
+        // still the current desktop because nothing changed.
+        const auto now = std::chrono::steady_clock::now();
+        const int interval_ms =
+            periodic_keyframe_ms() > 0 ? periodic_keyframe_ms() : 30000;
+        const bool refresh_due =
+            now - last_full > std::chrono::milliseconds(interval_ms);
+        if (pixels_valid &&
+            (keyframe_requested_.load() || refresh_due)) {
+          keyframe_requested_.store(false);
+          publish_frame(pixels, true);
+          last_full = now;
+        }
+      } else if (grab_error != last_grab_error) {
+        // A persistent runtime failure (HDR/non-BGRA format, a lost device)
+        // used to be silent and looked like a frozen picture. Log each
+        // distinct error once so it reaches the core log.
+        std::fprintf(stderr, "molink capture: %s\n", grab_error.c_str());
+        last_grab_error = grab_error;
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
       }
 
       const int fps = target_fps();
@@ -486,12 +522,14 @@ class windows_capture final : public capture_base {
     encoding.av1_qp = quality_av1_qp();
     encoding.av1_grayscale = quality_av1_grayscale();
     encoding.av1_max_area_percent = quality_av1_max_area_percent();
+    encoding.av1_full_frame = quality_av1_full_frame();
     std::vector<uint8_t> av1_payload;
+    bool av1_only = false;
 
     std::vector<uint8_t> payload;
     std::string err;
     if (!encode_capture_frame(header, tiles, encoding, pixels.data(), stride, payload,
-                           &av1_payload, err)) {
+                           &av1_payload, err, &av1_only)) {
       return;
     }
 
@@ -506,6 +544,7 @@ class windows_capture final : public capture_base {
     frame->codec = header.codec;
     frame->payload = std::move(payload);
     frame->av1_payload = std::move(av1_payload);
+    frame->av1_only = av1_only;
     publish(std::move(frame));
     have_previous_ = true;
   }

@@ -64,7 +64,10 @@ bool build_av1_frame_payload(const protocol::frame_header& header,
   }
   protocol::frame_header out = header;
   out.codec = static_cast<uint8_t>(protocol::codec::av1);
-  out.flags = protocol::kFrameFlagPartial;
+  // Keep the keyframe flag: a full-frame AV1 picture is the only packet the
+  // session sends, so the receiver has to know it can start from it. Patch
+  // frames arrive with the partial flag, exactly as before.
+  out.flags = static_cast<uint8_t>(header.flags & protocol::kFrameFlagKeyframe);
   return protocol::build_frame_payload(out, tiles, payload, error);
 }
 

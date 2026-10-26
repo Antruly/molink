@@ -1,7 +1,8 @@
-import { Home, Moon, Settings2, SlidersHorizontal, Sparkles, Sun } from 'lucide-react'
+import { Moon, Settings2, Sun } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useAppStore } from '../store/app'
 import { Logo } from './Logo'
+import { TabBar } from './TabBar'
 import { UpdateNotice } from './UpdateNotice'
 
 export function AppHeader({ showHome = true }: { showHome?: boolean }) {
@@ -9,63 +10,43 @@ export function AppHeader({ showHome = true }: { showHome?: boolean }) {
   const theme = useAppStore((state) => state.theme)
   const activeTabId = useAppStore((state) => state.activeTabId)
   const toggleTheme = useAppStore((state) => state.toggleTheme)
-  const uiMode = useAppStore((state) => state.uiMode)
-  const setUiMode = useAppStore((state) => state.setUiMode)
-  const setActiveTab = useAppStore((state) => state.setActiveTab)
   const setSettingsOpen = useAppStore((state) => state.setSettingsOpen)
+  // Inside a session the floating toolbar owns theme and settings; the home
+  // page keeps them here so they remain reachable without a session.
+  const home = activeTabId === 'home' || !showHome
 
   return (
-    <header className="flex h-14 shrink-0 items-center gap-3 border-b border-line-soft bg-surface/70 px-4 backdrop-blur sm:px-6">
-      <div className="flex items-center gap-2.5">
-        <Logo size={26} />
-        <div className="leading-tight">
-          <div className="text-[15px] font-semibold tracking-tight">moLink</div>
-          <div className="text-[10px] uppercase tracking-[0.18em] text-muted">
-            {t('app.tagline')}
-          </div>
-        </div>
+    <header className="flex h-12 shrink-0 items-center gap-2 border-b border-line-soft bg-surface/70 px-3 backdrop-blur sm:px-4">
+      <div className="flex shrink-0 items-center gap-2">
+        <Logo size={24} />
+        <span className="text-[15px] font-semibold tracking-tight">moLink</span>
       </div>
-
-      <div className="ml-auto flex items-center gap-1.5">
+      <div className="mx-1 h-5 w-px shrink-0 bg-line" />
+      <TabBar inline />
+      <div className="ml-1 flex shrink-0 items-center gap-1">
         <UpdateNotice />
-        {showHome && activeTabId !== 'home' ? (
-          <button
-            type="button"
-            onClick={() => setActiveTab('home')}
-            className="btn btn-quiet"
-            title={t('tabs.home')}
-          >
-            <Home size={15} />
-            <span className="hidden sm:inline">{t('tabs.home')}</span>
-          </button>
+        {home ? (
+          <>
+            <button
+              type="button"
+              onClick={toggleTheme}
+              className="btn btn-quiet h-8 w-8 !px-0"
+              title={theme === 'dark' ? t('settings.themeLight') : t('settings.themeDark')}
+              aria-label={theme === 'dark' ? t('settings.themeLight') : t('settings.themeDark')}
+            >
+              {theme === 'dark' ? <Sun size={15} /> : <Moon size={15} />}
+            </button>
+            <button
+              type="button"
+              onClick={() => setSettingsOpen(true)}
+              className="btn btn-quiet h-8 w-8 !px-0"
+              title={t('settings.title')}
+              aria-label={t('settings.title')}
+            >
+              <Settings2 size={15} />
+            </button>
+          </>
         ) : null}
-        <button
-          type="button"
-          onClick={() => setUiMode(uiMode === 'simple' ? 'advanced' : 'simple')}
-          className="btn btn-quiet h-9 w-9 !px-0"
-          title={uiMode === 'simple' ? t('ui.advancedMode') : t('ui.simpleMode')}
-          aria-label={uiMode === 'simple' ? t('ui.advancedMode') : t('ui.simpleMode')}
-        >
-          {uiMode === 'simple' ? <Sparkles size={16} /> : <SlidersHorizontal size={16} />}
-        </button>
-        <button
-          type="button"
-          onClick={toggleTheme}
-          className="btn btn-quiet h-9 w-9 !px-0"
-          title={theme === 'dark' ? t('settings.themeLight') : t('settings.themeDark')}
-          aria-label={theme === 'dark' ? t('settings.themeLight') : t('settings.themeDark')}
-        >
-          {theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
-        </button>
-        <button
-          type="button"
-          onClick={() => setSettingsOpen(true)}
-          className="btn btn-quiet h-9 w-9 !px-0"
-          title={t('settings.title')}
-          aria-label={t('settings.title')}
-        >
-          <Settings2 size={16} />
-        </button>
       </div>
     </header>
   )

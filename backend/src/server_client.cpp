@@ -35,6 +35,7 @@
 #include "auth_state.h"
 #include "identity.h"
 #include "settings.h"
+#include "transport/tls_pin.h"
 #include "util.h"
 
 namespace molink {
@@ -152,6 +153,54 @@ server_client::server_client(std::shared_ptr<auth_state> auth,
       version_(std::move(version)) {}
 
 server_client::~server_client() { stop(); }
+
+void server_client::set_data_ports(int quic_port, int tcp_port) {
+  quic_port_ = quic_port;
+  tcp_port_ = tcp_port;
+}
+
+void server_client::set_tls_identity(std::string cert_pem,
+                                     std::string fingerprint) {
+  tls_cert_pem_ = std::move(cert_pem);
+  tls_fingerprint_ = std::move(fingerprint);
+}
+
+bool server_client::lookup_device(const std::string& id, device_lan_info& out,
+                                  std::string& error) {
+  signaling_credentials credentials;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    credentials = signaling_credentials_locked();
+  }
+  if (credentials.url.empty()) {
+    error = "not registered with the directory";
+    return false;
+  }
+  std::string body;
+  int http_status = 0;
+  if (!get(credentials.url, "/v1/devices", "id=" + url_encode(id), body,
+           http_status, error)) {
+    return false;
+  }
+  if (http_status != 200) {
+    error = "the directory answered HTTP " + std::to_string(http_status);
+    return false;
+  }
+  try {
+    const json response = json::parse(body);
+    out = device_lan_info{};
+    out.address = response.value("address", std::string());
+    out.port = response.value("port", 0);
+    out.quic_port = response.value("quic_port", 0);
+    out.tcp_port = response.value("tcp_port", 0);
+    out.tls_cert = response.value("tls_cert", std::string());
+    out.tls_fingerprint = response.value("tls_fingerprint", std::string());
+  } catch (...) {
+    error = "the directory returned invalid JSON";
+    return false;
+  }
+  return true;
+}
 
 void server_client::start() {
   if (running_.exchange(true)) return;
@@ -691,9 +740,40 @@ bool server_client::directory_lookup(const std::string& query,
   return get(credentials.url, "/v1/devices", query, body, http_status, error);
 }
 
+namespace {
+
+/// Resolve the directory host to a numeric address for the TCP/QUIC relay
+/// endpoints (uvcpp_tcp_client takes an address literal, not a hostname).
+bool resolve_relay_host(const std::string& host, std::string& out) {
+  addrinfo hints{};
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_STREAM;
+  addrinfo* resolved = nullptr;
+  if (getaddrinfo(host.c_str(), nullptr, &hints, &resolved) != 0 ||
+      resolved == nullptr) {
+    return false;
+  }
+  char text[INET6_ADDRSTRLEN] = {};
+  bool ok = false;
+  if (resolved->ai_family == AF_INET) {
+    ok = inet_ntop(AF_INET,
+                   &reinterpret_cast<sockaddr_in*>(resolved->ai_addr)->sin_addr,
+                   text, sizeof(text)) != nullptr;
+  } else if (resolved->ai_family == AF_INET6) {
+    ok = inet_ntop(
+             AF_INET6,
+             &reinterpret_cast<sockaddr_in6*>(resolved->ai_addr)->sin6_addr,
+             text, sizeof(text)) != nullptr;
+  }
+  freeaddrinfo(resolved);
+  if (ok) out = text;
+  return ok;
+}
+
+}  // namespace
+
 bool server_client::relay_create(const std::string& connect_id,
-                                 std::string& relay_url,
-                                 std::string& ca_path, std::string& error) {
+                                 relay_info& out, std::string& error) {
   signaling_credentials credentials;
   {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -719,8 +799,9 @@ bool server_client::relay_create(const std::string& connect_id,
     return false;
   }
   std::string relay_token;
+  json response;
   try {
-    const json response = json::parse(body);
+    response = json::parse(body);
     relay_token = response.value("relay_token", std::string());
   } catch (...) {
     error = "the directory returned invalid JSON";
@@ -745,9 +826,62 @@ bool server_client::relay_create(const std::string& connect_id,
   }
   const std::size_t slash = base.find('/');
   if (slash != std::string::npos) base = base.substr(0, slash);
-  relay_url = scheme + base + "/v1/relay?connect_id=" +
-              url_encode(connect_id) + "&token=" + url_encode(relay_token);
-  ca_path = auth_ ? effective_server_ca(auth_->settings()) : std::string();
+
+  std::string relay_host = base;
+  if (!relay_host.empty() && relay_host.front() == '[') {
+    const std::size_t close = relay_host.find(']');
+    if (close != std::string::npos) {
+      relay_host = relay_host.substr(1, close - 1);
+    }
+  } else {
+    const std::size_t colon = relay_host.rfind(':');
+    if (colon != std::string::npos) relay_host = relay_host.substr(0, colon);
+  }
+  std::string resolved_host;
+  const bool resolved = !relay_host.empty() &&
+                        resolve_relay_host(relay_host, resolved_host);
+
+  out = relay_info{};
+  out.url = scheme + base + "/v1/relay?connect_id=" +
+            url_encode(connect_id) + "&token=" + url_encode(relay_token);
+  out.ca_path = auth_ ? effective_server_ca(auth_->settings()) : std::string();
+  if (out.ca_path.empty()) {
+    // No configured CA: pin the certificate the directory advertises with the
+    // relay credentials. The data channel then verifies that exact cert.
+    const std::string cert = response.value("tls_cert", std::string());
+    if (!cert.empty()) {
+      pinned_certificate pin = pin_certificate(cert, std::string());
+      if (pin.ok()) out.ca_path = pin.ca_path;
+    }
+  }
+  out.connect_id = connect_id;
+  out.token = relay_token;
+  out.tls_cert = response.value("tls_cert", std::string());
+  if (response.contains("relay") && response["relay"].is_object()) {
+    const json& relay = response["relay"];
+    if (relay.contains("endpoints") && relay["endpoints"].is_array()) {
+      for (const json& item : relay["endpoints"]) {
+        if (!item.is_object()) continue;
+        relay_endpoint endpoint;
+        endpoint.protocol = item.value("protocol", std::string());
+        endpoint.port = item.value("port", 0);
+        endpoint.secure = item.value("secure", true);
+        if (endpoint.protocol == "tcp" || endpoint.protocol == "quic" ||
+            endpoint.protocol == "udp" || endpoint.protocol == "http3" ||
+            endpoint.protocol == "http2") {
+          if (endpoint.port <= 0 || endpoint.port > 65535 || !resolved) {
+            continue;
+          }
+          endpoint.host = resolved_host;
+        } else if (endpoint.protocol == "websocket") {
+          endpoint.host = relay_host;
+        } else {
+          continue;
+        }
+        out.endpoints.push_back(std::move(endpoint));
+      }
+    }
+  }
   return true;
 }
 
@@ -936,6 +1070,10 @@ bool server_client::try_register(const std::string& url,
   json payload;
   payload["name"] = name;
   payload["port"] = port;
+  if (quic_port_ > 0) payload["quic_port"] = quic_port_;
+  if (tcp_port_ > 0) payload["tcp_port"] = tcp_port_;
+  if (!tls_fingerprint_.empty()) payload["tls_fingerprint"] = tls_fingerprint_;
+  if (!tls_cert_pem_.empty()) payload["tls_cert"] = tls_cert_pem_;
   payload["version"] = version_;
   payload["platform"] = device_platform();
   if (!local_address.empty()) payload["address"] = local_address;
@@ -1019,6 +1157,10 @@ bool server_client::try_heartbeat() {
   payload["id"] = id;
   payload["token"] = token;
   payload["port"] = port;
+  if (quic_port_ > 0) payload["quic_port"] = quic_port_;
+  if (tcp_port_ > 0) payload["tcp_port"] = tcp_port_;
+  if (!tls_fingerprint_.empty()) payload["tls_fingerprint"] = tls_fingerprint_;
+  if (!tls_cert_pem_.empty()) payload["tls_cert"] = tls_cert_pem_;
   payload["version"] = version_;
   payload["name"] = name;
   payload["platform"] = device_platform();

@@ -19,3 +19,9 @@
   default packages yet.
 - **dav1d** (`libdav1d`) — optional AV1 decoder, BSD-2-Clause. Used only by
   `MOLINK_ENABLE_AV1` builds to decode AV1 rectangles on the client core.
+- **NVIDIA Video Codec SDK headers** — `backend/third_party/ffnvcodec/nvEncodeAPI.h`
+  from `FFmpeg/nv-codec-headers` (MIT, Copyright (c) 2010-2026 NVIDIA
+  Corporation). Only the header is vendored; `nvEncodeAPI64.dll` /
+  `libnvidia-encode.so.1` is loaded from the installed driver at runtime and is
+  not distributed with moLink. Used when `MOLINK_ENABLE_NVENC` is on (default)
+  and an AV1-capable NVIDIA GPU is present.

@@ -24,7 +24,7 @@ function SecurityIcon({ tab }: { tab: SessionTab }) {
   if (security === 'e2e') {
     return (
       <span
-        className="shrink-0 text-emerald-500"
+        className="shrink-0 text-sky-500"
         title={t('session.secureE2e')}
         aria-label={t('session.secureE2e')}
       >
@@ -35,7 +35,7 @@ function SecurityIcon({ tab }: { tab: SessionTab }) {
   if (security === 'relay') {
     return (
       <span
-        className="shrink-0 text-sky-500"
+        className="shrink-0 text-amber-500"
         title={t('session.secureRelay')}
         aria-label={t('session.secureRelay')}
       >
@@ -54,7 +54,7 @@ function SecurityIcon({ tab }: { tab: SessionTab }) {
   )
 }
 
-export function TabBar() {
+export function TabBar({ inline = false }: { inline?: boolean }) {
   const { t } = useTranslation()
   const tabs = useAppStore((state) => state.tabs)
   const activeTabId = useAppStore((state) => state.activeTabId)
@@ -63,7 +63,13 @@ export function TabBar() {
   const localMode = useAppStore((state) => state.localMode)
 
   return (
-    <div className="flex h-11 shrink-0 items-center gap-1 overflow-x-auto border-b border-line-soft bg-surface/40 px-2">
+    <div
+      className={
+        inline
+          ? 'flex min-w-0 flex-1 items-center gap-1 overflow-x-auto'
+          : 'flex h-11 shrink-0 items-center gap-1 overflow-x-auto border-b border-line-soft bg-surface/40 px-2'
+      }
+    >
       <button
         type="button"
         onClick={() => setActiveTab('home')}

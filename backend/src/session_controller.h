@@ -49,6 +49,14 @@ struct session_options {
   std::shared_ptr<voice_engine> voice;
   std::shared_ptr<std::atomic<int>> bound_port;
   bool http2_available = false;
+  /// The QUIC session listener is up and reachable on network->quic_port.
+  /// Shared because the listener starts on the app loop *after* the handlers
+  /// are registered; the welcome reads the live value.
+  std::shared_ptr<std::atomic<bool>> quic_available;
+  /// The TCP data listener (`tcp_data_port`) is up.
+  std::shared_ptr<std::atomic<bool>> tcp_available;
+  /// The HTTP/3 WebSocket listener (`http3_port`) is up.
+  std::shared_ptr<std::atomic<bool>> http3_available;
   int tile_size = 0;
   std::string device_id;
   std::string device_name;

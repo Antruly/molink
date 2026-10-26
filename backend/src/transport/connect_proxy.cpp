@@ -129,10 +129,16 @@ class connect_proxy final
     pending_binary_.clear();
   }
 
+  /// `mode` is the legacy relay/p2p flag; `path` and `protocol` are the two
+  /// axes the UI labels separately (a relayed QUIC session is path=relay,
+  /// protocol=quic).
   void send_transport(const char* mode) {
     if (browser_ == nullptr) return;
-    const std::string message = std::string("{\"type\":\"transport\",\"mode\":\"") +
-                                mode + "\"}";
+    const char* path = transport_ ? transport_->path() : mode;
+    const char* protocol = transport_ ? transport_->name() : "websocket";
+    const std::string message =
+        std::string("{\"type\":\"transport\",\"mode\":\"") + mode +
+        "\",\"path\":\"" + path + "\",\"protocol\":\"" + protocol + "\"}";
     browser_->send_text(message.data(), message.size());
   }
 
@@ -254,6 +260,10 @@ class connect_proxy final
         binary_queue_.pop_front();
       }
       const bool av1 = packet_is_av1(packet);
+      // A patch follows a tile frame (tile-refresh flag); an AV1-only picture
+      // does not. The page uses this to label the stream as AV1 or AV1+tiles.
+      const bool full_frame =
+          av1 && (packet[6] & protocol::kPacketFlagTileRefresh) == 0;
       const std::size_t wire = packet.size();
       std::vector<uint8_t> out = transcode(std::move(packet));
       if (out.empty()) continue;
@@ -269,9 +279,10 @@ class connect_proxy final
       }
       std::weak_ptr<connect_proxy> weak = weak_from_this();
       std::vector<uint8_t> bytes = std::move(out);
-      post_([weak, bytes = std::move(bytes), announce, wire, decoded] {
+      post_([weak, bytes = std::move(bytes), announce, wire, decoded,
+             full_frame] {
         if (auto self = weak.lock()) {
-          if (announce) self->send_codec_stat(wire, decoded);
+          if (announce) self->send_codec_stat(wire, decoded, full_frame);
           self->send_to_browser(bytes.data(), bytes.size());
         }
       });
@@ -290,11 +301,13 @@ class connect_proxy final
 
   /// Tells the page that the client core is decoding AV1 patches, so the UI
   /// can show an indicator; the page itself never sees the AV1 bytes.
-  void send_codec_stat(std::size_t wire, std::size_t decoded) {
+  void send_codec_stat(std::size_t wire, std::size_t decoded,
+                       bool full_frame) {
     if (closed_ || browser_ == nullptr) return;
     const std::string text = "{\"type\":\"codec\",\"av1\":true,\"wire\":" +
                              std::to_string(wire) + ",\"decoded\":" +
-                             std::to_string(decoded) + "}";
+                             std::to_string(decoded) +
+                             (full_frame ? ",\"full\":true" : "") + "}";
     browser_->send_text(text.data(), text.size());
   }
 

@@ -27,6 +27,7 @@ class juice_transport final : public session_transport {
   ~juice_transport() override;
 
   const char* name() const override { return "udp"; }
+  const char* path() const override { return "p2p"; }
   std::string peer_ip() const override { return peer_ip_; }
   unsigned int peer_port() const override { return peer_port_; }
 

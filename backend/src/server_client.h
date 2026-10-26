@@ -75,6 +75,11 @@ class server_client {
   server_client& operator=(const server_client&) = delete;
 
   void start();
+  /// LAN data ports advertised with registration/heartbeat so same-NAT peers
+  /// can try a direct QUIC/TCP session before ICE or the relay.
+  void set_data_ports(int quic_port, int tcp_port);
+  /// Certificate advertised for same-NAT pinning (PEM + SHA-256 fingerprint).
+  void set_tls_identity(std::string cert_pem, std::string fingerprint);
   void stop();
   server_status status() const;
   /// Wake the thread after settings changed (also detected by polling).
@@ -112,11 +117,45 @@ class server_client {
   bool directory_lookup(const std::string& query, std::string& body,
                         int& http_status, std::string& error);
 
-  /// Obtain the relay credentials for a signaling session and build the
-  /// WebSocket URL (ws/wss follows the directory scheme) plus the CA path the
-  /// relay transport should verify with.
-  bool relay_create(const std::string& connect_id, std::string& relay_url,
-                    std::string& ca_path, std::string& error);
+  /// One relay endpoint advertised by the directory.
+  struct relay_endpoint {
+    std::string protocol;  ///< "tcp", "quic" or "websocket"
+    std::string host;      ///< resolved address for stream endpoints
+    int port = 0;
+    bool secure = true;
+  };
+  /// Everything a relay transport needs: the WebSocket fallback URL, the
+  /// per-session token, and the stream endpoints in preference order.
+  struct relay_info {
+    std::string url;
+    std::string ca_path;
+    std::string connect_id;
+    std::string token;
+    /// Directory/relay certificate advertised for pinning (PEM).
+    std::string tls_cert;
+    std::vector<relay_endpoint> endpoints;
+  };
+
+  /// One same-NAT direct endpoint from GET /v1/devices.
+  struct device_lan_info {
+    std::string address;
+    int port = 0;
+    int quic_port = 0;
+    int tcp_port = 0;
+    std::string tls_cert;
+    std::string tls_fingerprint;
+  };
+  /// Ask the directory for a target's LAN address and data ports. The
+  /// directory only fills them when the requester shares the target's public
+  /// address (or is on loopback).
+  bool lookup_device(const std::string& id, device_lan_info& out,
+                     std::string& error);
+
+  /// Exchange the device token for per-session relay credentials. The
+  /// directory lists the endpoints the same token opens (TCP now, QUIC as it
+  /// lands); `relay_info::url` remains the WebSocket baseline.
+  bool relay_create(const std::string& connect_id, relay_info& out,
+                    std::string& error);
 
  private:
   struct signaling_credentials {
@@ -145,6 +184,10 @@ class server_client {
 
   std::shared_ptr<auth_state> auth_;
   std::shared_ptr<std::atomic<int>> bound_port_;
+  int quic_port_ = 0;
+  int tcp_port_ = 0;
+  std::string tls_cert_pem_;
+  std::string tls_fingerprint_;
   std::string version_;
   std::thread thread_;
   std::atomic<bool> running_{false};

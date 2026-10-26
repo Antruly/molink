@@ -340,12 +340,47 @@ bool encode_capture_frame(protocol::frame_header& header,
                           const encode_options& options, const uint8_t* pixels,
                           std::size_t stride, std::vector<uint8_t>& payload,
                           std::vector<uint8_t>* av1_payload,
-                          std::string& err) {
+                          std::string& err, bool* av1_only) {
   if (av1_payload != nullptr) av1_payload->clear();
+  if (av1_only != nullptr) *av1_only = false;
   const bool keyframe = (header.flags & protocol::kFrameFlagKeyframe) != 0;
-  if (options.av1 != nullptr && av1_payload != nullptr && !keyframe &&
-      pixels != nullptr && stride > 0 && !tiles.empty() &&
-      header.tile_w > 0 && header.tile_h > 0) {
+  const bool can_encode_av1 =
+      options.av1 != nullptr && av1_payload != nullptr && pixels != nullptr &&
+      stride > 0 && header.tile_w > 0 && header.tile_h > 0 &&
+      (keyframe || !tiles.empty());
+  // Full-frame AV1: every changed rectangle goes to the encoder and the tile
+  // payload is emptied, so the wire carries one picture and not a tile image
+  // plus a patch. Tiles are only used again when AV1 cannot run or fails.
+  if (can_encode_av1 && options.av1_full_frame) {
+    std::vector<pixel_rect> rects;
+    if (keyframe) {
+      rects.push_back({0, 0, header.screen_w, header.screen_h});
+    } else {
+      const std::vector<std::pair<int, int>> cells =
+          collect_dirty_cells(tiles, header.tile_w, header.tile_h);
+      rects = merge_dirty_tiles(
+          cells, header.tile_w, header.tile_h, header.screen_w, header.screen_h,
+          static_cast<std::size_t>(std::max(1, options.av1_max_rects)));
+    }
+    if (!rects.empty()) {
+      std::vector<uint8_t> picture;
+      std::string av1_error;
+      if (build_av1_frame_payload(header, *options.av1, pixels, stride, rects,
+                                  options.av1_qp, picture, av1_error,
+                                  options.av1_grayscale)) {
+        *av1_payload = std::move(picture);
+        tiles.clear();
+        if (av1_only != nullptr) *av1_only = true;
+        if (std::getenv("MOLINK_AV1_LOG") != nullptr) {
+          std::fprintf(stderr, "av1 full: %zu rect(s), %zu bytes\n",
+                       rects.size(), av1_payload->size());
+        }
+      } else if (std::getenv("MOLINK_AV1_LOG") != nullptr) {
+        std::fprintf(stderr, "av1 full: encode failed (%s), tiles fallback\n",
+                     av1_error.c_str());
+      }
+    }
+  } else if (can_encode_av1 && !keyframe) {
     const std::vector<std::pair<int, int>> cells =
         collect_dirty_cells(tiles, header.tile_w, header.tile_h);
     const std::vector<pixel_rect> rects = merge_dirty_tiles(

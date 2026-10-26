@@ -19,11 +19,13 @@ import {
   MicOff,
   Minimize2,
   Monitor,
+  Moon,
   MousePointer2,
   Phone,
   PhoneOff,
   Radio,
   Settings2,
+  Sun,
   Volume2,
   VolumeX,
   X,
@@ -36,7 +38,6 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from 'react'
 import { useTranslation } from 'react-i18next'
-import { formatDisplayId } from '../lib/format'
 import { codecName } from '../lib/protocol'
 import { shellInfo, windowAction } from '../lib/shell'
 import { openSessionWindow } from '../lib/windows'
@@ -172,22 +173,31 @@ function touchPrimary(): boolean {
   }
 }
 
-function Stat({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="hidden min-w-[62px] rounded-lg border border-line-soft bg-panel px-2 py-1 text-center sm:block">
-      <div className="text-[9px] uppercase tracking-[0.14em] text-muted/80">
-        {label}
-      </div>
-      <div className="font-mono text-[11px] text-ink">{value}</div>
-    </div>
-  )
-}
 
 type ResolvedQuality = Exclude<QualityMode, 'auto'>
 
 /// Capture rate and pull interval per preset. The pull interval is the real
 /// ceiling: the client asks for the next frame only after the previous one
 /// arrived, so a shorter interval is what makes "smooth" actually smoother.
+/// Two independent axes, labelled as two chips: how the bytes travel (direct,
+/// hole-punched peer-to-peer, or through a relay) and which wire protocol
+/// carries them (WebSocket, QUIC, UDP, TCP...). A relayed QUIC session is
+/// RELAY + QUIC, not a single mixed value.
+const PATH_LABELS: Record<string, string> = {
+  direct: 'DIRECT',
+  p2p: 'P2P',
+  relay: 'RELAY',
+}
+
+const PROTOCOL_LABELS: Record<string, string> = {
+  websocket: 'WS',
+  http2: 'HTTP/2',
+  http3: 'HTTP/3',
+  quic: 'QUIC',
+  udp: 'UDP',
+  tcp: 'TCP',
+}
+
 const QUALITY_PROFILES: Record<
   ResolvedQuality,
   { fps: number; pullMs: number }
@@ -224,6 +234,9 @@ export function SessionView({
   const setWindowFullscreen = useAppStore((state) => state.setWindowFullscreen)
   const setClipboardEnabled = useAppStore((state) => state.setClipboardEnabled)
   const immersive = useAppStore((state) => state.immersive)
+  const theme = useAppStore((state) => state.theme)
+  const toggleTheme = useAppStore((state) => state.toggleTheme)
+  const setSettingsOpen = useAppStore((state) => state.setSettingsOpen)
 
   const welcome = tab.welcome
   const synthetic = welcome?.tiles.synthetic === true
@@ -286,16 +299,6 @@ export function SessionView({
     moved: boolean
   } | null>(null)
   const quickSuppressClick = useRef(false)
-  // The fullscreen floating toolbar has its own position so dragging it does
-  // not move the compact quick handle used outside fullscreen.
-  const [fullPos, setFullPos] = useState<{ x: number; y: number } | null>(null)
-  const fullDrag = useRef<{
-    offsetX: number
-    offsetY: number
-    startX: number
-    startY: number
-    moved: boolean
-  } | null>(null)
   const [mobilePos, setMobilePos] = useState<{ x: number; y: number } | null>(
     null,
   )
@@ -422,7 +425,8 @@ export function SessionView({
     const onVisible = () => {
       if (document.visibilityState !== 'visible') return
       if (tab.phase !== 'live') return
-      connection()?.requestKeyframe()
+      // The per-session back buffer is kept current by the background pull, so
+      // the returning view only needs the newest frame, not a keyframe.
       connection()?.requestFrame()
     }
     document.addEventListener('visibilitychange', onVisible)
@@ -1037,51 +1041,6 @@ export function SessionView({
     }, 0)
   }
 
-  const fullHandleDown = (event: ReactPointerEvent<HTMLElement>) => {
-    const surface = surfaceRef.current
-    const bar = quickBarRef.current
-    if (!surface || !bar) return
-    event.preventDefault()
-    event.stopPropagation()
-    const rect = surface.getBoundingClientRect()
-    const barRect = bar.getBoundingClientRect()
-    const position = fullPos ?? {
-      x: barRect.left - rect.left,
-      y: barRect.top - rect.top,
-    }
-    fullDrag.current = {
-      offsetX: event.clientX - rect.left - position.x,
-      offsetY: event.clientY - rect.top - position.y,
-      startX: event.clientX,
-      startY: event.clientY,
-      moved: false,
-    }
-    event.currentTarget.setPointerCapture(event.pointerId)
-  }
-
-  const fullHandleMove = (event: ReactPointerEvent<HTMLElement>) => {
-    const drag = fullDrag.current
-    const surface = surfaceRef.current
-    const bar = quickBarRef.current
-    if (!drag || !surface || !bar) return
-    if (
-      !drag.moved &&
-      Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) > 4
-    ) {
-      drag.moved = true
-    }
-    const rect = surface.getBoundingClientRect()
-    const maxX = Math.max(4, rect.width - bar.offsetWidth - 4)
-    const maxY = Math.max(4, rect.height - bar.offsetHeight - 4)
-    setFullPos({
-      x: Math.min(maxX, Math.max(4, event.clientX - rect.left - drag.offsetX)),
-      y: Math.min(maxY, Math.max(4, event.clientY - rect.top - drag.offsetY)),
-    })
-  }
-
-  const fullHandleUp = () => {
-    fullDrag.current = null
-  }
 
   const callHandleDown = (event: ReactPointerEvent<HTMLButtonElement>) => {
     const surface = surfaceRef.current
@@ -1547,286 +1506,55 @@ export function SessionView({
     tab.stats.latencyMs === null ? '—' : `${Math.round(tab.stats.latencyMs)} ms`
   const syntheticLabel = synthetic ? t('session.syntheticShort') : null
   const displays = tab.welcome?.displays ?? []
-  const transportLabel =
-    tab.welcome?.transport === 'websocket'
-      ? 'WS'
-      : (tab.welcome?.transport ?? '—')
+  // Live path from the local core's proxy first, then what the host's welcome
+  // reported, then a legacy mapping (older cores mixed "relay"/"udp" into the
+  // single transport field).
+  const welcomeTransport = tab.welcome?.transport
+  const livePath =
+    tab.path ??
+    (tab.transport === 'relay'
+      ? 'relay'
+      : tab.transport === 'p2p'
+        ? 'p2p'
+        : undefined)
+  const legacyPath =
+    welcomeTransport === 'relay'
+      ? 'relay'
+      : welcomeTransport === 'udp'
+        ? 'p2p'
+        : 'direct'
+  const pathName = livePath ?? tab.welcome?.transport_path ?? legacyPath
+  const pathLabel = PATH_LABELS[pathName] ?? pathName.toUpperCase()
+  const protocolName =
+    tab.protocol ??
+    (welcomeTransport === 'relay' ? 'websocket' : welcomeTransport)
+  const protocolLabel = protocolName
+    ? (PROTOCOL_LABELS[protocolName] ?? protocolName.toUpperCase())
+    : '—'
   // Follow the frame actually on screen; the welcome codec is only a snapshot
   // from connect time and goes stale when the preset changes.
   const codecLabel = tab.frame
     ? codecName(tab.frame.codec)
     : (tab.welcome?.tiles.codec ?? '')
+  // The session transport names the HTTP leg directly: http2/http3 are the
+  // RFC 8441/9220 WebSockets, websocket is the h1 baseline, and quic/tcp/udp
+  // are raw MOLK streams without an HTTP version.
+  const httpVersionLabel =
+    protocolName === 'http2'
+      ? 'HTTP/2'
+      : protocolName === 'http3'
+        ? 'HTTP/3'
+        : protocolName === 'websocket'
+          ? 'HTTP/1.1'
+          : '—'
+  const encodingLabel = tab.av1Active
+    ? tab.av1Full
+      ? t('session.watermarkAv1')
+      : t('session.watermarkAv1Tiles')
+    : t('session.watermarkTiles')
 
   return (
     <div ref={sessionRootRef} className="flex min-h-0 flex-1 flex-col">
-      <div
-        className={
-          isFullscreen
-            ? 'hidden'
-            : 'flex flex-wrap items-center gap-2 border-b border-line-soft px-4 py-2.5'
-        }
-      >
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            <span
-              className={
-                'h-1.5 w-1.5 rounded-full ' +
-                (tab.phase === 'live'
-                  ? 'bg-accent'
-                  : tab.phase === 'connecting'
-                    ? 'animate-pulse bg-warn'
-                    : 'bg-danger')
-              }
-            />
-            <div className="truncate text-sm font-medium">{tab.label}</div>
-          </div>
-          <div className="mt-0.5 truncate font-mono text-[11px] text-muted">
-            {tab.deviceId
-              ? `${formatDisplayId(tab.deviceId)} · ${
-                  welcome?.device_name || tab.label
-                }`
-              : `${tab.host}:${tab.port}${
-                  welcome?.device_name ? ` · ${welcome.device_name}` : ''
-                }`}
-          </div>
-        </div>
-
-        <div className="ml-auto flex items-center gap-1.5">
-          <div className="flex items-center gap-1.5">
-            <Stat label={t('stats.fps')} value={String(tab.stats.fps)} />
-            <Stat label={t('stats.latency')} value={latency} />
-            <Stat
-              label={t('stats.bandwidth')}
-              value={formatBandwidth(tab.stats.bytesPerSec)}
-            />
-            {tab.av1Active ? (
-              <span
-                className="rounded-lg border border-emerald-500/45 bg-emerald-500/10 px-2 py-1 font-mono text-[10px] font-semibold text-emerald-500"
-                title={`AV1 ${tab.av1WireBytes ?? 0} B wire → ${tab.av1DecodedBytes ?? 0} B decoded`}
-              >
-                AV1
-              </span>
-            ) : null}
-          </div>
-
-          {clipboardAvailable ? (
-            <>
-              <button
-                type="button"
-                onClick={() =>
-                  setClipboardEnabled(tab.id, !tab.clipboardEnabled)
-                }
-                className={
-                  'btn h-8 w-8 !px-0 ' +
-                  (tab.clipboardEnabled ? 'text-accent' : 'btn-quiet')
-                }
-                title={
-                  tab.clipboardEnabled
-                    ? t('session.clipboardOff')
-                    : t('session.clipboardOn')
-                }
-                aria-label={
-                  tab.clipboardEnabled
-                    ? t('session.clipboardOff')
-                    : t('session.clipboardOn')
-                }
-                aria-pressed={tab.clipboardEnabled}
-              >
-                {tab.clipboardEnabled ? (
-                  <ClipboardCheck size={14} />
-                ) : (
-                  <ClipboardX size={14} />
-                )}
-              </button>
-              <button
-                type="button"
-                onClick={copyFromRemote}
-                disabled={!tab.clipboardEnabled}
-                className="btn btn-quiet h-8 w-8 !px-0"
-                title={t('session.clipboardGet')}
-                aria-label={t('session.clipboardGet')}
-              >
-                <ClipboardCopy size={14} />
-              </button>
-              <button
-                type="button"
-                onClick={sendToRemote}
-                disabled={!tab.clipboardEnabled}
-                className="btn btn-quiet h-8 w-8 !px-0"
-                title={t('session.clipboardSet')}
-                aria-label={t('session.clipboardSet')}
-              >
-                <ClipboardPaste size={14} />
-              </button>
-            </>
-          ) : null}
-
-          {audioAvailable ? (
-            <div className="flex items-center gap-1">
-              <button
-                type="button"
-                onClick={toggleAudio}
-                className={
-                  'btn h-8 w-8 !px-0 ' +
-                  (audioOn ? 'text-accent' : 'btn-quiet')
-                }
-                title={
-                  audioOn ? t('session.audioOff') : t('session.audioOn')
-                }
-                aria-label={
-                  audioOn ? t('session.audioOff') : t('session.audioOn')
-                }
-                aria-pressed={audioOn}
-              >
-                {audioOn ? <Volume2 size={14} /> : <VolumeX size={14} />}
-              </button>
-              {audioOn ? (
-                <input
-                  type="range"
-                  min={0}
-                  max={1}
-                  step={0.05}
-                  value={audioVolume}
-                  onChange={(event) =>
-                    changeAudioVolume(Number(event.target.value))
-                  }
-                  className="hidden h-1 w-16 cursor-pointer sm:block"
-                  style={{ accentColor: 'var(--accent)' }}
-                  aria-label={t('session.audioVolume')}
-                />
-              ) : null}
-            </div>
-          ) : null}
-
-          <button
-            type="button"
-            onClick={() => setFilesOpen(true)}
-            className={
-              'btn h-8 gap-1 px-2 text-[11px] ' +
-              (filesOpen ? 'text-accent' : 'btn-quiet')
-            }
-            title={t('session.files')}
-            aria-label={t('session.files')}
-          >
-            <FolderOpen size={14} />
-            <span className="hidden lg:inline">{t('session.files')}</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-                  setChatUnread(0)
-                  setChatOpen(true)
-                }}
-            className={
-              'relative btn h-8 gap-1 px-2 text-[11px] ' +
-              (chatOpen ? 'text-accent' : 'btn-quiet')
-            }
-            title={t('session.chat')}
-            aria-label={t('session.chat')}
-          >
-            <MessageSquare size={14} />
-            <span className="hidden lg:inline">{t('session.chat')}</span>
-            {chatUnread > 0 && !chatOpen ? (
-              <span className="absolute -right-0.5 -top-0.5 grid h-4 min-w-4 place-items-center rounded-full bg-accent px-1 text-[9px] font-semibold text-on-accent">
-                {chatUnread > 9 ? '9+' : chatUnread}
-              </span>
-            ) : null}
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setQualityWatermark(!qualityWatermark)}
-            className={
-              'btn h-8 w-8 !px-0 ' +
-              (qualityWatermark ? 'text-accent' : 'btn-quiet')
-            }
-            title={t('settings.watermark')}
-            aria-label={t('settings.watermark')}
-          >
-            <Activity size={14} />
-          </button>
-
-          {!popout && localMode ? (
-            <button
-              type="button"
-              onClick={openPopout}
-              className="btn btn-quiet h-8 w-8 !px-0"
-              title={t('session.popOut')}
-              aria-label={t('session.popOut')}
-            >
-              <ExternalLink size={14} />
-            </button>
-          ) : null}
-
-          {inputAvailable ? (
-            <button
-              type="button"
-              onClick={() => {
-                const next = !tab.controlEnabled
-                setControlEnabled(tab.id, next)
-                if (!next) setVirtualMouse(false)
-              }}
-              className={
-                tab.controlEnabled
-                  ? 'btn border-accent/50 bg-accent-soft text-accent'
-                  : 'btn'
-              }
-            >
-              {tab.controlEnabled ? <Hand size={14} /> : <MousePointer2 size={14} />}
-              <span className="hidden md:inline">
-                {tab.controlEnabled
-                  ? t('session.stopControl')
-                  : t('session.startControl')}
-              </span>
-            </button>
-          ) : (
-            <span className="chip">{t('session.inputUnavailable')}</span>
-          )}
-
-          {inputAvailable ? (
-            <button
-              type="button"
-              onClick={() => connection()?.sendInput({ k: 'sas' })}
-              className="btn"
-              title={t('session.ctrlAltDelHint')}
-              aria-label={t('session.ctrlAltDel')}
-            >
-              <Keyboard size={14} />
-              <span className="hidden md:inline">
-                {t('session.ctrlAltDel')}
-              </span>
-            </button>
-          ) : null}
-
-          {popout ? (
-            <button
-              type="button"
-              onClick={() => {
-                // WebKitGTK ignores window.close() for a window it created;
-                // only the shell can actually destroy it.
-                if (shellInfo.enabled) windowAction('close')
-                else window.close()
-              }}
-              className="btn btn-quiet h-8 w-8 !px-0 hover:!border-danger/50 hover:!text-danger"
-              title={t('session.closeWindow')}
-              aria-label={t('session.closeWindow')}
-            >
-              <X size={15} />
-            </button>
-          ) : (
-            <button
-              type="button"
-              onClick={() => closeTab(tab.id)}
-              className="btn btn-quiet h-8 w-8 !px-0 hover:!border-danger/50 hover:!text-danger"
-              title={t('session.disconnect')}
-              aria-label={t('session.disconnect')}
-            >
-              <LogOut size={14} />
-            </button>
-          )}
-        </div>
-      </div>
-
       {tab.error || actionError ? (
         <div
           className={
@@ -1942,7 +1670,7 @@ export function SessionView({
           className={
             'relative h-full w-full touch-none select-none outline-none transition ' +
             (isFullscreen
-              ? 'bg-black ' +
+              ? 'bg-canvas ' +
                 (displayMode === 'actual'
                   ? 'overflow-auto'
                   : 'overflow-hidden')
@@ -1969,7 +1697,11 @@ export function SessionView({
                   : undefined
               }
             >
-              <TileCanvas frame={tab.frame} mode={displayMode} />
+              <TileCanvas
+                frame={tab.frame}
+                mode={displayMode}
+                sessionKey={tab.id}
+              />
               {(!tab.controlEnabled || virtualMouse) && !synthetic ? (
                 <RemoteCursor
                   shape={tab.cursorShape}
@@ -1993,6 +1725,17 @@ export function SessionView({
                     {codecLabel}
                   </span>
                 ) : null}
+                {qualityWatermark && welcome ? (
+                  <span className="rounded-md border border-accent/40 bg-black/65 px-2 py-1 font-mono text-[10px] text-accent backdrop-blur">
+                    {encodingLabel}
+                  </span>
+                ) : null}
+                {qualityWatermark && welcome ? (
+                  <span className="rounded-md border border-white/15 bg-black/65 px-2 py-1 font-mono text-[10px] text-white/85 backdrop-blur">
+                    {t('session.watermarkLink')} {pathLabel} · {protocolLabel} ·{' '}
+                    {httpVersionLabel}
+                  </span>
+                ) : null}
                 {qualityWatermark && welcome?.tiles.backend ? (
                   <span className="rounded-md border border-white/15 bg-black/65 px-2 py-1 font-mono text-[10px] text-white/85 backdrop-blur">
                     {welcome.tiles.backend}
@@ -2004,7 +1747,7 @@ export function SessionView({
                     {syntheticLabel}
                   </span>
                 ) : null}
-                {tab.controlEnabled ? (
+                {tab.controlEnabled && inputAvailable ? (
                   <span className="rounded-md border border-accent/50 bg-accent-soft px-2 py-1 font-mono text-[10px] text-accent backdrop-blur">
                     {t('session.controlOn')}
                   </span>
@@ -2016,7 +1759,10 @@ export function SessionView({
                   <span className="text-accent">{tab.stats.fps} fps</span>
                   <span>{latency}</span>
                   <span>{formatBandwidth(tab.stats.bytesPerSec)}</span>
-                  <span className="text-muted/60">{codecLabel}</span>
+                  <span className="text-accent">{encodingLabel}</span>
+                  <span className="text-muted/60">
+                    {pathLabel}/{protocolLabel}/{httpVersionLabel}
+                  </span>
                 </div>
               ) : null}
             </div>
@@ -2081,255 +1827,10 @@ export function SessionView({
             </div>
           ) : null}
 
-          {isFullscreen ? (
-            quickOpen ? (
+          {quickOpen ? (
             <div
               ref={quickBarRef}
-              className={
-                'fullscreen-toolbar pointer-events-auto absolute z-40 flex max-w-[96vw] items-center gap-0.5 overflow-x-auto rounded-full border border-white/10 bg-black/70 px-2 py-1.5 text-white shadow-2xl backdrop-blur-md ' +
-                (fullPos ? '' : 'left-1/2 top-3 -translate-x-1/2')
-              }
-              style={fullPos ? { left: fullPos.x, top: fullPos.y } : undefined}
-              onPointerDown={(event) => event.stopPropagation()}
-              onPointerUp={(event) => event.stopPropagation()}
-            >
-              <button
-                type="button"
-                onPointerDown={fullHandleDown}
-                onPointerMove={fullHandleMove}
-                onPointerUp={fullHandleUp}
-                onPointerCancel={fullHandleUp}
-                className="grid shrink-0 cursor-move place-items-center rounded-full px-1.5 py-1.5 text-white/50 transition hover:bg-white/10 hover:text-white"
-                title={t('session.moveToolbar')}
-                aria-label={t('session.moveToolbar')}
-              >
-                <GripHorizontal size={13} />
-              </button>
-              <button
-                type="button"
-                onClick={toggleFullscreen}
-                className="shrink-0 rounded-full bg-white/10 px-2.5 py-1.5 text-[11px] font-medium transition hover:bg-white/20"
-                title={t('session.exitFullscreen')}
-              >
-                <span className="flex items-center gap-1.5">
-                  <Minimize2 size={13} />
-                  {t('session.exitFullscreen')}
-                </span>
-              </button>
-              <span className="mx-1 h-4 w-px shrink-0 bg-white/15" />
-              {(['fit', 'actual', 'fill'] as DisplayMode[]).map((mode) => (
-                <button
-                  key={mode}
-                  type="button"
-                  onClick={() => changeDisplayMode(mode)}
-                  className={
-                    'shrink-0 rounded-full px-2.5 py-1.5 text-[11px] transition ' +
-                    (displayMode === mode
-                      ? 'bg-white/15 text-white'
-                      : 'text-white/70 hover:bg-white/10')
-                  }
-                >
-                  {t(`session.${mode}`)}
-                </button>
-              ))}
-              <span className="mx-1 h-4 w-px shrink-0 bg-white/15" />
-              <label className="flex shrink-0 items-center gap-1 rounded-full px-1.5">
-                <Gauge size={12} className="text-white/60" />
-                <select
-                  value={qualityMode}
-                  onChange={(event) =>
-                    setQualityMode(event.target.value as QualityMode)
-                  }
-                  aria-label={t('session.quality')}
-                  className="h-7 bg-transparent text-[11px] text-white outline-none [&>option]:text-black"
-                >
-                  <option value="turbo">{t('session.qualityTurbo')}</option>
-                  <option value="smooth">{t('session.qualitySmooth')}</option>
-                  <option value="balanced">
-                    {t('session.qualityBalanced')}
-                  </option>
-                  <option value="quality">{t('session.qualityHigh')}</option>
-                  <option value="ultra">{t('session.qualityUltra')}</option>
-                  <option value="lossless">{t('session.qualityLossless')}</option>
-                  <option value="game">{t('session.qualityGame')}</option>
-                  <option value="auto">{t('session.qualityAuto')}</option>
-                </select>
-              </label>
-              <button
-                type="button"
-                onClick={() => setQualityWatermark(!qualityWatermark)}
-                className={
-                  'shrink-0 rounded-full px-2.5 py-1.5 text-[11px] transition ' +
-                  (qualityWatermark
-                    ? 'bg-white/15 text-white'
-                    : 'text-white/50 hover:bg-white/10')
-                }
-                title={t('settings.watermark')}
-                aria-label={t('settings.watermark')}
-                aria-pressed={qualityWatermark}
-              >
-                <Activity size={13} />
-              </button>
-              {inputAvailable ? (
-                <button
-                  type="button"
-                  onClick={() => {
-                    const next = !tab.controlEnabled
-                    setControlEnabled(tab.id, next)
-                    if (!next) setVirtualMouse(false)
-                  }}
-                  className={
-                    'shrink-0 rounded-full px-2.5 py-1.5 text-[11px] transition ' +
-                    (tab.controlEnabled
-                      ? 'bg-accent text-on-accent'
-                      : 'text-white/70 hover:bg-white/10')
-                  }
-                  title={
-                    tab.controlEnabled
-                      ? t('session.stopControl')
-                      : t('session.startControl')
-                  }
-                >
-                  <span className="flex items-center gap-1.5">
-                    {tab.controlEnabled ? (
-                      <Hand size={13} />
-                    ) : (
-                      <MousePointer2 size={13} />
-                    )}
-                    <span className="hidden sm:inline">
-                      {tab.controlEnabled
-                        ? t('session.stopControl')
-                        : t('session.startControl')}
-                    </span>
-                  </span>
-                </button>
-              ) : null}
-              {clipboardAvailable ? (
-                <button
-                  type="button"
-                  onClick={() =>
-                    setClipboardEnabled(tab.id, !tab.clipboardEnabled)
-                  }
-                  className={
-                    'shrink-0 rounded-full px-2.5 py-1.5 text-[11px] transition ' +
-                    (tab.clipboardEnabled
-                      ? 'bg-white/15 text-white'
-                      : 'text-white/50 hover:bg-white/10')
-                  }
-                  title={
-                    tab.clipboardEnabled
-                      ? t('session.clipboardOff')
-                      : t('session.clipboardOn')
-                  }
-                >
-                  {tab.clipboardEnabled ? (
-                    <ClipboardCheck size={13} />
-                  ) : (
-                    <ClipboardX size={13} />
-                  )}
-                </button>
-              ) : null}
-              {audioAvailable ? (
-                <div className="flex shrink-0 items-center gap-1 pl-1">
-                  <button
-                    type="button"
-                    onClick={toggleAudio}
-                    className={
-                      'rounded-full px-2.5 py-1.5 text-[11px] transition ' +
-                      (audioOn
-                        ? 'bg-white/15 text-white'
-                        : 'text-white/50 hover:bg-white/10')
-                    }
-                    title={
-                      audioOn ? t('session.audioOff') : t('session.audioOn')
-                    }
-                  >
-                    {audioOn ? (
-                      <Volume2 size={13} />
-                    ) : (
-                      <VolumeX size={13} />
-                    )}
-                  </button>
-                  {audioOn ? (
-                    <input
-                      type="range"
-                      min={0}
-                      max={1}
-                      step={0.05}
-                      value={audioVolume}
-                      onChange={(event) =>
-                        changeAudioVolume(Number(event.target.value))
-                      }
-                      className="h-1 w-14 cursor-pointer"
-                      style={{ accentColor: '#5eead4' }}
-                      aria-label={t('session.audioVolume')}
-                    />
-                  ) : null}
-                </div>
-              ) : null}
-              <button
-                type="button"
-                onClick={() => {
-                  setChatUnread(0)
-                  setChatOpen(true)
-                  setFilesOpen(false)
-                }}
-                className="relative shrink-0 rounded-full px-2.5 py-1.5 text-[11px] text-white/80 transition hover:bg-white/10"
-                title={t('session.chat')}
-              >
-                <MessageSquare size={13} />
-                {chatUnread > 0 && !chatOpen ? (
-                  <span className="absolute -right-0.5 -top-0.5 grid h-4 min-w-4 place-items-center rounded-full bg-accent px-1 text-[9px] font-semibold text-on-accent">
-                    {chatUnread > 9 ? '9+' : chatUnread}
-                  </span>
-                ) : null}
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setFilesOpen(true)
-                  setChatOpen(false)
-                }}
-                className="shrink-0 rounded-full px-2.5 py-1.5 text-[11px] text-white/80 transition hover:bg-white/10"
-                title={t('session.files')}
-              >
-                <FolderOpen size={13} />
-              </button>
-              {inputAvailable ? (
-                <button
-                  type="button"
-                  onClick={() => connection()?.sendInput({ k: 'sas' })}
-                  className="shrink-0 rounded-full px-2.5 py-1.5 text-[11px] text-white/80 transition hover:bg-white/10"
-                  title={t('session.ctrlAltDelHint')}
-                >
-                  <Keyboard size={13} />
-                </button>
-              ) : null}
-              <span className="mx-1 h-4 w-px shrink-0 bg-white/15" />
-              <button
-                type="button"
-                onClick={() => closeTab(tab.id)}
-                className="shrink-0 rounded-full px-2.5 py-1.5 text-[11px] text-red-300 transition hover:bg-red-500/20"
-                title={t('session.disconnect')}
-              >
-                <LogOut size={13} />
-              </button>
-            </div>
-            ) : (
-              <button
-                type="button"
-                onClick={() => setQuickOpen(true)}
-                className="pointer-events-auto absolute left-1/2 top-3 z-40 grid h-9 w-9 -translate-x-1/2 place-items-center rounded-full border border-white/15 bg-black/60 text-white/70 shadow-lg backdrop-blur transition hover:text-white"
-                title={t('session.quickActions')}
-                aria-label={t('session.quickActions')}
-              >
-                <Settings2 size={15} />
-              </button>
-            )
-          ) : quickOpen ? (
-            <div
-              ref={quickBarRef}
-              className="pointer-events-auto absolute left-1/2 top-3 z-30 flex max-w-[94vw] -translate-x-1/2 items-center gap-1 overflow-x-auto rounded-full border border-line bg-surface/95 p-1 shadow-lg backdrop-blur"
+              className="pointer-events-auto absolute left-1/2 top-3 z-40 flex w-max max-w-[96vw] -translate-x-1/2 items-center gap-0.5 overflow-x-auto rounded-full border border-line bg-surface/95 px-1.5 py-1 text-ink shadow-lg backdrop-blur"
               onPointerDown={(event) => event.stopPropagation()}
               onPointerUp={(event) => event.stopPropagation()}
               onBlur={(event) => {
@@ -2347,46 +1848,53 @@ export function SessionView({
                 title={t('session.quickActions')}
                 aria-label={t('session.quickActions')}
               >
-                <Settings2 size={14} />
+                <X size={14} />
               </button>
+              {isFullscreen ? (
+                <span
+                  className="chip max-w-[8rem] shrink-0 truncate !px-1.5 !py-0 text-[10px]"
+                  title={tab.label}
+                >
+                  {tab.label}
+                </span>
+              ) : null}
               <button
                 type="button"
                 onClick={toggleFullscreen}
-                className="btn btn-quiet h-7 gap-1 px-2 text-[11px]"
+                className="btn btn-quiet h-7 w-7 shrink-0 !px-0"
                 title={
+                  isFullscreen
+                    ? t('session.exitFullscreen')
+                    : t('session.fullscreen')
+                }
+                aria-label={
                   isFullscreen
                     ? t('session.exitFullscreen')
                     : t('session.fullscreen')
                 }
               >
                 {isFullscreen ? (
-                  <Minimize2 size={13} />
+                  <Minimize2 size={14} />
                 ) : (
-                  <Maximize2 size={13} />
+                  <Maximize2 size={14} />
                 )}
-                <span className="hidden sm:inline">
-                  {isFullscreen
-                    ? t('session.exitFullscreen')
-                    : t('session.fullscreen')}
-                </span>
               </button>
-              <span className="mx-0.5 h-4 w-px bg-line" />
+              <span className="mx-0.5 h-4 w-px shrink-0 bg-line" />
               {(['fit', 'actual', 'fill'] as DisplayMode[]).map((mode) => (
                 <button
                   key={mode}
                   type="button"
                   onClick={() => changeDisplayMode(mode)}
                   className={
-                    'btn h-7 px-2 text-[11px] ' +
+                    'btn h-7 shrink-0 px-2 text-[11px] ' +
                     (displayMode === mode ? 'btn-primary' : 'btn-quiet')
                   }
                 >
                   {t(`session.${mode}`)}
                 </button>
               ))}
-              <span className="mx-0.5 h-4 w-px bg-line" />
               <label
-                className="flex items-center gap-1 rounded-md border border-line bg-panel px-1.5 text-muted"
+                className="flex shrink-0 items-center gap-1 rounded-md border border-line bg-panel px-1.5 text-muted"
                 title={t('session.quality')}
               >
                 <Gauge size={12} />
@@ -2412,7 +1920,7 @@ export function SessionView({
                 type="button"
                 onClick={() => setQualityWatermark(!qualityWatermark)}
                 className={
-                  'btn h-7 w-7 !px-0 ' +
+                  'btn h-7 w-7 shrink-0 !px-0 ' +
                   (qualityWatermark ? 'btn-primary' : 'btn-quiet')
                 }
                 title={t('settings.watermark')}
@@ -2423,7 +1931,7 @@ export function SessionView({
               </button>
               {displays.length > 1 ? (
                 <label
-                  className="flex items-center gap-1 rounded-md border border-line bg-panel px-1.5 text-muted"
+                  className="flex shrink-0 items-center gap-1 rounded-md border border-line bg-panel px-1.5 text-muted"
                   title={t('session.display')}
                 >
                   <Monitor size={12} />
@@ -2446,7 +1954,7 @@ export function SessionView({
               {welcome && !welcome.tiles.synthetic &&
               welcome.tiles.can_set_display_mode !== false ? (
                 <label
-                  className="flex items-center gap-1 rounded-md border border-line bg-panel px-1.5 text-muted"
+                  className="flex shrink-0 items-center gap-1 rounded-md border border-line bg-panel px-1.5 text-muted"
                   title={t('session.resolution')}
                 >
                   <Monitor size={12} />
@@ -2483,25 +1991,222 @@ export function SessionView({
                   </select>
                 </label>
               ) : null}
-              <span className="chip" title={t('session.transport')}>
-                {transportLabel}
+              <span className="mx-0.5 h-4 w-px shrink-0 bg-line" />
+              {clipboardAvailable ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setClipboardEnabled(tab.id, !tab.clipboardEnabled)
+                    }
+                    className={
+                      'btn h-7 w-7 shrink-0 !px-0 ' +
+                      (tab.clipboardEnabled ? 'text-accent' : 'btn-quiet')
+                    }
+                    title={
+                      tab.clipboardEnabled
+                        ? t('session.clipboardOff')
+                        : t('session.clipboardOn')
+                    }
+                    aria-label={
+                      tab.clipboardEnabled
+                        ? t('session.clipboardOff')
+                        : t('session.clipboardOn')
+                    }
+                    aria-pressed={tab.clipboardEnabled}
+                  >
+                    {tab.clipboardEnabled ? (
+                      <ClipboardCheck size={13} />
+                    ) : (
+                      <ClipboardX size={13} />
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={copyFromRemote}
+                    disabled={!tab.clipboardEnabled}
+                    className="btn btn-quiet h-7 w-7 shrink-0 !px-0"
+                    title={t('session.clipboardGet')}
+                    aria-label={t('session.clipboardGet')}
+                  >
+                    <ClipboardCopy size={13} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={sendToRemote}
+                    disabled={!tab.clipboardEnabled}
+                    className="btn btn-quiet h-7 w-7 shrink-0 !px-0"
+                    title={t('session.clipboardSet')}
+                    aria-label={t('session.clipboardSet')}
+                  >
+                    <ClipboardPaste size={13} />
+                  </button>
+                </>
+              ) : null}
+              {audioAvailable ? (
+                <button
+                  type="button"
+                  onClick={toggleAudio}
+                  className={
+                    'btn h-7 w-7 shrink-0 !px-0 ' +
+                    (audioOn ? 'text-accent' : 'btn-quiet')
+                  }
+                  title={audioOn ? t('session.audioOff') : t('session.audioOn')}
+                  aria-label={
+                    audioOn ? t('session.audioOff') : t('session.audioOn')
+                  }
+                  aria-pressed={audioOn}
+                >
+                  {audioOn ? <Volume2 size={13} /> : <VolumeX size={13} />}
+                </button>
+              ) : null}
+              {audioAvailable && audioOn ? (
+                <input
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  value={audioVolume}
+                  onChange={(event) =>
+                    changeAudioVolume(Number(event.target.value))
+                  }
+                  className="h-1 w-14 shrink-0 cursor-pointer"
+                  style={{ accentColor: 'var(--accent)' }}
+                  aria-label={t('session.audioVolume')}
+                />
+              ) : null}
+              <button
+                type="button"
+                onClick={() => {
+                  setChatUnread(0)
+                  setChatOpen(true)
+                }}
+                className={
+                  'relative btn h-7 w-7 shrink-0 !px-0 ' +
+                  (chatOpen ? 'text-accent' : 'btn-quiet')
+                }
+                title={t('session.chat')}
+                aria-label={t('session.chat')}
+              >
+                <MessageSquare size={13} />
+                {chatUnread > 0 && !chatOpen ? (
+                  <span className="absolute -right-0.5 -top-0.5 grid h-4 min-w-4 place-items-center rounded-full bg-danger px-1 text-[9px] font-semibold text-white">
+                    {chatUnread > 9 ? '9+' : chatUnread}
+                  </span>
+                ) : null}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setFilesOpen(true)
+                  setChatOpen(false)
+                }}
+                className={
+                  'btn h-7 w-7 shrink-0 !px-0 ' +
+                  (filesOpen ? 'text-accent' : 'btn-quiet')
+                }
+                title={t('session.files')}
+                aria-label={t('session.files')}
+              >
+                <FolderOpen size={13} />
+              </button>
+              {inputAvailable ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const next = !tab.controlEnabled
+                      setControlEnabled(tab.id, next)
+                      if (!next) setVirtualMouse(false)
+                    }}
+                    className={
+                      'btn h-7 w-7 shrink-0 !px-0 ' +
+                      (tab.controlEnabled
+                        ? 'border-accent/50 bg-accent-soft text-accent'
+                        : 'btn-quiet')
+                    }
+                    title={
+                      tab.controlEnabled
+                        ? t('session.stopControl')
+                        : t('session.startControl')
+                    }
+                    aria-label={
+                      tab.controlEnabled
+                        ? t('session.stopControl')
+                        : t('session.startControl')
+                    }
+                    aria-pressed={tab.controlEnabled}
+                  >
+                    {tab.controlEnabled ? (
+                      <Hand size={13} />
+                    ) : (
+                      <MousePointer2 size={13} />
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => connection()?.sendInput({ k: 'sas' })}
+                    className="btn btn-quiet h-7 w-7 shrink-0 !px-0"
+                    title={t('session.ctrlAltDelHint')}
+                    aria-label={t('session.ctrlAltDel')}
+                  >
+                    <Keyboard size={13} />
+                  </button>
+                </>
+              ) : null}
+              {!popout && localMode ? (
+                <button
+                  type="button"
+                  onClick={openPopout}
+                  className="btn btn-quiet h-7 w-7 shrink-0 !px-0"
+                  title={t('session.popOut')}
+                  aria-label={t('session.popOut')}
+                >
+                  <ExternalLink size={13} />
+                </button>
+              ) : null}
+              <span className="mx-0.5 h-4 w-px shrink-0 bg-line" />
+              <button
+                type="button"
+                onClick={toggleTheme}
+                className="btn btn-quiet h-7 w-7 shrink-0 !px-0"
+                title={theme === 'dark' ? t('settings.themeLight') : t('settings.themeDark')}
+                aria-label={theme === 'dark' ? t('settings.themeLight') : t('settings.themeDark')}
+              >
+                {theme === 'dark' ? <Sun size={13} /> : <Moon size={13} />}
+              </button>
+              <button
+                type="button"
+                onClick={() => setSettingsOpen(true)}
+                className="btn btn-quiet h-7 w-7 shrink-0 !px-0"
+                title={t('settings.title')}
+                aria-label={t('settings.title')}
+              >
+                <Settings2 size={13} />
+              </button>
+              <span className="mx-0.5 h-4 w-px shrink-0 bg-line" />
+              <span className="chip !px-1.5 !py-0 text-[10px]" title={t('session.path')}>
+                {pathLabel}
+              </span>
+              <span className="chip !px-1.5 !py-0 text-[10px]" title={t('session.protocol')}>
+                {protocolLabel}
               </span>
               {tab.av1Active ? (
                 <span
-                  className="chip text-emerald-500"
+                  className="chip !px-1.5 !py-0 text-[10px] text-emerald-500"
                   title={`AV1 ${tab.av1WireBytes ?? 0} B wire → ${tab.av1DecodedBytes ?? 0} B decoded`}
                 >
                   AV1
                 </span>
               ) : null}
-              {tab.welcome?.security ? (
+              {isFullscreen && tab.welcome?.security ? (
                 <span
                   className={
-                    'chip flex items-center gap-1 ' +
+                    'chip flex items-center gap-1 !px-1.5 !py-0 text-[10px] ' +
                     (tab.welcome.security === 'e2e'
-                      ? 'text-emerald-500'
+                      ? 'text-sky-500'
                       : tab.welcome.security === 'relay'
-                        ? 'text-sky-500'
+                        ? 'text-amber-500'
                         : 'text-warn')
                   }
                   title={
@@ -2524,6 +2229,23 @@ export function SessionView({
                       : t('session.insecureShort')}
                 </span>
               ) : null}
+              <span className="mx-0.5 h-4 w-px shrink-0 bg-line" />
+              <button
+                type="button"
+                onClick={() => {
+                  if (popout) {
+                    if (shellInfo.enabled) windowAction('close')
+                    else window.close()
+                  } else {
+                    closeTab(tab.id)
+                  }
+                }}
+                className="btn btn-quiet h-7 w-7 shrink-0 !px-0 hover:!border-danger/50 hover:!text-danger"
+                title={popout ? t('session.closeWindow') : t('session.disconnect')}
+                aria-label={popout ? t('session.closeWindow') : t('session.disconnect')}
+              >
+                {popout ? <X size={14} /> : <LogOut size={13} />}
+              </button>
             </div>
           ) : (
             <button
@@ -2533,12 +2255,15 @@ export function SessionView({
               onPointerUp={quickHandleUp}
               onPointerCancel={quickHandleUp}
               onClick={toggleQuickOpen}
-              className="pointer-events-auto absolute z-30 grid h-9 w-9 cursor-move place-items-center rounded-full border border-line bg-surface/90 text-muted shadow-lg backdrop-blur hover:text-ink"
+              className="pointer-events-auto absolute z-40 grid h-10 w-10 cursor-move touch-none place-items-center rounded-full border border-line bg-surface/90 text-muted shadow-lg backdrop-blur hover:text-ink"
               style={{ left: quickHandlePos.x, top: quickHandlePos.y }}
               title={t('session.quickActions')}
               aria-label={t('session.quickActions')}
             >
               <Settings2 size={15} />
+              {chatUnread > 0 && !chatOpen ? (
+                <span className="absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full bg-danger ring-2 ring-surface" />
+              ) : null}
             </button>
           )}
 
@@ -2749,28 +2474,6 @@ export function SessionView({
         </div>
       </div>
 
-      <div
-        className={
-          isFullscreen
-            ? 'hidden'
-            : 'flex flex-wrap items-center justify-between gap-2 border-t border-line-soft px-4 py-2 text-[11px] text-muted/85'
-        }
-      >
-        <span>{
-          synthetic
-            ? t('session.synthetic')
-            : tab.transport === 'relay'
-              ? t('session.relay')
-              : t('session.direct')
-        }{tab.av1Active ? ' · AV1' : ''}</span>
-        <span>
-          {tab.controlEnabled
-            ? t('session.controlOnHint')
-            : inputAvailable
-              ? t('session.controlHint')
-              : t('session.inputUnavailable')}
-        </span>
-      </div>
     </div>
   )
 }

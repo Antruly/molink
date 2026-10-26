@@ -1,5 +1,176 @@
 # Changelog
 
+## [0.9.31] — 2026-10-27
+
+### Changed
+
+- 多会话切换不再黑屏：每个会话在后台持续把收到的帧合成到自己的离屏画布（不再只在
+  可见时才绘制），切换标签、进入/退出全屏、在 1:1 与拉伸之间切换都只是一次
+  `drawImage`，立即显示上一张完整画面。切换标签时也不再强制主机重编一个全屏关键帧
+  （AV1 全屏关键帧在主机会明显耗时），只请求一帧新画面。全屏/窗口尺寸变化会在下一
+  帧、80ms 和 250ms 各重绘一次，避免 WebKitGTK 全屏时丢失画布内容。
+- AV1 改为可选的“全帧”模式并默认开启（图像设置 → AV1 全帧 / 瓦片兜底）：所有变化
+  区域都只走 AV1，主机不再同时发送同一画面的瓦片，接收端不会再收到“瓦片 + AV1 补丁”
+  的合并数据；只有 AV1 不可用（没有编码器、观看端不能解码、或单帧编码失败）时才回退
+  到瓦片。关闭该开关恢复旧的“瓦片为主 + 大区域 AV1 补丁”模式。
+- 会话水印会把全帧 AV1 显示为 “AV1”，旧的补丁模式仍显示 “AV1 + 瓦片”。
+- Windows 采集源选择：即使安装了后台服务，只要 helper 报告当前是普通
+  `Default` 桌面，核心就优先使用 **DXGI Desktop Duplication**；只有
+  Winlogon/锁屏桌面才使用 `secure-desktop` helper。修复了服务开启时正常会话
+  走 GDI helper 导致的壁纸/大面积旧块残留和 1 fps 低帧率。锁屏远程仍是
+  helper 的职责；应用启动后再锁屏的情况不会自动切换采集源。
+- 主界面压缩与整合：Logo 与首页/会话标签合并为一行，移除顶部右侧的“首页”和
+  “切换高级 UI”；会话页去掉上下两条重复工具栏，工具栏全部收进可拖动的悬浮栏
+  （含 Ctrl-Alt-Del、剪贴板、音频、聊天、文件、控制、弹出、主题、设置、断开）。
+  帧率/延迟/带宽等监控数据只在“水印”里显示，默认关闭。
+- 全屏不再切成暗色：全屏悬浮栏和收起小球改用主题色；收起小球在普通与全屏下
+  都可拖动，展开栏固定在顶部；会话标签栏保留 TLS 安全盾牌（蓝=e2e，琥珀=中继，
+  灰=不安全），直连 TCP/QUIC/HTTP3 现在也报 e2e。
+- 主页右下角的聊天悬浮卡（收起小球与展开卡片）可拖动到窗口任意位置，并带未读
+  红点/计数。
+- 修复主页聊天卡与会话内聊天重复的问题：进入会话后只保留会话悬浮栏里的聊天。
+- 设置页改为带菜单的分类页：常规（主题、自动锁定、语言）、安全、网络（端口与
+  目录服务）、图像（水印、默认画质与 AV1 编码）、服务（后台服务与 Windows
+  会话）、关于。
+- 图像页的画质档位改为带说明的卡片，覆盖极速/流畅/平衡/清晰/超清/无损/游戏/
+  自适应，选择时能直接看到每种档位的画质、帧率和带宽取舍。
+- AV1 大区域编码新增主机设置：启用开关、编码设备（自动 / CPU，GPU 编码在构建
+  提供后自动出现）、速度预设，以及 QP、最大编码面积、线程数（默认全部自动，
+  按画质档位和 CPU 核心数推导），并显示当前档位的实际参数。
+- 保存设备和最近设备支持备注：备注按设备名称共用，同一台设备的最近、保存、
+  局域网和在线列表显示同一条备注；卡片和列表都能直接编辑/清除，原设备名保留
+  为第二行说明。备注随 `ui.json` 持久化，重启后保留。
+- 简单模式的连接卡验证码输入增加“显示/隐藏明文”按钮，和登录页、高级连接页
+  的密码框保持一致。
+- 修复远程画面丢失更新区域/突然定格：
+  - **P2P 切换后接收端只接受中继上的 `file_data`**，而发送端从 0.9.25 起把
+    关键帧、AV1 补丁、补帧数据、tile clock 和补帧请求都改走中继，导致这些都
+    在接收端被静默丢弃。接收端现在使用与发送端相同的白名单；新增
+    `switchable_transport` 路由回归测试（旧逻辑 2 项失败，修复后 8 项通过）。
+  - AV1 补丁覆盖的 128px 格子现在写入 tile clock，补丁丢失后客户端能检测到并
+    `request-tiles` 补回；1 秒延迟补帧路径也会包含 AV1 矩形。
+  - tile clock 改走可靠中继，避免握手/关键帧切换后时钟本身丢包导致无法补帧。
+  - 客户端跳过“比已应用补帧更旧”的 delta 瓦片，避免迟到的旧帧把补好的区域覆盖
+    回去。
+  - Windows DXGI 在静态桌面下可用上一次成功抓取的画面响应 `request-keyframe`
+    和 30 秒全量刷新，不会因为用户没动鼠标而一直空白；DXGI/安全桌面 helper 的
+    运行错误会记录到核心日志（同类错误只记一次）。
+  - 采集历史的内存上限现在把 AV1 补丁也算进去，避免大补丁撑爆 128 MiB 预算。
+- 新增“关于”页：版本号、代码仓库、官方网站（https://ssvr.top/molink）、MIT
+  许可证、GitHub 星标数、Star 引导、检查更新（GitHub Release）与隐私声明。
+- README 增加官方网站链接。
+
+### Added
+
+- 关键帧间隔可配置：图像页新增 0–60 秒的选择，0 = 关闭（保留内置 30 秒安全
+  刷新），1 秒 = 每秒强制整屏关键帧；默认关闭。丢帧后能立即整屏恢复，实时性
+  最好但带宽明显增加，适合调试实时效果。
+- 连接水印新增实时信息：`编码: AV1 + 瓦片/瓦片`、`传输: 通路 · 协议 · HTTP 版本`
+  （DIRECT/P2P/RELAY，WS/HTTP2/HTTP3/QUIC/TCP/UDP；WS 显示 HTTP/1.1，
+  http2/http3 显示 HTTP/2/3，QUIC/TCP/UDP 显示 `—`），顶部和右下角都显示，
+  方便直接观察 AV1、传输和 HTTP 版本。
+- AV1 硬件编码（NVIDIA NVENC）：新增 `gpu-nvenc` 编码器，`auto` 在驱动宣告
+  AV1 编码时优先使用 GPU，否则回退 SVT-AV1；设备列表、`/api/encoding` 的
+  `hardware`/实际 preset 和设置页的 GPU 提示都已接入。Windows 用 D3D11 设备
+  打开 NVENC 会话，Linux 用 CUDA 上下文；`nvEncodeAPI64.dll` /
+  `libnvidia-encode.so.1` 在运行时动态加载，头文件 vendored 在
+  `backend/third_party/ffnvcodec`。RTX 4060 实测 256×256 矩形编码 1736 字节，
+  输出经 dav1d 解码通过。速度预设映射 P1/P3/P5，QP 1–63 映射到 NVENC 的
+  4 倍量化范围。
+- Linux 服务：设置页的“服务”在 systemd 平台变为“开机自启”，通过
+  `~/.config/systemd/user/molink.service` 在登录后启动桌面壳层；支持安装/
+  卸载/启动/停止/重启，卸载只关闭自启、不杀掉正在显示设置页的窗口。服务
+  状态 API 新增 `platform`/`autostart`，核心启动时不再自动拉起 Linux 服务
+  （避免递归启动第二个实例）。
+- HTTP/2 WebSocket 直连会话（RFC 8441）：web 端口同时接受 h1 `Upgrade` 和
+  h2/h2c extended CONNECT 的 `/ws/session`，两者进入同一个
+  `session_controller`；`/api/transports` 的 `http2` 变为可用，`/ws/direct`
+  代理按 **QUIC → TCP → HTTP/2 → WebSocket** 降级。实测 h2c 探针完成
+  hello → welcome 并收到帧。
+- HTTP/2 WebSocket 中继：客户端新增 `h2_relay_transport`（TLS/ALPN `h2` 或
+  h2c，扩展 CONNECT `/v1/relay`，同一行 `{"connect_id","token"}` 握手），
+  molink-server 在设备端口注册 extended CONNECT 中继路由并在
+  `/v1/connect/relay` 宣告 `protocol:"http2"` 端点；中继阶梯变为
+  **QUIC → HTTP/3 → TCP → HTTP/2 → UDP → WebSocket**。本机 h2c 与 TLS/h2
+  两轮双端回环均完成 relay-ready、文本和二进制双向转发。
+- libuvcpp 1.8.6：CI/发布默认版本从 1.8.5 升到 1.8.6（Linux/Windows x64；
+  Win7 x86 继续使用 1.8.5 kit），`http2/uvcpp_h2_ws_connection.h` 与
+  webapp extended CONNECT 路由在 CMake 中按头文件探测。1.8.6 的 MSVC kit 把
+  libuv 静态链进 `uvcpp.dll` 且不带 `uv.lib`，因此 CMake 在该情况下省略
+  直连 UDP 中继传输（QUIC/TCP/HTTP2/WS 仍在），避免 LNK2019；带 `uv.lib`
+  的构建保留 UDP 中继。
+- `/api/encoding`（仅本机回环）：读写 AV1 编码设备、速度、QP、面积与线程数，
+  并返回本构建可用的编码器列表和当前实际参数；设置写入 `settings` 后立即应用。
+- AV1 编码器按设备/速度/线程配置：`auto` 在核心较多时使用更精细的 SVT-AV1
+  preset、核心较少时用最快 preset，线程数默认取逻辑核心的一半（2–8）。
+- QUIC 会话传输：主机在 `--quic-port`（默认 `28420/udp`）上用设备证书监听，
+  一条双向流承载完整 MOLK 会话；`quic_listener` 把流接进同一个
+  `session_controller`，鉴权仍是第一条 `hello`（QUIC 没有 URL 可放 token）。
+- 直连 IP 会话的本地 core 代理会先 `GET /api/transports`，对端宣告 QUIC 可用时
+  改用 QUIC，失败或旧主机回退 WebSocket；`MOLINK_QUIC=0` 可强制走 WS。
+- 通路与协议拆成两个正交字段：`welcome` 新增 `transport_path`
+  （`direct`/`p2p`/`relay`），`transport` 只表示线路协议
+  （`websocket`/`quic`/`udp`/`tcp`）。`relay_transport` 现在报
+  path=relay + protocol=websocket，`juice_transport` 报 path=p2p + protocol=udp。
+- 会话工具栏分两个标签显示通路与协议（DIRECT/P2P/RELAY + WS/QUIC/UDP/…），
+  relay→ICE 切换时一起更新。
+- QUIC 回环测试改为直接使用 `quic_listener`，覆盖真实监听路径。
+- TCP 直连会话：`--tcp-data-port`（默认 `28421`）接受与 QUIC 完全相同的 MOLK
+  流分帧（`stream_transport`，QUIC/TCP 共用）。发送端自带 FIFO 与 8 MiB 积压
+  上限（libuvcpp 的 TCP 只允许一笔异步写），超限关闭连接而不是无限缓冲。
+- 直连阶梯：本地 core 探测 `/api/transports` 后按 **QUIC → TCP → WebSocket**
+  依次尝试，`transport` 相应显示 `quic`/`tcp`/`websocket`。实测 QUIC 可用时选
+  QUIC，QUIC 端口被占用时选 TCP，两者都不可用时回退 WS。
+- HTTP/3 WebSocket 会话（RFC 9220）：主机在 `--http3-port`（默认 `28419`）上用
+  设备证书、ALPN `h3` 接受 extended CONNECT，把 `uvcpp_h3_ws_connection` 适配成
+  `session_transport`（协议名 `http3`，通路 `direct`），会话鉴权与帧逻辑不变。
+  实测 h3 WS 客户端完成 hello → welcome；`/api/transports` 与 ready 行宣告
+  `http3`。要求 libuvcpp ≥ 1.8.4（旧包缺 h3 WebSocket 头时自动报告不可用）。
+- 证书固定：主机在 `/api/transports` 宣告设备证书 PEM 与 SHA-256 指纹，直连
+  QUIC 用 PEER 校验该证书；TCP 数据监听改为 **TLS-only**（设备证书），直连 TCP
+  同样按广告的证书固定。目录设备记录（schema v7）保存 `tls_fingerprint`/`tls_cert`，
+  同公网 IP 查询时下发，LAN 直连 QUIC/TCP 也做固定；中继响应携带 `tls_cert`，
+  未配置 CA 时可固定中继 TLS。`welcome.security` 对 tcp/quic/http3 直连报 `e2e`。
+- 内网直连：core 在注册/心跳里上报 `quic_port`/`tcp_port`（只报真正在监听的
+  端口，0 会清除旧值），目录按同公网 IP 下发局域网地址与数据端口。p2p 管理器
+  在信令/ICE/中继之外并行尝试**QUIC 直连，失败再试 TCP**；成功后关闭 ICE 与
+  中继、直接把会话交给代理。`relay=only` 不参与这条捷径。实测同一主机上的两台
+  core：`welcome transport=quic, transport_path=direct`（日志 `lan direct quic
+  ready`），把 QUIC 端口关掉后变为 `tcp/direct`；强制中继仍得到 `quic/relay`。
+- 中继支持 HTTP/3：新增 `h3_relay_transport`（QUIC ALPN `h3` + RFC 9220
+  WebSocket，首条文本消息是同一行 JSON 握手，之后按 WS 消息转发）。中继阶梯
+  顺序为 **QUIC → HTTP/3 → TCP → UDP → WebSocket**。实测目录只开 HTTP/3/WS
+  时得到 `transport=http3, transport_path=relay`，并完整接收 921888 字节关键帧。
+- 中继支持 UDP：新增 `udp_relay_transport`（同一行 JSON 握手，配对后按 ICE
+  相同的 1200 字节标签分片/重组，8 MiB 发送队列上限，握手每 500 ms 重发直到
+  配对）。分片按 **每 2 ms 最多 24 个数据报、发送队列水位 256 KiB** 限速：
+  不限速时一个 900 KB 关键帧会一次性打出 775 个数据报，服务端接收缓冲瞬间溢出
+  （实测 1000 包丢 68%）；限速后同一帧完整重组。中继阶梯顺序为
+  **QUIC → TCP → UDP → WebSocket**，目录只宣告真正在监听的端点。实测目录只开
+  UDP/WS 时两台 core 得到 `transport=udp, transport_path=relay`，并成功接收
+  921888 字节的完整关键帧。
+- 中继阶梯：目录在 `/v1/connect/relay` 返回 `relay.endpoints` 后，客户端按
+  **QUIC → TCP → WebSocket** 选择中继端点；TCP/QUIC 中继走 TLS 流，握手一行
+  JSON 后进入与直连相同的 MOLK 分帧。`relay_ladder` 会在某个端点配对前失败时
+  自动尝试下一个（最后一个端点不设超时，等它配对），避免被防火墙挡住的 UDP
+  端口拖死会话。实测两台 core 经本地目录配对，浏览器看到的 welcome 分别为
+  `transport=quic, transport_path=relay` 与 `transport=tcp, transport_path=relay`。
+
+### Changed
+
+- `/api/transports` 不再受 web-client 门禁限制：它是 peer core 建立数据通道前的
+  协商入口，只暴露端口与可用性。
+- `direct_proxy` 的 `make_direct_handler` 需要 app loop，用来在 loop 线程上创建
+  QUIC 客户端。
+
+### Security
+
+- 远程访问关闭时 QUIC 监听只绑 `127.0.0.1`；`/api/settings` 切换该开关时实时重绑，
+  非回环调用方在 `/api/transports` 中看到 `quic.available=false`。libuvcpp 的 QUIC
+  没有暴露对端地址，所以不能像 TCP 那样按 IP 放行回环。
+- 目录中继仍只支持 WebSocket；relay-over-QUIC 需要 molink-server 侧提供 QUIC
+  中转端点，客户端通路/协议字段已为此拆开。
+
 ## [0.9.30] — 2026-10-26
 
 ### Added

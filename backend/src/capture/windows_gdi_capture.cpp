@@ -177,9 +177,15 @@ class gdi_capture final : public capture_base {
     if (pixels == nullptr) return;
 
     std::lock_guard<std::mutex> lock(pixels_mutex_);
+    const auto now = std::chrono::steady_clock::now();
+    const int interval_ms =
+        periodic_keyframe_ms() > 0 ? periodic_keyframe_ms() : 30000;
+    const bool refresh_due =
+        now - last_full_ > std::chrono::milliseconds(interval_ms);
     const bool keyframe = keyframe_requested_.exchange(false) ||
                           !have_previous_ ||
-                          previous_.size() != stride * height_;
+                          previous_.size() != stride * height_ || refresh_due;
+    if (keyframe) last_full_ = now;
     if (previous_.size() != stride * height_) {
       previous_.assign(stride * height_, 0);
     }
@@ -208,12 +214,14 @@ class gdi_capture final : public capture_base {
     encoding.av1_qp = quality_av1_qp();
     encoding.av1_grayscale = quality_av1_grayscale();
     encoding.av1_max_area_percent = quality_av1_max_area_percent();
+    encoding.av1_full_frame = quality_av1_full_frame();
     std::vector<uint8_t> av1_payload;
+    bool av1_only = false;
 
     std::vector<uint8_t> payload;
     std::string err;
     if (!encode_capture_frame(header, tiles, encoding, pixels, stride, payload,
-                           &av1_payload, err)) return;
+                           &av1_payload, err, &av1_only)) return;
 
     auto frame = std::make_shared<captured_frame>();
     frame->seq = seq_++;
@@ -226,6 +234,7 @@ class gdi_capture final : public capture_base {
     frame->codec = header.codec;
     frame->payload = std::move(payload);
     frame->av1_payload = std::move(av1_payload);
+    frame->av1_only = av1_only;
     publish(std::move(frame));
     have_previous_ = true;
   }
@@ -325,6 +334,7 @@ class gdi_capture final : public capture_base {
   std::vector<uint8_t> previous_;
   mutable std::mutex pixels_mutex_;
   bool have_previous_ = false;
+  std::chrono::steady_clock::time_point last_full_{};
   uint32_t seq_ = 0;
   std::thread thread_;
 };

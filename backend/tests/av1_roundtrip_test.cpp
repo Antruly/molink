@@ -139,7 +139,7 @@ void test_roundtrip(const std::shared_ptr<molink::av1_encoder>& encoder,
 
 int main() {
   std::string error;
-  auto encoder = molink::make_av1_encoder(&error);
+  auto encoder = molink::make_av1_encoder(molink::av1_encoder_config{}, &error);
   expect(encoder != nullptr, "AV1 encoder available: " + error);
   if (encoder == nullptr) {
     std::printf("%d checks, %d failures\n", g_checks, g_failures);

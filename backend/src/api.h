@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -37,6 +38,8 @@ struct api_deps {
   std::string device_id;
   /// SHA-256 fingerprint of the host's self-signed transport certificate.
   std::string cert_fingerprint;
+  /// PEM of that certificate, advertised so peers can pin the data channel.
+  std::string tls_cert_pem;
   /// Random token handed only to the desktop shell through the ready line. It
   /// gates loopback web UI access when allow_web_client is off.
   std::string client_token;
@@ -50,6 +53,15 @@ struct api_deps {
   std::shared_ptr<std::atomic<int>> bound_port;
   /// True when this build can carry HTTP/2 (h2c) on the web port.
   bool http2_available = false;
+  /// Set once the QUIC session listener is actually accepting.
+  std::shared_ptr<std::atomic<bool>> quic_available;
+  /// Set once the plain-TCP session listener is accepting.
+  std::shared_ptr<std::atomic<bool>> tcp_available;
+  /// Set once the HTTP/3 WebSocket listener is accepting.
+  std::shared_ptr<std::atomic<bool>> http3_available;
+  /// Called on the app loop after the remote-access switch changes, so the
+  /// QUIC listener can move between loopback and the configured bind address.
+  std::function<void(bool allow_remote)> on_access_changed;
   /// Resolved capture tile edge (0 when capture is unavailable).
   int tile_size = 0;
   int change_threshold = 0;
