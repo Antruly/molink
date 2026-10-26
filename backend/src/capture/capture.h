@@ -430,7 +430,7 @@ class capture_base : public capture_source {
   /// EMA of the build+encode time, read by the session layer.
   std::atomic<uint64_t> build_time_us_{0};
   /// Forced keyframe cadence; 0 means the backends' 30 s safety refresh only.
-  std::atomic<int> periodic_keyframe_ms_{30000};
+  std::atomic<int> periodic_keyframe_ms_{120000};
   /// Settings arrive from the API thread; the capture thread copies them.
   mutable std::mutex av1_settings_mutex_;
   av1_encoding_settings av1_settings_;

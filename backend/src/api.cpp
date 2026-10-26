@@ -1484,7 +1484,7 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
                applied.full_frame = full_frame;
                deps.capture->set_av1_settings(applied);
                deps.capture->set_keyframe_interval_ms(
-                   keyframe_interval > 0 ? keyframe_interval * 1000 : 30000);
+                   keyframe_interval > 0 ? keyframe_interval * 1000 : 120000);
              }
              resp.set_header("Cache-Control", "no-store").json(encoding_json());
              resp.end();

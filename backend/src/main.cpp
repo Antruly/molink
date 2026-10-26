@@ -331,7 +331,7 @@ int main(int argc, char** argv) {
     capture->set_keyframe_interval_ms(
         prefs.keyframe_interval_seconds > 0
             ? prefs.keyframe_interval_seconds * 1000
-            : 30000);
+            : 120000);
   }
 
   if (!cfg.port_explicit) {
