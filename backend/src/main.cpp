@@ -501,6 +501,7 @@ int main(int argc, char** argv) {
     tls_enabled = false;
   }
 #endif
+#if UVCPP_OPENSSL_ENABLE
   if (tls_enabled) {
     app.enable_ssl(tls.cert_path, tls.key_path);
     if (!app.ssl_error().empty()) {
@@ -517,6 +518,7 @@ int main(int argc, char** argv) {
       }
     }
   }
+#endif
 
   // libuvcpp's start() returns once the loop is running; the stop below must
   // wait for the shutdown path, or it would stop the service we just started.

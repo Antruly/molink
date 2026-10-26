@@ -161,7 +161,7 @@ class svt_av1_encoder final : public av1_encoder {
     config.matrix_coefficients = EB_CICP_MC_BT_709;
     config.color_range = EB_CR_FULL_RANGE;
     config.fast_decode = 1;
-    config.logical_processors = 1;
+    config.logical_processors = 4;
     config.tile_columns = 0;
     config.tile_rows = 0;
 
