@@ -51,6 +51,14 @@ done
 for dll in "$(dirname "$CORE")"/*.dll; do
   [ -f "$dll" ] && cp "$dll" "$PKG/"
 done
+# AV1 runtime (host encoder + client decoder), from the vcpkg tree when the
+# release build enabled it.
+if [ -n "${VCPKG_INSTALLATION_ROOT:-}" ]; then
+  for dll in "$VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin/SvtAv1Enc.dll" \
+             "$VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin/dav1d.dll"; do
+    [ -f "$dll" ] && cp "$dll" "$PKG/"
+  done
+fi
 # OpenSSL runtime, when libuvcpp was built with TLS.
 for dll in "/c/Program Files/OpenSSL-Win64/bin"/libssl-*.dll \
            "/c/Program Files/OpenSSL-Win64/bin"/libcrypto-*.dll \

@@ -79,7 +79,9 @@ class connect_proxy final
   /// rejects it), so the core owns that capability: advertise it in the hello
   /// the target sees, and only then does the host produce AV1 patches.
   std::string inject_av1(const std::string& text) {
-    if (!av1_decode_available()) return text;
+    // Advertising AV1 without the worker would forward a bitstream the page
+    // cannot decode, so both the decoder and the loop post are required.
+    if (!av1_decode_available() || !post_) return text;
     try {
       nlohmann::json hello = nlohmann::json::parse(text);
       if (!hello.is_object()) return text;

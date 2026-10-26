@@ -4,13 +4,18 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
-VERSION=${VERSION:-0.9.21}
+VERSION=${VERSION:-0.9.22}
 BUILD=${BUILD_DIR:-$ROOT/build/appimage}
 APPDIR="$BUILD/AppDir"
 TOOLS="$ROOT/build/tools"
 
 echo "== build core, frontend and shell"
-cmake -S "$ROOT/backend" -B "$ROOT/backend/build" -DCMAKE_BUILD_TYPE=Release >/dev/null
+AV1_ARG=()
+if [ -n "${MOLINK_AV1_SDK:-}" ]; then
+  AV1_ARG+=("-DMOLINK_AV1_SDK=$MOLINK_AV1_SDK")
+fi
+cmake -S "$ROOT/backend" -B "$ROOT/backend/build" -DCMAKE_BUILD_TYPE=Release \
+  -DMOLINK_ENABLE_AV1=ON ${AV1_ARG[@]+"${AV1_ARG[@]}"} >/dev/null
 cmake --build "$ROOT/backend/build" --parallel
 (cd "$ROOT/frontend" && pnpm install --frozen-lockfile >/dev/null && pnpm build >/dev/null)
 cmake -S "$ROOT/shell/native" -B "$ROOT/shell/native/build" -DCMAKE_BUILD_TYPE=Release >/dev/null
@@ -35,6 +40,14 @@ fi
 OPENSSL_LIB_DIR=$(pkg-config --variable=libdir openssl 2>/dev/null || echo /usr/lib/x86_64-linux-gnu)
 for pattern in 'libssl.so*' 'libcrypto.so*'; do
   cp -P "$OPENSSL_LIB_DIR"/$pattern "$APPDIR/usr/lib/" 2>/dev/null || true
+done
+MULTIARCH=$(gcc -print-multiarch 2>/dev/null || echo x86_64-linux-gnu)
+for dir in ${MOLINK_AV1_SDK:+$MOLINK_AV1_SDK/usr/lib/$MULTIARCH} \
+           "/usr/lib/$MULTIARCH" /usr/lib64 /usr/lib; do
+  [ -d "$dir" ] || continue
+  for pattern in 'libSvtAv1Enc.so.*' 'libdav1d.so.*'; do
+    cp -P "$dir"/$pattern "$APPDIR/usr/lib/" 2>/dev/null || true
+  done
 done
 cp "$ROOT/shell/assets/icons/icon.png" "$APPDIR/molink.png"
 cp "$ROOT/shell/assets/icons/icon.png" "$APPDIR/usr/share/molink/molink.png"

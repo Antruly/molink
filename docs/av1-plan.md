@@ -86,8 +86,12 @@ SVT-AV1 初版参数：low-delay、preset 10–13、CBR 或 QP、8-bit 4:2:0；
 - SVT-AV1 的低延迟流水线会延迟一帧输出，单帧调用 `pic_send_done=1` 也不会
   flush；实现里对同一矩形发送两次并丢弃上一次留下的重复帧，测试覆盖复用与
   改尺寸。
-- 待做：能力协商（hello/welcome）、捕获端把大矩形从基础帧里拆出来走 AV1、
-  客户端 core 用 dav1d 解码后按现有 tile 路径交给页面。
+- 已接入（0.9.22）：捕获端把 ≥2 瓦片的大矩形拆成 AV1 补丁，作为 tile-refresh
+  随基础帧发送（仅限有损档，且所有已认证会话都支持 AV1 时）；连接代理在 hello
+  里声明 av1；客户端 core 在工作线程用 dav1d 解码后按 BGRA 交给页面；AV1 补丁
+  和关键帧走中继可靠路径。
+- 2026-10-26 实测：1280×720 全屏动画，AV1 补丁每帧约 48 KB，客户端解码成
+  3.6 MB BGRA，10+ fps；主机和客户端两端都需要 0.9.22。
 - 2026-10-26 实测 WebCodecs：同一段 AV1 码流 Chrome 能解（128×128），
   WebKitGTK 2.50/2.52 的 `VideoDecoder` 全部返回 Decode error（各种 level、
   av1C description、硬/软解选项都试过），所以原生壳层不能依赖 WebCodecs，

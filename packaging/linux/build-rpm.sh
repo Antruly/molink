@@ -4,14 +4,19 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
-VERSION=${VERSION:-0.9.21}
+VERSION=${VERSION:-0.9.22}
 WORK=${WORK_DIR:-$(mktemp -d /tmp/molink-rpm.XXXXXX)}
 RPMBUILD="$WORK/rpmbuild"
 OUT=${OUT_DIR:-$ROOT/build/package}
 PREFIX=/opt/molink
 
 echo "== build core, frontend and shell"
-cmake -S "$ROOT/backend" -B "$ROOT/backend/build" -DCMAKE_BUILD_TYPE=Release >/dev/null
+AV1_ARG=()
+if [ -n "${MOLINK_AV1_SDK:-}" ]; then
+  AV1_ARG+=("-DMOLINK_AV1_SDK=$MOLINK_AV1_SDK")
+fi
+cmake -S "$ROOT/backend" -B "$ROOT/backend/build" -DCMAKE_BUILD_TYPE=Release \
+  -DMOLINK_ENABLE_AV1=ON ${AV1_ARG[@]+"${AV1_ARG[@]}"} >/dev/null
 cmake --build "$ROOT/backend/build" --parallel
 (cd "$ROOT/frontend" && pnpm install --frozen-lockfile >/dev/null && pnpm build >/dev/null)
 cmake -S "$ROOT/shell/native" -B "$ROOT/shell/native/build" -DCMAKE_BUILD_TYPE=Release >/dev/null
@@ -37,6 +42,14 @@ if [ -n "$UVCPP_LIB_DIR" ] && [ -d "$UVCPP_LIB_DIR" ]; then
     cp -P "$UVCPP_LIB_DIR"/$pattern "$ROOTDIR$PREFIX/lib/" 2>/dev/null || true
   done
 fi
+MULTIARCH=$(gcc -print-multiarch 2>/dev/null || echo x86_64-linux-gnu)
+for dir in ${MOLINK_AV1_SDK:+$MOLINK_AV1_SDK/usr/lib/$MULTIARCH} \
+           "/usr/lib/$MULTIARCH" /usr/lib64 /usr/lib; do
+  [ -d "$dir" ] || continue
+  for pattern in 'libSvtAv1Enc.so.*' 'libdav1d.so.*'; do
+    cp -P "$dir"/$pattern "$ROOTDIR$PREFIX/lib/" 2>/dev/null || true
+  done
+done
 
 cat > "$ROOTDIR/usr/share/applications/molink.desktop" <<EOF
 [Desktop Entry]

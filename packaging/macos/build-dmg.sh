@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
-VERSION=${VERSION:-0.9.21}
+VERSION=${VERSION:-0.9.22}
 ARCH=${ARCH:-$(uname -m)}
 BUILD=${BUILD_DIR:-$ROOT/build/macos}
 APP="$BUILD/moLink.app"
@@ -19,7 +19,11 @@ OPENSSL_ROOT_ARG=""
 if [ -n "${OPENSSL_LIB_DIR:-}" ]; then
   OPENSSL_ROOT_ARG="-DOPENSSL_ROOT_DIR=${OPENSSL_LIB_DIR%/lib}"
 fi
+AV1_PREFIX=$(brew --prefix 2>/dev/null || true)
+AV1_ARG=""
+[ -n "$AV1_PREFIX" ] && AV1_ARG="-DCMAKE_PREFIX_PATH=$AV1_PREFIX"
 cmake -S "$ROOT/backend" -B "$ROOT/backend/build" -DCMAKE_BUILD_TYPE=Release \
+  -DMOLINK_ENABLE_AV1=ON ${AV1_ARG:+"$AV1_ARG"} \
   ${OPENSSL_ROOT_ARG:+"$OPENSSL_ROOT_ARG"} >/dev/null
 cmake --build "$ROOT/backend/build" --parallel
 (cd "$ROOT/frontend" && pnpm install --frozen-lockfile >/dev/null && pnpm build >/dev/null)
@@ -50,6 +54,12 @@ fi
 if [ -n "${OPENSSL_LIB_DIR:-}" ] && [ -d "$OPENSSL_LIB_DIR" ]; then
   for pattern in 'libssl*.dylib' 'libcrypto*.dylib'; do
     cp "$OPENSSL_LIB_DIR"/$pattern "$APP/Contents/MacOS/" 2>/dev/null || true
+  done
+fi
+# AV1: SVT-AV1 encodes on hosts, dav1d decodes on clients.
+if [ -n "$AV1_PREFIX" ]; then
+  for pattern in 'libSvtAv1Enc*.dylib' 'libdav1d*.dylib'; do
+    cp -P "$AV1_PREFIX/lib"/$pattern "$APP/Contents/MacOS/" 2>/dev/null || true
   done
 fi
 
@@ -87,7 +97,7 @@ if command -v otool >/dev/null 2>&1; then
     [ -f "$binary" ] || continue
     while read -r dep; do
       case "$dep" in
-        *uvcpp*|*llhttp*|*libuv*|*libssl*|*libcrypto*)
+        *uvcpp*|*llhttp*|*libuv*|*libssl*|*libcrypto*|*SvtAv1*|*dav1d*)
           install_name_tool -change "$dep" "@loader_path/$(basename "$dep")" \
             "$binary" 2>/dev/null || true
           ;;

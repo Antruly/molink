@@ -6,7 +6,7 @@ set -euo pipefail
 trap 'rm -rf "${WORK:-}"' EXIT
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
-VERSION=${VERSION:-0.9.21}
+VERSION=${VERSION:-0.9.22}
 ARCH=${ARCH:-$(dpkg --print-architecture)}
 # Stage in a real POSIX filesystem: the source tree may live on a mount that
 # ignores chmod, and dpkg-deb requires DEBIAN to be exactly 0755.
@@ -16,7 +16,12 @@ STAGE="$WORK/stage"
 PREFIX=/opt/molink
 
 echo "== configure and build core"
-cmake -S "$ROOT/backend" -B "$ROOT/backend/build" -DCMAKE_BUILD_TYPE=Release >/dev/null
+AV1_ARG=()
+if [ -n "${MOLINK_AV1_SDK:-}" ]; then
+  AV1_ARG+=("-DMOLINK_AV1_SDK=$MOLINK_AV1_SDK")
+fi
+cmake -S "$ROOT/backend" -B "$ROOT/backend/build" -DCMAKE_BUILD_TYPE=Release \
+  -DMOLINK_ENABLE_AV1=ON ${AV1_ARG[@]+"${AV1_ARG[@]}"} >/dev/null
 cmake --build "$ROOT/backend/build" --parallel
 
 echo "== build frontend"
@@ -43,6 +48,16 @@ if [ -n "$UVCPP_LIB_DIR" ] && [ -d "$UVCPP_LIB_DIR" ]; then
     cp -P "$UVCPP_LIB_DIR"/$pattern "$STAGE$PREFIX/lib/" 2>/dev/null || true
   done
 fi
+# AV1 needs SVT-AV1 (host encode) and dav1d (client decode). Bundle both when
+# the build found them; the core resolves ../lib through its RPATH.
+MULTIARCH=$(gcc -print-multiarch 2>/dev/null || echo x86_64-linux-gnu)
+for dir in ${MOLINK_AV1_SDK:+$MOLINK_AV1_SDK/usr/lib/$MULTIARCH} \
+           "/usr/lib/$MULTIARCH" /usr/lib64 /usr/lib; do
+  [ -d "$dir" ] || continue
+  for pattern in 'libSvtAv1Enc.so.*' 'libdav1d.so.*'; do
+    cp -P "$dir"/$pattern "$STAGE$PREFIX/lib/" 2>/dev/null || true
+  done
+done
 ln -sf "$PREFIX/bin/moLink" "$STAGE/usr/bin/moLink"
 
 cp "$ROOT/shell/assets/icons/icon.png" "$STAGE/usr/share/icons/hicolor/256x256/apps/molink.png"
