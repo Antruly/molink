@@ -221,7 +221,9 @@ class direct_proxy final : public std::enable_shared_from_this<direct_proxy> {
   }
 
   void fallback_from_tcp() {
+#if MOLINK_HAVE_H2_WS
     if (http2_available_ && start_h2_upstream()) return;
+#endif
     start_ws_upstream();
   }
 

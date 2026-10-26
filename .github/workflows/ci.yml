@@ -145,10 +145,19 @@ jobs:
           ./packaging/clone-retry.sh --depth 1 --branch "$REF" "${{ vars.UVCPP_REPO }}" "$RUNNER_TEMP/libuvcpp"
           cmake -S "$RUNNER_TEMP/libuvcpp" -B "$RUNNER_TEMP/libuvcpp/build" \
             -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
+            -DUVCPP_ENABLE_OPENSSL=ON \
+            -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)" \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/uvcpp"
           cmake --build "$RUNNER_TEMP/libuvcpp/build" --parallel
           cmake --install "$RUNNER_TEMP/libuvcpp/build"
+          # The encrypted transports include libuvcpp's TLS headers; fail early
+          # instead of at the core build when TLS was not compiled in.
+          cfg="$RUNNER_TEMP/uvcpp/include/uvcpp/uvcpp_config.h"
+          grep -qE "^#[[:space:]]*define[[:space:]]+UVCPP_OPENSSL_ENABLE[[:space:]]+1" "$cfg" || {
+            echo "::error::UVCPP_OPENSSL_ENABLE is not enabled in libuvcpp"
+            exit 1
+          }
 
       - name: Install libuv into the prefix
         shell: bash

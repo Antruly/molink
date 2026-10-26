@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.9.33] — 2026-10-27
+
+### Fixed
+
+- Linux 打包（pkg-config 找到 libuvcpp 时）：测试目标把 `PkgConfig::UVCPP`
+  当成库目标计算 RPATH，导致 CMake 生成阶段直接失败；现在按 pkg-config 给出的
+  库目录设置 RPATH。
+- macOS 与 Windows 7 构建：未启用 HTTP/2/HTTP/3 时，H2/H3 中继传输的
+  `unique_ptr` 成员在析构时要求完整类型（头文件未安装），并且直连代理仍调用
+  被编译掉的 H2 入口；现在相关成员和调用都随宏一起编译掉。
+- CI 的 macOS 核心任务在构建 libuvcpp 时未启用 OpenSSL，缺少 TLS 头文件；
+  现在与发布构建一致地启用 OpenSSL 并校验 `UVCPP_OPENSSL_ENABLE`。
+
+0.9.32 的功能内容见下一节；因三平台构建失败，0.9.32 的 Linux/macOS/Win7
+产物缺失，完整产物以 0.9.33 为准。
+
 ## [0.9.32] — 2026-10-27
 
 ### Changed

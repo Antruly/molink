@@ -92,12 +92,14 @@ if(MOLINK_BUILD_CORE)
     endif()
     set(UVP_UVCPP_TARGET uvcpp_prebuilt)
     set(UVP_UVCPP_PREFIX "${MOLINK_UVCPP_PREFIX}")
+    set(UVP_UVCPP_LIBDIR "$<TARGET_FILE_DIR:uvcpp_prebuilt>")
     set(UVP_UVCPP_ROUTE "prebuilt archive (${MOLINK_UVCPP_PREFIX})")
   else()
   find_package(uvcpp 1.7.0 CONFIG QUIET)
 
   if(uvcpp_FOUND)
     set(UVP_UVCPP_TARGET uvcpp::uvcpp)
+    set(UVP_UVCPP_LIBDIR "$<TARGET_FILE_DIR:uvcpp::uvcpp>")
     set(UVP_UVCPP_ROUTE "CMake package (${uvcpp_DIR})")
 
     # The installed uvcpp package advertises <prefix>/include/libuv even when
@@ -125,6 +127,16 @@ if(MOLINK_BUILD_CORE)
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(UVCPP REQUIRED IMPORTED_TARGET "uvcpp>=1.7.0")
     set(UVP_UVCPP_TARGET PkgConfig::UVCPP)
+    set(UVP_UVCPP_PREFIX "${UVCPP_PREFIX}")
+    # PkgConfig::UVCPP is an interface target, so $<TARGET_FILE_DIR:...> is
+    # invalid for it; the -L directory is what the tests' RPATH needs.
+    if(UVCPP_LIBDIR)
+      set(UVP_UVCPP_LIBDIR "${UVCPP_LIBDIR}")
+    elseif(UVCPP_LIBRARY_DIRS)
+      list(GET UVCPP_LIBRARY_DIRS 0 UVP_UVCPP_LIBDIR)
+    else()
+      set(UVP_UVCPP_LIBDIR "${UVCPP_PREFIX}/lib")
+    endif()
     set(UVP_UVCPP_ROUTE "pkg-config (${UVCPP_VERSION})")
   endif()
   endif()
@@ -633,7 +645,7 @@ if(MOLINK_BUILD_CORE AND OpenSSL_FOUND)
   endif()
   set_target_properties(molink-core-quic-loopback-test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
-    BUILD_RPATH "$<TARGET_FILE_DIR:${UVP_UVCPP_TARGET}>")
+    BUILD_RPATH "${UVP_UVCPP_LIBDIR}")
   foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
     string(TOUPPER "${uvp_config}" uvp_config_upper)
     set_target_properties(molink-core-quic-loopback-test PROPERTIES
@@ -668,7 +680,7 @@ if(MOLINK_BUILD_CORE)
     ${UVP_UVCPP_TARGET})
   set_target_properties(molink-core-relay-ladder-test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
-    BUILD_RPATH "$<TARGET_FILE_DIR:${UVP_UVCPP_TARGET}>")
+    BUILD_RPATH "${UVP_UVCPP_LIBDIR}")
   foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
     string(TOUPPER "${uvp_config}" uvp_config_upper)
     set_target_properties(molink-core-relay-ladder-test PROPERTIES

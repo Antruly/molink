@@ -6,7 +6,15 @@
 #include <memory>
 #include <string>
 
+#include <uvcpp/uvcpp_config.h>
+
 #include "transport/relay_session.h"
+
+// Set by CMake. Without HTTP/3 the H3 headers are not installed and a
+// unique_ptr member with an incomplete type cannot be destroyed.
+#ifndef MOLINK_HAVE_H3_WS
+#define MOLINK_HAVE_H3_WS 0
+#endif
 
 namespace uvcpp {
 class uvcpp_loop;
@@ -73,8 +81,10 @@ class h3_relay_transport final
   // which borrows the QUIC connection and its TLS context.
   std::shared_ptr<uvcpp::uvcpp_ssl_context> tls_;
   std::shared_ptr<uvcpp::uvcpp_quic_client> quic_;
+#if MOLINK_HAVE_H3_WS
   std::unique_ptr<uvcpp::uvcpp_h3_connection> h3_;
   std::unique_ptr<uvcpp::uvcpp_h3_ws_connection> ws_;
+#endif
 
   bool started_ = false;
   bool ready_ = false;
