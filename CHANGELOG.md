@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.9.34] — 2026-10-27
+
+### Fixed
+
+- Linux 发布构建链接失败：预编译 libuvcpp 的 `uvcpp.pc` 有时没有在 `Requires`
+  里声明 libuv，而 UDP 中继传输直接调用 `uv_*`，导致 `undefined reference to
+  uv_ip4_addr / uv_recv_buffer_size`。现在 pkg-config 路径会显式查找并链接
+  系统 libuv；预编译归档路径同样处理，找不到时才关闭 UDP 中继。
+  本地已用“无 `Requires: libuv` 的 uvcpp.pc”强制走 pkg-config 路径复现并验证
+  修复（链接行同时包含 `libuvcpp.so` 和 `libuv.so`）。
+
+0.9.33 已在 Windows x64、macOS（Intel/ARM）和 Win7 x86 构建成功，仅 Linux
+失败；0.9.34 补齐全部平台。
+
 ## [0.9.33] — 2026-10-27
 
 ### Fixed

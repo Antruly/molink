@@ -89,6 +89,17 @@ if(MOLINK_BUILD_CORE)
       endif()
       set_target_properties(uvcpp_prebuilt PROPERTIES
         IMPORTED_LOCATION "${_uvp_so}")
+      # The UDP relay transport calls libuv directly. Linux links the system
+      # libuv; if it is absent, omit that transport instead of failing to link.
+      find_library(_uvp_uv NAMES uv libuv)
+      if(_uvp_uv)
+        set_target_properties(uvcpp_prebuilt PROPERTIES
+          INTERFACE_LINK_LIBRARIES "${_uvp_uv}")
+      else()
+        set(MOLINK_HAVE_UDP_RELAY 0)
+        message(STATUS
+          "molink: system libuv not found; UDP relay transport omitted")
+      endif()
     endif()
     set(UVP_UVCPP_TARGET uvcpp_prebuilt)
     set(UVP_UVCPP_PREFIX "${MOLINK_UVCPP_PREFIX}")
@@ -128,6 +139,17 @@ if(MOLINK_BUILD_CORE)
     pkg_check_modules(UVCPP REQUIRED IMPORTED_TARGET "uvcpp>=1.7.0")
     set(UVP_UVCPP_TARGET PkgConfig::UVCPP)
     set(UVP_UVCPP_PREFIX "${UVCPP_PREFIX}")
+    # A release archive's uvcpp.pc may not list libuv in Requires, but the
+    # UDP relay transport calls uv_* directly, so link it explicitly.
+    pkg_check_modules(UVLIB QUIET IMPORTED_TARGET libuv)
+    if(UVLIB_FOUND)
+      set(UVP_LIBUV_TARGET PkgConfig::UVLIB)
+    else()
+      find_library(_uvp_uv NAMES uv libuv)
+      if(_uvp_uv)
+        set(UVP_LIBUV_TARGET "${_uvp_uv}")
+      endif()
+    endif()
     # PkgConfig::UVCPP is an interface target, so $<TARGET_FILE_DIR:...> is
     # invalid for it; the -L directory is what the tests' RPATH needs.
     if(UVCPP_LIBDIR)
@@ -447,9 +469,11 @@ if(MOLINK_BUILD_CORE)
   endif()
 
   # The P2P socket and timer use libuvcpp's own wrappers, so they run on the
-  # same libuv instance as the rest of the core and need no extra libuv link.
+  # same libuv instance as the rest of the core. UVP_LIBUV_TARGET is only set
+  # for the pkg-config route, whose .pc may omit libuv from its Requires even
+  # though the UDP relay transport calls uv_* directly.
   target_link_libraries(molink-core PRIVATE ${UVP_UVCPP_TARGET}
-    ${MOLINK_LIBJUICE_TARGET} ${CMAKE_DL_LIBS})
+    ${UVP_LIBUV_TARGET} ${MOLINK_LIBJUICE_TARGET} ${CMAKE_DL_LIBS})
 
   # libuvcpp's installed libuvcpp.so depends on libllhttp.so in its own directory
   # but carries no RUNPATH of its own. The executable's default RUNPATH is not
