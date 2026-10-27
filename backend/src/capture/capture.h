@@ -436,6 +436,18 @@ class capture_base : public capture_source {
     // for a picture that actually moves; see note_build_time().
     return (std::min)(base + av1_qp_offset_.load(), kMaxAv1Qp);
   }
+  /// QP for the AV1 stream. It deliberately ignores the frame-time
+  /// adaptation: every QP change re-initialises the encoder and forces a
+  /// keyframe, which would restart the stream again and again.
+  int quality_av1_qp_stream() const {
+    av1_encoding_settings settings;
+    {
+      std::lock_guard<std::mutex> lock(av1_settings_mutex_);
+      settings = av1_settings_;
+    }
+    if (settings.qp >= 1 && settings.qp <= 63) return settings.qp;
+    return quality_profile_for(quality_.load()).av1_qp;
+  }
   bool quality_av1_grayscale() const {
     return quality_profile_for(quality_.load()).av1_grayscale;
   }

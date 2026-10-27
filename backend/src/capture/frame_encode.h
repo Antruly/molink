@@ -75,6 +75,8 @@ struct encode_options {
   /// Force this stream frame to be a keyframe (the first frame after a switch
   /// or after a decode failure on the viewer).
   bool av1_stream_keyframe = false;
+  /// Constant QP for the stream encoder (0 = use av1_qp).
+  int av1_stream_qp = 0;
   /// Shared hysteresis owned by the capture: while *this monotonic time has
   /// not passed, a near-full-screen change keeps the single full-screen AV1
   /// picture. Video pauses for a frame or two all the time; without the

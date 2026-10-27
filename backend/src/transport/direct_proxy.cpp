@@ -843,6 +843,7 @@ class direct_proxy final : public std::enable_shared_from_this<direct_proxy> {
       std::vector<uint8_t> bgra;
       int width = 0;
       int height = 0;
+      const auto decode_start = std::chrono::steady_clock::now();
       if (!stream_decoder_.decode(view.data, view.size, keyframe, bgra, width,
                                   height, error)) {
         std::fprintf(stderr, "direct proxy: av1 stream decode failed: %s\n",
@@ -854,10 +855,21 @@ class direct_proxy final : public std::enable_shared_from_this<direct_proxy> {
         }
         return {};
       }
+      // The page paints full-screen frames; forwarding more than ten a
+      // second only adds latency and inflate work. Every frame is still
+      // decoded so the reference chain stays valid.
+      const auto now = std::chrono::steady_clock::now();
+      if (last_stream_forward_.time_since_epoch().count() != 0 &&
+          now - last_stream_forward_ < std::chrono::milliseconds(100)) {
+        return {};
+      }
+      last_stream_forward_ = now;
       protocol::frame_header header;
       header.frame_seq = frame.header.frame_seq;
-      header.codec = static_cast<uint8_t>(protocol::codec::bgra);
-      header.flags = protocol::kFrameFlagPartial;
+      header.codec = static_cast<uint8_t>(protocol::codec::rgb565);
+      header.flags = static_cast<uint8_t>(
+          keyframe ? (protocol::kFrameFlagKeyframe | protocol::kFrameFlagPartial)
+                   : protocol::kFrameFlagPartial);
       header.screen_w = frame.header.screen_w;
       header.screen_h = frame.header.screen_h;
       header.tile_w = frame.header.tile_w;
@@ -870,14 +882,27 @@ class direct_proxy final : public std::enable_shared_from_this<direct_proxy> {
       tile.h = static_cast<uint16_t>(
           std::min<int>(height, header.screen_h > 0 ? header.screen_h : height));
       tile.flags = protocol::kTileFlagChanged;
-      tile.data.resize(static_cast<std::size_t>(tile.w) * tile.h * 4);
+      // A stream frame is a whole screen: pack it as RGB565, which halves
+      // everything the core deflates and the page inflates on every frame.
+      tile.data.resize(static_cast<std::size_t>(tile.w) * tile.h * 2);
       for (int row = 0; row < tile.h; ++row) {
-        std::memcpy(tile.data.data() + static_cast<std::size_t>(row) * tile.w * 4,
-                    bgra.data() + static_cast<std::size_t>(row) * width * 4,
-                    static_cast<std::size_t>(tile.w) * 4);
+        const uint8_t* src =
+            bgra.data() + static_cast<std::size_t>(row) * width * 4;
+        uint8_t* dst =
+            tile.data.data() + static_cast<std::size_t>(row) * tile.w * 2;
+        for (int x = 0; x < tile.w; ++x) {
+          const uint8_t* px = src + static_cast<std::size_t>(x) * 4;
+          const uint16_t value = static_cast<uint16_t>(
+              (static_cast<uint16_t>(px[2] >> 3) << 11) |
+              (static_cast<uint16_t>(px[1] >> 2) << 5) |
+              static_cast<uint16_t>(px[0] >> 3));
+          dst[x * 2] = static_cast<uint8_t>(value & 0xff);
+          dst[x * 2 + 1] = static_cast<uint8_t>(value >> 8);
+        }
       }
       std::vector<protocol::tile_blob> tiles;
       tiles.push_back(std::move(tile));
+      const auto deflate_start = std::chrono::steady_clock::now();
       std::vector<std::vector<uint8_t>> packed(tiles.size());
       if (compression_available()) {
         std::string deflate_error;
@@ -888,11 +913,23 @@ class direct_proxy final : public std::enable_shared_from_this<direct_proxy> {
           }
           tiles[i].data = std::move(packed[i]);
         }
-        header.codec = static_cast<uint8_t>(protocol::codec::deflate_bgra);
+        header.codec = static_cast<uint8_t>(protocol::codec::deflate_rgb565);
       }
       std::vector<uint8_t> payload;
       if (!protocol::build_frame_payload(header, tiles, payload, error)) {
         return {};
+      }
+      if (std::getenv("MOLINK_STREAM_LOG") != nullptr) {
+        const double decode_ms = std::chrono::duration<double, std::milli>(
+                                     deflate_start - decode_start)
+                                     .count();
+        const double deflate_ms = std::chrono::duration<double, std::milli>(
+                                      std::chrono::steady_clock::now() -
+                                      deflate_start)
+                                      .count();
+        std::fprintf(stderr,
+                     "stream frame: decode %.1f ms deflate %.1f ms wire %zu B\n",
+                     decode_ms, deflate_ms, payload.size());
       }
       std::vector<uint8_t> out;
       if (!protocol::encode_packet_into(
@@ -1017,6 +1054,8 @@ class direct_proxy final : public std::enable_shared_from_this<direct_proxy> {
   /// The low-delay stream keeps reference frames, so one decoder lives for the
   /// whole session.
   av1_stream_decoder stream_decoder_;
+  /// Last time a stream frame was forwarded to the page (rate limit).
+  std::chrono::steady_clock::time_point last_stream_forward_{};
   /// Host bytes received since the last codec stat (the true wire rate) and
   /// the start of that window. The window start is only touched by the worker.
   std::atomic<std::size_t> wire_window_{0};

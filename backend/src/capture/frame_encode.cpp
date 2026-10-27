@@ -356,7 +356,9 @@ bool encode_capture_frame(protocol::frame_header& header,
     bool picture_keyframe = false;
     std::string stream_error;
     if (options.av1_stream->encode_stream(
-            pixels, stride, header.screen_w, header.screen_h, options.av1_qp,
+            pixels, stride, header.screen_w, header.screen_h,
+            options.av1_stream_qp > 0 ? options.av1_stream_qp
+                                      : options.av1_qp,
             options.av1_stream_keyframe, picture, picture_keyframe,
             stream_error)) {
       tiles.clear();

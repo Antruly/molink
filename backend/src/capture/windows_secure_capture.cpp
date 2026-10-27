@@ -261,6 +261,7 @@ class secure_capture final : public capture_base {
         tiles, static_cast<int>(width), static_cast<int>(height),
         stream_keyframe);
     encoding.av1_stream_keyframe = stream_keyframe;
+    encoding.av1_stream_qp = quality_av1_qp_stream();
     std::vector<uint8_t> av1_payload;
     bool av1_only = false;
     std::vector<uint8_t> payload;

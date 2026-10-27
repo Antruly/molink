@@ -942,6 +942,7 @@ class x11_capture final : public capture_base {
     encoding.av1_stream = stream_for_frame(tiles, header.screen_w,
                                            header.screen_h, stream_keyframe);
     encoding.av1_stream_keyframe = stream_keyframe;
+    encoding.av1_stream_qp = quality_av1_qp_stream();
     std::vector<uint8_t> av1_payload;
     bool av1_only = false;
 

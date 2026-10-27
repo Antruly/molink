@@ -1176,6 +1176,11 @@ export class MolinkClient {
       this.noteReceived(frame, (packet.flags & PacketFlag.tileRefresh) !== 0)
       this.reconcileQualityPreset(frame)
       if ((packet.flags & PacketFlag.tileRefresh) !== 0) {
+        // A tile refresh carries exact pixels, so it can establish the first
+        // picture: the AV1 stream sends everything as a refresh, and without
+        // this the page would refuse every frame of a fresh stream and stay
+        // frozen while asking for a keyframe that also arrives as a refresh.
+        if ((frame.flags & FrameFlag.keyframe) !== 0) this.hasImage = true
         if (!this.hasImage) {
           this.requestKeyframeThrottled()
           return

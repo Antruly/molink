@@ -349,8 +349,111 @@ class connect_proxy final
       return bytes;
     }
     if (packet.type != static_cast<uint8_t>(protocol::packet_type::frame) ||
-        packet.payload.size() < protocol::kFrameHeaderSize ||
-        packet.payload[6] != static_cast<uint8_t>(protocol::codec::av1)) {
+        packet.payload.size() < protocol::kFrameHeaderSize) {
+      return bytes;
+    }
+    const uint8_t codec = packet.payload[6];
+    if (codec == static_cast<uint8_t>(protocol::codec::av1_stream)) {
+      // One full-screen picture of a low-delay stream: decode it with the
+      // session's decoder, then hand the page a full-screen tile refresh, so
+      // it sees no difference between a stream frame and a tile repair.
+      protocol::parsed_frame frame;
+      if (!protocol::parse_frame_payload(packet.payload.data(),
+                                         packet.payload.size(), frame, error)) {
+        return {};
+      }
+      if (frame.tiles.empty()) return {};
+      const protocol::tile_view& view = frame.tiles[0];
+      const bool keyframe =
+          (packet.payload[7] & protocol::kFrameFlagKeyframe) != 0;
+      std::vector<uint8_t> bgra;
+      int width = 0;
+      int height = 0;
+      if (!stream_decoder_.decode(view.data, view.size, keyframe, bgra, width,
+                                  height, error)) {
+        std::fprintf(stderr, "connect proxy: av1 stream decode failed: %s\n",
+                     error.c_str());
+        // The reference chain is broken; ask the host for a keyframe.
+        if (transport_) {
+          static const char kRequest[] = "{\"type\":\"request-keyframe\"}";
+          transport_->send_text(kRequest);
+        }
+        return {};
+      }
+      // The page paints full-screen frames; forwarding more than ten a
+      // second only adds latency and inflate work. Every frame is still
+      // decoded so the reference chain stays valid.
+      const auto now = std::chrono::steady_clock::now();
+      if (last_stream_forward_.time_since_epoch().count() != 0 &&
+          now - last_stream_forward_ < std::chrono::milliseconds(100)) {
+        return {};
+      }
+      last_stream_forward_ = now;
+      protocol::frame_header header;
+      header.frame_seq = frame.header.frame_seq;
+      header.codec = static_cast<uint8_t>(protocol::codec::rgb565);
+      header.flags = static_cast<uint8_t>(
+          keyframe ? (protocol::kFrameFlagKeyframe | protocol::kFrameFlagPartial)
+                   : protocol::kFrameFlagPartial);
+      header.screen_w = frame.header.screen_w;
+      header.screen_h = frame.header.screen_h;
+      header.tile_w = frame.header.tile_w;
+      header.tile_h = frame.header.tile_h;
+      protocol::tile_blob tile;
+      tile.x = 0;
+      tile.y = 0;
+      tile.w = static_cast<uint16_t>(
+          std::min<int>(width, header.screen_w > 0 ? header.screen_w : width));
+      tile.h = static_cast<uint16_t>(
+          std::min<int>(height, header.screen_h > 0 ? header.screen_h : height));
+      tile.flags = protocol::kTileFlagChanged;
+      // A stream frame is a whole screen: pack it as RGB565, which halves
+      // everything the core deflates and the page inflates on every frame.
+      tile.data.resize(static_cast<std::size_t>(tile.w) * tile.h * 2);
+      for (int row = 0; row < tile.h; ++row) {
+        const uint8_t* src =
+            bgra.data() + static_cast<std::size_t>(row) * width * 4;
+        uint8_t* dst =
+            tile.data.data() + static_cast<std::size_t>(row) * tile.w * 2;
+        for (int x = 0; x < tile.w; ++x) {
+          const uint8_t* px = src + static_cast<std::size_t>(x) * 4;
+          const uint16_t value = static_cast<uint16_t>(
+              (static_cast<uint16_t>(px[2] >> 3) << 11) |
+              (static_cast<uint16_t>(px[1] >> 2) << 5) |
+              static_cast<uint16_t>(px[0] >> 3));
+          dst[x * 2] = static_cast<uint8_t>(value & 0xff);
+          dst[x * 2 + 1] = static_cast<uint8_t>(value >> 8);
+        }
+      }
+      std::vector<protocol::tile_blob> tiles;
+      tiles.push_back(std::move(tile));
+      std::vector<std::vector<uint8_t>> packed(tiles.size());
+      if (compression_available()) {
+        std::string deflate_error;
+        for (std::size_t i = 0; i < tiles.size(); ++i) {
+          if (!deflate_buffer(tiles[i].data.data(), tiles[i].data.size(), 1,
+                              packed[i], deflate_error)) {
+            return {};
+          }
+          tiles[i].data = std::move(packed[i]);
+        }
+        header.codec = static_cast<uint8_t>(protocol::codec::deflate_rgb565);
+      }
+      std::vector<uint8_t> payload;
+      if (!protocol::build_frame_payload(header, tiles, payload, error)) {
+        return {};
+      }
+      std::vector<uint8_t> out;
+      if (!protocol::encode_packet_into(
+              out, packet.type,
+              static_cast<uint16_t>(protocol::kPacketFlagTileRefresh),
+              packet.session, packet.seq, packet.ts_us, payload.data(),
+              payload.size(), error)) {
+        return {};
+      }
+      return out;
+    }
+    if (codec != static_cast<uint8_t>(protocol::codec::av1)) {
       return bytes;
     }
     std::vector<protocol::tile_blob> tiles;
@@ -434,6 +537,10 @@ class connect_proxy final
   bool worker_started_ = false;
   bool stopping_ = false;
   std::chrono::steady_clock::time_point last_stat_{};
+  /// The low-delay stream keeps reference frames per session.
+  av1_stream_decoder stream_decoder_;
+  /// Last time a stream frame was forwarded to the page (rate limit).
+  std::chrono::steady_clock::time_point last_stream_forward_{};
   /// Host bytes received since the last codec stat (the true wire rate) and
   /// the start of that window. The window start is only touched by the worker.
   std::atomic<std::size_t> wire_window_{0};
