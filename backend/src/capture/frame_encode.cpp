@@ -378,21 +378,31 @@ bool encode_capture_frame(protocol::frame_header& header,
       const long long screen = static_cast<long long>(header.screen_w) *
                                static_cast<long long>(header.screen_h);
       const bool large = screen > 0 && changed * 100 >= screen * 60;
-      // A video pauses between shots, a scroll pauses at the end of a page:
-      // switching back to strips for those frames and into the full-screen
-      // picture again a moment later reads as a stutter. Stay in the
-      // full-screen mode for three seconds after the last large change.
+      // Once in the full-screen mode, "still moving" is a lower bar: a video
+      // scene rarely changes exactly the same fraction of the screen on every
+      // frame, and dropping back to strips the moment one frame falls below
+      // 60 % would flap continuously. Any frame that changes at least a
+      // quarter of the screen keeps the hold alive, so the mode follows the
+      // content and only expires when the picture really settles.
+      const bool moving = screen > 0 && changed * 100 >= screen * 25;
       uint64_t* until = options.av1_full_screen_until_us;
-      uint64_t now_us = 0;
+      bool full_screen_mode = large;
       if (until != nullptr) {
-        now_us = static_cast<uint64_t>(
+        // A video pauses between shots, a scroll pauses at the end of a page:
+        // switching back to strips for those frames and into the full-screen
+        // picture again a moment later reads as a stutter. Every large (or
+        // still-moving) frame pushes the deadline three seconds out, so
+        // continuous video never expires it and cannot stutter every three
+        // seconds.
+        const uint64_t now_us = static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now().time_since_epoch())
                 .count());
-        if (large) *until = now_us + 3000000ull;
+        if (large || (now_us < *until && moving)) {
+          *until = now_us + 3000000ull;
+        }
+        full_screen_mode = large || now_us < *until;
       }
-      const bool full_screen_mode =
-          large || (until != nullptr && now_us != 0 && now_us < *until);
       if (full_screen_mode) {
         rects.assign(1, pixel_rect{0, 0, header.screen_w, header.screen_h});
       }

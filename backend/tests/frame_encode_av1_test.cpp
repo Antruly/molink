@@ -270,6 +270,30 @@ int main() {
                  held.tiles[0].h == kSize,
              "the hold-off keeps one full-screen picture");
 
+      // A medium change (a quarter of the screen) keeps the hold alive: a
+      // video scene does not change exactly the same fraction every frame, and
+      // the mode must not expire in the middle of one.
+      const uint64_t before_medium = until;
+      std::vector<uint8_t> medium_before = pixels;
+      fill_rect(pixels, kStride, 0, 0, 280, 280, 90, 40, 160);
+      std::vector<molink::protocol::tile_blob> medium_tiles;
+      molink::build_changed_tiles(pixels.data(), kStride, kSize, kSize, 128,
+                                  medium_before.data(), /*keyframe=*/false,
+                                  nullptr, /*force_opaque=*/false, 0,
+                                  medium_tiles);
+      molink::protocol::frame_header medium_header = header;
+      medium_header.flags = molink::protocol::kFrameFlagPartial;
+      std::vector<uint8_t> medium_payload;
+      std::vector<uint8_t> medium_av1;
+      bool medium_only = false;
+      expect(molink::encode_capture_frame(medium_header, medium_tiles, hold,
+                                          pixels.data(), kStride,
+                                          medium_payload, &medium_av1, error,
+                                          &medium_only),
+             "medium change encodes during the hold: " + error);
+      expect(until >= before_medium && until != 1,
+             "a medium change pushes the deadline out");
+
       // Once the window has passed, a small change goes back to strips.
       until = 1;
       std::vector<uint8_t> after_before = pixels;
