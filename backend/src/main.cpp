@@ -195,6 +195,10 @@ void print_ready(const molink::core_config& cfg, int port,
 }
 
 #if defined(_WIN32)
+// The anonymous namespace is outside `molink`, so bring the injector type in
+// by name before deriving the adapter (Linux does not compile this block).
+using molink::input_injector;
+
 /// Routes input to the injector that can reach the desktop currently shown.
 ///
 /// SendInput only works on the normal input desktop and is blocked by UIPI
