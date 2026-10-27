@@ -394,7 +394,7 @@ class capture_base : public capture_source {
     // CPU-only hosts cannot encode a sharp 1080p intra frame at the rate the
     // viewer asks for. Raising the QP in small steps trades some sharpness
     // for a picture that actually moves; see note_build_time().
-    return std::min(base + av1_qp_offset_.load(), kMaxAv1Qp);
+    return (std::min)(base + av1_qp_offset_.load(), kMaxAv1Qp);
   }
   bool quality_av1_grayscale() const {
     return quality_profile_for(quality_.load()).av1_grayscale;

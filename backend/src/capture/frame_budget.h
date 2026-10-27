@@ -43,9 +43,9 @@ inline int adapt_av1_qp_offset(int offset, uint64_t build_us,
   if (budget_us == 0) return offset;
   if (build_us > budget_us) {
     const int step = build_us > budget_us + budget_us / 3 ? 2 : 1;
-    return std::min(offset + step, kMaxAv1QpOffset);
+    return (std::min)(offset + step, kMaxAv1QpOffset);
   }
-  if (build_us * 2 < budget_us) return std::max(offset - 1, 0);
+  if (build_us * 2 < budget_us) return (std::max)(offset - 1, 0);
   return offset;
 }
 
@@ -92,7 +92,7 @@ struct av1_budget_policy {
     suspended = true;
     suspend_until_ms = now_ms + cooldown_ms;
     trial_started_ms = 0;
-    cooldown_ms = std::min(cooldown_ms * 2, kMaxCooldownMs);
+    cooldown_ms = (std::min)(cooldown_ms * 2, kMaxCooldownMs);
     return true;
   }
 
