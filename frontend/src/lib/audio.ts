@@ -34,6 +34,11 @@ export class PcmPlayer {
     const context = this.context
     const gain = this.gain
     if (!context || !gain || pcm.byteLength < 2) return
+    // A hidden or inactive page can leave the context suspended; without this
+    // the stream would schedule buffers into a paused clock and stay silent.
+    if (context.state === 'suspended') {
+      void context.resume().catch(() => undefined)
+    }
     const channels = Math.max(1, this.channels)
     const frames = Math.floor(pcm.byteLength / 2 / channels)
     if (frames <= 0) return

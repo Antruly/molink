@@ -190,14 +190,28 @@ class wasapi_loopback final : public audio_source {
   }
 
   void run() {
-    const int channels = format_.channels;
     std::vector<uint8_t> pcm;
     while (running_.load()) {
+      // The device can disappear under us: the user switches the output, the
+      // audio service restarts, or the engine invalidates the stream. Losing
+      // sound for the rest of the session because of one reset is far worse
+      // than a short gap, so reopen with a backoff instead of giving up.
+      if (capture_ == nullptr) {
+        std::string open_error;
+        if (!open(open_error)) {
+          close();
+          Sleep(reopen_delay_ms_);
+          reopen_delay_ms_ = std::min(reopen_delay_ms_ * 2u, 2000u);
+          continue;
+        }
+        reopen_delay_ms_ = 250;
+      }
+      const int channels = format_.channels;
       Sleep(10);
       UINT32 packet = 0;
-      if (capture_ == nullptr ||
-          FAILED(capture_->GetNextPacketSize(&packet))) {
-        break;
+      if (FAILED(capture_->GetNextPacketSize(&packet))) {
+        close();
+        continue;
       }
       while (packet != 0 && running_.load()) {
         BYTE* data = nullptr;
@@ -205,7 +219,7 @@ class wasapi_loopback final : public audio_source {
         DWORD flags = 0;
         if (FAILED(
                 capture_->GetBuffer(&data, &frames, &flags, nullptr, nullptr))) {
-          running_.store(false);
+          close();
           break;
         }
         if (frames > 0) {
@@ -232,7 +246,10 @@ class wasapi_loopback final : public audio_source {
           if (sink_) sink_(std::move(pcm));
         }
         capture_->ReleaseBuffer(frames);
-        if (FAILED(capture_->GetNextPacketSize(&packet))) break;
+        if (FAILED(capture_->GetNextPacketSize(&packet))) {
+          close();
+          break;
+        }
       }
     }
   }
@@ -240,6 +257,8 @@ class wasapi_loopback final : public audio_source {
   bool available_ = false;
   audio_format format_;
   sink sink_;
+  /// Wait before retrying a failed open; doubles up to two seconds.
+  unsigned reopen_delay_ms_ = 250;
   std::atomic<bool> running_{false};
   std::thread thread_;
   ComPtr<IAudioClient> client_;
