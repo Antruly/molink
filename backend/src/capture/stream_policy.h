@@ -1,0 +1,78 @@
+#pragma once
+
+#include <algorithm>
+#include <cstdint>
+
+namespace molink {
+
+/// When to switch between the tile/patch path and a real AV1 video stream.
+///
+/// The stream path (inter-frame prediction) is dramatically cheaper for moving
+/// pictures -- a P frame only codes what changed -- but it forces full-screen
+/// frames and a stateful decoder, and it is pointless for a still screen where
+/// the patch path sends almost nothing. So the mode follows the content:
+///
+///  * enter the stream after at least `kEnterFraction` of the screen has been
+///    moving for `kEnterDwellMs` (a video, a scroll, a drag);
+///  * leave it once less than that has moved for `kExitDwellMs` (the picture
+///    settled);
+///  * `kArmFraction` is the early warning: the caller can create the stream
+///    encoder before the threshold is crossed, so the switch does not pay the
+///    encoder start-up.
+///
+/// Fractions are 0..1 of the screen area that changed in one capture frame.
+struct stream_policy {
+  static constexpr double kEnterFraction = 0.10;
+  static constexpr double kExitFraction = 0.10;
+  static constexpr double kArmFraction = 0.08;
+  static constexpr uint64_t kEnterDwellMs = 1000;
+  static constexpr uint64_t kExitDwellMs = 10000;
+
+  bool streaming = false;
+  /// True while the content is close to the enter threshold, so the caller can
+  /// prepare the stream encoder.
+  bool armed = false;
+  bool entering = false;
+  bool exiting = false;
+  uint64_t enter_since_ms = 0;
+  uint64_t exit_since_ms = 0;
+
+  /// Feeds one frame. Returns true on the frame the mode changed, so the caller
+  /// requests a keyframe for the path it just switched to.
+  bool note(double moving_fraction, uint64_t now_ms) {
+    armed = moving_fraction >= kArmFraction;
+    if (!streaming) {
+      if (moving_fraction < kEnterFraction) {
+        entering = false;
+        return false;
+      }
+      if (!entering) {
+        entering = true;
+        enter_since_ms = now_ms;
+        return false;
+      }
+      if (now_ms - enter_since_ms < kEnterDwellMs) return false;
+      streaming = true;
+      entering = false;
+      exiting = false;
+      return true;
+    }
+    if (moving_fraction >= kExitFraction) {
+      exiting = false;
+      return false;
+    }
+    if (!exiting) {
+      exiting = true;
+      exit_since_ms = now_ms;
+      return false;
+    }
+    if (now_ms - exit_since_ms < kExitDwellMs) return false;
+    streaming = false;
+    exiting = false;
+    return true;
+  }
+
+  void reset() { *this = stream_policy{}; }
+};
+
+}  // namespace molink

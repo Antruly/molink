@@ -550,6 +550,15 @@ set_target_properties(molink-core-tile-scale-test PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 add_test(NAME tile_scale COMMAND molink-core-tile-scale-test)
 
+# The tile <-> AV1 stream hand-over is pure state machine.
+add_executable(molink-core-stream-policy-test
+  tests/stream_policy_test.cpp
+)
+target_include_directories(molink-core-stream-policy-test PRIVATE src)
+set_target_properties(molink-core-stream-policy-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME stream_policy COMMAND molink-core-stream-policy-test)
+
 # The relay/ICE split is pure routing: no libuvcpp and no sockets.
 add_executable(molink-core-switchable-test
   tests/switchable_transport_test.cpp
