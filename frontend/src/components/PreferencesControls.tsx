@@ -246,6 +246,7 @@ function Av1Controls({ token }: { token: string }) {
   const [maxArea, setMaxArea] = useState(35)
   const [threads, setThreads] = useState(4)
   const [keyframeInterval, setKeyframeInterval] = useState(0)
+  const [bandwidthMbps, setBandwidthMbps] = useState(2)
   const [busy, setBusy] = useState(false)
   const [note, setNote] = useState<'saved' | 'failed' | null>(null)
 
@@ -262,6 +263,7 @@ function Av1Controls({ token }: { token: string }) {
     setMaxArea(next.effective?.max_area_percent ?? 35)
     setThreads(next.effective?.threads ?? 4)
     setKeyframeInterval(next.keyframe_interval_seconds ?? 0)
+    setBandwidthMbps(next.bandwidth_mbps ?? 2)
   }
 
   useEffect(() => {
@@ -290,6 +292,7 @@ function Av1Controls({ token }: { token: string }) {
         max_area_percent: autoParams ? 0 : maxArea,
         threads: autoParams ? 0 : threads,
         keyframe_interval_seconds: keyframeInterval,
+        bandwidth_mbps: bandwidthMbps,
       })
       apply(next)
       setNote('saved')
@@ -332,6 +335,29 @@ function Av1Controls({ token }: { token: string }) {
         </select>
         <p className="text-[11px] leading-relaxed text-muted">
           {t('settings.keyframeIntervalHint')}
+        </p>
+      </div>
+
+      <div className="space-y-2">
+        <div className="flex items-center gap-2 text-[12px] font-medium text-ink">
+          <Gauge size={14} className="text-accent" />
+          {t('settings.bandwidthLimit')}
+        </div>
+        <select
+          value={bandwidthMbps}
+          onChange={(event) => setBandwidthMbps(Number(event.target.value))}
+          className="field"
+        >
+          {[0, 1, 2, 4, 8, 16, 32].map((mbps) => (
+            <option key={mbps} value={mbps}>
+              {mbps === 0
+                ? t('settings.bandwidthUnlimited')
+                : t('settings.megabytesValue', { count: mbps })}
+            </option>
+          ))}
+        </select>
+        <p className="text-[11px] leading-relaxed text-muted">
+          {t('settings.bandwidthLimitHint')}
         </p>
       </div>
       <div className="border-t border-line-soft" />

@@ -54,6 +54,12 @@ struct app_settings {
   /// (1 s is the most real-time, at a large bandwidth cost).
   int keyframe_interval_seconds = 0;
 
+  /// Per-session bandwidth ceiling in MB/s. The capture measures what it
+  /// produces and first softens large pictures, then paces the capture thread
+  /// to stay inside it. 0 disables the ceiling. 2 MB/s is a deliberate
+  /// default: a 1080p screen with motion otherwise reaches 10 MB/s and more.
+  int bandwidth_mbps = 2;
+
   /// Master switch for the remote directory. Off means LAN/direct only.
   bool server_enabled = true;
   /// Built-in directory is used when this is empty (and the switch is on).

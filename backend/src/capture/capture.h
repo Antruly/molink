@@ -247,6 +247,11 @@ class capture_source {
   /// of waiting for the viewer's own frame-rate controller to give up.
   virtual void set_viewer_pressure(bool pressure) { (void)pressure; }
 
+  /// Ceiling on the bytes this source produces per second; 0 disables it.
+  /// Above the ceiling the capture softens large pictures and then paces
+  /// itself, so a metered or weak link sees a predictable rate.
+  virtual void set_bytes_budget(int bytes_per_sec) { (void)bytes_per_sec; }
+
   /// Monitors this source can capture. Empty means the source is not ready or
   /// does not support selection (clients fall back to the whole screen).
   virtual std::vector<display_info> displays() const { return {}; }
@@ -440,6 +445,12 @@ class capture_base : public capture_source {
   void set_viewer_pressure(bool pressure) override {
     viewer_pressure_.store(pressure);
   }
+  void set_bytes_budget(int bytes_per_sec) override {
+    bytes_budget_.store(bytes_per_sec < 0 ? 0 : bytes_per_sec);
+    bytes_over_budget_.store(false);
+  }
+  /// True while the produced rate is above the configured ceiling.
+  bool bytes_over_budget() const { return bytes_over_budget_.load(); }
   /// True when AV1 should carry the entire picture instead of only patches.
   bool quality_av1_full_frame() const {
     av1_encoding_settings settings;
@@ -479,6 +490,9 @@ class capture_base : public capture_source {
   static int clamp_fps(int fps) { return fps < 1 ? 1 : (fps > 60 ? 60 : fps); }
 
   void publish(std::shared_ptr<const captured_frame> frame);
+  /// Counts a produced frame against the bandwidth ceiling and paces the
+  /// capture thread when the recent rate is above it.
+  void account_frame_bytes(std::size_t bytes);
   /// Records the CPU time spent building/encoding one frame (EMA, 1/8 weight).
   void note_build_time(uint64_t us);
   /// Updates the per-cell freshness grid from a published frame's tiles.
@@ -510,6 +524,12 @@ class capture_base : public capture_source {
   /// downscale while it lasts.
   std::atomic<bool> viewer_pressure_{false};
   std::atomic<bool> tile_downscale_{false};
+  /// Bandwidth ceiling and the one-second window used to measure it.
+  std::atomic<int> bytes_budget_{2 * 1024 * 1024};
+  std::atomic<uint64_t> budget_window_bytes_{0};
+  std::atomic<uint64_t> budget_window_start_us_{0};
+  std::atomic<uint64_t> measured_bytes_per_sec_{0};
+  std::atomic<bool> bytes_over_budget_{false};
   /// State for the "give AV1 up, send tiles" decision. Only the capture
   /// thread touches it; a preset change asks for a reset.
   av1_budget_policy av1_budget_;

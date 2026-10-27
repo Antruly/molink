@@ -185,6 +185,8 @@ app_settings load_settings() {
       settings.av1_threads = parse_int(value, 0);
     } else if (key == "keyframe_interval_seconds") {
       settings.keyframe_interval_seconds = parse_int(value, 0);
+    } else if (key == "bandwidth_mbps") {
+      settings.bandwidth_mbps = parse_int(value, 2);
     } else if (key == "device_name") {
       if (!value.empty()) settings.device_name = value;
     } else if (key == "server_enabled") {
@@ -223,6 +225,9 @@ app_settings load_settings() {
   }
   if (settings.av1_threads < 0 || settings.av1_threads > 64) {
     settings.av1_threads = 0;
+  }
+  if (settings.bandwidth_mbps < 0 || settings.bandwidth_mbps > 1000) {
+    settings.bandwidth_mbps = 2;
   }
   if (settings.keyframe_interval_seconds < 0 ||
       settings.keyframe_interval_seconds > 60) {
@@ -265,6 +270,7 @@ void save_settings(const app_settings& settings) {
   stream << "av1_threads=" << settings.av1_threads << "\n";
   stream << "keyframe_interval_seconds="
          << settings.keyframe_interval_seconds << "\n";
+  stream << "bandwidth_mbps=" << settings.bandwidth_mbps << "\n";
   stream << "device_name=" << settings.device_name << "\n";
   stream << "avatar=" << settings.avatar << "\n";
   stream << "server_enabled=" << (settings.server_enabled ? 1 : 0) << "\n";

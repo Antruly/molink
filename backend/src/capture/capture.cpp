@@ -14,6 +14,7 @@
 #endif
 
 #include <algorithm>
+#include <chrono>
 #include <thread>
 #include <utility>
 
@@ -316,15 +317,17 @@ void capture_base::note_build_time(uint64_t us) {
   // the large rectangles on both paths while it lasts: the tile path has no
   // other lever on bytes per frame.
   const bool pressure = viewer_pressure_.load();
-  tile_downscale_.store(pressure);
-  if (pressure && !av1_downscale_.load()) av1_downscale_.store(true);
+  const bool over_bytes = bytes_over_budget_.load();
+  const bool soften = pressure || over_bytes;
+  tile_downscale_.store(soften);
+  if (soften && !av1_downscale_.load()) av1_downscale_.store(true);
 
   const bool over_budget = average > budget_us;
   if (over_budget && offset >= kMaxAv1QpOffset && !av1_downscale_.load()) {
     av1_downscale_.store(true);
     return;  // judge the halved frames on their own
   }
-  if (!over_budget && !pressure && av1_downscale_.load() &&
+  if (!over_budget && !soften && av1_downscale_.load() &&
       average * 5 < budget_us * 3) {
     av1_downscale_.store(false);  // comfortable again: restore sharpness
   }
@@ -333,7 +336,49 @@ void capture_base::note_build_time(uint64_t us) {
       offset >= kMaxAv1QpOffset && av1_downscale_.load(), monotonic_ms());
 }
 
+void capture_base::account_frame_bytes(std::size_t bytes) {
+  const int budget = bytes_budget_.load();
+  if (budget <= 0) {
+    bytes_over_budget_.store(false);
+    return;
+  }
+  const uint64_t now = static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::microseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+  budget_window_bytes_.fetch_add(bytes);
+  const uint64_t start = budget_window_start_us_.load();
+  if (start == 0) {
+    budget_window_start_us_.store(now);
+    return;
+  }
+  if (now > start && now - start >= 1000000) {
+    const uint64_t total = budget_window_bytes_.exchange(0);
+    budget_window_start_us_.store(now);
+    const uint64_t bps = total * 1000000ull / (now - start);
+    const uint64_t previous = measured_bytes_per_sec_.load();
+    measured_bytes_per_sec_.store(previous == 0 ? bps
+                                                : (previous * 3 + bps) / 4);
+    bytes_over_budget_.store(measured_bytes_per_sec_.load() >
+                             static_cast<uint64_t>(budget));
+  }
+
+  // Pacing: a frame costs `bytes / budget` seconds of the ceiling. Wait for
+  // the part the frame rate does not already account for, so the produced
+  // rate converges on the ceiling instead of bursting past it.
+  const double cost = static_cast<double>(bytes) / static_cast<double>(budget);
+  const double interval =
+      1.0 / static_cast<double>(std::max(1, target_fps_.load()));
+  if (cost > interval) {
+    const double extra = std::min(cost - interval, 0.5);
+    if (extra > 0.001) {
+      std::this_thread::sleep_for(std::chrono::duration<double>(extra));
+    }
+  }
+}
+
 void capture_base::publish(std::shared_ptr<const captured_frame> frame) {
+  account_frame_bytes(frame->payload.size() + frame->av1_payload.size());
   stat_frames_.fetch_add(1);
   stat_bytes_.fetch_add(frame->payload.size());
   if (frame->keyframe) stat_keyframes_.fetch_add(1);

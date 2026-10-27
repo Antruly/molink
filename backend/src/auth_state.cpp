@@ -268,6 +268,12 @@ void auth_state::set_av1_encoding(bool enabled, std::string device,
   persist_locked();
 }
 
+void auth_state::set_bandwidth_mbps(int mbps) {
+  if (mbps < 0 || mbps > 1000) return;
+  settings_.bandwidth_mbps = mbps;
+  save_settings(settings_);
+}
+
 void auth_state::set_keyframe_interval_seconds(int seconds) {
   std::lock_guard<std::mutex> lock(mutex_);
   settings_.keyframe_interval_seconds = seconds;

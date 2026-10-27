@@ -69,6 +69,7 @@ class auth_state {
                         bool full_frame);
   /// Host capture keyframe cadence in seconds; 0 = off.
   void set_keyframe_interval_seconds(int seconds);
+  void set_bandwidth_mbps(int mbps);
   /// Phase-2 directory: the switch is independent from the custom URL (an
   /// empty URL with the switch on means the built-in default).
   bool set_server(std::string url, std::string invite, std::string ca,

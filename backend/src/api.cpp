@@ -1329,6 +1329,7 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
     j["max_area_percent"] = settings.av1_max_area_percent;
     j["threads"] = settings.av1_threads;
     j["keyframe_interval_seconds"] = settings.keyframe_interval_seconds;
+    j["bandwidth_mbps"] = settings.bandwidth_mbps;
     j["devices"] = uvcpp_json::array();
     for (const av1_encoder_device& device : av1_encoder_devices()) {
       uvcpp_json item;
@@ -1441,6 +1442,8 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
              const int keyframe_interval = query_int(
                  "keyframe_interval_seconds",
                  before.keyframe_interval_seconds);
+             const int bandwidth_mbps =
+                 query_int("bandwidth_mbps", before.bandwidth_mbps);
 
              if (speed != "auto" && speed != "fast" && speed != "balanced" &&
                  speed != "quality") {
@@ -1450,7 +1453,8 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
              }
              if (qp < 0 || qp > 63 || max_area < 0 || max_area > 100 ||
                  threads < 0 || threads > 64 || keyframe_interval < 0 ||
-                 keyframe_interval > 60) {
+                 keyframe_interval > 60 || bandwidth_mbps < 0 ||
+                 bandwidth_mbps > 1000) {
                resp.status(400).json_str(R"({"code":"invalid_av1_params"})");
                resp.end();
                return;
@@ -1474,6 +1478,7 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
              deps.auth->set_av1_encoding(enabled, device, speed, qp,
                                          max_area, threads, full_frame);
              deps.auth->set_keyframe_interval_seconds(keyframe_interval);
+             deps.auth->set_bandwidth_mbps(bandwidth_mbps);
              if (deps.capture) {
                av1_encoding_settings applied;
                applied.device = device;
@@ -1485,6 +1490,7 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
                deps.capture->set_av1_settings(applied);
                deps.capture->set_keyframe_interval_ms(
                    keyframe_interval > 0 ? keyframe_interval * 1000 : 120000);
+               deps.capture->set_bytes_budget(bandwidth_mbps * 1024 * 1024);
              }
              resp.set_header("Cache-Control", "no-store").json(encoding_json());
              resp.end();
