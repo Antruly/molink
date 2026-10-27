@@ -180,6 +180,43 @@ int main() {
            "full-frame AV1 covers the large change");
     expect(covered(310, 310, full_patch.tiles),
            "full-frame AV1 covers the small change too");
+    expect(full_patch.tiles.size() > 1,
+           "a quarter-screen change stays several rectangles");
+
+    // Nearly the whole screen changing is one full-screen picture: extra
+    // rectangles each cost an encoder setup and a decoder instance.
+    {
+      std::vector<uint8_t> previous_all = pixels;
+      fill_rect(pixels, kStride, 0, 0, kSize, kSize, 15, 25, 35);
+      molink::protocol::frame_header delta_all = header;
+      delta_all.flags = molink::protocol::kFrameFlagPartial;
+      std::vector<molink::protocol::tile_blob> all_tiles;
+      molink::build_changed_tiles(pixels.data(), kStride, kSize, kSize, 128,
+                                  previous_all.data(), /*keyframe=*/false,
+                                  nullptr, /*force_opaque=*/false, 0,
+                                  all_tiles);
+      std::vector<uint8_t> all_payload;
+      std::vector<uint8_t> all_av1;
+      bool all_only = false;
+      expect(molink::encode_capture_frame(delta_all, all_tiles, full,
+                                          pixels.data(), kStride, all_payload,
+                                          &all_av1, error, &all_only),
+             "full-screen delta encodes: " + error);
+      expect(all_only, "full-screen delta is AV1-only");
+      molink::protocol::parsed_frame all_patch;
+      expect(molink::protocol::parse_frame_payload(all_av1.data(),
+                                                   all_av1.size(), all_patch,
+                                                   error),
+             "full-screen AV1 payload parses: " + error);
+      expect(all_patch.tiles.size() == 1,
+             "a full-screen change becomes one AV1 picture");
+      if (all_patch.tiles.size() == 1) {
+        const auto& picture = all_patch.tiles[0];
+        expect(picture.x == 0 && picture.y == 0 && picture.w == kSize &&
+                   picture.h == kSize,
+               "the single picture covers the whole screen");
+      }
+    }
 
     // A keyframe has to bootstrap a viewer that has no picture: one rect over
     // the whole screen and the keyframe flag preserved for the receiver.

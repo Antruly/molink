@@ -361,6 +361,23 @@ bool encode_capture_frame(protocol::frame_header& header,
       rects = merge_dirty_tiles(
           cells, header.tile_w, header.tile_h, header.screen_w, header.screen_h,
           static_cast<std::size_t>(std::max(1, options.av1_max_rects)));
+      // A picture that is changing nearly everywhere (video, scrolling, a
+      // dragged window) is cheaper as one full-screen rectangle than as the
+      // several strips the merge produces: every extra rectangle pays its own
+      // encoder setup on the host and its own decoder instance on the viewer,
+      // and small pictures code worse per pixel. Measured with SVT-AV1: four
+      // quarter-screen rectangles take ~1.55x the time of one full-screen
+      // picture covering the same area, so above ~60 % changed the full
+      // screen wins on both ends.
+      long long changed = 0;
+      for (const pixel_rect& rect : rects) {
+        changed += static_cast<long long>(rect.w) * rect.h;
+      }
+      const long long screen = static_cast<long long>(header.screen_w) *
+                               static_cast<long long>(header.screen_h);
+      if (rects.size() > 1 && screen > 0 && changed * 100 >= screen * 60) {
+        rects.assign(1, pixel_rect{0, 0, header.screen_w, header.screen_h});
+      }
     }
     if (!rects.empty()) {
       std::vector<uint8_t> picture;
