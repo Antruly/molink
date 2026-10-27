@@ -260,7 +260,9 @@ export function SessionView({
   const [audioOn, setAudioOn] = useState(
     () => sessionConnection(tab.id)?.audioActive() ?? false,
   )
-  const [audioVolume, setAudioVolume] = useState(0.8)
+  const [audioVolume, setAudioVolume] = useState(
+    () => sessionConnection(tab.id)?.getAudioVolume() ?? 0.8,
+  )
   const audioAvailable = welcome?.audio === true && welcome.audio_format != null
   const [callPhase, setCallPhase] = useState<'idle' | 'ringing' | 'active'>(
     'idle',
@@ -1635,10 +1637,12 @@ export function SessionView({
       window.removeEventListener('keydown', down, true)
       window.removeEventListener('keyup', up, true)
       window.removeEventListener('blur', releaseAll)
+      // Release anything still held on the host, but keep the user's control
+      // choice: this effect also unwinds when the view is unmounted for a tab
+      // switch, and turning control off there made every switch lose it.
       releaseAll()
-      setControlEnabled(tab.id, false)
     }
-  }, [tab.controlEnabled, tab.id, setControlEnabled, connection])
+  }, [tab.controlEnabled, tab.id, connection])
 
   // Keyboard capture is global, but focusing the surface when control starts
   // (or when the window regains focus) keeps the remote page the active

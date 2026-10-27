@@ -616,6 +616,10 @@ export class SessionConnection {
     return this.player !== null
   }
 
+  getAudioVolume(): number {
+    return this.audioVolume
+  }
+
   setAudioVolume(value: number): void {
     this.audioVolume = Math.min(1, Math.max(0, value))
     this.player?.setVolume(this.audioVolume)
