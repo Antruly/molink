@@ -49,18 +49,14 @@ jobs:
           VERSION: ${{ github.ref_name }}
         run: |
           export VERSION="${VERSION#v}"
+          # Test phase: the .deb is the only Linux package we ship right now.
           ./packaging/linux/build-deb.sh
-          ./packaging/linux/build-appimage.sh
-          ./packaging/linux/build-rpm.sh
 
       - uses: softprops/action-gh-release@v2
         with:
           name: moLink ${{ github.ref_name }}
-          body: 'Linux packages: .deb and .AppImage.'
-          files: |
-            build/package/*.deb
-            build/package/*.AppImage
-            build/package/*.rpm
+          body: 'Linux package: .deb.'
+          files: build/package/*.deb
 
   windows:
     runs-on: windows-latest
@@ -216,10 +212,13 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           name: moLink ${{ github.ref_name }}
-          body: 'Windows installer (Inno Setup) and portable executable (x64).'
-          files: build/package/*.exe
+          body: 'Windows installer (Inno Setup, x64).'
+          # Test phase: attach the installer only, not the portable build.
+          files: build/package/*setup*x64.exe
 
+  # Temporarily disabled during the test phase (macOS runners are scarce).
   macos:
+    if: ${{ false }}
     strategy:
       fail-fast: false
       matrix:
@@ -294,7 +293,9 @@ jobs:
           files: build/package/*.dmg
 
   # Windows 7 x86 ships in the same release as the other platforms.
+  # Temporarily disabled during the test phase.
   win7-x86:
+    if: ${{ false }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
