@@ -433,6 +433,8 @@ class capture_base : public capture_source {
   /// resolution. The policy turns this on only after raising the QP was not
   /// enough, and off again when the encoder is comfortably inside the budget.
   bool quality_av1_downscale() const { return av1_downscale_.load(); }
+  /// Hysteresis deadline for the full-screen AV1 picture (see encode_options).
+  uint64_t* av1_full_screen_until() { return &av1_full_screen_until_us_; }
   /// True when large tile strips should be box-averaged in place: the viewer
   /// is behind and this is the tile path's only lever on bytes per frame.
   bool quality_tile_downscale() const { return tile_downscale_.load(); }
@@ -506,6 +508,8 @@ class capture_base : public capture_source {
   std::atomic<int> av1_qp_offset_{0};
   /// Halve large AV1 rectangles while the encoder cannot meet the budget.
   std::atomic<bool> av1_downscale_{false};
+  /// Keeps a video in full-screen AV1 mode for a moment after it pauses.
+  uint64_t av1_full_screen_until_us_ = 0;
   /// A viewer is behind; box-average large tiles and stop lifting the AV1
   /// downscale while it lasts.
   std::atomic<bool> viewer_pressure_{false};

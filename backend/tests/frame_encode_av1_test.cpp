@@ -218,6 +218,85 @@ int main() {
       }
     }
 
+    // Hysteresis: after a full-screen change the full-screen picture is held
+    // for a moment, so a video that pauses between shots does not flap back
+    // to strips and forth on every gap.
+    {
+      uint64_t until = 0;
+      molink::protocol::frame_header hold_header = header;
+      hold_header.flags = molink::protocol::kFrameFlagPartial;
+      molink::encode_options hold = full;
+      hold.av1_full_screen_until_us = &until;
+
+      std::vector<uint8_t> before = pixels;
+      fill_rect(pixels, kStride, 0, 0, kSize, kSize, 5, 15, 25);
+      std::vector<molink::protocol::tile_blob> big_tiles;
+      molink::build_changed_tiles(pixels.data(), kStride, kSize, kSize, 128,
+                                  before.data(), /*keyframe=*/false, nullptr,
+                                  /*force_opaque=*/false, 0, big_tiles);
+      std::vector<uint8_t> big_payload;
+      std::vector<uint8_t> big_av1;
+      bool big_only = false;
+      expect(molink::encode_capture_frame(hold_header, big_tiles, hold,
+                                          pixels.data(), kStride, big_payload,
+                                          &big_av1, error, &big_only),
+             "large change encodes: " + error);
+      expect(until != 0, "a large change arms the hold-off");
+
+      // A tiny change right after still ships one full-screen picture.
+      std::vector<uint8_t> small_before = pixels;
+      fill_rect(pixels, kStride, 40, 40, 32, 32, 220, 30, 30);
+      std::vector<molink::protocol::tile_blob> small_tiles;
+      molink::build_changed_tiles(pixels.data(), kStride, kSize, kSize, 128,
+                                  small_before.data(), /*keyframe=*/false,
+                                  nullptr, /*force_opaque=*/false, 0,
+                                  small_tiles);
+      molink::protocol::frame_header small_header = header;
+      small_header.flags = molink::protocol::kFrameFlagPartial;
+      std::vector<uint8_t> small_payload;
+      std::vector<uint8_t> small_av1;
+      bool small_only = false;
+      expect(molink::encode_capture_frame(small_header, small_tiles, hold,
+                                          pixels.data(), kStride,
+                                          small_payload, &small_av1, error,
+                                          &small_only),
+             "small change encodes during the hold-off: " + error);
+      molink::protocol::parsed_frame held;
+      expect(molink::protocol::parse_frame_payload(small_av1.data(),
+                                                   small_av1.size(), held,
+                                                   error),
+             "held payload parses: " + error);
+      expect(held.tiles.size() == 1 && held.tiles[0].w == kSize &&
+                 held.tiles[0].h == kSize,
+             "the hold-off keeps one full-screen picture");
+
+      // Once the window has passed, a small change goes back to strips.
+      until = 1;
+      std::vector<uint8_t> after_before = pixels;
+      fill_rect(pixels, kStride, 60, 60, 32, 32, 30, 220, 30);
+      std::vector<molink::protocol::tile_blob> after_tiles;
+      molink::build_changed_tiles(pixels.data(), kStride, kSize, kSize, 128,
+                                  after_before.data(), /*keyframe=*/false,
+                                  nullptr, /*force_opaque=*/false, 0,
+                                  after_tiles);
+      molink::protocol::frame_header after_header = header;
+      after_header.flags = molink::protocol::kFrameFlagPartial;
+      std::vector<uint8_t> after_payload;
+      std::vector<uint8_t> after_av1;
+      bool after_only = false;
+      expect(molink::encode_capture_frame(after_header, after_tiles, hold,
+                                          pixels.data(), kStride, after_payload,
+                                          &after_av1, error, &after_only),
+             "small change after the hold-off encodes: " + error);
+      molink::protocol::parsed_frame resumed;
+      expect(molink::protocol::parse_frame_payload(after_av1.data(),
+                                                   after_av1.size(), resumed,
+                                                   error),
+             "resumed payload parses: " + error);
+      expect(resumed.tiles.size() >= 1 && resumed.tiles[0].w < kSize,
+             "after the window the rectangle shrinks back");
+    }
+
     // A keyframe has to bootstrap a viewer that has no picture: one rect over
     // the whole screen and the keyframe flag preserved for the receiver.
     std::vector<uint8_t> key_tiles_pixels = pixels;

@@ -67,6 +67,12 @@ struct encode_options {
   /// full-frame mode, which has to encode every changed rectangle.
   int av1_max_area_percent = 100;
   int av1_max_rects = 4;
+  /// Shared hysteresis owned by the capture: while *this monotonic time has
+  /// not passed, a near-full-screen change keeps the single full-screen AV1
+  /// picture. Video pauses for a frame or two all the time; without the
+  /// hold-off the encoder flapped between full-screen and strips, which reads
+  /// as a stutter. Null disables the hold-off.
+  uint64_t* av1_full_screen_until_us = nullptr;
   /// Minimum rectangle area in pixels; 0 means two capture tiles.
   int av1_min_area = 0;
 };

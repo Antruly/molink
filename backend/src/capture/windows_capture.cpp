@@ -526,6 +526,7 @@ class windows_capture final : public capture_base {
     encoding.tile_downscale = quality_tile_downscale();
     encoding.av1_max_area_percent = quality_av1_max_area_percent();
     encoding.av1_full_frame = quality_av1_full_frame();
+    encoding.av1_full_screen_until_us = av1_full_screen_until();
     std::vector<uint8_t> av1_payload;
     bool av1_only = false;
 

@@ -1,6 +1,7 @@
 #include "capture/frame_encode.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
@@ -376,7 +377,23 @@ bool encode_capture_frame(protocol::frame_header& header,
       }
       const long long screen = static_cast<long long>(header.screen_w) *
                                static_cast<long long>(header.screen_h);
-      if (rects.size() > 1 && screen > 0 && changed * 100 >= screen * 60) {
+      const bool large = screen > 0 && changed * 100 >= screen * 60;
+      // A video pauses between shots, a scroll pauses at the end of a page:
+      // switching back to strips for those frames and into the full-screen
+      // picture again a moment later reads as a stutter. Stay in the
+      // full-screen mode for three seconds after the last large change.
+      uint64_t* until = options.av1_full_screen_until_us;
+      uint64_t now_us = 0;
+      if (until != nullptr) {
+        now_us = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now().time_since_epoch())
+                .count());
+        if (large) *until = now_us + 3000000ull;
+      }
+      const bool full_screen_mode =
+          large || (until != nullptr && now_us != 0 && now_us < *until);
+      if (full_screen_mode) {
         rects.assign(1, pixel_rect{0, 0, header.screen_w, header.screen_h});
       }
     }
