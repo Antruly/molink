@@ -33,6 +33,7 @@ import {
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type PointerEvent as ReactPointerEvent,
@@ -909,6 +910,29 @@ export function SessionView({
     }, 1000)
     return () => window.clearInterval(timer)
   }, [tab.phase, tab.id])
+
+  // The remote cursor shape becomes the local pointer over the picture, so a
+  // resize handle, a text caret, a link hand or the busy spinner looks the
+  // same as on the host and the user can tell which control is under it. The
+  // style sits on the surface element, so it only applies inside the remote
+  // image; browsers cap cursor images at 128x128, and anything larger falls
+  // back to the default arrow.
+  const remoteCursorCss = useMemo(() => {
+    const shape = tab.cursorShape
+    if (!shape || shape.w <= 0 || shape.h <= 0 || shape.w > 128 ||
+        shape.h > 128) {
+      return undefined
+    }
+    const canvas = document.createElement('canvas')
+    canvas.width = shape.w
+    canvas.height = shape.h
+    const context = canvas.getContext('2d')
+    if (!context) return undefined
+    const image = context.createImageData(shape.w, shape.h)
+    image.data.set(shape.rgba)
+    context.putImageData(image, 0, 0)
+    return `url("${canvas.toDataURL()}") ${shape.hotspotX} ${shape.hotspotY}, default`
+  }, [tab.cursorShape])
 
   useEffect(() => {
     const element = surfaceRef.current
@@ -1803,14 +1827,17 @@ export function SessionView({
                   ? 'relative'
                   : 'relative h-full w-full'
               }
-              style={
-                displayMode === 'actual'
+              style={{
+                ...(displayMode === 'actual'
                   ? {
                       width: tab.frame.screenW,
                       height: tab.frame.screenH,
                     }
-                  : undefined
-              }
+                  : {}),
+                ...(tab.controlEnabled && !virtualMouse
+                  ? { cursor: remoteCursorCss ?? 'default' }
+                  : {}),
+              }}
             >
               <TileCanvas
                 frame={tab.frame}
