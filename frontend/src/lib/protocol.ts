@@ -25,6 +25,11 @@ export const PacketType = {
   voice: 0x14,
   /** Per-cell freshness map from the host (see packet_type::tile_clock). */
   tileClock: 0x15,
+  /**
+   * Per-cell applied-sequence map (see packet_type::tile_seq): u16 cols, u16
+   * rows, u16 cell, u16 reserved, then cols*rows u32 capture sequences.
+   */
+  tileSeq: 0x16,
   control: 0x7f,
   ping: 0x80,
   pong: 0x81,

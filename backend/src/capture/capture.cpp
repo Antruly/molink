@@ -207,6 +207,7 @@ void capture_base::update_cell_clock(const captured_frame& frame) {
     clock_cols_ = static_cast<uint16_t>(cols);
     clock_rows_ = static_cast<uint16_t>(rows);
     cell_clock_.assign(static_cast<std::size_t>(cols) * rows, 0);
+    cell_seq_.assign(static_cast<std::size_t>(cols) * rows, 0);
   }
   auto mark = [this, cols, rows, &frame](const std::vector<uint8_t>& payload) {
     if (payload.empty()) return;
@@ -226,6 +227,7 @@ void capture_base::update_cell_clock(const captured_frame& frame) {
         for (int col = col0; col <= col1 && col < cols; ++col) {
           cell_clock_[static_cast<std::size_t>(row) * cols + col] =
               frame.ts_us;
+          cell_seq_[static_cast<std::size_t>(row) * cols + col] = frame.seq;
         }
       }
     }
@@ -254,6 +256,27 @@ bool capture_base::tile_clock(std::vector<uint8_t>& out) {
     for (int byte = 0; byte < 8; ++byte) {
       out[8 + i * 8 + byte] =
           static_cast<uint8_t>(value >> (8 * byte));
+    }
+  }
+  return true;
+}
+
+bool capture_base::tile_seq(std::vector<uint8_t>& out) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (clock_cols_ == 0 || clock_rows_ == 0 || cell_seq_.empty()) return false;
+  out.resize(8 + cell_seq_.size() * 4);
+  auto put16 = [&out](std::size_t at, uint16_t value) {
+    out[at] = static_cast<uint8_t>(value & 0xff);
+    out[at + 1] = static_cast<uint8_t>(value >> 8);
+  };
+  put16(0, clock_cols_);
+  put16(2, clock_rows_);
+  put16(4, 128);
+  put16(6, 0);
+  for (std::size_t i = 0; i < cell_seq_.size(); ++i) {
+    const uint32_t value = cell_seq_[i];
+    for (int byte = 0; byte < 4; ++byte) {
+      out[8 + i * 4 + byte] = static_cast<uint8_t>(value >> (8 * byte));
     }
   }
   return true;

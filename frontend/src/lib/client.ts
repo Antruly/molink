@@ -317,6 +317,11 @@ export class MolinkClient {
   /// When the unanswered frame request was sent, for the retry timeout.
   private pendingFrameAt = 0
   private latestFrameSeq = -1
+  /// Capture sequence this client has received for each 128 px cell. The
+  /// host's per-block sequence map is compared with this to name the cells a
+  /// lost or skipped frame left behind.
+  private cellReceivedSeq = new Map<string, number>()
+  private lastSeqRequest = 0
   private lastKeyframeRequest = 0
   /// Preset this tab pushed; used to notice a host-global preset changed by
   /// another viewer while we keep asking for a colour format.
@@ -411,6 +416,8 @@ export class MolinkClient {
     this.resumeToken = ''
     this.frameClockOffset = 0
     this.frameClockSamples = []
+    this.cellReceivedSeq.clear()
+    this.lastSeqRequest = 0
     this.lastConnect = { host, port, token, requestAccess, targetId,
                         forceRelay, clientName, clientId }
     this.openSocket()
@@ -525,6 +532,9 @@ export class MolinkClient {
         this.helloPayload = {
           type: 'hello',
           token,
+          // The host then attaches a per-block sequence map to every frame
+          // response, which names the cells a lost frame left stale.
+          seq_clock: true,
           ...(this.resumeToken ? { session: this.resumeToken } : {}),
           ...(clientName ? { name: clientName } : {}),
           ...(clientId ? { device_id: clientId } : {}),
@@ -1116,11 +1126,28 @@ export class MolinkClient {
         this.handleTileClock(packet.payload)
         return
       }
+      if (packet.type === PacketType.tileSeq) {
+        // The whole block map arrives as one packet, usually deflated. Handle
+        // it on the frame queue so it is compared after the frames it
+        // describes have been received.
+        if ((packet.flags & PacketFlag.compressed) !== 0) {
+          const payload = packet.payload
+          this.frameQueue = this.frameQueue
+            .then(async () => {
+              this.handleTileSeq(await inflateTile(payload))
+            })
+            .catch(() => {})
+        } else {
+          this.handleTileSeq(packet.payload)
+        }
+        return
+      }
       if (packet.type !== PacketType.frame) return
       this.pendingFrame = false
       this.missedFrameResponses = 0
       const frame = parseFramePayload(packet.payload)
       this.noteFrameClock(packet.tsUs)
+      this.noteReceived(frame, (packet.flags & PacketFlag.tileRefresh) !== 0)
       this.reconcileQualityPreset(frame)
       if ((packet.flags & PacketFlag.tileRefresh) !== 0) {
         if (!this.hasImage) {
@@ -1331,6 +1358,52 @@ export class MolinkClient {
     this.sendJson({ type: 'request-tiles', tiles: tiles.slice(0, 64) })
   }
 
+  /// Names the cells this client missed: the host reports the capture
+  /// sequence of every 128 px cell, and anything newer than what was received
+  /// is asked for at once. Unlike the timestamp clock there is no one-second
+  /// window, so a lost frame is repaired on the next frame response.
+  private handleTileSeq(payload: Uint8Array): void {
+    if (payload.byteLength < 8) return
+    const view = new DataView(payload.buffer, payload.byteOffset,
+                              payload.byteLength)
+    const cols = view.getUint16(0, true)
+    const rows = view.getUint16(2, true)
+    const cell = view.getUint16(4, true)
+    if (cols === 0 || rows === 0 || cell !== 128) return
+    if (payload.byteLength < 8 + cols * rows * 4) return
+    if (!this.hasImage) {
+      this.requestKeyframeThrottled()
+      return
+    }
+    const now = performance.now()
+    if (now - this.lastSeqRequest < 100) return
+    const tiles: Array<{ x: number; y: number; w: number; h: number }> = []
+    for (let row = 0; row < rows; row += 1) {
+      let runStart = -1
+      for (let col = 0; col <= cols; col += 1) {
+        let behind = false
+        if (col < cols) {
+          const hostSeq = view.getUint32(8 + (row * cols + col) * 4, true)
+          const mine = this.cellReceivedSeq.get(`${col},${row}`)
+          behind = mine === undefined ? hostSeq > 0 : hostSeq > mine
+        }
+        if (behind && runStart < 0) runStart = col
+        if (!behind && runStart >= 0) {
+          tiles.push({
+            x: runStart * cell,
+            y: row * cell,
+            w: (col - runStart) * cell,
+            h: cell,
+          })
+          runStart = -1
+        }
+      }
+    }
+    if (tiles.length === 0) return
+    this.lastSeqRequest = now
+    this.sendJson({ type: 'request-tiles', tiles: tiles.slice(0, 64) })
+  }
+
   private tileCellKeys(x: number, y: number, w: number, h: number): string[] {
     const cell = 128
     const keys: string[] = []
@@ -1352,6 +1425,21 @@ export class MolinkClient {
         const previous = this.tileAppliedAt.get(key)
         if (previous === undefined || tsUs > previous) {
           this.tileAppliedAt.set(key, tsUs)
+        }
+      }
+    }
+  }
+
+  /// Records the capture sequence each cell was delivered up to. A tile
+  /// refresh snapshots the host's current pixels, so it counts as the newest
+  /// frame the client has seen.
+  private noteReceived(frame: Frame, refresh: boolean): void {
+    const seq = refresh ? Math.max(0, this.latestFrameSeq) : frame.frameSeq
+    for (const tile of frame.tiles) {
+      for (const key of this.tileCellKeys(tile.x, tile.y, tile.w, tile.h)) {
+        const previous = this.cellReceivedSeq.get(key)
+        if (previous === undefined || seq > previous) {
+          this.cellReceivedSeq.set(key, seq)
         }
       }
     }

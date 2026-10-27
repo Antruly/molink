@@ -22,6 +22,12 @@ struct session_info {
   /// when its core was built with dav1d). AV1 patches are only produced when
   /// every authenticated session supports them.
   bool av1 = false;
+  /// The client advertised `seq_clock` in hello: it understands the per-cell
+  /// applied-sequence map and can name the cells it missed.
+  bool seq_clock = false;
+  /// Last time (monotonic ms) this session received a sequence map, so a
+  /// polling client is not flooded while the screen is static.
+  uint64_t last_seq_ms = 0;
   /// Identity the client reported in hello; lets a shared chat label who sent
   /// each message when several viewers are connected.
   std::string client_name;

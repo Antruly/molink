@@ -23,6 +23,7 @@
 
 #include "config.h"
 #include "capture/frame_encode.h"
+#include "compression.h"
 #include "capture/replay_policy.h"
 #include "protocol/frame_packet.h"
 #include "service_control.h"
@@ -607,6 +608,51 @@ void send_capture_frame(session_transport* transport,
   }
 }
 
+/// Sends the per-cell capture sequence map to a client that advertised
+/// `seq_clock`. Compared with what the client received, it names the exact
+/// cells a lost or skipped frame left stale, with no timestamp window and no
+/// extra round trip. Throttled so a polling client does not flood the link
+/// while the screen is static.
+void send_tile_seq(session_transport* transport,
+                   const std::shared_ptr<session_info>& session,
+                   const session_options& opt) {
+  if (!session->seq_clock || !session->has_image || !opt.capture) return;
+  const uint64_t now_ms = static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+  if (session->last_seq_ms != 0 && now_ms - session->last_seq_ms < 100) {
+    return;
+  }
+  std::vector<uint8_t> map;
+  if (!opt.capture->tile_seq(map)) return;
+  session->last_seq_ms = now_ms;
+  // Neighbouring cells usually share a sequence, so deflate shrinks the map
+  // several-fold; the client inflates it before comparing. The whole map is
+  // one packet on purpose: a client checks every block at once and asks only
+  // for the ones it is missing.
+  const std::vector<uint8_t>* payload = &map;
+  std::vector<uint8_t> packed;
+  uint16_t flags = 0;
+  if (compression_available()) {
+    std::string deflate_error;
+    if (deflate_buffer(map.data(), map.size(), 1, packed, deflate_error) &&
+        !packed.empty() && packed.size() < map.size()) {
+      payload = &packed;
+      flags = protocol::kPacketFlagCompressed;
+    }
+  }
+  std::vector<uint8_t> bytes;
+  std::string error;
+  if (!protocol::encode_packet_into(
+          bytes, static_cast<uint8_t>(protocol::packet_type::tile_seq), flags,
+          session->id, 0, epoch_us(), payload->data(), payload->size(),
+          error)) {
+    return;
+  }
+  transport->send_binary(bytes.data(), bytes.size());
+}
+
 void send_welcome(session_transport* transport, const session_info& session,
                   const session_options& opt,
                   const std::string& resume_token) {
@@ -1132,6 +1178,9 @@ void session_controller::on_text(const std::string& text) {
       return;
     }
     session->av1 = bool_field(j, "av1", false);
+    // Clients that understand the per-block sequence map get one with every
+    // frame response, so a lost frame is repaired immediately and precisely.
+    session->seq_clock = bool_field(j, "seq_clock", false);
     if (std::getenv("MOLINK_AV1_LOG") != nullptr) {
       std::fprintf(stderr, "host: session av1=%d\n", session->av1 ? 1 : 0);
     }
@@ -1488,6 +1537,7 @@ void session_controller::on_text(const std::string& text) {
     if (options_.capture) options_.capture->set_active(true);
     maybe_send_cursor(transport.get(), session, options_);
     send_capture_frame(transport.get(), session, options_);
+    send_tile_seq(transport.get(), session, options_);
     return;
   }
 

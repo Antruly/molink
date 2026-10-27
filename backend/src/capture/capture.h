@@ -234,6 +234,14 @@ class capture_source {
     return false;
   }
 
+  /// Per-128px-cell capture sequence of the newest pixels, as a binary
+  /// tile-sequence payload. Clients that advertised `seq_clock` use it to name
+  /// the cells they missed exactly, without a timestamp window.
+  virtual bool tile_seq(std::vector<uint8_t>& out) {
+    (void)out;
+    return false;
+  }
+
   /// Monitors this source can capture. Empty means the source is not ready or
   /// does not support selection (clients fall back to the whole screen).
   virtual std::vector<display_info> displays() const { return {}; }
@@ -445,6 +453,7 @@ class capture_base : public capture_source {
   bool running() const override { return running_.load(); }
   virtual capture_stats stats() const override;
   bool tile_clock(std::vector<uint8_t>& out) override;
+  bool tile_seq(std::vector<uint8_t>& out) override;
 
   bool cursor(cursor_snapshot& out) const override;
 
@@ -503,6 +512,9 @@ class capture_base : public capture_source {
   int encoder_threads_ = 0;
   /// Newest capture timestamp per 128 px cell, protected by mutex_.
   std::vector<uint64_t> cell_clock_;
+  /// Newest capture sequence per 128 px cell: the exact "you have this cell up
+  /// to frame N" reference clients acknowledge against.
+  std::vector<uint32_t> cell_seq_;
   uint16_t clock_cols_ = 0;
   uint16_t clock_rows_ = 0;
   std::atomic<uint64_t> stat_frames_{0};
