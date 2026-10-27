@@ -130,6 +130,8 @@ class session_controller final
   int audio_subscription_ = 0;
   int call_subscription_ = 0;
   bool voice_active_ = false;
+  /// Rate limit for reporting silent input-injection failures to the client.
+  std::uint64_t last_input_error_ms_ = 0;
 };
 
 /// Sends keepalive pings and reaps sessions that never authenticated or went

@@ -1670,6 +1670,17 @@ void session_controller::on_text(const std::string& text) {
 
     std::string input_error;
     bool rejected = false;
+    bool failed = false;
+    auto apply = [&](const uvcpp_json& event) {
+      const input_injector::status status =
+          inject_one(*options_.input, event, input_error);
+      if (status == input_injector::status::rejected) {
+        rejected = true;
+        return false;
+      }
+      if (status == input_injector::status::unavailable) failed = true;
+      return true;
+    };
     const auto events = j.find("events");
     if (events != j.end() && events->is_array()) {
       if (events->size() > 64) {
@@ -1678,17 +1689,24 @@ void session_controller::on_text(const std::string& text) {
         return;
       }
       for (const auto& event : *events) {
-        if (inject_one(*options_.input, event, input_error) ==
-            input_injector::status::rejected) {
-          rejected = true;
-          break;
-        }
+        if (!apply(event)) break;
       }
-    } else if (inject_one(*options_.input, j, input_error) ==
-               input_injector::status::rejected) {
-      rejected = true;
+    } else {
+      apply(j);
     }
-    if (rejected) send_error(transport.get(), "bad_input", input_error);
+    if (rejected) {
+      send_error(transport.get(), "bad_input", input_error);
+    } else if (failed) {
+      // SendInput fails silently on the secure desktop and for elevated
+      // windows; tell the client instead of dropping every event without a
+      // word. Rate-limit it so a moving pointer cannot flood the socket.
+      const std::uint64_t now = now_ms();
+      if (now - last_input_error_ms_ >= 5000) {
+        last_input_error_ms_ = now;
+        send_error(transport.get(), "input_unavailable",
+                   "the host could not inject input");
+      }
+    }
     return;
   }
 

@@ -5,9 +5,11 @@
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 #include <future>
 #include <iostream>
 #include <iterator>
+#include <memory>
 #include <string>
 #include <thread>
 
@@ -191,6 +193,89 @@ void print_ready(const molink::core_config& cfg, int port,
   j["synthetic_frames"] = capture_backend == "synthetic";
   std::cout << uvcpp::uvcpp_json_dump(j) << std::endl;
 }
+
+#if defined(_WIN32)
+/// Routes input to the injector that can reach the desktop currently shown.
+///
+/// SendInput only works on the normal input desktop and is blocked by UIPI
+/// for elevated windows. The helper pipe (SYSTEM) reaches the lock/UAC
+/// desktop and elevated windows. The capture backend tells us which desktop
+/// is on screen, and either backend can stand in when the other fails.
+class adaptive_input final : public input_injector {
+ public:
+  adaptive_input(std::unique_ptr<input_injector> direct,
+                 std::unique_ptr<input_injector> secure,
+                 std::function<bool()> secure_desktop)
+      : direct_(std::move(direct)),
+        secure_(std::move(secure)),
+        secure_desktop_(std::move(secure_desktop)) {}
+
+  bool available() const override {
+    return (direct_ != nullptr && direct_->available()) ||
+           (secure_ != nullptr && secure_->available());
+  }
+  std::string backend() const override {
+    const input_injector* chosen = preferred();
+    return chosen != nullptr ? chosen->backend() : std::string("none");
+  }
+  void set_display_rect(int x, int y, int width, int height) override {
+    if (direct_) direct_->set_display_rect(x, y, width, height);
+    if (secure_) secure_->set_display_rect(x, y, width, height);
+  }
+  status move(double x, double y) override {
+    return dispatch([x, y](input_injector& i) { return i.move(x, y); });
+  }
+  status button(int button, bool down) override {
+    return dispatch(
+        [button, down](input_injector& i) { return i.button(button, down); });
+  }
+  status wheel(int dx, int dy) override {
+    return dispatch([dx, dy](input_injector& i) { return i.wheel(dx, dy); });
+  }
+  status key(const std::string& code, bool down) override {
+    return dispatch(
+        [&code, down](input_injector& i) { return i.key(code, down); });
+  }
+  status text(const std::string& utf8) override {
+    return dispatch([&utf8](input_injector& i) { return i.text(utf8); });
+  }
+  void release_all() override {
+    if (direct_) direct_->release_all();
+    if (secure_) secure_->release_all();
+  }
+
+ private:
+  bool prefer_secure() const {
+    return secure_ != nullptr && secure_desktop_ && secure_desktop_();
+  }
+  input_injector* preferred() const {
+    if (prefer_secure()) return secure_.get();
+    return direct_ != nullptr ? direct_.get() : secure_.get();
+  }
+  input_injector* fallback() const {
+    if (preferred() == direct_.get()) return secure_.get();
+    return direct_.get();
+  }
+  template <typename Fn>
+  status dispatch(Fn fn) {
+    input_injector* first = preferred();
+    if (first == nullptr) return status::unavailable;
+    const status result = fn(*first);
+    if (result == status::unavailable) {
+      input_injector* second = fallback();
+      if (second != nullptr && second != first) {
+        const status retry = fn(*second);
+        if (retry != status::unavailable) return retry;
+      }
+    }
+    return result;
+  }
+
+  std::unique_ptr<input_injector> direct_;
+  std::unique_ptr<input_injector> secure_;
+  std::function<bool()> secure_desktop_;
+};
+#endif
 
 }  // namespace
 
@@ -378,11 +463,20 @@ int main(int argc, char** argv) {
   if (!cfg.no_input) {
     std::string input_error;
 #if defined(_WIN32)
+    std::unique_ptr<input_injector> direct = make_windows_input(input_error);
+    std::unique_ptr<input_injector> secure = make_windows_secure_input();
     std::unique_ptr<input_injector> created;
-    if (capture->backend() == "secure-desktop") {
-      created = make_windows_secure_input();
+    if (direct && secure) {
+      // The capture backend switches to "secure-desktop" while the console is
+      // locked or a UAC prompt is up; input must switch with it.
+      created = std::make_unique<adaptive_input>(
+          std::move(direct), std::move(secure),
+          [capture] { return capture->backend() == "secure-desktop"; });
+    } else if (direct) {
+      created = std::move(direct);
+    } else {
+      created = std::move(secure);
     }
-    if (!created) created = make_windows_input(input_error);
 #elif defined(__APPLE__)
     std::unique_ptr<input_injector> created = make_macos_input(input_error);
 #else
