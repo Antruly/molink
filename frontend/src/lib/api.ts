@@ -130,6 +130,9 @@ export interface RecentPreference {
 
 export interface UiPreferences {
   uiMode?: 'simple' | 'advanced'
+  /// UI language; mirrored here so the native Windows shell can localize its
+  /// tray menu without reading the WebView localStorage.
+  language?: string
   savedDevices?: SavedDevicePreference[]
   recents?: RecentPreference[]
   /// Notes shared by device name (normalized name -> note).

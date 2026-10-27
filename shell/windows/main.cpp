@@ -30,7 +30,9 @@
 
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iterator>
 #include <string>
 #include <thread>
@@ -221,14 +223,40 @@ bool json_number(const std::string& json, const char* key, long& out) {
 }
 
 bool json_string(const std::string& json, const char* key, std::string& out) {
-  const std::string needle = std::string("\"") + key + "\":\"";
+  const std::string needle = std::string("\"") + key + "\":";
   std::size_t pos = json.find(needle);
   if (pos == std::string::npos) return false;
   pos += needle.size();
+  while (pos < json.size() &&
+         (json[pos] == ' ' || json[pos] == '\t' || json[pos] == '\n' ||
+          json[pos] == '\r')) {
+    ++pos;
+  }
+  if (pos >= json.size() || json[pos] != '"') return false;
+  ++pos;
   const std::size_t end = json.find('"', pos);
   if (end == std::string::npos) return false;
   out = json.substr(pos, end - pos);
   return true;
+}
+
+/// The tray lives in the native shell, which cannot read the WebView's
+/// localStorage. The page mirrors its language into the core's ui.json; fall
+/// back to the Windows UI language when that file is missing or old.
+bool tray_uses_chinese() {
+  const char* appdata = std::getenv("APPDATA");
+  if (appdata != nullptr) {
+    std::ifstream in(fs::path(appdata) / "moLink" / "ui.json");
+    if (in) {
+      const std::string body((std::istreambuf_iterator<char>(in)),
+                             std::istreambuf_iterator<char>());
+      std::string language;
+      if (json_string(body, "language", language) && !language.empty()) {
+        return language.rfind("zh", 0) == 0;
+      }
+    }
+  }
+  return PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_CHINESE;
 }
 
 std::wstring url_host_w(const std::wstring& host) {
@@ -852,8 +880,10 @@ void show_main_window() {
 void show_tray_menu() {
   if (g_tray_menu != nullptr) DestroyMenu(g_tray_menu);
   g_tray_menu = CreatePopupMenu();
-  AppendMenuW(g_tray_menu, MF_STRING, 1, L"Show moLink");
-  AppendMenuW(g_tray_menu, MF_STRING, 2, L"Quit");
+  const bool zh = tray_uses_chinese();
+  AppendMenuW(g_tray_menu, MF_STRING, 1,
+              zh ? L"\u663e\u793a moLink" : L"Show moLink");
+  AppendMenuW(g_tray_menu, MF_STRING, 2, zh ? L"\u9000\u51fa" : L"Quit");
   POINT point;
   GetCursorPos(&point);
   SetForegroundWindow(g_window);

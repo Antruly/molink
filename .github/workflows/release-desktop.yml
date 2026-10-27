@@ -38,7 +38,7 @@ jobs:
         shell: bash
         env:
           UVCPP_VERSION: ${{ vars.UVCPP_VERSION }}
-        run: ./packaging/fetch-uvcpp.sh linux-x64 "${UVCPP_VERSION:-1.8.7}" "$RUNNER_TEMP/uvcpp"
+        run: ./packaging/fetch-uvcpp.sh linux-x64 "${UVCPP_VERSION:-1.8.8}" "$RUNNER_TEMP/uvcpp"
 
       - name: Build packages
         env:
@@ -81,7 +81,7 @@ jobs:
         shell: bash
         env:
           UVCPP_VERSION: ${{ vars.UVCPP_VERSION }}
-        run: ./packaging/fetch-uvcpp.sh msvc-x64 "${UVCPP_VERSION:-1.8.7}" "$RUNNER_TEMP/uvcpp"
+        run: ./packaging/fetch-uvcpp.sh msvc-x64 "${UVCPP_VERSION:-1.8.8}" "$RUNNER_TEMP/uvcpp"
 
       # The archive ships zlib.h (libuvcpp's public headers include it) but no
       # zlib library, and molink compresses tiles itself. Build a static zlib

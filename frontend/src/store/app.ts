@@ -508,6 +508,13 @@ export const useAppStore = create<AppState>((set, get) => {
       }))
       void saveUiPreferences(token, {
         uiMode: get().uiMode,
+        language: (() => {
+          try {
+            return window.localStorage.getItem('molink.lang') || 'zh-CN'
+          } catch {
+            return 'zh-CN'
+          }
+        })(),
         savedDevices: saved,
         recents: get().recents,
         deviceNotes: get().deviceNotes,

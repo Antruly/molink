@@ -431,11 +431,16 @@ std::shared_ptr<relay_session> p2p_manager::make_relay(
 #if MOLINK_HAVE_H3_WS
     } else if (endpoint.protocol == "http3" && endpoint.port > 0 &&
                !endpoint.host.empty()) {
-      // Skip: libuvcpp's HTTP/3 stream keeps outbound data in an unbounded
-      // queue, so a peer that stops reading can grow the local core until it
-      // is OOM-killed. The server stopped advertising this endpoint in 0.3.4;
-      // skip it here too so an older server cannot select it.
-      plog("relay endpoint http3 skipped (no outbound queue bound)");
+      // libuvcpp 1.8.8 bounds an extended-CONNECT stream's outbound queue
+      // (UV_ENOBUFS past 4 MiB), so the endpoint is safe to use again; server
+      // 0.3.5 advertises it for the relay ladder.
+      plog("relay endpoint http3 " + endpoint.host + ":" +
+           std::to_string(endpoint.port));
+      factories.push_back([endpoint, info, loop, post] {
+        return std::make_shared<h3_relay_transport>(
+            endpoint.host, endpoint.port, info.connect_id, info.token,
+            info.ca_path, loop, post);
+      });
 #endif
 #if MOLINK_HAVE_H2_WS
     } else if (endpoint.protocol == "http2" && endpoint.port > 0 &&
