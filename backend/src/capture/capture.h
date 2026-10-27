@@ -172,6 +172,10 @@ class capture_source {
   /// Short identifier: "x11-shm", "x11", "synthetic".
   virtual std::string backend() const = 0;
 
+  /// Tile format the active preset produces, for recovery paths that build
+  /// tiles by hand (a refresh must not paint colour over a monochrome preset).
+  virtual tile_format frame_format() const { return tile_format::bgra; }
+
   /// Most recent encoded frame, or nullptr before the first one.
   virtual std::shared_ptr<const captured_frame> latest() const = 0;
 
@@ -308,7 +312,16 @@ class capture_base : public capture_source {
     // otherwise it never gathers a streak. Only a real change resets it.
     if (quality_.exchange(mode) == mode) return;
     av1_qp_offset_.store(0);
+    av1_downscale_.store(false);
     av1_budget_reset_.store(true);
+    // Frames in the replay history were encoded with the previous preset
+    // (colour vs monochrome, a different QP). Replaying one into a viewer that
+    // has already switched would paint the old look back.
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      history_.clear();
+      history_bytes_ = 0;
+    }
   }
   quality_mode quality() const override { return quality_.load(); }
 
@@ -317,6 +330,10 @@ class capture_base : public capture_source {
   tile_format quality_format() const {
     return quality_profile_for(quality_.load()).format;
   }
+  /// Recovery paths that build tiles by hand (a tile refresh after a dropped
+  /// frame) must use the preset's format, or a monochrome session gets colour
+  /// patches painted over it.
+  tile_format frame_format() const override { return quality_format(); }
   compression_effort quality_effort() const {
     return quality_profile_for(quality_.load()).effort;
   }
@@ -399,6 +416,10 @@ class capture_base : public capture_source {
   bool quality_av1_grayscale() const {
     return quality_profile_for(quality_.load()).av1_grayscale;
   }
+  /// True when screen-sized AV1 rectangles should be encoded at half
+  /// resolution. The policy turns this on only after raising the QP was not
+  /// enough, and off again when the encoder is comfortably inside the budget.
+  bool quality_av1_downscale() const { return av1_downscale_.load(); }
   /// True when AV1 should carry the entire picture instead of only patches.
   bool quality_av1_full_frame() const {
     av1_encoding_settings settings;
@@ -462,6 +483,8 @@ class capture_base : public capture_source {
   /// Extra AV1 QP on top of the preset when the encoder misses the frame
   /// budget; 0 means the preset's own quality.
   std::atomic<int> av1_qp_offset_{0};
+  /// Halve large AV1 rectangles while the encoder cannot meet the budget.
+  std::atomic<bool> av1_downscale_{false};
   /// State for the "give AV1 up, send tiles" decision. Only the capture
   /// thread touches it; a preset change asks for a reset.
   av1_budget_policy av1_budget_;

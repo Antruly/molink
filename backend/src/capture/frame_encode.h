@@ -56,6 +56,9 @@ struct encode_options {
   int av1_qp = 32;
   /// Encode the rectangles as luminance-only (the turbo preset).
   bool av1_grayscale = false;
+  /// Encode screen-sized rectangles at half resolution when the host cannot
+  /// keep up (see build_av1_frame_payload); the receiver scales them back.
+  bool av1_downscale = false;
   /// Cap on the AV1-encoded area per frame, percent of the screen (100 = no
   /// cap). The uncapped rectangles stay in the tile payload. Ignored in
   /// full-frame mode, which has to encode every changed rectangle.

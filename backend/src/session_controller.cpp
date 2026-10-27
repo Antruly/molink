@@ -370,7 +370,10 @@ bool send_tile_refresh(session_transport* transport,
   header.tile_h = 128;
   encode_options encoding;
   encoding.compress = true;
-  encoding.format = tile_format::bgra;
+  // A refresh is a patch of the live picture: it has to be produced in the
+  // preset's own format, or a monochrome session gets colour patches painted
+  // over it (the old hard-coded BGRA did exactly that in turbo).
+  encoding.format = opt.capture->frame_format();
   encoding.effort = compression_effort::fast;
   std::vector<uint8_t> payload;
   // Tile refreshes are already a patch; never split them into AV1 here.

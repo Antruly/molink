@@ -12,9 +12,12 @@ bool build_av1_frame_payload(const protocol::frame_header& header,
                              std::size_t stride,
                              const std::vector<pixel_rect>& rects, int qp,
                              std::vector<uint8_t>& payload,
-                             std::string& error, bool grayscale) {
+                             std::string& error, bool grayscale,
+                             bool downscale) {
   payload.clear();
   if (bgra == nullptr || rects.empty()) return false;
+  const long long screen_area = static_cast<long long>(header.screen_w) *
+                                static_cast<long long>(header.screen_h);
   std::vector<protocol::tile_blob> tiles;
   for (const pixel_rect& rect : rects) {
     if (rect.w <= 0 || rect.h <= 0) continue;
@@ -45,13 +48,48 @@ bool build_av1_frame_payload(const protocol::frame_header& header,
       source = gray.data();
       source_stride = static_cast<std::size_t>(rect.w) * 4;
     }
+
+    // A large rectangle is the expensive one, and it is also the one whose
+    // detail the eye is least likely to hold still for: encode it at half
+    // resolution and let the decoder scale it back. A quarter of the pixels
+    // means roughly a quarter of the encode time, which is what a CPU-only
+    // host needs to keep a video moving. Small patches (text, controls) are
+    // never touched.
+    int encode_w = rect.w;
+    int encode_h = rect.h;
+    std::vector<uint8_t> scaled;
+    if (downscale && rect.w >= 128 && rect.h >= 128 &&
+        static_cast<long long>(rect.w) * rect.h * 4 >= screen_area) {
+      encode_w = rect.w / 2;
+      encode_h = rect.h / 2;
+      scaled.resize(static_cast<std::size_t>(encode_w) * encode_h * 4);
+      for (int row = 0; row < encode_h; ++row) {
+        const uint8_t* in0 =
+            source + static_cast<std::size_t>(row * 2) * source_stride;
+        const uint8_t* in1 = in0 + source_stride;
+        uint8_t* out =
+            scaled.data() + static_cast<std::size_t>(row) * encode_w * 4;
+        for (int col = 0; col < encode_w; ++col) {
+          const uint8_t* a = in0 + col * 8;
+          const uint8_t* b = in1 + col * 8;
+          for (int channel = 0; channel < 4; ++channel) {
+            out[col * 4 + channel] = static_cast<uint8_t>(
+                (a[channel] + a[channel + 4] + b[channel] + b[channel + 4] +
+                 2) / 4);
+          }
+        }
+      }
+      source = scaled.data();
+      source_stride = static_cast<std::size_t>(encode_w) * 4;
+    }
+
     protocol::tile_blob tile;
     tile.x = static_cast<uint16_t>(rect.x);
     tile.y = static_cast<uint16_t>(rect.y);
     tile.w = static_cast<uint16_t>(rect.w);
     tile.h = static_cast<uint16_t>(rect.h);
     tile.flags = protocol::kTileFlagChanged;
-    if (!encoder.encode_intra(source, source_stride, rect.w, rect.h, qp,
+    if (!encoder.encode_intra(source, source_stride, encode_w, encode_h, qp,
                               tile.data, error)) {
       return false;
     }
@@ -153,16 +191,27 @@ bool decode_tile(const protocol::tile_view& tile, protocol::tile_blob& out,
   const auto* chroma_v = static_cast<const uint8_t*>(picture.data[2]);
   const int luma_stride = picture.stride[0];
   const int chroma_stride = picture.stride[1];
-  for (int y = 0; y < height; ++y) {
-    const uint8_t* y_row = luma + static_cast<std::size_t>(y) * luma_stride;
+  const int picture_w = picture.p.w;
+  const int picture_h = picture.p.h;
+  // A rectangle the encoder halved comes back at half size and must be scaled
+  // back up to the size the tile declares; a rectangle that was only padded to
+  // the encoder's block size is cropped. Everything the page receives is
+  // therefore always the declared size.
+  const bool scale_up = picture_w < tile.w || picture_h < tile.h;
+  for (int y = 0; y < tile.h; ++y) {
+    const int sy = scale_up ? std::min(picture_h - 1, y * picture_h / tile.h)
+                            : y;
+    const uint8_t* y_row = luma + static_cast<std::size_t>(sy) * luma_stride;
     const uint8_t* u_row =
-        chroma_u + static_cast<std::size_t>(y / 2) * chroma_stride;
+        chroma_u + static_cast<std::size_t>(sy / 2) * chroma_stride;
     const uint8_t* v_row =
-        chroma_v + static_cast<std::size_t>(y / 2) * chroma_stride;
+        chroma_v + static_cast<std::size_t>(sy / 2) * chroma_stride;
     uint8_t* out_row =
         out.data.data() + static_cast<std::size_t>(y) * tile.w * 4;
-    for (int x = 0; x < width; ++x) {
-      yuv_to_bgra(y_row[x], u_row[x / 2], v_row[x / 2],
+    for (int x = 0; x < tile.w; ++x) {
+      const int sx = scale_up ? std::min(picture_w - 1, x * picture_w / tile.w)
+                              : x;
+      yuv_to_bgra(y_row[sx], u_row[sx / 2], v_row[sx / 2],
                   out_row + static_cast<std::size_t>(x) * 4);
     }
   }

@@ -384,7 +384,8 @@ bool encode_capture_frame(protocol::frame_header& header,
       std::string av1_error;
       if (build_av1_frame_payload(header, *options.av1, pixels, stride, rects,
                                   options.av1_qp, picture, av1_error,
-                                  options.av1_grayscale)) {
+                                  options.av1_grayscale,
+                                  options.av1_downscale)) {
         *av1_payload = std::move(picture);
         tiles.clear();
         if (av1_only != nullptr) *av1_only = true;
@@ -434,7 +435,8 @@ bool encode_capture_frame(protocol::frame_header& header,
       std::string av1_error;
       if (build_av1_frame_payload(header, *options.av1, pixels, stride, chosen,
                                   options.av1_qp, patch, av1_error,
-                                  options.av1_grayscale)) {
+                                  options.av1_grayscale,
+                                  options.av1_downscale)) {
         subtract_av1_rects(tiles, chosen, header.tile_w, header.tile_h);
         *av1_payload = std::move(patch);
         if (std::getenv("MOLINK_AV1_LOG") != nullptr) {

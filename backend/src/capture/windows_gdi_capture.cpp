@@ -214,6 +214,7 @@ class gdi_capture final : public capture_base {
     encoding.av1 = av1_for_frame();
     encoding.av1_qp = quality_av1_qp();
     encoding.av1_grayscale = quality_av1_grayscale();
+    encoding.av1_downscale = quality_av1_downscale();
     encoding.av1_max_area_percent = quality_av1_max_area_percent();
     encoding.av1_full_frame = quality_av1_full_frame();
     std::vector<uint8_t> av1_payload;

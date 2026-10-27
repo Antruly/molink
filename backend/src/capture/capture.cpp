@@ -280,15 +280,25 @@ void capture_base::note_build_time(uint64_t us) {
       adapt_av1_qp_offset(av1_qp_offset_.load(), average, budget_us);
   av1_qp_offset_.store(offset);
 
-  // Quality cannot be traded away forever: once the QP is at its bound and the
-  // frame is still late, the preset hands the picture back to the tile path,
-  // which is lossless and much cheaper to produce (see av1_budget_policy).
+  // Quality cannot be traded away forever: once the QP is at its bound the
+  // preset first halves the large rectangles (a quarter of the encode work,
+  // and the step that keeps a video moving without the tile path's bytes), and
+  // only when that is not enough does it hand the picture to the tiles.
   if (!av1_allowed_.load() ||
       !quality_profile_for(quality_.load()).av1_fallback_to_tiles) {
     return;
   }
-  av1_budget_.note_frame(average > budget_us, offset >= kMaxAv1QpOffset,
-                         monotonic_ms());
+  const bool over_budget = average > budget_us;
+  if (over_budget && offset >= kMaxAv1QpOffset && !av1_downscale_.load()) {
+    av1_downscale_.store(true);
+    return;  // judge the halved frames on their own
+  }
+  if (!over_budget && av1_downscale_.load() && average * 5 < budget_us * 3) {
+    av1_downscale_.store(false);  // comfortable again: restore sharpness
+  }
+  av1_budget_.note_frame(
+      over_budget,
+      offset >= kMaxAv1QpOffset && av1_downscale_.load(), monotonic_ms());
 }
 
 void capture_base::publish(std::shared_ptr<const captured_frame> frame) {

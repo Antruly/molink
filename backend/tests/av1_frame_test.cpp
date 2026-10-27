@@ -169,11 +169,80 @@ void test_rejects_non_av1() {
          "a BGRA payload is rejected by the AV1 decoder");
 }
 
+void test_downscale_roundtrip() {
+  // A screen-sized rectangle encoded at half resolution must come back at the
+  // declared size, so the page still receives full-size tiles.
+  constexpr int kSize = 256;
+  std::vector<uint8_t> screen(static_cast<std::size_t>(kSize) * kSize * 4);
+  for (int y = 0; y < kSize; ++y) {
+    for (int x = 0; x < kSize; ++x) {
+      uint8_t* px = screen.data() +
+                    (static_cast<std::size_t>(y) * kSize + x) * 4;
+      px[0] = static_cast<uint8_t>(40 + (x * 3) % 60);
+      px[1] = static_cast<uint8_t>(80 + (y * 5) % 60);
+      px[2] = 150;
+      px[3] = 255;
+    }
+  }
+  std::string error;
+  auto encoder = molink::make_av1_encoder(molink::av1_encoder_config{}, &error);
+  expect(encoder != nullptr, "AV1 encoder available: " + error);
+  if (encoder == nullptr) return;
+
+  molink::protocol::frame_header header;
+  header.frame_seq = 9;
+  header.screen_w = kSize;
+  header.screen_h = kSize;
+  header.tile_w = kSize;
+  header.tile_h = kSize;
+  const std::vector<molink::pixel_rect> rects = {{0, 0, kSize, kSize}};
+
+  std::vector<uint8_t> full;
+  std::vector<uint8_t> halved;
+  expect(molink::build_av1_frame_payload(header, *encoder, screen.data(),
+                                         kSize * 4, rects, 30, full, error),
+         "full-resolution picture builds: " + error);
+  expect(molink::build_av1_frame_payload(header, *encoder, screen.data(),
+                                         kSize * 4, rects, 30, halved, error,
+                                         /*grayscale=*/false,
+                                         /*downscale=*/true),
+         "halved picture builds: " + error);
+  expect(!halved.empty() && halved.size() < full.size(),
+         "the halved picture is smaller on the wire");
+
+  molink::protocol::parsed_frame parsed;
+  expect(molink::protocol::parse_frame_payload(halved.data(), halved.size(),
+                                               parsed, error),
+         "halved payload parses: " + error);
+  expect(parsed.tiles.size() == 1, "halved payload has one tile");
+  if (parsed.tiles.size() != 1) return;
+  expect(parsed.tiles[0].w == kSize && parsed.tiles[0].h == kSize,
+         "the tile still declares the full rectangle");
+
+  std::vector<molink::protocol::tile_blob> decoded;
+  expect(molink::decode_av1_frame_payload(halved.data(), halved.size(),
+                                          decoded, error),
+         "halved payload decodes: " + error);
+  expect(decoded.size() == 1, "decoded one tile");
+  if (decoded.size() != 1) return;
+  const auto& tile = decoded[0];
+  expect(tile.w == kSize && tile.h == kSize,
+         "the decoder restores the declared size");
+  expect(tile.data.size() == static_cast<std::size_t>(kSize) * kSize * 4,
+         "the decoded tile is full-size BGRA");
+  const colour source = mean_colour(screen.data(), kSize, kSize, kSize * 4);
+  const colour got = mean_colour(tile.data.data(), kSize, kSize, kSize * 4);
+  expect(std::abs(source.b - got.b) < 32 && std::abs(source.g - got.g) < 32 &&
+             std::abs(source.r - got.r) < 32,
+         "the scaled picture keeps the source colour");
+}
+
 }  // namespace
 
 int main() {
   test_roundtrip();
   test_rejects_non_av1();
+  test_downscale_roundtrip();
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
 }
