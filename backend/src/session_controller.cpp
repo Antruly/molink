@@ -1247,7 +1247,16 @@ void session_controller::on_text(const std::string& text) {
       send_error(transport.get(), "bad_fps", "fps must be a number");
       return;
     }
+    const quality_mode previous = options_.capture->quality();
     if (!mode_name.empty()) options_.capture->set_quality(mode);
+    // A preset change is not just a knob: turbo encodes gray8, and the other
+    // presets switch between BGRA/16-bit colour. Tiles the client already
+    // holds keep the old format until they happen to change, so switching
+    // turbo -> colour used to leave most of the screen monochrome until every
+    // tile was touched. Push one full frame immediately after any change.
+    if (options_.capture->quality() != previous) {
+      options_.capture->request_keyframe();
+    }
     int fps = 0;
     if (fps_it != j.end()) {
       fps = apply_fps(static_cast<int>(fps_it->get<double>()));

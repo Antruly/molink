@@ -725,10 +725,24 @@ export function SessionView({
 
   // Push the active preset and the average rate after a short settle delay.
   // Both are host-global, like the old capture-fps message.
+  const lastPushedQuality = useRef<string | null>(null)
   useEffect(() => {
-    if (tab.phase !== 'live') return
+    if (tab.phase !== 'live') {
+      lastPushedQuality.current = null
+      return
+    }
     const timer = window.setTimeout(() => {
-      connection()?.setQuality(resolvedMode, targetFps)
+      const conn = connection()
+      if (!conn) return
+      conn.setQuality(resolvedMode, targetFps)
+      // A preset change can change the tile format (turbo is gray8); without
+      // a full frame the host only repaints tiles that happen to change, so
+      // the rest of the picture stays in the previous format.
+      const key = `${tab.id}:${resolvedMode}`
+      if (lastPushedQuality.current !== key) {
+        lastPushedQuality.current = key
+        conn.requestKeyframe()
+      }
     }, 400)
     return () => window.clearTimeout(timer)
   }, [tab.phase, tab.id, connection, resolvedMode, targetFps])
