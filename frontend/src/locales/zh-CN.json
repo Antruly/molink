@@ -255,11 +255,7 @@
     "encryptLanHint": "默认关闭，修改后需要重启 moLink 才能切换监听模式。开启后局域网连接使用自签 HTTPS/WSS，对端需要接受证书。",
     "keyframeInterval": "关键帧间隔",
     "keyframeOff": "关闭（默认，保留 120 秒安全刷新）",
-    "keyframeIntervalHint": "设为 1 秒会每秒强制发送整屏关键帧，丢帧后立刻恢复，实时性最好但带宽最高；2–5 秒是较均衡的调试值。默认关闭。",
-    "bandwidthLimit": "带宽上限",
-    "bandwidthLimitHint": "单个会话每秒最多发送多少数据。超出时先软化大面积画面、再放慢采集，把速率压回上限以内；0 表示不限制。默认 2 MB/s。",
-    "bandwidthUnlimited": "不限制",
-    "megabytesValue": "{{count}} MB/s"
+    "keyframeIntervalHint": "设为 1 秒会每秒强制发送整屏关键帧，丢帧后立刻恢复，实时性最好但带宽最高；2–5 秒是较均衡的调试值。默认关闭。"
   },
   "session": {
     "connecting": "连接中…",

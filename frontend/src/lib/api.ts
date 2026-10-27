@@ -314,8 +314,6 @@ export interface Av1Settings {
   max_area_percent: number
   threads: number
   keyframe_interval_seconds: number
-  /// Per-session bandwidth ceiling in MB/s; 0 disables it.
-  bandwidth_mbps: number
   devices: Av1Device[]
   active_quality?: string
   effective?: Av1Effective
@@ -330,7 +328,6 @@ export interface Av1SettingsUpdate {
   max_area_percent?: number
   threads?: number
   keyframe_interval_seconds?: number
-  bandwidth_mbps?: number
 }
 
 export function fetchAv1Settings(token: string): Promise<Av1Settings> {
@@ -362,9 +359,6 @@ export function postAv1Settings(
       'keyframe_interval_seconds',
       String(update.keyframe_interval_seconds),
     )
-  }
-  if (update.bandwidth_mbps !== undefined) {
-    query.set('bandwidth_mbps', String(update.bandwidth_mbps))
   }
   return request<Av1Settings>(
     `/api/encoding?${query.toString()}`,

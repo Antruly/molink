@@ -417,7 +417,6 @@ int main(int argc, char** argv) {
     av1.threads = prefs.av1_threads;
     av1.full_frame = prefs.av1_full_frame;
     capture->set_av1_settings(av1);
-    capture->set_bytes_budget(prefs.bandwidth_mbps * 1024 * 1024);
     capture->set_keyframe_interval_ms(
         prefs.keyframe_interval_seconds > 0
             ? prefs.keyframe_interval_seconds * 1000

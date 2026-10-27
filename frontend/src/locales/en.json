@@ -255,11 +255,7 @@
     "encryptLanHint": "Off by default; restart moLink after changing it. When on, LAN connections use a self-signed HTTPS/WSS certificate the peer must accept.",
     "keyframeInterval": "Keyframe interval",
     "keyframeOff": "Off (default; 120 s safety refresh stays)",
-    "keyframeIntervalHint": "1 s forces a full keyframe every second: the fastest recovery after loss, at the highest bandwidth. 2–5 s is a balanced debugging value. Off by default.",
-    "bandwidthLimit": "Bandwidth limit",
-    "bandwidthLimitHint": "Most bytes per second one session may send. Above it the capture first softens large pictures, then slows down so the rate settles just under the limit. 0 disables it. Default 2 MB/s.",
-    "bandwidthUnlimited": "Unlimited",
-    "megabytesValue": "{{count}} MB/s"
+    "keyframeIntervalHint": "1 s forces a full keyframe every second: the fastest recovery after loss, at the highest bandwidth. 2–5 s is a balanced debugging value. Off by default."
   },
   "session": {
     "connecting": "Connecting…",
