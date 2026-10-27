@@ -242,6 +242,11 @@ class capture_source {
     return false;
   }
 
+  /// A viewer reported that it cannot keep up (dropped frames or a painted
+  /// rate far below the request). The capture then sends less detail instead
+  /// of waiting for the viewer's own frame-rate controller to give up.
+  virtual void set_viewer_pressure(bool pressure) { (void)pressure; }
+
   /// Monitors this source can capture. Empty means the source is not ready or
   /// does not support selection (clients fall back to the whole screen).
   virtual std::vector<display_info> displays() const { return {}; }
@@ -428,6 +433,13 @@ class capture_base : public capture_source {
   /// resolution. The policy turns this on only after raising the QP was not
   /// enough, and off again when the encoder is comfortably inside the budget.
   bool quality_av1_downscale() const { return av1_downscale_.load(); }
+  /// True when large tile strips should be box-averaged in place: the viewer
+  /// is behind and this is the tile path's only lever on bytes per frame.
+  bool quality_tile_downscale() const { return tile_downscale_.load(); }
+
+  void set_viewer_pressure(bool pressure) override {
+    viewer_pressure_.store(pressure);
+  }
   /// True when AV1 should carry the entire picture instead of only patches.
   bool quality_av1_full_frame() const {
     av1_encoding_settings settings;
@@ -494,6 +506,10 @@ class capture_base : public capture_source {
   std::atomic<int> av1_qp_offset_{0};
   /// Halve large AV1 rectangles while the encoder cannot meet the budget.
   std::atomic<bool> av1_downscale_{false};
+  /// A viewer is behind; box-average large tiles and stop lifting the AV1
+  /// downscale while it lasts.
+  std::atomic<bool> viewer_pressure_{false};
+  std::atomic<bool> tile_downscale_{false};
   /// State for the "give AV1 up, send tiles" decision. Only the capture
   /// thread touches it; a preset change asks for a reset.
   av1_budget_policy av1_budget_;

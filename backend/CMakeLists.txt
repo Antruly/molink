@@ -541,6 +541,15 @@ set_target_properties(molink-core-frame-budget-test PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 add_test(NAME frame_budget COMMAND molink-core-frame-budget-test)
 
+# Box averaging for large tile strips: pure pixel arithmetic.
+add_executable(molink-core-tile-scale-test
+  tests/tile_scale_test.cpp
+)
+target_include_directories(molink-core-tile-scale-test PRIVATE src)
+set_target_properties(molink-core-tile-scale-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME tile_scale COMMAND molink-core-tile-scale-test)
+
 # The relay/ICE split is pure routing: no libuvcpp and no sockets.
 add_executable(molink-core-switchable-test
   tests/switchable_transport_test.cpp

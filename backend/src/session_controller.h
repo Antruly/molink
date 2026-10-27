@@ -163,6 +163,10 @@ class session_supervisor {
   /// Capture-stats reporting: previous sample, to derive the achieved rate.
   std::chrono::steady_clock::time_point last_capture_at_{};
   uint64_t last_capture_frames_ = 0;
+  /// Consecutive one-second samples with a viewer behind; two are needed
+  /// before the capture is told to cut detail, so one hiccup cannot soften
+  /// the picture.
+  int viewer_behind_streak_ = 0;
 };
 
 }  // namespace molink

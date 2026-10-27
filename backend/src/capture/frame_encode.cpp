@@ -12,6 +12,7 @@
 #include "capture/av1_encoder.h"
 #include "capture/av1_frame.h"
 #include "capture/dirty_rects.h"
+#include "capture/tile_scale.h"
 #include "compression.h"
 
 namespace molink {
@@ -442,6 +443,27 @@ bool encode_capture_frame(protocol::frame_header& header,
         if (std::getenv("MOLINK_AV1_LOG") != nullptr) {
           std::fprintf(stderr, "av1: %zu rect(s), %zu bytes, %zu base tiles\n",
                        chosen.size(), av1_payload->size(), tiles.size());
+        }
+      }
+    }
+  }
+
+  // A viewer that cannot keep up needs fewer bytes, not just a lower frame
+  // rate: box-average a nearly full-screen change in place. The tiles keep
+  // their size and format, so the receiver needs no changes at all.
+  if (options.tile_downscale && !tiles.empty()) {
+    std::size_t changed = 0;
+    for (const auto& tile : tiles) {
+      changed += static_cast<std::size_t>(tile.w) * tile.h;
+    }
+    const long long screen = static_cast<long long>(header.screen_w) *
+                             static_cast<long long>(header.screen_h);
+    if (screen > 0 &&
+        changed * 100 >= static_cast<std::size_t>(screen) * 60) {
+      for (auto& tile : tiles) {
+        if (tile.data.size() ==
+            static_cast<std::size_t>(tile.w) * tile.h * 4) {
+          downsample_box2_bgra(tile.data, tile.w, tile.h);
         }
       }
     }

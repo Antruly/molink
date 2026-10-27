@@ -55,6 +55,8 @@ export interface Welcome {
   }
   /** Reconnect credential; reused instead of spending another code use. */
   session_token?: string
+  /** The host accepts per-second viewer health reports. */
+  viewer_stats?: boolean
   /** e2e: direct TLS to the host; relay: directory WSS only; none: plain. */
   security?: 'e2e' | 'relay' | 'none' | string
   /** Host certificate fingerprint advertised for pinning. */
@@ -766,6 +768,21 @@ export class MolinkClient {
   /** Asks for the next capture to be a full keyframe (resync after a loss). */
   requestKeyframe(): void {
     this.sendJson({ type: 'request-keyframe' })
+  }
+
+  /**
+   * Reports what this viewer's own pipeline achieved in the last second: the
+   * host uses it to send less detail when the client, not its encoder, is the
+   * limit. Ignored by hosts that did not advertise `viewer_stats`.
+   */
+  sendViewerStats(fps: number, dropped: number, rxRate: number): void {
+    if (!this.isLive()) return
+    this.sendJson({
+      type: 'viewer',
+      fps: Math.max(0, Math.round(fps)),
+      dropped: Math.max(0, Math.round(dropped)),
+      rx: Math.max(0, Math.round(rxRate)),
+    })
   }
 
   /** Asks the core to change its capture rate (global for this host). */

@@ -667,6 +667,9 @@ void send_welcome(session_transport* transport, const session_info& session,
   j["protocol"] = protocol::kProtocolVersion;
   j["service"] = MOLINK_CORE_SERVICE;
   j["version"] = opt.version;
+  // The viewer may report its own paint health; the host uses it to send less
+  // detail when the client, not the encoder, is the limit.
+  j["viewer_stats"] = true;
   // `transport` stays the wire protocol for older clients; `transport_path`
   // is the orthogonal axis (direct / p2p / relay), so a relayed QUIC session
   // reads as path=relay, protocol=quic.
@@ -1280,6 +1283,23 @@ void session_controller::on_text(const std::string& text) {
     options_.capture->set_target_fps(fps);
     return fps;
   };
+
+  if (type == "viewer") {
+    // A client-side health sample: how many frames it actually painted, how
+    // many it dropped, and how many bytes it received in the last second. The
+    // supervisor turns this into back-pressure for the capture.
+    double fps = 0;
+    double dropped = 0;
+    double rx = 0;
+    number_field(j, "fps", fps);
+    number_field(j, "dropped", dropped);
+    number_field(j, "rx", rx);
+    session->viewer_paint_fps = fps < 0 ? 0 : fps;
+    session->viewer_dropped = dropped < 0 ? 0 : static_cast<int>(dropped);
+    session->viewer_rx_rate = rx < 0 ? 0 : rx;
+    session->viewer_stats_ms = now_ms();
+    return;
+  }
 
   if (type == "capture-fps") {
     if (!options_.capture) {
@@ -1956,6 +1976,37 @@ void session_supervisor::run() {
       }
       options_.capture->set_av1_allowed(allow);
       if (!live) options_.capture->set_active(false);
+    }
+
+    // Back-pressure from the viewers. A client that keeps dropping frames, or
+    // paints far below the rate it asked for, is the limit: no amount of host
+    // CPU makes its pipeline faster, so the capture sends less detail instead
+    // of letting the client's own controller collapse to the minimum rate.
+    if (options_.capture) {
+      const uint64_t now_ms = static_cast<uint64_t>(
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+              std::chrono::steady_clock::now().time_since_epoch())
+              .count());
+      const int target = options_.capture->target_fps();
+      bool behind = false;
+      for (const session_info& peer : registry_->snapshot()) {
+        if (!peer.authenticated || !peer.has_image) continue;
+        if (peer.viewer_stats_ms == 0 ||
+            now_ms - peer.viewer_stats_ms > 3000) {
+          continue;
+        }
+        if (peer.viewer_dropped >= 3) behind = true;
+        if (target > 0 && peer.viewer_paint_fps > 0 &&
+            peer.viewer_paint_fps < target * 0.6) {
+          behind = true;
+        }
+      }
+      if (behind) {
+        ++viewer_behind_streak_;
+      } else {
+        viewer_behind_streak_ = 0;
+      }
+      options_.capture->set_viewer_pressure(viewer_behind_streak_ >= 2);
     }
 
     // Once a second, report the rate the capture thread achieved and how long

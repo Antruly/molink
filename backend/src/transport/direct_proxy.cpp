@@ -841,7 +841,13 @@ class direct_proxy final : public std::enable_shared_from_this<direct_proxy> {
     // desktop). Sending it raw over the local WebSocket blocks the app loop
     // and forces the page to handle a huge message; deflate it on the worker
     // instead. The page already inflates deflate_bgra asynchronously.
-    if (compression_available() && !tiles.empty()) {
+    // Tiny patches are cheaper to send raw: deflating a few kilobytes costs
+    // more than it saves, and the page paints either form the same way.
+    std::size_t raw_total = 0;
+    for (const auto& tile : tiles) raw_total += tile.data.size();
+    constexpr std::size_t kMinDeflateBytes = 96 * 1024;
+    if (compression_available() && !tiles.empty() &&
+        raw_total >= kMinDeflateBytes) {
       std::vector<std::vector<uint8_t>> packed(tiles.size());
       bool compressed = true;
       std::string deflate_error;

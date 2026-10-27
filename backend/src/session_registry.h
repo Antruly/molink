@@ -28,6 +28,12 @@ struct session_info {
   /// Last time (monotonic ms) this session received a sequence map, so a
   /// polling client is not flooded while the screen is static.
   uint64_t last_seq_ms = 0;
+  /// What the viewer last reported about its own pipeline (see the "viewer"
+  /// control message). Freshness is tracked so a silent viewer stops counting.
+  double viewer_paint_fps = 0;
+  int viewer_dropped = 0;
+  double viewer_rx_rate = 0;
+  uint64_t viewer_stats_ms = 0;
   /// Identity the client reported in hello; lets a shared chat label who sent
   /// each message when several viewers are connected.
   std::string client_name;

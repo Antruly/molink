@@ -93,6 +93,9 @@ export class SessionConnection {
   /// arrived. Only the core sees the host's packets before transcoding.
   private wireRate: number | null = null
   private wireRateAt = 0
+  /// Host accepts per-second viewer health reports (welcome.viewer_stats).
+  private viewerStats = false
+  private viewerTimer: number | null = null
   private clipboardEnabled = true
   /// This viewer's machine name/ID, sent in hello so the shared chat can
   /// attribute its messages. Empty for a plain browser.
@@ -176,6 +179,8 @@ export class SessionConnection {
         })
       },
       onWelcome: (welcome) => {
+        this.viewerStats = welcome.viewer_stats === true
+        this.startViewerStats()
         // The computer name is the user-facing identity. The device ID is a
         // phase-2 server registration concept and is only a fallback.
         const label = welcome.device_name || welcome.device_id
@@ -345,6 +350,23 @@ export class SessionConnection {
     this.fileSync?.reset()
   }
 
+  /// Once a second, tell the host how this viewer is actually doing. The host
+  /// halves large pictures when the client cannot consume full detail, which
+  /// is what stops the 5 fps / 13 MB/s oscillation on a slow host.
+  private startViewerStats(): void {
+    if (!this.viewerStats || this.viewerTimer !== null) return
+    this.viewerTimer = window.setInterval(() => {
+      const stats = this.snapshot()
+      this.client.sendViewerStats(stats.fps, stats.dropped, stats.bytesPerSec)
+    }, 1000)
+  }
+
+  private stopViewerStats(): void {
+    if (this.viewerTimer === null) return
+    window.clearInterval(this.viewerTimer)
+    this.viewerTimer = null
+  }
+
   private snapshot(now = performance.now()): Stats {
     while (this.frameTimes.length > 0 && now - this.frameTimes[0]! > 1000) {
       this.frameTimes.shift()
@@ -398,6 +420,7 @@ export class SessionConnection {
     this.latency = null
     this.wireRate = null
     this.wireRateAt = 0
+    this.stopViewerStats()
     this.stopAv1Indicator()
     forgetSessionScreenBuffer(this.sessionKey)
     this.frames = 0
@@ -421,6 +444,7 @@ export class SessionConnection {
   }
 
   disconnect(): void {
+    this.stopViewerStats()
     this.stopAv1Indicator()
     this.stopBackgroundPull()
     this.stopFileSync()

@@ -311,12 +311,21 @@ void capture_base::note_build_time(uint64_t us) {
       !quality_profile_for(quality_.load()).av1_fallback_to_tiles) {
     return;
   }
+  // A viewer that reports dropped frames, or a painted rate far below the
+  // request, cannot consume full detail even when the encoder is fast. Halve
+  // the large rectangles on both paths while it lasts: the tile path has no
+  // other lever on bytes per frame.
+  const bool pressure = viewer_pressure_.load();
+  tile_downscale_.store(pressure);
+  if (pressure && !av1_downscale_.load()) av1_downscale_.store(true);
+
   const bool over_budget = average > budget_us;
   if (over_budget && offset >= kMaxAv1QpOffset && !av1_downscale_.load()) {
     av1_downscale_.store(true);
     return;  // judge the halved frames on their own
   }
-  if (!over_budget && av1_downscale_.load() && average * 5 < budget_us * 3) {
+  if (!over_budget && !pressure && av1_downscale_.load() &&
+      average * 5 < budget_us * 3) {
     av1_downscale_.store(false);  // comfortable again: restore sharpness
   }
   av1_budget_.note_frame(
