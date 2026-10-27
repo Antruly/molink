@@ -59,7 +59,6 @@ import { TileCanvas, type DisplayMode } from './TileCanvas'
 import { ChatPanel } from './ChatPanel'
 import { FileTransferPanel } from './FileTransferPanel'
 import type { ChatMessage } from '../lib/client'
-import { PcmPlayer } from '../lib/audio'
 import { VoiceCall } from '../lib/voice'
 
 function formatBandwidth(bytesPerSecond: number): string {
@@ -256,9 +255,12 @@ export function SessionView({
   const [chatUnread, setChatUnread] = useState(0)
   const chatOpenRef = useRef(false)
   const [filesOpen, setFilesOpen] = useState(false)
-  const [audioOn, setAudioOn] = useState(false)
+  // The player lives in the connection, so a background tab keeps playing and
+  // the toggle reflects that when the tab is shown again.
+  const [audioOn, setAudioOn] = useState(
+    () => sessionConnection(tab.id)?.audioActive() ?? false,
+  )
   const [audioVolume, setAudioVolume] = useState(0.8)
-  const playerRef = useRef<PcmPlayer | null>(null)
   const audioAvailable = welcome?.audio === true && welcome.audio_format != null
   const [callPhase, setCallPhase] = useState<'idle' | 'ringing' | 'active'>(
     'idle',
@@ -573,8 +575,6 @@ export function SessionView({
           [...previous, event.message].slice(-200),
         )
         if (!chatOpenRef.current) setChatUnread((count) => count + 1)
-      } else if (event.kind === 'audio') {
-        playerRef.current?.push(event.data)
       } else if (event.kind === 'voice') {
         voiceRef.current?.pushRemote(event.data)
       } else if (event.kind === 'call') {
@@ -589,14 +589,6 @@ export function SessionView({
   useEffect(() => {
     connection()?.setFilePanelOpen(filesOpen)
   }, [connection, filesOpen])
-
-  useEffect(() => {
-    return () => {
-      playerRef.current?.stop()
-      playerRef.current = null
-      sessionConnection(tab.id)?.stopAudio()
-    }
-  }, [tab.id])
 
   useEffect(() => {
     if (callPhase !== 'active' || callStartedAt === null) return
@@ -1087,30 +1079,22 @@ export function SessionView({
   }
 
   const toggleAudio = () => {
+    const conn = connection()
+    if (!conn) return
     if (audioOn) {
-      playerRef.current?.stop()
-      playerRef.current = null
+      conn.stopAudio()
       setAudioOn(false)
-      connection()?.stopAudio()
       return
     }
-    const format = welcome?.audio_format
-    if (!format) return
-    const player = new PcmPlayer(
-      format.sample_rate || 48000,
-      format.channels || 2,
-      audioVolume,
-    )
-    void player.start().then(() => {
-      playerRef.current = player
-      setAudioOn(true)
-      connection()?.startAudio()
-    })
+    if (!welcome?.audio_format) return
+    conn.setAudioVolume(audioVolume)
+    conn.startAudio()
+    setAudioOn(conn.audioActive())
   }
 
   const changeAudioVolume = (value: number) => {
     setAudioVolume(value)
-    playerRef.current?.setVolume(value)
+    connection()?.setAudioVolume(value)
   }
 
   const toggleFullscreen = useCallback(() => {

@@ -8,6 +8,7 @@ import {
   type Welcome,
 } from './client'
 import type { Frame } from './protocol'
+import { PcmPlayer } from './audio'
 import { ClipboardFileSync } from './clipboard-sync'
 import {
   applyFrameToSession,
@@ -95,6 +96,11 @@ export class SessionConnection {
   /// arrived. Only the core sees the host's packets before transcoding.
   private wireRate: number | null = null
   private wireRateAt = 0
+  /// Audio playback lives with the connection so a background tab keeps
+  /// playing; created from the format the welcome announced.
+  private player: PcmPlayer | null = null
+  private audioVolume = 0.8
+  private audioFormat: { sampleRate: number; channels: number } | null = null
   /// Host accepts per-second viewer health reports (welcome.viewer_stats).
   private viewerStats = false
   private viewerTimer: number | null = null
@@ -181,6 +187,14 @@ export class SessionConnection {
         })
       },
       onWelcome: (welcome) => {
+        const format = welcome.audio_format
+        this.audioFormat =
+          format !== undefined && format !== null
+            ? {
+                sampleRate: format.sample_rate || 48000,
+                channels: format.channels || 2,
+              }
+            : null
         this.viewerStats = welcome.viewer_stats === true
         this.startViewerStats()
         // The computer name is the user-facing identity. The device ID is a
@@ -282,6 +296,7 @@ export class SessionConnection {
       },
       onSessionEvent: (event: SessionEvent) => {
         if (event.kind === 'file') this.fileSync?.handleMessage(event.message)
+        if (event.kind === 'audio') this.player?.push(event.data)
         for (const listener of this.listeners) listener(event)
       },
     })
@@ -448,6 +463,7 @@ export class SessionConnection {
   }
 
   disconnect(): void {
+    this.stopAudio()
     this.stopViewerStats()
     this.stopAv1Indicator()
     this.stopBackgroundPull()
@@ -572,12 +588,37 @@ export class SessionConnection {
     this.client.requestClipboardFiles()
   }
 
+  /// Audio playback belongs to the connection, not to the view: switching to
+  /// another tab unmounts the view, and it used to take the player with it,
+  /// so the sound stopped and the toggle came back off. Keeping it here lets a
+  /// background tab keep playing.
   startAudio(): void {
+    if (this.player === null) {
+      const format = this.audioFormat
+      if (format === null) return
+      const player = new PcmPlayer(format.sampleRate, format.channels,
+                                   this.audioVolume)
+      this.player = player
+      void player.start()
+    }
     this.client.startAudio()
   }
 
   stopAudio(): void {
+    if (this.player !== null) {
+      this.player.stop()
+      this.player = null
+    }
     this.client.stopAudio()
+  }
+
+  audioActive(): boolean {
+    return this.player !== null
+  }
+
+  setAudioVolume(value: number): void {
+    this.audioVolume = Math.min(1, Math.max(0, value))
+    this.player?.setVolume(this.audioVolume)
   }
 
   inviteCall(): void {
