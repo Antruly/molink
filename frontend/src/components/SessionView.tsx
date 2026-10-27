@@ -724,6 +724,15 @@ export function SessionView({
     setTargetFps((current) => (current === next ? current : next))
   }, [frameRate, qualityMode, resolvedMode])
 
+  // The preset is host-global: one capture serves every viewer. When another
+  // viewer picks one, follow it — otherwise this tab's next push asserts its
+  // own choice right back and the host re-encodes for whoever spoke last.
+  useEffect(() => {
+    const shared = tab.sharedQuality?.mode
+    if (!shared || shared === qualityMode || shared === 'auto') return
+    setQualityMode(shared as QualityMode)
+  }, [tab.sharedQuality, qualityMode, setQualityMode])
+
   // Push the active preset and the average rate after a short settle delay.
   // Both are host-global, like the old capture-fps message.
   const lastPushedQuality = useRef<string | null>(null)

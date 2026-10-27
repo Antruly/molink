@@ -51,6 +51,8 @@ export interface TabPatch {
   /// Host-reported capture rate and encoder build time (EMA).
   hostFps?: number
   hostBuildMs?: number
+  /// Preset another viewer selected on the shared host.
+  sharedQuality?: { mode: string }
   notice?: string | null
   approvalDeadline?: number | null
   retryAt?: number | null
@@ -243,6 +245,8 @@ export class SessionConnection {
           this.sink.onPatch({ av1Active: false })
         }, 10000)
       },
+      onQualityShared: (mode) =>
+        this.sink.onPatch({ sharedQuality: { mode } }),
       onCursor: (cursorShape) => this.sink.onPatch({ cursorShape }),
       onCursorPosition: (cursorPosition) =>
         this.sink.onPatch({ cursorPosition }),

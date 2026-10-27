@@ -173,6 +173,9 @@ export interface ClientHandlers {
     fullFrame: boolean
     wireRate: number
   }) => void
+  /// Another viewer changed the host-global quality preset; this tab must
+  /// follow it instead of asserting its own choice.
+  onQualityShared?: (mode: string) => void
   onCursor: (shape: CursorShape) => void
   onCursorPosition: (position: CursorPosition) => void
   onClipboard: (text: string) => void
@@ -1055,6 +1058,11 @@ export class MolinkClient {
           fps: typeof message.fps === 'number' ? message.fps : 0,
           buildMs: typeof message.build_ms === 'number' ? message.build_ms : 0,
         })
+        break
+      case 'quality':
+        if (typeof message.mode === 'string') {
+          this.handlers.onQualityShared?.(message.mode)
+        }
         break
       case 'codec':
         if (message.av1 === true) {

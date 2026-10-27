@@ -107,6 +107,8 @@ export interface SessionTab {
   /// slow encoder.
   hostFps?: number
   hostBuildMs?: number
+  /// Preset another viewer selected on the shared host; this tab follows it.
+  sharedQuality?: { mode: string }
   notice: string | null
   /// When the host must approve this session: epoch ms of the 60 s deadline.
   approvalDeadline: number | null

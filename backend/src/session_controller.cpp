@@ -1349,6 +1349,22 @@ void session_controller::on_text(const std::string& text) {
     // tile was touched. Push one full frame immediately after any change.
     if (options_.capture->quality() != previous) {
       options_.capture->request_keyframe();
+      // The preset is global to the host. Every other viewer has to see the
+      // same one, otherwise its UI keeps asserting its own choice and the
+      // host ends up re-encoding for whoever pushed last.
+      uvcpp_json shared;
+      shared["type"] = "quality";
+      shared["mode"] = quality_mode_name(options_.capture->quality());
+      shared["format"] = tile_format_name(
+          quality_profile_for(options_.capture->quality()).format);
+      shared["scope"] = "global";
+      for (const session_info& peer : registry_->snapshot()) {
+        if (peer.id == session->id || !peer.authenticated ||
+            !peer.transport) {
+          continue;
+        }
+        send_json(peer.transport.get(), shared);
+      }
     }
     int fps = 0;
     if (fps_it != j.end()) {
