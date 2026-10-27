@@ -1148,12 +1148,21 @@ void session_controller::on_text(const std::string& text) {
                                  !is_loopback_peer(peer_ip);
     // `session` is the reconnect credential from a previous welcome. It is a
     // session token, not a code: checking it through valid_session() keeps it
-    // from bypassing the temporary code's usage budget. While the host is
-    // locked it is ignored, so the lock still demands the code again.
+    // from bypassing the temporary code's usage budget.
+    //
+    // While the host is locked the token is still honoured for a grace period.
+    // A fresh token is a stronger credential than the code itself, and a
+    // single-use code is already spent: refusing a viewer that lost the link a
+    // minute ago left it with nothing to present, and every retry counted as a
+    // failed code until the address was locked out.
+    constexpr uint64_t kLockedResumeGraceMs = 10ull * 60ull * 1000ull;
     const std::string resume = string_field(j, "session");
     bool authenticated = false;
-    if (!locked_for_peer && !resume.empty() && options_.auth &&
-        options_.auth->valid_session(resume)) {
+    if (!resume.empty() && options_.auth &&
+        (locked_for_peer
+             ? options_.auth->valid_recent_session(resume,
+                                                   kLockedResumeGraceMs)
+             : options_.auth->valid_session(resume))) {
       authenticated = true;
       resume_token_ = resume;
     } else if (options_.auth && options_.auth->authenticate(

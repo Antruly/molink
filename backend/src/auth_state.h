@@ -41,6 +41,11 @@ class auth_state {
   bool authenticate(const std::string& supplied, bool consume);
 
   bool valid_session(const std::string& token) const;
+  /// True when `token` is a session token issued no more than `max_age_ms` ago.
+  /// A locked host uses this to let a just-disconnected viewer back in without
+  /// demanding a code that a single-use code has already spent.
+  bool valid_recent_session(const std::string& token,
+                            uint64_t max_age_ms) const;
   std::string create_session();
 
   /// Stable token handed to the local shell through /api/device.
@@ -91,7 +96,8 @@ class auth_state {
   mutable std::mutex mutex_;
   app_settings settings_;
   std::string local_session_;
-  std::deque<std::string> remote_sessions_;
+  /// Session tokens and when they were issued (monotonic ms).
+  std::deque<std::pair<std::string, uint64_t>> remote_sessions_;
 };
 
 }  // namespace molink

@@ -1,4 +1,5 @@
 #include "auth_state.h"
+#include <chrono>
 
 #include <algorithm>
 #include <cctype>
@@ -122,8 +123,26 @@ bool auth_state::valid_session(const std::string& token) const {
 bool auth_state::valid_session_locked(const std::string& token) const {
   if (token.empty()) return false;
   unsigned diff = constant_time_equals(token, local_session_) ? 0u : 1u;
-  for (const std::string& session : remote_sessions_) {
-    if (constant_time_equals(token, session)) diff = 0;
+  for (const auto& session : remote_sessions_) {
+    if (constant_time_equals(token, session.first)) diff = 0;
+  }
+  return diff == 0;
+}
+
+bool auth_state::valid_recent_session(const std::string& token,
+                                      uint64_t max_age_ms) const {
+  if (token.empty()) return false;
+  const uint64_t now = static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+  std::lock_guard<std::mutex> lock(mutex_);
+  unsigned diff = 1u;
+  for (const auto& session : remote_sessions_) {
+    if (constant_time_equals(token, session.first) &&
+        now >= session.second && now - session.second <= max_age_ms) {
+      diff = 0;
+    }
   }
   return diff == 0;
 }
@@ -131,7 +150,11 @@ bool auth_state::valid_session_locked(const std::string& token) const {
 std::string auth_state::create_session() {
   std::lock_guard<std::mutex> lock(mutex_);
   std::string token = generate_token();
-  remote_sessions_.push_back(token);
+  const uint64_t now = static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+  remote_sessions_.emplace_back(token, now);
   while (remote_sessions_.size() > kRemoteSessionLimit) {
     remote_sessions_.pop_front();
   }
