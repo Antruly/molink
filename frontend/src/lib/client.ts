@@ -4,6 +4,7 @@ import {
   PacketType,
   ProtocolError,
   PROTOCOL_VERSION,
+  Codec,
   codecBytesPerPixel,
   decodePacket,
   encodePacket,
@@ -312,6 +313,10 @@ export class MolinkClient {
   private pendingFrameAt = 0
   private latestFrameSeq = -1
   private lastKeyframeRequest = 0
+  /// Preset this tab pushed; used to notice a host-global preset changed by
+  /// another viewer while we keep asking for a colour format.
+  private pushedQuality: { mode: string; fps?: number } | null = null
+  private lastQualityAssertAt = 0
   /// Last keyframe request made because no picture exists yet.
   private lastKeyframeRecovery = 0
   /// Last tile-clock-driven refresh request, to keep it to one per second.
@@ -759,6 +764,8 @@ export class MolinkClient {
    * three concrete modes are ever sent.
    */
   setQuality(mode: string, fps?: number): void {
+    this.pushedQuality = { mode, fps }
+    this.lastQualityAssertAt = 0
     if (!this.isLive()) return
     this.sendJson({ type: 'quality', mode, ...(fps ? { fps } : {}) })
   }
@@ -1107,6 +1114,7 @@ export class MolinkClient {
       this.missedFrameResponses = 0
       const frame = parseFramePayload(packet.payload)
       this.noteFrameClock(packet.tsUs)
+      this.reconcileQualityPreset(frame)
       if ((packet.flags & PacketFlag.tileRefresh) !== 0) {
         if (!this.hasImage) {
           this.requestKeyframeThrottled()
@@ -1174,6 +1182,29 @@ export class MolinkClient {
         error instanceof ProtocolError ? error.message : 'could not decode frame'
       this.handlers.onError?.(message)
     }
+  }
+
+  /**
+   * The host's capture preset is global across sessions, so another viewer can
+   * switch it to turbo (gray8) while this tab asked for a colour preset. The
+   * tiles that arrive then are monochrome and would stay that way until their
+   * pixels change. Re-assert this tab's preset and pull one full frame.
+   */
+  private reconcileQualityPreset(frame: Frame): void {
+    const pushed = this.pushedQuality
+    if (!pushed || pushed.mode === 'turbo') return
+    if (frame.codec !== Codec.gray8 && frame.codec !== Codec.deflateGray8) {
+      return
+    }
+    const now = Date.now()
+    if (now - this.lastQualityAssertAt < 2000) return
+    this.lastQualityAssertAt = now
+    this.sendJson({
+      type: 'quality',
+      mode: pushed.mode,
+      ...(pushed.fps ? { fps: pushed.fps } : {}),
+    })
+    this.requestKeyframe()
   }
 
   private async deliverCompressed(
