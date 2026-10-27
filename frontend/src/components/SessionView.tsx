@@ -727,10 +727,18 @@ export function SessionView({
   // The preset is host-global: one capture serves every viewer. When another
   // viewer picks one, follow it — otherwise this tab's next push asserts its
   // own choice right back and the host re-encodes for whoever spoke last.
+  //
+  // Only a *new* notice is adopted. The remembered notice stays in the tab
+  // state, and without this guard every local change was compared with that
+  // stale value and immediately reverted, which left the preset pinned to
+  // whatever the last broadcast said.
+  const lastSharedQuality = useRef<string | null>(null)
   useEffect(() => {
     const shared = tab.sharedQuality?.mode
-    if (!shared || shared === qualityMode || shared === 'auto') return
-    setQualityMode(shared as QualityMode)
+    if (!shared || shared === 'auto') return
+    if (lastSharedQuality.current === shared) return
+    lastSharedQuality.current = shared
+    if (shared !== qualityMode) setQualityMode(shared as QualityMode)
   }, [tab.sharedQuality, qualityMode, setQualityMode])
 
   // Push the active preset and the average rate after a short settle delay.
