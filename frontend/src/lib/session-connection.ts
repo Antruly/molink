@@ -20,6 +20,12 @@ export interface Stats {
   /** Completed frame pulls (including empty frames) in the last second. */
   wireFps: number
   latencyMs: number | null
+  /**
+   * Bytes per second the session actually costs on the network. An AV1 patch
+   * is decoded by the client core before it reaches the page, so the bytes the
+   * page receives are several times the wire bytes; while the core reports a
+   * wire rate, that rate is used instead of the received-byte count.
+   */
   bytesPerSec: number
   frames: number
   /** Frames dropped as stale or overtaken in the last second. */
@@ -83,6 +89,10 @@ export class SessionConnection {
   private clipboardRetryAt = 0
   private dropTimes: number[] = []
   private av1Timer: number | null = null
+  /// Wire rate reported by the client core with its codec stat, and when it
+  /// arrived. Only the core sees the host's packets before transcoding.
+  private wireRate: number | null = null
+  private wireRateAt = 0
   private clipboardEnabled = true
   /// This viewer's machine name/ID, sent in hello so the shared chat can
   /// attribute its messages. Empty for a plain browser.
@@ -213,6 +223,10 @@ export class SessionConnection {
         // Patches arrive continuously while a lossy preset is in use; the
         // badge disappears if none have arrived for five seconds.
         if (this.av1Timer !== null) window.clearTimeout(this.av1Timer)
+        if (info.wireRate > 0) {
+          this.wireRate = info.wireRate
+          this.wireRateAt = performance.now()
+        }
         this.sink.onPatch({
           av1Active: true,
           av1Full: info.fullFrame,
@@ -344,11 +358,20 @@ export class SessionConnection {
     while (this.dropTimes.length > 0 && now - this.dropTimes[0]! > 1000) {
       this.dropTimes.shift()
     }
+    // A codec stat is current for a few seconds: a static screen stops
+    // producing patches, and the last wire rate is then still the best
+    // description of what the session costs.
+    const currentWireRate =
+      this.wireRate !== null && now - this.wireRateAt < 4000
+        ? this.wireRate
+        : null
     return {
       fps: this.frameTimes.length,
       wireFps: this.packetTimes.length,
       latencyMs: this.latency,
-      bytesPerSec: this.byteWindow.reduce((sum, item) => sum + item.n, 0),
+      bytesPerSec:
+        currentWireRate ??
+        this.byteWindow.reduce((sum, item) => sum + item.n, 0),
       frames: this.frames,
       dropped: this.dropTimes.length,
     }
@@ -373,6 +396,8 @@ export class SessionConnection {
     this.packetTimes = []
     this.byteWindow = []
     this.latency = null
+    this.wireRate = null
+    this.wireRateAt = 0
     this.stopAv1Indicator()
     forgetSessionScreenBuffer(this.sessionKey)
     this.frames = 0

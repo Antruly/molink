@@ -2,6 +2,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -234,6 +235,10 @@ class connect_proxy final
 
   void deliver_binary(const uint8_t* data, std::size_t len) {
     if (closed_ || browser_ == nullptr || data == nullptr) return;
+    // Every packet here crossed the network to the host, whether or not the
+    // page will see its bytes: an AV1 patch is transcoded, so the page's own
+    // byte counter would show the decoded (several times larger) size.
+    wire_window_.fetch_add(len);
     if (!worker_started_) {
       browser_->send_binary(reinterpret_cast<const char*>(data), len);
       return;
@@ -270,10 +275,21 @@ class connect_proxy final
       if (out.empty()) continue;
       const std::size_t decoded = out.size();
       bool announce = false;
+      std::size_t wire_rate = 0;
       if (av1) {
         const auto now = std::chrono::steady_clock::now();
         if (last_stat_.time_since_epoch().count() == 0 ||
             now - last_stat_ >= std::chrono::seconds(1)) {
+          const double seconds =
+              window_start_.time_since_epoch().count() == 0
+                  ? 0.0
+                  : std::chrono::duration<double>(now - window_start_).count();
+          const std::size_t bytes = wire_window_.exchange(0);
+          if (seconds > 0.2) {
+            wire_rate = static_cast<std::size_t>(
+                static_cast<double>(bytes) / seconds);
+          }
+          window_start_ = now;
           last_stat_ = now;
           announce = true;
         }
@@ -281,9 +297,10 @@ class connect_proxy final
       std::weak_ptr<connect_proxy> weak = weak_from_this();
       std::vector<uint8_t> bytes = std::move(out);
       post_([weak, bytes = std::move(bytes), announce, wire, decoded,
-             full_frame] {
+             full_frame, wire_rate] {
         if (auto self = weak.lock()) {
-          if (announce) self->send_codec_stat(wire, decoded, full_frame);
+          if (announce)
+            self->send_codec_stat(wire, decoded, full_frame, wire_rate);
           self->send_to_browser(bytes.data(), bytes.size());
         }
       });
@@ -302,13 +319,15 @@ class connect_proxy final
 
   /// Tells the page that the client core is decoding AV1 patches, so the UI
   /// can show an indicator; the page itself never sees the AV1 bytes.
-  void send_codec_stat(std::size_t wire, std::size_t decoded,
-                       bool full_frame) {
+  void send_codec_stat(std::size_t wire, std::size_t decoded, bool full_frame,
+                       std::size_t wire_rate) {
     if (closed_ || browser_ == nullptr) return;
     const std::string text = "{\"type\":\"codec\",\"av1\":true,\"wire\":" +
                              std::to_string(wire) + ",\"decoded\":" +
                              std::to_string(decoded) +
-                             (full_frame ? ",\"full\":true" : "") + "}";
+                             (full_frame ? ",\"full\":true" : "") +
+                             ",\"wire_rate\":" + std::to_string(wire_rate) +
+                             "}";
     browser_->send_text(text.data(), text.size());
   }
 
@@ -406,6 +425,10 @@ class connect_proxy final
   bool worker_started_ = false;
   bool stopping_ = false;
   std::chrono::steady_clock::time_point last_stat_{};
+  /// Host bytes received since the last codec stat (the true wire rate) and
+  /// the start of that window. The window start is only touched by the worker.
+  std::atomic<std::size_t> wire_window_{0};
+  std::chrono::steady_clock::time_point window_start_{};
   std::shared_ptr<session_transport> transport_;
   std::deque<std::string> pending_text_;
   std::deque<std::vector<uint8_t>> pending_binary_;

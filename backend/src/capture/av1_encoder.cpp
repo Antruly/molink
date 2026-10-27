@@ -410,10 +410,11 @@ bool av1_encode_available() { return true; }
 
 namespace {
 
-/// Runs the GPU encoder first and drops it on its first failure. NVENC can
+/// Runs the GPU encoder first and keeps CPU SVT-AV1 behind it. NVENC can
 /// initialise and then fail while encoding a patch rectangle (driver session
-/// limits, unusual rectangle sizes); without this the capture would fall back
-/// to tiles for the rest of the session even though CPU SVT-AV1 is available.
+/// limits, unusual rectangle sizes); a rectangle too small for NVENC goes
+/// straight to the CPU backend, and the GPU is dropped only after repeated
+/// failures so one bad strip cannot cost the session its hardware encoder.
 class fallback_av1_encoder final : public av1_encoder {
  public:
   fallback_av1_encoder(std::shared_ptr<av1_encoder> first,
@@ -423,13 +424,23 @@ class fallback_av1_encoder final : public av1_encoder {
   bool encode_intra(const uint8_t* bgra, std::size_t stride, int width,
                     int height, int qp, std::vector<uint8_t>& out,
                     std::string& error) override {
-    if (first_) {
+    // NVENC refuses small rectangles; send those straight to the CPU backend
+    // instead of letting one bad strip disable the GPU for the whole session.
+    const bool gpu_sized = width >= 128 && height >= 128;
+    if (first_ && gpu_sized) {
       std::string first_error;
       if (first_->encode_intra(bgra, stride, width, height, qp, out,
                                first_error)) {
+        failures_ = 0;
         return true;
       }
-      first_.reset();
+      if (!reported_) {
+        reported_ = true;
+        std::fprintf(stderr,
+                     "av1: nvenc failed for %dx%d qp=%d: %s\n", width, height,
+                     qp, first_error.c_str());
+      }
+      if (++failures_ >= 8) first_.reset();
       error = first_error;
     }
     if (second_) {
@@ -441,6 +452,8 @@ class fallback_av1_encoder final : public av1_encoder {
  private:
   std::shared_ptr<av1_encoder> first_;
   std::shared_ptr<av1_encoder> second_;
+  int failures_ = 0;
+  bool reported_ = false;
 };
 
 }  // namespace
@@ -452,6 +465,9 @@ std::shared_ptr<av1_encoder> make_av1_encoder(
   if (config.device == "auto") {
     std::string gpu_error;
     if (auto gpu = make_nvenc_av1_encoder(config, &gpu_error)) {
+      // One line so a host log answers "is this session on the GPU or the
+      // CPU?" — the difference is an order of magnitude in frame time.
+      std::fprintf(stderr, "av1: auto -> gpu-nvenc\n");
       return std::make_shared<fallback_av1_encoder>(
           std::move(gpu), std::make_shared<svt_av1_encoder>(config));
     }
@@ -471,6 +487,7 @@ std::shared_ptr<av1_encoder> make_av1_encoder(
     }
     return nullptr;
   }
+  if (config.device == "auto") std::fprintf(stderr, "av1: auto -> cpu-svt\n");
   return std::make_shared<svt_av1_encoder>(config);
 }
 

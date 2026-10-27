@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
@@ -10,6 +11,7 @@
 #include <vector>
 
 #include "capture/av1_encoder.h"
+#include "capture/frame_budget.h"
 #include "capture/frame_encode.h"
 
 namespace molink {
@@ -44,6 +46,11 @@ struct quality_profile {
   /// a capture frame budget, so the rest stays on the tile path. Ignored by
   /// full-frame mode, where every changed rectangle must be covered.
   int av1_max_area_percent = 100;
+  /// Allow the capture to drop AV1 and fall back to zlib tiles when the
+  /// encoder cannot keep up with the viewer's frame rate even at the coarsest
+  /// QP (see av1_budget_policy). Tiles are lossless but several times larger on
+  /// the wire, so presets that prioritise the smallest stream opt out.
+  bool av1_fallback_to_tiles = true;
   /// Raise the configured change threshold to at least this value (0 = leave).
   int minimum_change_threshold = 0;
   /// Lower a non-zero change threshold to at most this value (0 = leave).
@@ -295,7 +302,14 @@ class capture_base : public capture_source {
   }
   void set_target_fps(int fps) override { target_fps_.store(clamp_fps(fps)); }
   int target_fps() const override { return target_fps_.load(); }
-  void set_quality(quality_mode mode) override { quality_.store(mode); }
+  void set_quality(quality_mode mode) override {
+    // Repeated pushes of the same preset (the viewer re-sends it whenever its
+    // frame rate changes) must not restart the encoder-quality adaptation,
+    // otherwise it never gathers a streak. Only a real change resets it.
+    if (quality_.exchange(mode) == mode) return;
+    av1_qp_offset_.store(0);
+    av1_budget_reset_.store(true);
+  }
   quality_mode quality() const override { return quality_.load(); }
 
   /// Encoding knobs for the active preset. Backends read these on the capture
@@ -330,6 +344,13 @@ class capture_base : public capture_source {
   /// A device/speed/thread change recreates it on the next frame.
   av1_encoder* av1_for_frame() {
     if (!av1_allowed_.load()) return nullptr;
+    bool resumed = false;
+    if (!av1_budget_.allow_av1(monotonic_ms(), resumed)) return nullptr;
+    if (resumed) {
+      // A retry starts at the coarsest QP the preset allows, so the decision
+      // costs a handful of frames rather than a slow minute.
+      av1_qp_offset_.store(kMaxAv1QpOffset);
+    }
     av1_encoding_settings settings;
     {
       std::lock_guard<std::mutex> lock(av1_settings_mutex_);
@@ -363,8 +384,17 @@ class capture_base : public capture_source {
       std::lock_guard<std::mutex> lock(av1_settings_mutex_);
       settings = av1_settings_;
     }
+    // An explicit QP is the host owner's choice, so it is taken literally.
     if (settings.qp >= 1 && settings.qp <= 63) return settings.qp;
-    return quality_profile_for(quality_.load()).av1_qp;
+    const int base = quality_profile_for(quality_.load()).av1_qp;
+    // The near-lossless presets keep their QP: that quality is the point of
+    // choosing them, and the frame rate controller already reacts to a slow
+    // encoder by lowering the rate.
+    if (base <= 4) return base;
+    // CPU-only hosts cannot encode a sharp 1080p intra frame at the rate the
+    // viewer asks for. Raising the QP in small steps trades some sharpness
+    // for a picture that actually moves; see note_build_time().
+    return std::min(base + av1_qp_offset_.load(), kMaxAv1Qp);
   }
   bool quality_av1_grayscale() const {
     return quality_profile_for(quality_.load()).av1_grayscale;
@@ -429,6 +459,13 @@ class capture_base : public capture_source {
   std::atomic<bool> av1_allowed_{false};
   /// EMA of the build+encode time, read by the session layer.
   std::atomic<uint64_t> build_time_us_{0};
+  /// Extra AV1 QP on top of the preset when the encoder misses the frame
+  /// budget; 0 means the preset's own quality.
+  std::atomic<int> av1_qp_offset_{0};
+  /// State for the "give AV1 up, send tiles" decision. Only the capture
+  /// thread touches it; a preset change asks for a reset.
+  av1_budget_policy av1_budget_;
+  std::atomic<bool> av1_budget_reset_{false};
   /// Forced keyframe cadence; 0 means the backends' 30 s safety refresh only.
   std::atomic<int> periodic_keyframe_ms_{120000};
   /// Settings arrive from the API thread; the capture thread copies them.

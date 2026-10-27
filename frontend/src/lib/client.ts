@@ -162,11 +162,14 @@ export interface ClientHandlers {
   /**
    * The client core decoded AV1 (wire and decoded byte counts). `fullFrame`
    * means the stream carries only AV1, without a tile image underneath.
+   * `wireRate` is the average number of bytes the host actually sent over the
+   * network during the last stat window, which is what the user pays for.
    */
   onCodec?: (info: {
     wireBytes: number
     decodedBytes: number
     fullFrame: boolean
+    wireRate: number
   }) => void
   onCursor: (shape: CursorShape) => void
   onCursorPosition: (position: CursorPosition) => void
@@ -217,6 +220,8 @@ interface ControlMessage {
   build_ms?: number
   /// Emitted with a codec stat: the stream is AV1-only, not AV1 patches.
   full?: boolean
+  /// Bytes per second the host sent over the network in the last window.
+  wire_rate?: number
   from?: string
   ts?: number
   name?: string
@@ -1031,6 +1036,8 @@ export class MolinkClient {
             decodedBytes:
               typeof message.decoded === 'number' ? message.decoded : 0,
             fullFrame: message.full === true,
+            wireRate:
+              typeof message.wire_rate === 'number' ? message.wire_rate : 0,
           })
         }
         break

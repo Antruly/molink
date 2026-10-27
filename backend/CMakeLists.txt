@@ -532,6 +532,15 @@ set_target_properties(molink-core-replay-policy-test PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 add_test(NAME replay_policy COMMAND molink-core-replay-policy-test)
 
+# The frame-budget adaptation is pure arithmetic: no encoder required.
+add_executable(molink-core-frame-budget-test
+  tests/frame_budget_test.cpp
+)
+target_include_directories(molink-core-frame-budget-test PRIVATE src)
+set_target_properties(molink-core-frame-budget-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME frame_budget COMMAND molink-core-frame-budget-test)
+
 # The relay/ICE split is pure routing: no libuvcpp and no sockets.
 add_executable(molink-core-switchable-test
   tests/switchable_transport_test.cpp

@@ -150,6 +150,9 @@ quality_profile quality_profile_for(quality_mode mode) {
       profile.av1_qp = 1;
       profile.av1_max_area_percent = 20;
       profile.maximum_change_threshold = 1;
+      // Undeflated BGRA is the most expensive stream there is; giving AV1 up
+      // here would not buy a usable frame rate, only a much larger one.
+      profile.av1_fallback_to_tiles = false;
       break;
     case quality_mode::balanced:
     default:
@@ -257,9 +260,35 @@ bool capture_base::tile_clock(std::vector<uint8_t>& out) {
 }
 
 void capture_base::note_build_time(uint64_t us) {
+  // A preset change asks the capture thread to forget the previous preset's
+  // measurements; the API thread only sets the flag.
+  if (av1_budget_reset_.exchange(false)) {
+    av1_budget_.reset();
+    av1_qp_offset_.store(0);
+  }
   // An exponential average keeps one slow keyframe from pinning the value.
   const uint64_t previous = build_time_us_.load();
-  build_time_us_.store(previous == 0 ? us : (previous * 7 + us) / 8);
+  const uint64_t average = previous == 0 ? us : (previous * 7 + us) / 8;
+  build_time_us_.store(average);
+
+  // A host that cannot encode one frame inside the budget the viewer asked
+  // for settles at a handful of frames per second: every frame is sharp, but
+  // the picture visibly stutters. Raise the AV1 QP a step at a time until the
+  // encoder fits the budget again (see quality_av1_qp()).
+  const uint64_t budget_us = frame_budget_us(target_fps_.load());
+  const int offset =
+      adapt_av1_qp_offset(av1_qp_offset_.load(), average, budget_us);
+  av1_qp_offset_.store(offset);
+
+  // Quality cannot be traded away forever: once the QP is at its bound and the
+  // frame is still late, the preset hands the picture back to the tile path,
+  // which is lossless and much cheaper to produce (see av1_budget_policy).
+  if (!av1_allowed_.load() ||
+      !quality_profile_for(quality_.load()).av1_fallback_to_tiles) {
+    return;
+  }
+  av1_budget_.note_frame(average > budget_us, offset >= kMaxAv1QpOffset,
+                         monotonic_ms());
 }
 
 void capture_base::publish(std::shared_ptr<const captured_frame> frame) {
