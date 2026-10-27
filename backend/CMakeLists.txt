@@ -524,6 +524,14 @@ foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
 endforeach()
 add_test(NAME dirty_rects COMMAND molink-core-dirty-rects-test)
 
+add_executable(molink-core-replay-policy-test
+  tests/replay_policy_test.cpp
+)
+target_include_directories(molink-core-replay-policy-test PRIVATE src)
+set_target_properties(molink-core-replay-policy-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME replay_policy COMMAND molink-core-replay-policy-test)
+
 # The relay/ICE split is pure routing: no libuvcpp and no sockets.
 add_executable(molink-core-switchable-test
   tests/switchable_transport_test.cpp

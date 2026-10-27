@@ -272,8 +272,11 @@ void capture_base::publish(std::shared_ptr<const captured_frame> frame) {
   latest_ = frame;
   history_bytes_ += frame->payload.size() + frame->av1_payload.size();
   history_.push_back(std::move(frame));
+  const uint64_t newest_ts = history_.back()->ts_us;
   while (history_.size() > kHistoryMaxFrames ||
-         history_bytes_ > kHistoryMaxBytes) {
+         history_bytes_ > kHistoryMaxBytes ||
+         (newest_ts > history_.front()->ts_us &&
+          newest_ts - history_.front()->ts_us > kHistoryMaxAgeUs)) {
     const auto& oldest = history_.front();
     history_bytes_ -=
         oldest->payload.size() + oldest->av1_payload.size();

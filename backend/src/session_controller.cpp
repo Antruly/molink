@@ -23,6 +23,7 @@
 
 #include "config.h"
 #include "capture/frame_encode.h"
+#include "capture/replay_policy.h"
 #include "protocol/frame_packet.h"
 #include "service_control.h"
 #include "transport/ws_transport.h"
@@ -80,10 +81,6 @@ uint64_t epoch_us() {
       duration_cast<microseconds>(system_clock::now().time_since_epoch())
           .count());
 }
-
-/// Replaying more than this means the client is hopelessly behind; a keyframe
-/// is cheaper than shipping dozens of deltas it will render in one go.
-constexpr uint32_t kMaxReplayFrames = 120;
 
 /// A display mode change resets the driver and the desktop duplication. A
 /// burst of requests (someone clicking through the resolution menu) can leave
@@ -460,7 +457,7 @@ void send_capture_frame(session_transport* transport,
     start_seq = latest->keyframe ? static_cast<int64_t>(latest->seq) : -1;
     if (start_seq < 0) {
       for (uint32_t back = 0;
-           back < kMaxReplayFrames && latest->seq >= back; ++back) {
+           back < kReplayMaxFrames && latest->seq >= back; ++back) {
         const auto candidate = opt.capture->find(latest->seq - back);
         if (candidate && candidate->keyframe) {
           start_seq = candidate->seq;
@@ -501,26 +498,50 @@ void send_capture_frame(session_transport* transport,
     return;
   }
   const uint32_t missing = latest->seq - first + 1;
-  if (missing > kMaxReplayFrames) {
-    session->has_image = false;
+
+  const uint64_t now_us = static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::microseconds>(
+          std::chrono::system_clock::now().time_since_epoch())
+          .count());
+  const auto oldest_pending = opt.capture->find(first);
+  const uint64_t oldest_age_us =
+      oldest_pending && now_us > oldest_pending->ts_us
+          ? now_us - oldest_pending->ts_us
+          : 0;
+  const replay_action action =
+      choose_replay_action(missing, oldest_age_us, session->has_image);
+  if (action == replay_action::skip_to_latest) {
+    // Do not make a slow viewer replay a queue of obsolete deltas. Advance it
+    // to the current capture sequence; the periodic tile clock repairs any
+    // regions that were skipped.
+    session->last_capture_seq = latest->seq;
+    send_empty_frame(transport, session, latest->width, latest->height, false);
+    return;
+  }
+  if (action == replay_action::request_keyframe) {
     session->last_capture_seq = -1;
     opt.capture->request_keyframe();
     send_empty_frame(transport, session, latest->width, latest->height, false);
     return;
   }
 
-  const uint64_t now_us = static_cast<uint64_t>(
-      std::chrono::duration_cast<std::chrono::microseconds>(
-          std::chrono::system_clock::now().time_since_epoch())
-          .count());
+
   for (uint32_t seq = first; seq <= latest->seq; ++seq) {
     const std::shared_ptr<const captured_frame> frame = opt.capture->find(seq);
     if (!frame) {
-      // Evicted from history. Resynchronize from a fresh keyframe.
-      session->has_image = false;
+      // The replay history has evicted this frame. A viewer with a valid base
+      // can skip to the latest capture and repair stale cells from tile_clock;
+      // a new viewer still needs a keyframe to establish its base image.
+      if (session->has_image) {
+        session->last_capture_seq = latest->seq;
+        send_empty_frame(transport, session, latest->width, latest->height,
+                         false);
+        return;
+      }
       session->last_capture_seq = -1;
       opt.capture->request_keyframe();
-      send_empty_frame(transport, session, latest->width, latest->height, false);
+      send_empty_frame(transport, session, latest->width, latest->height,
+                       false);
       return;
     }
     if (now_us > frame->ts_us && now_us - frame->ts_us > 1000000ULL) {

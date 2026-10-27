@@ -397,11 +397,11 @@ class capture_base : public capture_source {
 
   bool cursor(cursor_snapshot& out) const override;
 
-  /// Hard bounds for the replay history, whichever comes first. Partial frames
-  /// are usually small; the byte cap exists so a burst of full-screen changes
-  /// cannot grow memory without limit.
+  /// Keep at most one second of replayable frames, with independent count and
+  /// byte bounds so high capture rates or large keyframes cannot grow memory.
+  static constexpr uint64_t kHistoryMaxAgeUs = 1000000ULL;
   static constexpr std::size_t kHistoryMaxBytes = 128u * 1024u * 1024u;
-  static constexpr std::size_t kHistoryMaxFrames = 120;
+  static constexpr std::size_t kHistoryMaxFrames = 60;
 
  protected:
   static int clamp_fps(int fps) { return fps < 1 ? 1 : (fps > 60 ? 60 : fps); }
