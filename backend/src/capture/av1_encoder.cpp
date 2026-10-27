@@ -408,19 +408,61 @@ std::vector<av1_encoder_device> av1_encoder_devices() {
 
 bool av1_encode_available() { return true; }
 
+namespace {
+
+/// Runs the GPU encoder first and drops it on its first failure. NVENC can
+/// initialise and then fail while encoding a patch rectangle (driver session
+/// limits, unusual rectangle sizes); without this the capture would fall back
+/// to tiles for the rest of the session even though CPU SVT-AV1 is available.
+class fallback_av1_encoder final : public av1_encoder {
+ public:
+  fallback_av1_encoder(std::shared_ptr<av1_encoder> first,
+                       std::shared_ptr<av1_encoder> second)
+      : first_(std::move(first)), second_(std::move(second)) {}
+
+  bool encode_intra(const uint8_t* bgra, std::size_t stride, int width,
+                    int height, int qp, std::vector<uint8_t>& out,
+                    std::string& error) override {
+    if (first_) {
+      std::string first_error;
+      if (first_->encode_intra(bgra, stride, width, height, qp, out,
+                               first_error)) {
+        return true;
+      }
+      first_.reset();
+      error = first_error;
+    }
+    if (second_) {
+      return second_->encode_intra(bgra, stride, width, height, qp, out, error);
+    }
+    return false;
+  }
+
+ private:
+  std::shared_ptr<av1_encoder> first_;
+  std::shared_ptr<av1_encoder> second_;
+};
+
+}  // namespace
+
 std::shared_ptr<av1_encoder> make_av1_encoder(
     const av1_encoder_config& config, std::string* error) {
   if (error != nullptr) error->clear();
 #if MOLINK_HAVE_NVENC
-  if (config.device == "auto" || config.device == "gpu-nvenc") {
+  if (config.device == "auto") {
+    std::string gpu_error;
+    if (auto gpu = make_nvenc_av1_encoder(config, &gpu_error)) {
+      return std::make_shared<fallback_av1_encoder>(
+          std::move(gpu), std::make_shared<svt_av1_encoder>(config));
+    }
+  }
+  if (config.device == "gpu-nvenc") {
     std::string gpu_error;
     if (auto gpu = make_nvenc_av1_encoder(config, &gpu_error)) {
       return gpu;
     }
-    if (config.device == "gpu-nvenc") {
-      if (error != nullptr) *error = gpu_error;
-      return nullptr;
-    }
+    if (error != nullptr) *error = gpu_error;
+    return nullptr;
   }
 #endif
   if (config.device != "auto" && config.device != "cpu-svt") {

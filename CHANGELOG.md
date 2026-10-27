@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.9.38] — 2026-10-27
+
+### Fixed
+
+- AV1 在 NVENC 初始化/编码失败后整场会话退回瓦片：`auto` 设备现在先尝试
+  NVENC，任一矩形编码失败就丢弃 GPU 编码器并自动改用 CPU SVT-AV1，后续矩形
+  继续走 AV1；显式选择 `gpu-nvenc` 时仍尊重用户选择。
+- Linux 原生托盘（GtkStatusIcon）条目固定英文：现在读取核心 `ui.json` 的
+  `language`（中文显示“显示 moLink / 退出”，其他语言英文），每次弹出菜单
+  重新读取；`ui.json` 缺失时按 `LANGUAGE` / `LC_ALL` / `LANG` 判断。
+- 网页端启动时把语言写入 `ui.json` 被 bearer 鉴权拦成 401：`/api/ui-preferences`
+  本身只允许 loopback，现不再被 token guard 提前拦截，托盘能真正跟随语言设置。
+
 ## [0.9.37] — 2026-10-27
 
 ### Fixed

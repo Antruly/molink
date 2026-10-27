@@ -355,7 +355,7 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
     // /api/device is loopback-only and self-checks the peer address.
     if (!is_api || path == "/api/health" || path == "/api/device" ||
         path == "/api/state" || path == "/api/login" ||
-        path == "/api/transports") {
+        path == "/api/transports" || path == "/api/ui-preferences") {
       next();
       return;
     }

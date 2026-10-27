@@ -460,6 +460,8 @@ gboolean smoke_timeout(gpointer) {
 
 GtkStatusIcon* g_tray_icon = nullptr;
 GtkWidget* g_tray_menu = nullptr;
+GtkWidget* g_tray_show_item = nullptr;
+GtkWidget* g_tray_quit_item = nullptr;
 bool g_url_mode = false;
 std::string g_url_override;
 
@@ -708,12 +710,64 @@ void hide_to_tray(GtkWidget* window) {
   if (g_tray_icon != nullptr) gtk_status_icon_set_visible(g_tray_icon, TRUE);
 }
 
+/// The page mirrors its language into the core's ui.json; the native tray
+/// cannot read the WebView's localStorage. Fall back to the environment
+/// language when the file (or the key) is missing.
+bool tray_uses_chinese() {
+  gchar* path = g_build_filename(g_get_user_config_dir(), "molink", "ui.json",
+                                 nullptr);
+  gchar* contents = nullptr;
+  gsize length = 0;
+  bool found = false;
+  bool chinese = false;
+  if (g_file_get_contents(path, &contents, &length, nullptr) &&
+      contents != nullptr) {
+    const std::string body(contents, length);
+    const std::string key = "\"language\"";
+    const std::size_t pos = body.find(key);
+    if (pos != std::string::npos) {
+      const std::size_t colon = body.find(':', pos + key.size());
+      const std::size_t quote =
+          colon == std::string::npos ? std::string::npos
+                                     : body.find('"', colon + 1);
+      if (quote != std::string::npos) {
+        const std::size_t end = body.find('"', quote + 1);
+        if (end != std::string::npos) {
+          const std::string language = body.substr(quote + 1, end - quote - 1);
+          chinese = language.rfind("zh", 0) == 0;
+          found = !language.empty();
+        }
+      }
+    }
+  }
+  g_free(contents);
+  g_free(path);
+  if (found) return chinese;
+  const char* lang = std::getenv("LANGUAGE");
+  if (lang == nullptr || *lang == '\0') lang = std::getenv("LC_ALL");
+  if (lang == nullptr || *lang == '\0') lang = std::getenv("LANG");
+  return lang != nullptr && std::strncmp(lang, "zh", 2) == 0;
+}
+
+void apply_tray_language() {
+  const bool zh = tray_uses_chinese();
+  if (g_tray_show_item != nullptr) {
+    gtk_menu_item_set_label(GTK_MENU_ITEM(g_tray_show_item),
+                            zh ? "显示 moLink" : "Show moLink");
+  }
+  if (g_tray_quit_item != nullptr) {
+    gtk_menu_item_set_label(GTK_MENU_ITEM(g_tray_quit_item),
+                            zh ? "退出" : "Quit");
+  }
+}
+
 void on_tray_activate(GtkStatusIcon*, gpointer data) {
   show_window(GTK_WIDGET(data));
 }
 
 void on_tray_popup(GtkStatusIcon* icon, guint button, guint time, gpointer) {
   if (g_tray_menu == nullptr) return;
+  apply_tray_language();
   gtk_menu_popup(GTK_MENU(g_tray_menu), nullptr, nullptr,
                  gtk_status_icon_position_menu, icon, button, time);
 }
@@ -740,12 +794,15 @@ void setup_tray(GtkWidget* window) {
   gtk_status_icon_set_visible(g_tray_icon, TRUE);
 
   g_tray_menu = gtk_menu_new();
-  GtkWidget* show_item = gtk_menu_item_new_with_label("Show moLink");
-  GtkWidget* quit_item = gtk_menu_item_new_with_label("Quit");
-  gtk_menu_shell_append(GTK_MENU_SHELL(g_tray_menu), show_item);
-  gtk_menu_shell_append(GTK_MENU_SHELL(g_tray_menu), quit_item);
-  g_signal_connect(show_item, "activate", G_CALLBACK(on_menu_show), window);
-  g_signal_connect(quit_item, "activate", G_CALLBACK(on_menu_quit), nullptr);
+  g_tray_show_item = gtk_menu_item_new_with_label("Show moLink");
+  g_tray_quit_item = gtk_menu_item_new_with_label("Quit");
+  gtk_menu_shell_append(GTK_MENU_SHELL(g_tray_menu), g_tray_show_item);
+  gtk_menu_shell_append(GTK_MENU_SHELL(g_tray_menu), g_tray_quit_item);
+  apply_tray_language();
+  g_signal_connect(g_tray_show_item, "activate", G_CALLBACK(on_menu_show),
+                   window);
+  g_signal_connect(g_tray_quit_item, "activate", G_CALLBACK(on_menu_quit),
+                   nullptr);
   gtk_widget_show_all(g_tray_menu);
 
   g_signal_connect(g_tray_icon, "activate", G_CALLBACK(on_tray_activate), window);
