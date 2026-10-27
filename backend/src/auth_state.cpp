@@ -3,15 +3,32 @@
 
 #include <algorithm>
 #include <cctype>
+#include <filesystem>
+#ifndef _WIN32
+#include <sys/stat.h>
+#endif
+#include <fstream>
 #include <random>
 #include <string>
 
 #include "config.h"
+#include "identity.h"
 
 namespace molink {
 namespace {
 
 constexpr int kRemoteSessionLimit = 64;
+/// How long a session token stays usable. It survives a core restart (an
+/// update or a service restart) and a host idle lock, because a viewer that
+/// authenticated once cannot present a single-use code again.
+constexpr uint64_t kSessionLifetimeMs = 7ull * 24ull * 60ull * 60ull * 1000ull;
+
+uint64_t now_epoch_ms() {
+  return static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::system_clock::now().time_since_epoch())
+          .count());
+}
 
 bool has_whitespace_or_control(const std::string& value) {
   for (unsigned char c : value) {
@@ -107,6 +124,7 @@ auth_state::auth_state(app_settings settings)
     settings_.temp_code = generate_numeric(6);
   }
   save_settings(settings_);
+  load_sessions_locked();
 }
 
 bool auth_state::authenticate(const std::string& supplied, bool consume) {
@@ -132,32 +150,83 @@ bool auth_state::valid_session_locked(const std::string& token) const {
 bool auth_state::valid_recent_session(const std::string& token,
                                       uint64_t max_age_ms) const {
   if (token.empty()) return false;
-  const uint64_t now = static_cast<uint64_t>(
-      std::chrono::duration_cast<std::chrono::milliseconds>(
-          std::chrono::steady_clock::now().time_since_epoch())
-          .count());
+  const uint64_t now = now_epoch_ms();
   std::lock_guard<std::mutex> lock(mutex_);
   unsigned diff = 1u;
   for (const auto& session : remote_sessions_) {
-    if (constant_time_equals(token, session.first) &&
-        now >= session.second && now - session.second <= max_age_ms) {
+    if (constant_time_equals(token, session.first) && now >= session.second &&
+        now - session.second <= max_age_ms) {
       diff = 0;
     }
   }
   return diff == 0;
 }
 
+void auth_state::touch_session(const std::string& token) {
+  if (token.empty()) return;
+  const uint64_t now = now_epoch_ms();
+  std::lock_guard<std::mutex> lock(mutex_);
+  for (auto& session : remote_sessions_) {
+    if (!constant_time_equals(token, session.first)) continue;
+    // Rewrite at most once a minute: every reconnect refreshes the lifetime,
+    // but an idle session does not rewrite the file on every frame.
+    if (now > session.second && now - session.second < 60000) return;
+    session.second = now;
+    save_sessions_locked();
+    return;
+  }
+}
+
+void auth_state::load_sessions_locked() {
+  const std::string dir = config_directory();
+  if (dir.empty()) return;
+  std::ifstream in(dir + "/sessions");
+  if (!in) return;
+  const uint64_t now = now_epoch_ms();
+  std::string token;
+  uint64_t issued = 0;
+  while (in >> token >> issued) {
+    if (token.empty()) continue;
+    const uint64_t age = now >= issued ? now - issued : issued - now;
+    if (age > kSessionLifetimeMs) continue;
+    remote_sessions_.emplace_back(token, issued);
+    if (remote_sessions_.size() >= kRemoteSessionLimit) break;
+  }
+}
+
+void auth_state::save_sessions_locked() const {
+  const std::string dir = config_directory();
+  if (dir.empty()) return;
+  const std::filesystem::path path =
+      std::filesystem::path(dir) / "sessions";
+  const std::filesystem::path temp =
+      std::filesystem::path(dir) / "sessions.tmp";
+  std::ofstream out(temp, std::ios::binary | std::ios::trunc);
+  if (!out) return;
+  for (const auto& session : remote_sessions_) {
+    out << session.first << ' ' << session.second << '\n';
+  }
+  out.close();
+  std::error_code ec;
+  std::filesystem::rename(temp, path, ec);
+  if (ec) {
+    std::filesystem::remove(temp, ec);
+    return;
+  }
+#ifndef _WIN32
+  // Session tokens are credentials: keep them owner-only like the settings.
+  ::chmod(path.c_str(), S_IRUSR | S_IWUSR);
+#endif
+}
+
 std::string auth_state::create_session() {
   std::lock_guard<std::mutex> lock(mutex_);
   std::string token = generate_token();
-  const uint64_t now = static_cast<uint64_t>(
-      std::chrono::duration_cast<std::chrono::milliseconds>(
-          std::chrono::steady_clock::now().time_since_epoch())
-          .count());
-  remote_sessions_.emplace_back(token, now);
+  remote_sessions_.emplace_back(token, now_epoch_ms());
   while (remote_sessions_.size() > kRemoteSessionLimit) {
     remote_sessions_.pop_front();
   }
+  save_sessions_locked();
   return token;
 }
 
@@ -413,6 +482,7 @@ void auth_state::rotate_temp_locked() {
 
 void auth_state::invalidate_remote_sessions_locked() {
   remote_sessions_.clear();
+  save_sessions_locked();
 }
 
 void auth_state::persist_locked() { save_settings(settings_); }

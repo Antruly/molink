@@ -929,6 +929,21 @@ export function SessionView({
   const remoteCursorCss = useMemo(() => {
     const shape = tab.cursorShape
     if (!shape || shape.w <= 0 || shape.h <= 0) return undefined
+    // Fall back to the local arrow when the remote pointer is hidden (a
+    // fullscreen video hides it) or its bitmap paints nothing: mirroring a
+    // blank cursor made the local pointer disappear entirely, and a frozen
+    // session could leave it that way with nothing to click with.
+    if (tab.cursorPosition && tab.cursorPosition.visible === false) {
+      return undefined
+    }
+    let paints = false
+    for (let i = 3; i < shape.rgba.length; i += 4) {
+      if (shape.rgba[i] !== 0) {
+        paints = true
+        break
+      }
+    }
+    if (!paints) return undefined
     // The host draws its cursor at native pixel size. When the picture is
     // scaled to fit the window, a native-size cursor looks oversized, so scale
     // it with the picture; 'actual' keeps 1:1 and browsers cap cursors at
@@ -973,8 +988,9 @@ export function SessionView({
     const hotspotX = Math.round(shape.hotspotX * (width / shape.w))
     const hotspotY = Math.round(shape.hotspotY * (height / shape.h))
     return `url("${source.toDataURL()}") ${hotspotX} ${hotspotY}, default`
-  }, [tab.cursorShape, tab.frame?.screenW, tab.frame?.screenH, welcome, displayMode,
-      surfaceSize.width, surfaceSize.height])
+  }, [tab.cursorShape, tab.cursorPosition?.visible, tab.frame?.screenW,
+      tab.frame?.screenH, welcome, displayMode, surfaceSize.width,
+      surfaceSize.height])
 
   useEffect(() => {
     const element = surfaceRef.current
@@ -1876,7 +1892,7 @@ export function SessionView({
                       height: tab.frame.screenH,
                     }
                   : {}),
-                ...(tab.controlEnabled && !virtualMouse
+                ...(tab.phase === 'live' && tab.controlEnabled && !virtualMouse
                   ? { cursor: remoteCursorCss ?? 'default' }
                   : {}),
               }}

@@ -1155,16 +1155,20 @@ void session_controller::on_text(const std::string& text) {
     // single-use code is already spent: refusing a viewer that lost the link a
     // minute ago left it with nothing to present, and every retry counted as a
     // failed code until the address was locked out.
-    constexpr uint64_t kLockedResumeGraceMs = 10ull * 60ull * 1000ull;
+    // A token stays usable for a week and is refreshed on every use, so a
+    // viewer that was connected a moment ago can always return: after a host
+    // restart (the tokens are persisted), after an idle lock, or after a long
+    // session. A single-use code would be spent by then.
+    constexpr uint64_t kResumeLifetimeMs = 7ull * 24ull * 60ull * 60ull * 1000ull;
     const std::string resume = string_field(j, "session");
     bool authenticated = false;
     if (!resume.empty() && options_.auth &&
         (locked_for_peer
-             ? options_.auth->valid_recent_session(resume,
-                                                   kLockedResumeGraceMs)
+             ? options_.auth->valid_recent_session(resume, kResumeLifetimeMs)
              : options_.auth->valid_session(resume))) {
       authenticated = true;
       resume_token_ = resume;
+      options_.auth->touch_session(resume);
     } else if (options_.auth && options_.auth->authenticate(
                                    string_field(j, "token"),
                                    /*consume=*/true)) {

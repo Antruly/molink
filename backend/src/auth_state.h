@@ -46,6 +46,9 @@ class auth_state {
   /// demanding a code that a single-use code has already spent.
   bool valid_recent_session(const std::string& token,
                             uint64_t max_age_ms) const;
+  /// Marks a session token as just used, so an active viewer keeps its
+  /// credential fresh across idle locks.
+  void touch_session(const std::string& token);
   std::string create_session();
 
   /// Stable token handed to the local shell through /api/device.
@@ -92,6 +95,11 @@ class auth_state {
   void rotate_temp_locked();
   void invalidate_remote_sessions_locked();
   void persist_locked();
+  /// Session tokens survive a core restart (an update, a service restart):
+  /// a remote viewer cannot present a code that a single-use code already
+  /// spent, so dropping the tokens on restart locks that viewer out for good.
+  void load_sessions_locked();
+  void save_sessions_locked() const;
 
   mutable std::mutex mutex_;
   app_settings settings_;
