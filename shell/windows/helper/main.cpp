@@ -303,7 +303,10 @@ std::string handle_line(const std::string& line, std::vector<uint8_t>& frame,
   // Opening the input desktop for every command (each mouse move included)
   // made the host cursor blink and added latency. The capture command runs
   // continuously, so a desktop switch is still noticed within a few frames.
-  static ULONGLONG last_desktop_refresh = 0;
+  // Per-thread: the capture pipe and the input pipe each own their own
+  // desktop handle. A shared timestamp let the capture thread's refresh
+  // suppress the input thread's, leaving input on Winlogon after unlock.
+  static thread_local ULONGLONG last_desktop_refresh = 0;
   const ULONGLONG now = GetTickCount64();
   if (line != "quit" && now - last_desktop_refresh >= 250) {
     last_desktop_refresh = now;
