@@ -434,6 +434,7 @@ export class MolinkClient {
     this.stopRetryTimers()
     this.retryAttempts = 0
     this.closedByUser = false
+    this.directProxyFailed = false
     // A manual retry starts clean: a stale policy error would otherwise make
     // the next close look like a rejection even when the code is fine.
     this.lastErrorCode = ''
@@ -1567,6 +1568,11 @@ export class MolinkClient {
   /// reconnect; the resume token keeps this from spending another code use.
   private recoverStalledSession(reason: string): void {
     if (this.closedByUser || !this.isLive()) return
+    // Retry the local proxy on every reconnection. It may have failed once
+    // while the core was restarting (an update, a crash), and the fallback to
+    // the host's own socket has no AV1 and no AV1 stream: the session would
+    // stay on tiles until the tab was reopened.
+    this.directProxyFailed = false
     const ws = this.ws
     this.ws = null
     this.stopPing()
