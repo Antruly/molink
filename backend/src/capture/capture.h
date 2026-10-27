@@ -12,6 +12,7 @@
 
 #include "capture/av1_encoder.h"
 #include "capture/frame_budget.h"
+#include "capture/stream_policy.h"
 #include "capture/frame_encode.h"
 
 namespace molink {
@@ -247,6 +248,10 @@ class capture_source {
   /// of waiting for the viewer's own frame-rate controller to give up.
   virtual void set_viewer_pressure(bool pressure) { (void)pressure; }
 
+  /// Whether the AV1 low-delay stream may be used. Only set while every live
+  /// session can decode it.
+  virtual void set_av1_stream_allowed(bool allowed) { (void)allowed; }
+
   /// Monitors this source can capture. Empty means the source is not ready or
   /// does not support selection (clients fall back to the whole screen).
   virtual std::vector<display_info> displays() const { return {}; }
@@ -312,7 +317,12 @@ class capture_base : public capture_source {
 
   std::shared_ptr<const captured_frame> latest() const override;
   std::shared_ptr<const captured_frame> find(uint32_t seq) const override;
-  void request_keyframe() override { keyframe_requested_.store(true); }
+  void request_keyframe() override {
+    keyframe_requested_.store(true);
+    // A viewer that joins (or lost the stream) cannot decode a delta: the
+    // stream has to restart from a keyframe.
+    stream_keyframe_pending_.store(true);
+  }
   void set_active(bool active) override {
     active_.store(active);
     set_display_awake(active);
@@ -442,6 +452,15 @@ class capture_base : public capture_source {
   void set_viewer_pressure(bool pressure) override {
     viewer_pressure_.store(pressure);
   }
+  void set_av1_stream_allowed(bool allowed) override {
+    av1_stream_allowed_.store(allowed);
+  }
+  /// Feeds the moving-area policy for this frame. Returns the stream encoder
+  /// to use, or null while the frame stays on tiles; `keyframe` asks for a
+  /// stream keyframe (the first frame after a switch).
+  av1_stream_encoder* stream_for_frame(
+      const std::vector<protocol::tile_blob>& tiles, int screen_w,
+      int screen_h, bool& keyframe);
   /// True when AV1 should carry the entire picture instead of only patches.
   bool quality_av1_full_frame() const {
     av1_encoding_settings settings;
@@ -510,6 +529,11 @@ class capture_base : public capture_source {
   std::atomic<bool> av1_downscale_{false};
   /// Keeps a video in full-screen AV1 mode for a moment after it pauses.
   uint64_t av1_full_screen_until_us_ = 0;
+  /// Tile <-> AV1 stream hand-over, fed once per frame.
+  stream_policy stream_policy_;
+  std::shared_ptr<av1_stream_encoder> stream_encoder_;
+  std::atomic<bool> av1_stream_allowed_{false};
+  std::atomic<bool> stream_keyframe_pending_{true};
   /// A viewer is behind; box-average large tiles and stop lifting the AV1
   /// downscale while it lasts.
   std::atomic<bool> viewer_pressure_{false};

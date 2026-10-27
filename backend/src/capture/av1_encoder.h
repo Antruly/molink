@@ -45,6 +45,28 @@ class av1_encoder {
                             std::string& error) = 0;
 };
 
+/// Encodes a low-delay AV1 stream of full-screen frames: the first picture is
+/// a keyframe and later ones are P frames that only carry what changed. This
+/// is what makes a moving 1080p screen affordable, but the receiver has to
+/// keep a matching decoder alive -- a frame cannot be decoded on its own.
+class av1_stream_encoder {
+ public:
+  virtual ~av1_stream_encoder() = default;
+
+  /// Encodes one full-screen frame. `out` is empty when the encoder has no
+  /// packet ready yet (its low-delay pipeline holds one picture), which is
+  /// normal for the first frame. `keyframe` forces this picture to be a
+  /// keyframe, which is also what a receiver needs after a decode failure.
+  virtual bool encode_stream(const uint8_t* bgra, std::size_t stride, int width,
+                             int height, int qp, bool keyframe,
+                             std::vector<uint8_t>& out, bool& out_keyframe,
+                             std::string& error) = 0;
+};
+
+/// Null (with `error` filled) when this build has no encoder for the stream.
+std::shared_ptr<av1_stream_encoder> make_av1_stream_encoder(
+    const av1_encoder_config& config, std::string* error = nullptr);
+
 /// Null (with `error` filled) when this build has no SVT-AV1, the requested
 /// device is unknown, or the encoder cannot be initialised. Callers must fall
 /// back to tile compression.

@@ -1194,6 +1194,7 @@ void session_controller::on_text(const std::string& text) {
       return;
     }
     session->av1 = bool_field(j, "av1", false);
+    session->av1_stream = bool_field(j, "av1_stream", false);
     // Clients that understand the per-block sequence map get one with every
     // frame response, so a lost frame is repaired immediately and precisely.
     session->seq_clock = bool_field(j, "seq_clock", false);
@@ -1986,13 +1987,12 @@ void session_supervisor::run() {
     if (options_.capture) {
       bool live = false;
       bool all_av1 = true;
+      bool all_stream = true;
       for (const session_info& peer : registry_->snapshot()) {
         if (!peer.authenticated) continue;
         live = true;
-        if (!peer.av1) {
-          all_av1 = false;
-          break;
-        }
+        if (!peer.av1) all_av1 = false;
+        if (!peer.av1_stream) all_stream = false;
       }
       // The host settings page can switch AV1 off entirely; it still only
       // runs when every watching client can decode it.
@@ -2004,6 +2004,9 @@ void session_supervisor::run() {
         av1_allowed_ = allow;
       }
       options_.capture->set_av1_allowed(allow);
+      // The low-delay stream needs a stateful decoder on every viewer; a
+      // single session without one keeps the host on tiles and patches.
+      options_.capture->set_av1_stream_allowed(allow && all_stream);
       if (!live) options_.capture->set_active(false);
     }
 

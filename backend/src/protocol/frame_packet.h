@@ -121,6 +121,10 @@ enum class codec : uint8_t {
   deflate_rgb565 = 9,  ///< zlib deflate of an rgb565 tile
   gray8 = 10,          ///< one 8-bit luminance byte per pixel
   deflate_gray8 = 11,  ///< zlib deflate of a gray8 tile
+  /// A frame of a low-delay AV1 stream: one full-screen picture that is only
+  /// decodable once the stream's keyframe has been seen. Receivers that did
+  /// not advertise the capability never see this codec.
+  av1_stream = 12,
 };
 
 enum frame_flags : uint8_t {

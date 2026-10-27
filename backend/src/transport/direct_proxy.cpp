@@ -687,6 +687,7 @@ class direct_proxy final : public std::enable_shared_from_this<direct_proxy> {
       nlohmann::json hello = nlohmann::json::parse(text);
       if (!hello.is_object()) return text;
       hello["av1"] = true;
+      hello["av1_stream"] = true;
       return hello.dump();
     } catch (...) {
       return text;
@@ -701,8 +702,10 @@ class direct_proxy final : public std::enable_shared_from_this<direct_proxy> {
            std::memcmp(bytes.data(), protocol::kMagic,
                        sizeof(protocol::kMagic)) == 0 &&
            bytes[5] == static_cast<uint8_t>(protocol::packet_type::frame) &&
-           bytes[protocol::kPacketHeaderSize + 6] ==
-               static_cast<uint8_t>(protocol::codec::av1);
+           (bytes[protocol::kPacketHeaderSize + 6] ==
+                static_cast<uint8_t>(protocol::codec::av1) ||
+            bytes[protocol::kPacketHeaderSize + 6] ==
+                static_cast<uint8_t>(protocol::codec::av1_stream));
   }
 
   void start_worker() {
@@ -820,8 +823,88 @@ class direct_proxy final : public std::enable_shared_from_this<direct_proxy> {
       return bytes;
     }
     if (packet.type != static_cast<uint8_t>(protocol::packet_type::frame) ||
-        packet.payload.size() < protocol::kFrameHeaderSize ||
-        packet.payload[6] != static_cast<uint8_t>(protocol::codec::av1)) {
+        packet.payload.size() < protocol::kFrameHeaderSize) {
+      return bytes;
+    }
+    const uint8_t codec = packet.payload[6];
+    if (codec == static_cast<uint8_t>(protocol::codec::av1_stream)) {
+      // One full-screen picture of a low-delay stream: decode it with the
+      // session's decoder, then hand the page a full-screen tile refresh, so
+      // it sees no difference between a stream frame and a tile repair.
+      protocol::parsed_frame frame;
+      if (!protocol::parse_frame_payload(packet.payload.data(),
+                                         packet.payload.size(), frame, error)) {
+        return {};
+      }
+      if (frame.tiles.empty()) return {};
+      const protocol::tile_view& view = frame.tiles[0];
+      const bool keyframe =
+          (packet.payload[7] & protocol::kFrameFlagKeyframe) != 0;
+      std::vector<uint8_t> bgra;
+      int width = 0;
+      int height = 0;
+      if (!stream_decoder_.decode(view.data, view.size, keyframe, bgra, width,
+                                  height, error)) {
+        std::fprintf(stderr, "direct proxy: av1 stream decode failed: %s\n",
+                     error.c_str());
+        // The reference chain is broken; ask the host for a keyframe.
+        if (transport_) {
+          static const char kRequest[] = "{\"type\":\"request-keyframe\"}";
+          transport_->send_text(kRequest);
+        }
+        return {};
+      }
+      protocol::frame_header header;
+      header.frame_seq = frame.header.frame_seq;
+      header.codec = static_cast<uint8_t>(protocol::codec::bgra);
+      header.flags = protocol::kFrameFlagPartial;
+      header.screen_w = frame.header.screen_w;
+      header.screen_h = frame.header.screen_h;
+      header.tile_w = frame.header.tile_w;
+      header.tile_h = frame.header.tile_h;
+      protocol::tile_blob tile;
+      tile.x = 0;
+      tile.y = 0;
+      tile.w = static_cast<uint16_t>(
+          std::min<int>(width, header.screen_w > 0 ? header.screen_w : width));
+      tile.h = static_cast<uint16_t>(
+          std::min<int>(height, header.screen_h > 0 ? header.screen_h : height));
+      tile.flags = protocol::kTileFlagChanged;
+      tile.data.resize(static_cast<std::size_t>(tile.w) * tile.h * 4);
+      for (int row = 0; row < tile.h; ++row) {
+        std::memcpy(tile.data.data() + static_cast<std::size_t>(row) * tile.w * 4,
+                    bgra.data() + static_cast<std::size_t>(row) * width * 4,
+                    static_cast<std::size_t>(tile.w) * 4);
+      }
+      std::vector<protocol::tile_blob> tiles;
+      tiles.push_back(std::move(tile));
+      std::vector<std::vector<uint8_t>> packed(tiles.size());
+      if (compression_available()) {
+        std::string deflate_error;
+        for (std::size_t i = 0; i < tiles.size(); ++i) {
+          if (!deflate_buffer(tiles[i].data.data(), tiles[i].data.size(), 1,
+                              packed[i], deflate_error)) {
+            return {};
+          }
+          tiles[i].data = std::move(packed[i]);
+        }
+        header.codec = static_cast<uint8_t>(protocol::codec::deflate_bgra);
+      }
+      std::vector<uint8_t> payload;
+      if (!protocol::build_frame_payload(header, tiles, payload, error)) {
+        return {};
+      }
+      std::vector<uint8_t> out;
+      if (!protocol::encode_packet_into(
+              out, packet.type,
+              static_cast<uint16_t>(protocol::kPacketFlagTileRefresh),
+              packet.session, packet.seq, packet.ts_us, payload.data(),
+              payload.size(), error)) {
+        return {};
+      }
+      return out;
+    }
+    if (codec != static_cast<uint8_t>(protocol::codec::av1)) {
       return bytes;
     }
     std::vector<protocol::tile_blob> tiles;
@@ -931,6 +1014,9 @@ class direct_proxy final : public std::enable_shared_from_this<direct_proxy> {
   bool worker_started_ = false;
   bool stopping_ = false;
   std::chrono::steady_clock::time_point last_stat_{};
+  /// The low-delay stream keeps reference frames, so one decoder lives for the
+  /// whole session.
+  av1_stream_decoder stream_decoder_;
   /// Host bytes received since the last codec stat (the true wire rate) and
   /// the start of that window. The window start is only touched by the worker.
   std::atomic<std::size_t> wire_window_{0};

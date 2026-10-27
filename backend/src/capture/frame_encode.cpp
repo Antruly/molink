@@ -346,6 +346,49 @@ bool encode_capture_frame(protocol::frame_header& header,
   if (av1_payload != nullptr) av1_payload->clear();
   if (av1_only != nullptr) *av1_only = false;
   const bool keyframe = (header.flags & protocol::kFrameFlagKeyframe) != 0;
+  // Low-delay stream: one full-screen picture per frame, decoded with the
+  // receiver's reference frames. The capture switches to it while the content
+  // is moving and back to tiles once it settles (see stream_policy).
+  if (options.av1_stream != nullptr && av1_payload != nullptr &&
+      pixels != nullptr && stride > 0 && header.screen_w > 0 &&
+      header.screen_h > 0) {
+    std::vector<uint8_t> picture;
+    bool picture_keyframe = false;
+    std::string stream_error;
+    if (options.av1_stream->encode_stream(
+            pixels, stride, header.screen_w, header.screen_h, options.av1_qp,
+            options.av1_stream_keyframe, picture, picture_keyframe,
+            stream_error)) {
+      tiles.clear();
+      if (!picture.empty()) {
+        protocol::tile_blob tile;
+        tile.x = 0;
+        tile.y = 0;
+        tile.w = header.screen_w;
+        tile.h = header.screen_h;
+        tile.flags = protocol::kTileFlagChanged;
+        tile.data = std::move(picture);
+        std::vector<protocol::tile_blob> only;
+        only.push_back(std::move(tile));
+        protocol::frame_header out = header;
+        out.codec = static_cast<uint8_t>(protocol::codec::av1_stream);
+        out.flags = picture_keyframe ? protocol::kFrameFlagKeyframe
+                                     : protocol::kFrameFlagPartial;
+        if (protocol::build_frame_payload(out, only, *av1_payload, err)) {
+          if (av1_only != nullptr) *av1_only = true;
+          return true;
+        }
+      }
+      // The encoder still holds this picture; answer with an empty frame so
+      // the client's pull completes and the next one carries the packet.
+      if (av1_only != nullptr) *av1_only = false;
+      return protocol::build_frame_payload(header, {}, payload, err);
+    }
+    if (std::getenv("MOLINK_AV1_LOG") != nullptr) {
+      std::fprintf(stderr, "av1 stream: %s; falling back to tiles\n",
+                   stream_error.c_str());
+    }
+  }
   const bool can_encode_av1 =
       options.av1 != nullptr && av1_payload != nullptr && pixels != nullptr &&
       stride > 0 && header.tile_w > 0 && header.tile_h > 0 &&

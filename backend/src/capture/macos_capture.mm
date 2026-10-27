@@ -303,6 +303,10 @@ class macos_capture final : public capture_base {
     encoding.av1_max_area_percent = quality_av1_max_area_percent();
     encoding.av1_full_frame = quality_av1_full_frame();
     encoding.av1_full_screen_until_us = av1_full_screen_until();
+    bool stream_keyframe = false;
+    encoding.av1_stream = stream_for_frame(tiles, header.screen_w,
+                                           header.screen_h, stream_keyframe);
+    encoding.av1_stream_keyframe = stream_keyframe;
     std::vector<uint8_t> av1_payload;
     bool av1_only = false;
 

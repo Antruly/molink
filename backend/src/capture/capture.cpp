@@ -261,6 +261,54 @@ bool capture_base::tile_clock(std::vector<uint8_t>& out) {
   return true;
 }
 
+av1_stream_encoder* capture_base::stream_for_frame(
+    const std::vector<protocol::tile_blob>& tiles, int screen_w, int screen_h,
+    bool& keyframe) {
+  keyframe = false;
+  int64_t changed = 0;
+  for (const auto& tile : tiles) {
+    changed += static_cast<int64_t>(tile.w) * tile.h;
+  }
+  const double area = static_cast<double>(screen_w) * screen_h;
+  const double moving = area > 0 ? static_cast<double>(changed) / area : 0.0;
+  // Field diagnosis: MOLINK_STREAM_FORCE=1 pins the stream path on so a host
+  // can be checked without making the screen move.
+  const bool forced = std::getenv("MOLINK_STREAM_FORCE") != nullptr;
+  if (forced) {
+    stream_policy_.armed = true;
+    stream_policy_.streaming = true;
+  } else if (stream_policy_.note(moving, monotonic_ms()) &&
+      stream_policy_.streaming) {
+    // The viewer's decoder has no reference frame for this stream yet.
+    stream_keyframe_pending_.store(true);
+  }
+  if (!av1_stream_allowed_.load()) return nullptr;
+  if (!stream_policy_.streaming && !stream_policy_.armed) return nullptr;
+  if (!stream_encoder_) {
+    // Created when the content approaches the threshold, so the switch itself
+    // does not pay the encoder start-up.
+    av1_encoding_settings settings;
+    {
+      std::lock_guard<std::mutex> lock(av1_settings_mutex_);
+      settings = av1_settings_;
+    }
+    av1_encoder_config config;
+    config.device = "cpu-svt";
+    config.speed = settings.speed;
+    config.threads = settings.threads;
+    std::string error;
+    stream_encoder_ = make_av1_stream_encoder(config, &error);
+    if (!stream_encoder_ && !error.empty()) {
+      std::fprintf(stderr, "molink: %s\n", error.c_str());
+    }
+    stream_keyframe_pending_.store(true);
+  }
+  if (!stream_policy_.streaming || !stream_encoder_) return nullptr;
+  keyframe = stream_keyframe_pending_.load();
+  stream_keyframe_pending_.store(false);
+  return stream_encoder_.get();
+}
+
 bool capture_base::tile_seq(std::vector<uint8_t>& out) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (clock_cols_ == 0 || clock_rows_ == 0 || cell_seq_.empty()) return false;

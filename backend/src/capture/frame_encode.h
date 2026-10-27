@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include "capture/av1_encoder.h"
 #include "protocol/frame_packet.h"
 
 namespace molink {
@@ -67,6 +68,13 @@ struct encode_options {
   /// full-frame mode, which has to encode every changed rectangle.
   int av1_max_area_percent = 100;
   int av1_max_rects = 4;
+  /// When set, the whole screen is encoded as one frame of a low-delay AV1
+  /// stream (P frames after the first) instead of tiles or patches. The
+  /// receiver must keep a matching decoder; see av1_stream_encoder.
+  av1_stream_encoder* av1_stream = nullptr;
+  /// Force this stream frame to be a keyframe (the first frame after a switch
+  /// or after a decode failure on the viewer).
+  bool av1_stream_keyframe = false;
   /// Shared hysteresis owned by the capture: while *this monotonic time has
   /// not passed, a near-full-screen change keeps the single full-screen AV1
   /// picture. Video pauses for a frame or two all the time; without the

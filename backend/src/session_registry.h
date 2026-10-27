@@ -22,6 +22,9 @@ struct session_info {
   /// when its core was built with dav1d). AV1 patches are only produced when
   /// every authenticated session supports them.
   bool av1 = false;
+  /// The client advertised that it can decode the low-delay AV1 stream (a
+  /// stateful decoder). Stream mode is only used while every viewer can.
+  bool av1_stream = false;
   /// The client advertised `seq_clock` in hello: it understands the per-cell
   /// applied-sequence map and can name the cells it missed.
   bool seq_clock = false;

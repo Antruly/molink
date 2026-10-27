@@ -641,6 +641,27 @@ if(MOLINK_SVT_AV1_FOUND AND MOLINK_DAV1D_FOUND)
   endforeach()
   add_test(NAME av1_frame COMMAND molink-core-av1-frame-test)
 
+  add_executable(molink-core-av1-stream-test
+    tests/av1_stream_test.cpp
+    src/capture/av1_frame.cpp
+    src/capture/av1_encoder.cpp
+    src/protocol/frame_packet.cpp
+  )
+  target_include_directories(molink-core-av1-stream-test PRIVATE
+    src ${SVT_AV1_INCLUDE_DIR} ${DAV1D_INCLUDE_DIR})
+  target_compile_definitions(molink-core-av1-stream-test PRIVATE
+    MOLINK_HAVE_SVT_AV1=1 MOLINK_HAVE_DAV1D=1)
+  target_link_libraries(molink-core-av1-stream-test PRIVATE
+    ${SVT_AV1_LIBRARY} ${DAV1D_LIBRARY})
+  set_target_properties(molink-core-av1-stream-test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+  foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
+    string(TOUPPER "${uvp_config}" uvp_config_upper)
+    set_target_properties(molink-core-av1-stream-test PROPERTIES
+      "RUNTIME_OUTPUT_DIRECTORY_${uvp_config_upper}" "${CMAKE_BINARY_DIR}")
+  endforeach()
+  add_test(NAME av1_stream COMMAND molink-core-av1-stream-test)
+
   # Capture-side split: large changes become AV1 patches, small ones stay
   # tiles. This exercises frame_encode.cpp with the real encoder.
   find_package(ZLIB QUIET)

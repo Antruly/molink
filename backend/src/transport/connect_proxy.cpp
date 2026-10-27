@@ -90,6 +90,7 @@ class connect_proxy final
       nlohmann::json hello = nlohmann::json::parse(text);
       if (!hello.is_object()) return text;
       hello["av1"] = true;
+      hello["av1_stream"] = true;
       if (std::getenv("MOLINK_AV1_LOG") != nullptr) {
         std::fprintf(stderr, "proxy: injected av1 into hello\n");
       }
@@ -313,8 +314,10 @@ class connect_proxy final
            std::memcmp(bytes.data(), protocol::kMagic,
                        sizeof(protocol::kMagic)) == 0 &&
            bytes[5] == static_cast<uint8_t>(protocol::packet_type::frame) &&
-           bytes[protocol::kPacketHeaderSize + 6] ==
-               static_cast<uint8_t>(protocol::codec::av1);
+           (bytes[protocol::kPacketHeaderSize + 6] ==
+                static_cast<uint8_t>(protocol::codec::av1) ||
+            bytes[protocol::kPacketHeaderSize + 6] ==
+                static_cast<uint8_t>(protocol::codec::av1_stream));
   }
 
   /// Tells the page that the client core is decoding AV1 patches, so the UI

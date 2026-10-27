@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -41,5 +42,26 @@ bool decode_av1_frame_payload(const uint8_t* payload, std::size_t len,
 
 /// True when this build links dav1d and can decode AV1 rectangles.
 bool av1_decode_available();
+
+/// Decodes a low-delay AV1 stream, keeping the reference frames between calls.
+/// One instance per stream; a keyframe (or reset()) starts a fresh decoder.
+class av1_stream_decoder {
+ public:
+  av1_stream_decoder();
+  ~av1_stream_decoder();
+  av1_stream_decoder(const av1_stream_decoder&) = delete;
+  av1_stream_decoder& operator=(const av1_stream_decoder&) = delete;
+
+  /// Feeds one stream frame. On success `bgra` holds width*height*4 bytes,
+  /// where the size is the decoded (padded) picture size.
+  bool decode(const uint8_t* data, std::size_t len, bool keyframe,
+              std::vector<uint8_t>& bgra, int& width, int& height,
+              std::string& error);
+  void reset();
+
+ private:
+  struct impl;
+  std::unique_ptr<impl> impl_;
+};
 
 }  // namespace molink

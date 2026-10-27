@@ -247,7 +247,104 @@ bool decode_av1_frame_payload(const uint8_t* payload, std::size_t len,
   return true;
 }
 
+struct av1_stream_decoder::impl {
+  Dav1dContext* ctx = nullptr;
+  ~impl() {
+    if (ctx != nullptr) dav1d_close(&ctx);
+  }
+};
+
+av1_stream_decoder::av1_stream_decoder() = default;
+av1_stream_decoder::~av1_stream_decoder() = default;
+
+void av1_stream_decoder::reset() { impl_.reset(); }
+
+bool av1_stream_decoder::decode(const uint8_t* data, std::size_t len,
+                                bool keyframe, std::vector<uint8_t>& bgra,
+                                int& width, int& height, std::string& error) {
+  bgra.clear();
+  if (data == nullptr || len == 0) {
+    error = "av1 stream: empty frame";
+    return false;
+  }
+  if (!impl_) impl_ = std::make_unique<impl>();
+  if (impl_->ctx == nullptr || keyframe) {
+    if (impl_->ctx != nullptr) {
+      dav1d_close(&impl_->ctx);
+      impl_->ctx = nullptr;
+    }
+    Dav1dSettings settings{};
+    dav1d_default_settings(&settings);
+    settings.n_threads = 1;
+    settings.max_frame_delay = 1;
+    if (dav1d_open(&impl_->ctx, &settings) != 0) {
+      error = "av1 stream: could not open dav1d";
+      impl_.reset();
+      return false;
+    }
+  }
+  Dav1dData input{};
+  uint8_t* dst = dav1d_data_create(&input, len);
+  if (dst == nullptr) {
+    error = "av1 stream: could not allocate the dav1d input";
+    return false;
+  }
+  std::memcpy(dst, data, len);
+  int rc = dav1d_send_data(impl_->ctx, &input);
+  dav1d_data_unref(&input);
+  if (rc < 0 && rc != DAV1D_ERR(EAGAIN)) {
+    error = "av1 stream: dav1d rejected the bitstream";
+    reset();
+    return false;
+  }
+  Dav1dPicture picture{};
+  rc = dav1d_get_picture(impl_->ctx, &picture);
+  if (rc != 0) {
+    error = "av1 stream: dav1d produced no picture";
+    return false;
+  }
+  if (picture.p.layout != DAV1D_PIXEL_LAYOUT_I420) {
+    dav1d_picture_unref(&picture);
+    reset();
+    error = "av1 stream: unexpected pixel layout";
+    return false;
+  }
+  width = picture.p.w;
+  height = picture.p.h;
+  bgra.assign(static_cast<std::size_t>(width) * height * 4, 0);
+  const auto* luma = static_cast<const uint8_t*>(picture.data[0]);
+  const auto* chroma_u = static_cast<const uint8_t*>(picture.data[1]);
+  const auto* chroma_v = static_cast<const uint8_t*>(picture.data[2]);
+  const int luma_stride = picture.stride[0];
+  const int chroma_stride = picture.stride[1];
+  for (int y = 0; y < height; ++y) {
+    const uint8_t* y_row = luma + static_cast<std::size_t>(y) * luma_stride;
+    const uint8_t* u_row =
+        chroma_u + static_cast<std::size_t>(y / 2) * chroma_stride;
+    const uint8_t* v_row =
+        chroma_v + static_cast<std::size_t>(y / 2) * chroma_stride;
+    uint8_t* out_row = bgra.data() + static_cast<std::size_t>(y) * width * 4;
+    for (int x = 0; x < width; ++x) {
+      yuv_to_bgra(y_row[x], u_row[x / 2], v_row[x / 2],
+                  out_row + static_cast<std::size_t>(x) * 4);
+    }
+  }
+  dav1d_picture_unref(&picture);
+  return true;
+}
+
 #else
+
+struct av1_stream_decoder::impl {};
+av1_stream_decoder::av1_stream_decoder() = default;
+av1_stream_decoder::~av1_stream_decoder() = default;
+void av1_stream_decoder::reset() {}
+bool av1_stream_decoder::decode(const uint8_t*, std::size_t, bool,
+                                std::vector<uint8_t>&, int&, int&,
+                                std::string& error) {
+  error = "this build has no dav1d";
+  return false;
+}
 
 bool decode_av1_frame_payload(const uint8_t* payload, std::size_t len,
                               std::vector<protocol::tile_blob>& tiles,
