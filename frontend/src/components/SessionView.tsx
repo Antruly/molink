@@ -928,20 +928,53 @@ export function SessionView({
   // back to the default arrow.
   const remoteCursorCss = useMemo(() => {
     const shape = tab.cursorShape
-    if (!shape || shape.w <= 0 || shape.h <= 0 || shape.w > 128 ||
-        shape.h > 128) {
-      return undefined
+    if (!shape || shape.w <= 0 || shape.h <= 0) return undefined
+    // The host draws its cursor at native pixel size. When the picture is
+    // scaled to fit the window, a native-size cursor looks oversized, so scale
+    // it with the picture; 'actual' keeps 1:1 and browsers cap cursors at
+    // 128x128, so anything larger falls back to the default arrow.
+    const screenW = tab.frame?.screenW ?? welcome?.tiles.screen_w ?? 0
+    const screenH = tab.frame?.screenH ?? welcome?.tiles.screen_h ?? 0
+    let scaleX = 1
+    let scaleY = 1
+    if (displayMode === 'fill' && screenW > 0 && screenH > 0 &&
+        surfaceSize.width > 0 && surfaceSize.height > 0) {
+      scaleX = surfaceSize.width / screenW
+      scaleY = surfaceSize.height / screenH
+    } else if (screenW > 0 && screenH > 0 && surfaceSize.width > 0 &&
+               surfaceSize.height > 0) {
+      scaleX = scaleY = Math.min(surfaceSize.width / screenW,
+                                 surfaceSize.height / screenH)
     }
-    const canvas = document.createElement('canvas')
-    canvas.width = shape.w
-    canvas.height = shape.h
-    const context = canvas.getContext('2d')
-    if (!context) return undefined
-    const image = context.createImageData(shape.w, shape.h)
+    const width = Math.max(8, Math.round(shape.w * scaleX))
+    const height = Math.max(8, Math.round(shape.h * scaleY))
+    if (width > 128 || height > 128) return undefined
+
+    const native = document.createElement('canvas')
+    native.width = shape.w
+    native.height = shape.h
+    const nativeContext = native.getContext('2d')
+    if (!nativeContext) return undefined
+    const image = nativeContext.createImageData(shape.w, shape.h)
     image.data.set(shape.rgba)
-    context.putImageData(image, 0, 0)
-    return `url("${canvas.toDataURL()}") ${shape.hotspotX} ${shape.hotspotY}, default`
-  }, [tab.cursorShape])
+    nativeContext.putImageData(image, 0, 0)
+
+    let source = native
+    if (width !== shape.w || height !== shape.h) {
+      const scaled = document.createElement('canvas')
+      scaled.width = width
+      scaled.height = height
+      const scaledContext = scaled.getContext('2d')
+      if (!scaledContext) return undefined
+      scaledContext.imageSmoothingEnabled = true
+      scaledContext.drawImage(native, 0, 0, width, height)
+      source = scaled
+    }
+    const hotspotX = Math.round(shape.hotspotX * (width / shape.w))
+    const hotspotY = Math.round(shape.hotspotY * (height / shape.h))
+    return `url("${source.toDataURL()}") ${hotspotX} ${hotspotY}, default`
+  }, [tab.cursorShape, tab.frame?.screenW, tab.frame?.screenH, welcome, displayMode,
+      surfaceSize.width, surfaceSize.height])
 
   useEffect(() => {
     const element = surfaceRef.current
