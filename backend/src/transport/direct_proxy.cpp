@@ -848,10 +848,27 @@ class direct_proxy final : public std::enable_shared_from_this<direct_proxy> {
                                   height, error)) {
         std::fprintf(stderr, "direct proxy: av1 stream decode failed: %s\n",
                      error.c_str());
-        // The reference chain is broken; ask the host for a keyframe.
-        if (transport_) {
-          static const char kRequest[] = "{\"type\":\"request-keyframe\"}";
-          transport_->send_text(kRequest);
+        // The reference chain is broken; ask the host for a keyframe. The
+        // transport owns QUIC state and is only safe on the loop thread,
+        // so the request is posted there: writing it from this decoder
+        // thread crashed ngtcp2. One a second is enough; a burst of failed
+        // frames must not restart the stream in a loop.
+        const auto request_now = std::chrono::steady_clock::now();
+        if (last_stream_keyframe_request_.time_since_epoch().count() == 0 ||
+            request_now - last_stream_keyframe_request_ >=
+                std::chrono::seconds(1)) {
+          last_stream_keyframe_request_ = request_now;
+          std::weak_ptr<direct_proxy> weak_self = weak_from_this();
+          const auto post = post_;
+          if (post) {
+            post([weak_self] {
+              auto self = weak_self.lock();
+              if (!self || !self->transport_) return;
+              static const char kRequest[] =
+                  "{\"type\":\"request-keyframe\"}";
+              self->transport_->send_text(kRequest);
+            });
+          }
         }
         return {};
       }
@@ -1054,6 +1071,8 @@ class direct_proxy final : public std::enable_shared_from_this<direct_proxy> {
   /// The low-delay stream keeps reference frames, so one decoder lives for the
   /// whole session.
   av1_stream_decoder stream_decoder_;
+  /// Last keyframe request for a broken stream (one a second).
+  std::chrono::steady_clock::time_point last_stream_keyframe_request_{};
   /// Last time a stream frame was forwarded to the page (rate limit).
   std::chrono::steady_clock::time_point last_stream_forward_{};
   /// Host bytes received since the last codec stat (the true wire rate) and
