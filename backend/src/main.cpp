@@ -112,6 +112,9 @@ std::string resolve_web_root(const molink::core_config& cfg) {
   if (!exe.empty()) {
     const fs::path dir = exe.parent_path();
     candidates.push_back(dir / "web");
+    // The packaged layout keeps bin/ and web/ side by side
+    // (/opt/molink/bin, /opt/molink/web).
+    candidates.push_back(dir / "../web");
     candidates.push_back(dir / "../share/molink/web");
     candidates.push_back(dir / "../../frontend/dist");
   }
