@@ -57,6 +57,9 @@ export interface Welcome {
   session_token?: string
   /** The host accepts per-second viewer health reports. */
   viewer_stats?: boolean
+  /** The host drives the frame clock for a client that asked for video_push:
+   *  frames arrive on their own and the pull loop stops. */
+  video_push?: boolean
   /** e2e: direct TLS to the host; relay: directory WSS only; none: plain. */
   security?: 'e2e' | 'relay' | 'none' | string
   /** Host certificate fingerprint advertised for pinning. */
@@ -322,6 +325,12 @@ export class MolinkClient {
   private ws: WebSocket | null = null
   private handlers: Partial<ClientHandlers> = {}
   private pendingFrame = false
+  /** The host offered to drive the frame clock for this session. */
+  private pushSupported = false
+  /** The clock is on right now: the page is visible and pulling is off. */
+  private pushVideo = false
+  /** Re-evaluates the clock whenever the page is shown or hidden. */
+  private visibilityListener: (() => void) | null = null
   /// When the unanswered frame request was sent, for the retry timeout.
   private pendingFrameAt = 0
   private latestFrameSeq = -1
@@ -461,6 +470,9 @@ export class MolinkClient {
     } = args
     this.closedByUser = false
     this.hasImage = false
+    this.stopWatchingVisibility()
+    this.pushSupported = false
+    this.pushVideo = false
     this.pendingFrame = false
     this.pendingFrameAt = 0
     this.missedFrameResponses = 0
@@ -544,6 +556,12 @@ export class MolinkClient {
           // The host then attaches a per-block sequence map to every frame
           // response, which names the cells a lost frame left stale.
           seq_clock: true,
+          // Ask the host to drive the frame clock instead of answering a
+          // request per frame. The host confirms in `welcome`; until then the
+          // pull loop keeps running.
+          video_push: true,
+          // This browser can decode the host's H.264 stream through WebCodecs;
+          // the host picks it when AV1 is not decodable by every viewer.
           ...(this.resumeToken ? { session: this.resumeToken } : {}),
           ...(clientName ? { name: clientName } : {}),
           ...(clientId ? { device_id: clientId } : {}),
@@ -573,7 +591,10 @@ export class MolinkClient {
       if (this.ws !== ws) return
       this.stopPing()
       this.stopHelloRetry()
-      this.pendingFrame = false
+      this.stopWatchingVisibility()
+      this.pushSupported = false
+      this.pushVideo = false
+        this.pendingFrame = false
       this.ws = null
       // Wrong code / locked host / denied request: the host answered and
       // closed on purpose. Falling back to a direct socket or retrying would
@@ -683,6 +704,9 @@ export class MolinkClient {
     this.stopRetryTimers()
     this.stopPing()
     this.stopHelloRetry()
+    this.stopWatchingVisibility()
+    this.pushSupported = false
+    this.pushVideo = false
     const ws = this.ws
     this.ws = null
     if (ws && ws.readyState <= WebSocket.OPEN) {
@@ -746,8 +770,36 @@ export class MolinkClient {
     this.helloAttempts = 0
   }
 
+  /// Turns the host clock on for a visible page and off for a hidden one.
+  ///
+  /// Hiding a tab (or losing focus, which WebKitGTK reports the same way)
+  /// used to drop the session to a 1 Hz pull; a pushed session would otherwise
+  /// keep receiving full-rate frames for a page nobody is looking at. Turning
+  /// the clock off hands the session back to its own slow pull instead.
+  private watchVisibility(): void {
+    if (this.visibilityListener !== null) return
+    const apply = () => {
+      const on = this.pushSupported && document.visibilityState === 'visible'
+      if (on === this.pushVideo) return
+      this.pushVideo = on
+      if (this.pushSupported) this.sendJson({ type: 'video-push', on })
+    }
+    this.visibilityListener = apply
+    document.addEventListener('visibilitychange', apply)
+    apply()
+  }
+
+  private stopWatchingVisibility(): void {
+    if (this.visibilityListener === null) return
+    document.removeEventListener('visibilitychange', this.visibilityListener)
+    this.visibilityListener = null
+  }
+
   /** Asks for one synthetic frame. Returns false while one is in flight. */
   requestFrame(): boolean {
+    // The host owns the clock for this session: polling would make it send
+    // every frame twice.
+    if (this.pushVideo) return false
     if (!this.isLive()) return false
     if (this.pendingFrame) {
       if (Date.now() - this.pendingFrameAt < kFrameRequestTimeoutMs) {
@@ -939,6 +991,11 @@ export class MolinkClient {
           this.resumeToken = welcome.session_token
         }
         this.stopHelloRetry()
+        // A host that answered `video_push` sends frames on its own clock
+        // while this page is the one being looked at; the pull loop stays
+        // quiet meanwhile so frames are not sent twice.
+        this.pushSupported = welcome.video_push === true
+        this.watchVisibility()
         this.handlers.onWelcome?.(welcome)
         this.retryAttempts = 0
         this.stopRetryTimers()
@@ -947,7 +1004,8 @@ export class MolinkClient {
         // Ask for the first picture immediately. WebKitGTK reports the page
         // as hidden while its window is unfocused, so waiting for the visible
         // pull loop would leave a freshly opened session on "waiting for the
-        // first frame" until the user clicks the window.
+        // first frame" until the user clicks the window. A pushed session
+        // gets its first picture from the host's clock instead.
         this.requestKeyframe()
         this.requestFrame()
         break

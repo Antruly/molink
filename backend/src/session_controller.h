@@ -159,6 +159,7 @@ class session_supervisor {
   std::shared_ptr<session_registry> registry_;
   session_options options_;
   std::thread thread_;
+  std::thread push_thread_;
   std::atomic<bool> running_{false};
   /// Last AV1 policy value announced to the capture source (diagnostics).
   bool av1_allowed_ = false;

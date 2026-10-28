@@ -25,6 +25,7 @@
 #include "capture/frame_encode.h"
 #include "compression.h"
 #include "capture/replay_policy.h"
+#include "capture/video_push.h"
 #include "protocol/frame_packet.h"
 #include "service_control.h"
 #include "transport/ws_transport.h"
@@ -438,9 +439,15 @@ void maybe_send_cursor(session_transport* transport,
   }
 }
 
+/// Sends whatever this session still needs to reach the newest capture.
+///
+/// @param push the host drives the clock for this session: when there is
+///        nothing new, send nothing at all. A polling client has a request in
+///        flight and still needs the empty frame to hear back; a pushed one
+///        must not pay a packet for every idle tick.
 void send_capture_frame(session_transport* transport,
                         const std::shared_ptr<session_info>& session,
-                        const session_options& opt) {
+                        const session_options& opt, bool push = false) {
   if (!opt.capture) {
     send_empty_frame(transport, session, 0, 0, false);
     return;
@@ -448,8 +455,10 @@ void send_capture_frame(session_transport* transport,
 
   const std::shared_ptr<const captured_frame> latest = opt.capture->latest();
   if (!latest) {
-    // Capture has not produced anything yet; let the client keep polling.
-    send_empty_frame(transport, session, 0, 0, false);
+    // Capture has not produced anything yet; let the client keep polling. A
+    // pushed session has nothing in flight, so an empty frame every tick would
+    // be pure noise until the first capture lands.
+    if (!push) send_empty_frame(transport, session, 0, 0, false);
     return;
   }
 
@@ -472,8 +481,10 @@ void send_capture_frame(session_transport* transport,
     }
     if (start_seq < 0) {
       opt.capture->request_keyframe();
-      send_empty_frame(transport, session, latest->width, latest->height,
-                       false);
+      if (!push) {
+        send_empty_frame(transport, session, latest->width, latest->height,
+                         false);
+      }
       return;
     }
     session->last_capture_seq = start_seq - 1;
@@ -482,8 +493,12 @@ void send_capture_frame(session_transport* transport,
   const int64_t last = session->last_capture_seq;
   if (last >= 0 && static_cast<uint32_t>(last) >= latest->seq) {
     // Nothing new since the last response. Answer anyway so the client's
-    // request does not stay in flight.
-    send_empty_frame(transport, session, latest->width, latest->height, false);
+    // request does not stay in flight -- unless the host owns the clock, in
+    // which case an idle tick costs nothing.
+    if (!push) {
+      send_empty_frame(transport, session, latest->width, latest->height,
+                       false);
+    }
     return;
   }
   // A session without a picture replays from the keyframe it found above,
@@ -603,9 +618,19 @@ void send_capture_frame(session_transport* transport,
       send_empty_frame(transport, session, frame->width, frame->height, false);
       return;
     }
+    if (!send_frame_with_av1(transport, session, *frame)) {
+      // The transport refused the frame: its channel is full, or the session
+      // is gone. Advancing anyway would tell the next tick that the viewer is
+      // up to date when it is now one delta behind, and every later frame
+      // would build on a picture it never applied. Start over from a keyframe
+      // instead -- the sender's queue is part of the recovery loop.
+      session->has_image = false;
+      session->last_capture_seq = -1;
+      opt.capture->request_keyframe();
+      return;
+    }
     session->last_capture_seq = seq;
     if (frame->keyframe) session->has_image = true;
-    send_frame_with_av1(transport, session, *frame);
   }
 }
 
@@ -671,6 +696,10 @@ void send_welcome(session_transport* transport, const session_info& session,
   // The viewer may report its own paint health; the host uses it to send less
   // detail when the client, not the encoder, is the limit.
   j["viewer_stats"] = true;
+  // The host can drive the frame clock itself. A client that advertises
+  // `video_push` in hello stops polling `request-frame`; clients that never
+  // ask keep the pull path, which stays the compatibility default.
+  j["video_push"] = true;
   // `transport` stays the wire protocol for older clients; `transport_path`
   // is the orthogonal axis (direct / p2p / relay), so a relayed QUIC session
   // reads as path=relay, protocol=quic.
@@ -1203,6 +1232,7 @@ void session_controller::on_text(const std::string& text) {
     // Clients that understand the per-block sequence map get one with every
     // frame response, so a lost frame is repaired immediately and precisely.
     session->seq_clock = bool_field(j, "seq_clock", false);
+    session->video_push = bool_field(j, "video_push", false);
     if (std::getenv("MOLINK_AV1_LOG") != nullptr) {
       std::fprintf(stderr, "host: session av1=%d\n", session->av1 ? 1 : 0);
     }
@@ -1635,6 +1665,15 @@ void session_controller::on_text(const std::string& text) {
   // looking at the picture -- a background tab, or a window that lost focus.
   // It then falls back to its own (much slower) pull until it turns the clock
   // back on. Without this a hidden tab keeps receiving full-rate frames.
+  if (type == "video-push") {
+    if (!require_auth()) return;
+    // Frames the viewer skipped while it was pulling are repaired by the
+    // sequence map and tile clock like any other gap, so turning the clock
+    // back on does not need a keyframe.
+    session->video_push = bool_field(j, "on", false);
+    return;
+  }
+
   if (type == "call") {
     if (!require_auth()) return;
     if (!options_.call) {
@@ -1974,11 +2013,79 @@ session_supervisor::~session_supervisor() { stop(); }
 void session_supervisor::start() {
   if (running_.exchange(true)) return;
   thread_ = std::thread([this] { run(); });
+  if (options_.post && options_.capture) {
+    push_thread_ = std::thread([this] { run_push_clock(); });
+  }
 }
 
 void session_supervisor::stop() {
   if (!running_.exchange(false)) return;
   if (thread_.joinable()) thread_.join();
+  if (push_thread_.joinable()) push_thread_.join();
+}
+
+/// The host side of the frame clock (Phase 2 of the media transport rebuild).
+///
+/// Every tick offers each push session the newest capture; frames the viewer
+/// never got to are never sent, so a slow link does not build a backlog of
+/// obsolete deltas. The rate follows the capture target and is halved while a
+/// viewer reports that it cannot paint what it already receives -- the same
+/// feedback the pull path uses to lower detail, applied to cadence instead.
+void session_supervisor::run_push_clock() {
+  video_push_clock clock(options_.capture ? options_.capture->target_fps()
+                                          : video_push_clock::kDefaultFps);
+  while (running_.load()) {
+    std::this_thread::sleep_for(
+        std::chrono::milliseconds(clock.interval_ms()));
+    if (!running_.load()) break;
+    if (!registry_->has_authenticated() || !options_.capture) continue;
+    clock.set_target_fps(options_.capture->target_fps());
+    const uint64_t now_ms = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count());
+    if (!clock.due(now_ms)) continue;
+
+    // Read the viewer feedback here rather than inside the posted lambda: the
+    // supervisor must not capture `this`, a post can outlive stop().
+    double slowest = 0.0;
+    bool dropping = false;
+    bool any = false;
+    for (const session_info& peer : registry_->snapshot()) {
+      if (!peer.authenticated || !peer.video_push || !peer.transport) continue;
+      any = true;
+      if (peer.viewer_stats_ms == 0 || now_ms - peer.viewer_stats_ms > 3000) {
+        continue;
+      }
+      const double fps = peer.viewer_paint_fps;
+      if (fps <= 0.0) continue;
+      slowest = slowest <= 0.0 ? fps : std::min(slowest, fps);
+      if (peer.viewer_dropped > 0) dropping = true;
+    }
+    if (!any) continue;
+    clock.note_viewer(slowest, dropping ? 1 : 0, now_ms);
+
+    auto registry_ref = registry_;
+    auto post = options_.post;
+    session_options options = options_;
+    post([registry_ref, options] {
+      for (const session_info& peer : registry_ref->snapshot()) {
+        if (!peer.authenticated || !peer.video_push || !peer.transport) {
+          continue;
+        }
+        const std::shared_ptr<session_info> live = registry_ref->find(peer.id);
+        if (!live || !live->transport) continue;
+        session_transport* transport = live->transport.get();
+        send_capture_frame(transport, live, options, /*push=*/true);
+        // These rode along with `request-frame` in the pull model. A pushed
+        // session sends no requests, so the clock has to carry them or the
+        // cursor freezes and the sequence map that names stale cells never
+        // reaches the viewer.
+        maybe_send_cursor(transport, live, options);
+        send_tile_seq(transport, live, options);
+      }
+    });
+  }
 }
 
 void session_supervisor::run() {

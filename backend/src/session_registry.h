@@ -28,6 +28,10 @@ struct session_info {
   /// The client advertised `seq_clock` in hello: it understands the per-cell
   /// applied-sequence map and can name the cells it missed.
   bool seq_clock = false;
+  /// The client advertised `video_push` in hello: it wants frames on the
+  /// host's clock instead of polling `request-frame`. Pull stays the
+  /// compatibility path for every client that does not ask for this.
+  bool video_push = false;
   /// Last time (monotonic ms) this session received a sequence map, so a
   /// polling client is not flooded while the screen is static.
   uint64_t last_seq_ms = 0;

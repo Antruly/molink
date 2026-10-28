@@ -594,6 +594,15 @@ set_target_properties(molink-core-stream-policy-test PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 add_test(NAME stream_policy COMMAND molink-core-stream-policy-test)
 
+# The host-side frame clock is pure scheduling, so it needs no transport.
+add_executable(molink-core-video-push-test
+  tests/video_push_test.cpp
+)
+target_include_directories(molink-core-video-push-test PRIVATE src)
+set_target_properties(molink-core-video-push-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME video_push COMMAND molink-core-video-push-test)
+
 # The logical channel API is backward-compatible with existing transports.
 add_executable(molink-core-session-channel-test
   tests/session_transport_channel_test.cpp
