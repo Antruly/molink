@@ -16,12 +16,18 @@
 #if MOLINK_HAVE_H3_WS
 #include <http3/uvcpp_h3_common.h>
 #include <http3/uvcpp_h3_connection.h>
+#if MOLINK_HAVE_WEBTRANSPORT
+#include <http3/uvcpp_h3_wt_session.h>
+#endif
 #include <http3/uvcpp_h3_ws_connection.h>
 #include <quic/uvcpp_quic_connection.h>
 #include <quic/uvcpp_quic_server.h>
 #include <ssl/uvcpp_ssl_context.h>
 
 #include "transport/h3_ws_transport.h"
+#if MOLINK_HAVE_WEBTRANSPORT
+#include "transport/wt_transport.h"
+#endif
 #endif
 
 namespace molink {
@@ -32,6 +38,10 @@ struct h3_ws_listener::impl {
     std::unique_ptr<uvcpp::uvcpp_h3_connection> h3;
     std::unique_ptr<uvcpp::uvcpp_h3_ws_connection> ws;
     std::shared_ptr<h3_ws_transport> transport;
+#if MOLINK_HAVE_WEBTRANSPORT
+    std::unique_ptr<uvcpp::uvcpp_h3_wt_session> wt;
+    std::shared_ptr<wt_transport> wt_link;
+#endif
     bool closed = false;
   };
 
@@ -112,6 +122,11 @@ bool h3_ws_listener::start(const std::string& ip, int port,
         auto state = std::make_shared<impl::connection_state>();
         state->h3 =
             std::make_unique<uvcpp::uvcpp_h3_connection>(connection, true);
+#if MOLINK_HAVE_WEBTRANSPORT
+        // WebTransport carries video as H3 datagrams, so the connection has to
+        // announce SETTINGS_H3_DATAGRAM before the session is created.
+        state->h3->set_h3_datagram_enabled(true);
+#endif
         self->connections[connection] = state;
 
         std::weak_ptr<impl> weak_self = self;
@@ -122,6 +137,62 @@ bool h3_ws_listener::start(const std::string& ip, int port,
                                     const uvcpp::h3_request& request) {
               auto state = weak_state.lock();
               if (!state || state->closed) return;
+#if MOLINK_HAVE_WEBTRANSPORT
+              if (request.protocol == "webtransport") {
+                auto transport =
+                    std::make_shared<wt_transport>("webtransport");
+                std::weak_ptr<wt_transport> weak_transport = transport;
+                uvcpp::uvcpp_h3_wt_session::callbacks wt_callbacks;
+                wt_callbacks.on_open = [weak_self, weak_state,
+                                        weak_transport](
+                                           uvcpp::uvcpp_h3_wt_session&) {
+                  auto state = weak_state.lock();
+                  auto link = weak_transport.lock();
+                  if (!state || !link) return;
+                  if (!state->wt) return;
+                  link->attach(state->wt.get());
+                  if (auto owner = weak_self.lock()) {
+                    if (owner->accept) owner->accept(link);
+                  }
+                };
+                wt_callbacks.on_datagram =
+                    [weak_transport](uvcpp::uvcpp_h3_wt_session&,
+                                     const uint8_t* data, std::size_t len) {
+                      if (auto link = weak_transport.lock()) {
+                        link->feed_datagram(data, len);
+                      }
+                    };
+                wt_callbacks.on_stream =
+                    [weak_transport](uvcpp::uvcpp_h3_wt_session&,
+                                     uvcpp::uvcpp_h3_wt_stream& stream,
+                                     bool bidi) {
+                      if (!bidi) return;
+                      if (auto link = weak_transport.lock()) {
+                        link->attach_stream(&stream);
+                      }
+                    };
+                wt_callbacks.on_close = [weak_transport](
+                                            uvcpp::uvcpp_h3_wt_session&,
+                                            uint32_t code,
+                                            const std::string& reason) {
+                  if (auto link = weak_transport.lock()) {
+                    link->link_closed(transport_close::normal,
+                                      reason.empty() ? "webtransport closed"
+                                                     : reason);
+                  }
+                };
+                auto wt = uvcpp::uvcpp_h3_wt_session::accept(h3, request,
+                                                             wt_callbacks);
+                if (!wt) {
+                  transport->link_closed(transport_close::policy,
+                                         "webtransport rejected");
+                  return;
+                }
+                state->wt = std::move(wt);
+                state->wt_link = transport;
+                return;
+              }
+#endif
               if (request.protocol != "websocket") return;
               auto transport = std::make_shared<h3_ws_transport>("http3");
               std::weak_ptr<h3_ws_transport> weak_transport = transport;
@@ -176,6 +247,14 @@ bool h3_ws_listener::start(const std::string& ip, int port,
                                             "h3 connection closed");
             }
             state->ws.reset();
+#if MOLINK_HAVE_WEBTRANSPORT
+            if (state->wt_link) {
+              state->wt_link->link_closed(transport_close::normal,
+                                          "h3 connection closed");
+            }
+            state->wt_link.reset();
+            state->wt.reset();
+#endif
           }
           // Destroy the h3 object after this callback returns: it must not
           // be freed while the library is still on its stack.

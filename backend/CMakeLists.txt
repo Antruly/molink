@@ -22,6 +22,9 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 #
 set(UVP_REQUESTED_FEATURES websocket)
 
+option(MOLINK_OPTION_WEBTRANSPORT
+  "Build the WebTransport session transport (needs libuvcpp with WebTransport)" ON)
+
 option(MOLINK_BUILD_CORE
   "Build the molink-core executable (requires libuvcpp with WEB and WEBAPP)" ON)
 
@@ -262,6 +265,18 @@ set(MOLINK_CORE_SOURCES
   src/protocol/frame_packet.cpp
 )
 
+# WebTransport (Phase 5) is compiled only when the libuvcpp in use provides it:
+# a 1.9 build has the session type and draft-13 stream framing, 1.8 has neither.
+set(MOLINK_HAVE_WEBTRANSPORT 0)
+if(MOLINK_OPTION_WEBTRANSPORT AND UVP_UVCPP_PREFIX AND
+   EXISTS "${UVP_UVCPP_PREFIX}/include/http3/uvcpp_h3_wt_session.h" AND
+   EXISTS "${UVP_UVCPP_PREFIX}/include/http3/uvcpp_h3_ws_connection.h")
+  set(MOLINK_HAVE_WEBTRANSPORT 1)
+  list(APPEND MOLINK_CORE_SOURCES
+    src/transport/wt_transport.cpp
+    src/transport/wt_framing.cpp)
+endif()
+
 if(APPLE)
   enable_language(OBJCXX)
   list(APPEND MOLINK_CORE_SOURCES
@@ -396,7 +411,8 @@ if(MOLINK_BUILD_CORE)
     set(MOLINK_HAVE_H3_WS 1)
   endif()
   target_compile_definitions(molink-core PRIVATE
-    MOLINK_HAVE_H3_WS=${MOLINK_HAVE_H3_WS})
+    MOLINK_HAVE_H3_WS=${MOLINK_HAVE_H3_WS}
+    MOLINK_HAVE_WEBTRANSPORT=${MOLINK_HAVE_WEBTRANSPORT})
 
   # WebRTC video track + data channel (Phase 4). The library brings its own
   # libjuice, so ICE behaviour matches the native P2P path.
@@ -621,6 +637,54 @@ target_include_directories(molink-core-stream-policy-test PRIVATE src)
 set_target_properties(molink-core-stream-policy-test PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 add_test(NAME stream_policy COMMAND molink-core-stream-policy-test)
+
+# WebTransport loopback: a real session over loopback QUIC, both halves of the
+# transport (reliable stream + fragmented datagrams). Skips without HTTP/3.
+if(MOLINK_HAVE_WEBTRANSPORT AND OpenSSL_FOUND)
+  add_executable(molink-core-wt-loopback-test
+    tests/wt_loopback_test.cpp
+    src/transport/wt_transport.cpp
+    src/transport/wt_framing.cpp
+    src/transport/stream_transport.cpp
+    src/protocol/frame_packet.cpp
+    src/tls_identity.cpp
+  )
+  target_include_directories(molink-core-wt-loopback-test PRIVATE src)
+  target_compile_definitions(molink-core-wt-loopback-test PRIVATE
+    MOLINK_HAVE_WEBTRANSPORT=1 MOLINK_HAVE_OPENSSL=1)
+  if(UVP_UVCPP_PREFIX)
+    target_include_directories(molink-core-wt-loopback-test PRIVATE
+      "${UVP_UVCPP_PREFIX}/include")
+    target_link_directories(molink-core-wt-loopback-test PRIVATE
+      "${UVP_UVCPP_PREFIX}/lib")
+  endif()
+  target_link_libraries(molink-core-wt-loopback-test PRIVATE
+    ${UVP_UVCPP_TARGET} OpenSSL::SSL OpenSSL::Crypto)
+  set_target_properties(molink-core-wt-loopback-test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+    BUILD_RPATH "${UVP_UVCPP_LIBDIR}")
+  foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
+    string(TOUPPER "${uvp_config}" uvp_config_upper)
+    set_target_properties(molink-core-wt-loopback-test PROPERTIES
+      "RUNTIME_OUTPUT_DIRECTORY_${uvp_config_upper}" "${CMAKE_BINARY_DIR}")
+  endforeach()
+  if(UNIX AND NOT APPLE)
+    target_link_options(molink-core-wt-loopback-test PRIVATE
+      "LINKER:--disable-new-dtags")
+  endif()
+  add_test(NAME wt_loopback COMMAND molink-core-wt-loopback-test)
+  set_tests_properties(wt_loopback PROPERTIES SKIP_RETURN_CODE 77)
+endif()
+
+# Datagram framing for WebTransport: pure byte handling, no libuvcpp needed.
+add_executable(molink-core-wt-framing-test
+  tests/wt_framing_test.cpp
+  src/transport/wt_framing.cpp
+)
+target_include_directories(molink-core-wt-framing-test PRIVATE src)
+set_target_properties(molink-core-wt-framing-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME wt_framing COMMAND molink-core-wt-framing-test)
 
 # The unified encoder face is policy only: the ladder and the backend list.
 add_executable(molink-core-video-encoder-test

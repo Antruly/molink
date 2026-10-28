@@ -150,16 +150,26 @@ capture
 
 ### Phase 5：WebTransport/QUIC
 
-> libuvcpp **1.8.9 没有** WebTransport API；libuvcpp **master（1.9.0 批次）** 已经有
-> `uvcpp_h3_wt_session`（draft-ietf-webtrans-http3-13：会话流、双向/单向流、H3 datagram、
-> Close/Drain capsule）。它自己注明“浏览器互通未验证”，而 draft 版本在演进中变过
-> `:protocol` 与流类型码 —— 所以这一步要先升 libuvcpp 到 1.9、再拿真实浏览器对齐，
-> 然后再接 moLink 的通道。本仓还没有做。
+> 主机侧用 libuvcpp **1.9 批次**的 `uvcpp_h3_wt_session`（draft-13）。必须用 1.9 构建
+> libuvcpp：1.8.9 没有这个类型。构建时自动探测 `include/http3/uvcpp_h3_wt_session.h`，
+> 有就编 `wt_transport`，没有就完全跳过（默认发布用的 1.8.9 不受影响）。
 
-- [ ] 浏览器支持时使用 WebTransport datagram 承载低延迟数据。
-- [ ] 使用 WebTransport stream 承载文件和控制。
-- [ ] 原生端优先 QUIC stream/datagram。
-- [ ] 为旧版本客户端保留协议版本协商。
+- [x] datagram 承载低延迟数据：`wt_transport` 把 video 通道的帧切成 MTU 大小的
+      H3 datagram（8 字节分片头：帧号 / 片号 / 片数），接收端按帧号重组；缺片就整帧丢弃，
+      由已有的关键帧/修复回路兜底。超过 256 KiB 的帧（关键帧）改走可靠流。
+- [x] stream 承载文件和控制：一条双向流按 MOLK 包头长度分帧，控制/音频/文件都走它，
+      与 QUIC 数据流共用 `stream_transport` 的分帧代码。
+- [x] 原生端优先 QUIC stream/datagram：原生路径本来就优先 QUIC；WebTransport 是浏览器侧
+      的 H3 封装，两者在 `wt_transport` 里共用同一套通道语义。
+- [x] 为旧版本客户端保留协议版本协商：WebTransport 是独立入口（h3 上的
+      `:protocol = webtransport`），没升级的客户端继续走 WebSocket/QUIC，协议版本不变。
+- [ ] **浏览器端还没有接**：页面仍然只用 WebSocket。要接 WebTransport，页面需要
+      `new WebTransport("https://host:port/wt")`，而浏览器要求受信任的 HTTPS 证书
+      （自签证书需要用户信任），并且 draft 版本要和 libuvcpp 的实现对得上。
+- [ ] **libuvcpp 的服务端 accept 有个 bug**（已定位，patch 见
+      `docs/patches/uvcpp-wt-server-open.patch`）：`accept()` 建好会话后既不置 `open_`
+      也不调 `on_open`，于是服务端 `open_bidi_stream()` 返回 nullptr、datagram 全被丢弃。
+      打上这个 patch 后，`wt_loopback` 端到端通过。
 
 ## 5. 当前变更记录
 
@@ -242,6 +252,19 @@ capture
   主机记录与构建/测试命令放在 `docs/testing.local.md`（含凭据，已加入 .gitignore）。
 - 新增 `av1_stream_fallback_test`（27 项断言）：GPU 正常时不创建 CPU 编码器；GPU 失败时同一帧由
   CPU 重编并强制关键帧；连续 3 次失败后丢弃 GPU；丢弃后不再重试。全量 CTest 16 项通过。
+### 2026-10-28（第六轮：Phase 5 WebTransport）
+
+- 主机侧 WebTransport 传输：`transport/wt_transport`（可靠流 + datagram 分片）与
+  `transport/wt_framing`（纯分片/重组逻辑，带单元测试）。
+- h3 监听器在 `:protocol = webtransport` 时接受会话，并把对端开的第一条双向流接成可靠路径；
+  datagram 只走视频通道。
+- CMake：探测 libuvcpp 是否带 WT 头文件，有则编入并定义 `MOLINK_HAVE_WEBTRANSPORT=1`；
+  默认（1.8.9）构建完全不受影响。
+- 测试：`wt_framing`（分片形状、乱序重组、丢片、旧帧被新帧顶掉、畸形输入）与
+  `wt_loopback`（真实 QUIC 上的 WebTransport 会话：控制包双向、3 片视频帧重组）。
+  在 libuvcpp 1.9 + 服务端 patch 下 20/20 通过。
+- 发现并记录 libuvcpp 的 `accept()` 缺陷（patch 存在 `docs/patches/`，没有改上游工作树）。
+
 ### 2026-10-28（第五轮：Phase 4 WebRTC）
 
 - 可选依赖 libdatachannel 0.22.6（`MOLINK_ENABLE_WEBRTC=ON`，默认关闭）。

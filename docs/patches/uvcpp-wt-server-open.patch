@@ -1,0 +1,17 @@
+diff --git a/src/http3/uvcpp_h3_wt_session.cpp b/src/http3/uvcpp_h3_wt_session.cpp
+index 2459165..4f75487 100644
+--- a/src/http3/uvcpp_h3_wt_session.cpp
++++ b/src/http3/uvcpp_h3_wt_session.cpp
+@@ -165,6 +165,12 @@ std::unique_ptr<uvcpp_h3_wt_session> uvcpp_h3_wt_session::accept(
+                        raw->on_capsule_data(d, n);
+                      },
+                      [raw]() { raw->on_capsule_end(); });
++  // 服务端在 200 发出去那一刻就已经建立：没有这一步，open_ 永远是 false，
++  // open_bidi_stream() 返回 nullptr、datagram 全被丢掉、on_open 也永远不触发。
++  raw->open_    = true;
++  raw->pending_ = false;
++  std::function<void(uvcpp_h3_wt_session&)> open_cb = raw->cbs_.on_open;
++  if (open_cb) open_cb(*raw);
+   return s;
+ }
+ 
