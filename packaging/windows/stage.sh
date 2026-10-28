@@ -40,6 +40,13 @@ done
 cp "$ROOT/shell/assets/icons/icon.ico" "$PKG/molink.ico"
 cp -r "$WEB/." "$PKG/web/"
 
+# WebRTC: libdatachannel comes from vcpkg when the core was built with it.
+for _dll in libdatachannel.dll; do
+  for _dir in "${VCPKG_INSTALLATION_ROOT:+$VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin}"; do
+    [ -n "$_dir" ] && [ -f "$_dir/$_dll" ] && cp "$_dir/$_dll" "$PKG/"
+  done
+done
+
 # Runtime DLLs, when libuvcpp was built shared. A source install may keep them
 # in lib/, while the release archives put them in bin/ next to the import
 # libraries in lib; check both. Never ship the archive's debug DLL.

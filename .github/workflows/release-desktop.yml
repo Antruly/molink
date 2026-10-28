@@ -3,6 +3,9 @@ name: Release Desktop
 on:
   push:
     tags: ['v*']
+  # Manual runs build the artifacts without publishing a release; the release
+  # steps below only fire for a tag.
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -39,26 +42,74 @@ jobs:
           cache: pnpm
           cache-dependency-path: frontend/pnpm-lock.yaml
 
-      - name: Fetch prebuilt libuvcpp
+      # WebTransport needs libuvcpp's 1.9 line (the session type shipped there),
+      # and that line's QUIC/HTTP3 needs the OpenSSL 3.5 QUIC API, which no
+      # Ubuntu package provides. So both are built from source here.
+      - name: Build OpenSSL 3.5 (QUIC API)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -sSL --retry 3 --retry-delay 5 -o openssl.tar.gz \
+            https://codeload.github.com/openssl/openssl/tar.gz/refs/tags/openssl-3.5.0
+          mkdir -p openssl-src
+          tar xzf openssl.tar.gz -C openssl-src --strip-components=1
+          cd openssl-src
+          ./Configure --prefix="$RUNNER_TEMP/openssl-quic" --libdir=lib shared no-tests
+          make -j"$(nproc)"
+          make install_sw
+          nm -D "$RUNNER_TEMP/openssl-quic/lib/libssl.so" | grep -qE ' [TW] SSL_set_quic_tls_cbs($|@)' || {
+            echo "::error title=quic-openssl::libssl has no SSL_set_quic_tls_cbs"; exit 1; }
+
+      - name: Build libuvcpp (1.9 line, WebTransport)
         shell: bash
         env:
-          UVCPP_VERSION: ${{ vars.UVCPP_VERSION }}
-        run: ./packaging/fetch-uvcpp.sh linux-x64 "${UVCPP_VERSION:-1.8.8}" "$RUNNER_TEMP/uvcpp"
+          UVCPP_REF: ${{ vars.UVCPP_REF }}
+        run: |
+          set -euo pipefail
+          ./packaging/clone-retry.sh --depth 1 --branch "${UVCPP_REF:-master}" \
+            https://github.com/Antruly/libuvcpp.git "$RUNNER_TEMP/libuvcpp"
+          cmake -S "$RUNNER_TEMP/libuvcpp" -B "$RUNNER_TEMP/libuvcpp/build" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/uvcpp" \
+            -DUVCPP_BUILD_SHARED=ON -DUVCPP_BUILD_STATIC=OFF -DUVCPP_BUILD_TESTS=OFF \
+            -DUVCPP_BUILD_NET=ON -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
+            -DUVCPP_ENABLE_OPENSSL=ON -DUVCPP_ENABLE_QUIC=ON -DUVCPP_ENABLE_HTTP3=ON \
+            -DOPENSSL_ROOT_DIR="$RUNNER_TEMP/openssl-quic"
+          cmake --build "$RUNNER_TEMP/libuvcpp/build" --parallel
+          cmake --install "$RUNNER_TEMP/libuvcpp/build"
+          test -f "$RUNNER_TEMP/uvcpp/include/http3/uvcpp_h3_wt_session.h" || {
+            echo "::error title=webtransport::libuvcpp has no WebTransport header"; exit 1; }
+
+      - name: Build libdatachannel (WebRTC)
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch v0.22.6 --recurse-submodules --shallow-submodules \
+            https://github.com/paullouisageneau/libdatachannel.git "$RUNNER_TEMP/libdatachannel"
+          cmake -S "$RUNNER_TEMP/libdatachannel" -B "$RUNNER_TEMP/libdatachannel/build" \
+            -DCMAKE_BUILD_TYPE=Release -DNO_EXAMPLES=ON -DNO_TESTS=ON \
+            -DUSE_GNUTLS=OFF -DUSE_NICE=OFF \
+            -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/datachannel"
+          cmake --build "$RUNNER_TEMP/libdatachannel/build" --parallel
+          cmake --install "$RUNNER_TEMP/libdatachannel/build"
 
       - name: Build packages
         env:
-          CMAKE_PREFIX_PATH: ${{ runner.temp }}/uvcpp
+          CMAKE_PREFIX_PATH: ${{ runner.temp }}/uvcpp:${{ runner.temp }}/datachannel
           PKG_CONFIG_PATH: ${{ runner.temp }}/uvcpp/lib/pkgconfig
           UVCPP_LIB_DIR: ${{ runner.temp }}/uvcpp/lib
           UVCPP_ROOT: ${{ runner.temp }}/uvcpp
           VERSION: ${{ github.ref_name }}
         run: |
           export VERSION="${VERSION#v}"
+          export MOLINK_EXTRA_CMAKE_ARGS="-DMOLINK_UVCPP_PREFIX=$RUNNER_TEMP/uvcpp -DMOLINK_ENABLE_WEBRTC=ON"
           ./packaging/linux/build-deb.sh
           ./packaging/linux/build-appimage.sh
           ./packaging/linux/build-rpm.sh
 
       - uses: softprops/action-gh-release@v2
+        if: github.ref_type == 'tag' 
         with:
           name: moLink ${{ github.ref_name }}
           body: 'Linux packages: .deb, .AppImage and .rpm.'
@@ -132,8 +183,12 @@ jobs:
           # libjpeg-turbo pulls vcpkg's zlib in; the core takes that zlib too,
           # so headers and import library agree (a static zlib built here used
           # to collide with vcpkg's headers: unresolved __imp_compress2).
+          # libdatachannel carries the WebRTC video track and data channels.
+          # WebTransport is not on Windows yet: it needs libuvcpp's 1.9 line,
+          # and this job still links the 1.8 prebuilt archive.
           "$VCPKG_INSTALLATION_ROOT/vcpkg.exe" install \
-            svt-av1:x64-windows dav1d:x64-windows libjpeg-turbo:x64-windows
+            svt-av1:x64-windows dav1d:x64-windows libjpeg-turbo:x64-windows \
+            libdatachannel:x64-windows
 
       - name: Build core
         shell: bash
@@ -143,6 +198,7 @@ jobs:
             -DOPENSSL_ROOT_DIR="$(cygpath -m "$OPENSSL_ROOT_DIR")" \
             -DMOLINK_ENABLE_AV1=ON \
             -DMOLINK_ENABLE_JPEG=ON \
+            -DMOLINK_ENABLE_WEBRTC=ON \
             -DCMAKE_PREFIX_PATH="$(cygpath -m "$VCPKG_INSTALLATION_ROOT/installed/x64-windows")"
           cmake --build backend/build --config Release --parallel
 
@@ -239,6 +295,7 @@ jobs:
           Write-Host "runtime dependencies OK"
 
       - uses: softprops/action-gh-release@v2
+        if: github.ref_type == 'tag' 
         with:
           name: moLink ${{ github.ref_name }}
           body: 'Windows installer (Inno Setup) and portable executable (x64).'
@@ -314,6 +371,7 @@ jobs:
           ./packaging/macos/build-dmg.sh
 
       - uses: softprops/action-gh-release@v2
+        if: github.ref_type == 'tag' 
         with:
           name: moLink ${{ github.ref_name }}
           body: 'macOS disk image.'
@@ -415,6 +473,7 @@ jobs:
 
       - name: Attach to the shared release
         uses: softprops/action-gh-release@v2
+        if: github.ref_type == 'tag' 
         with:
           overwrite_files: true
           files: |

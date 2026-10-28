@@ -271,10 +271,16 @@ set(MOLINK_HAVE_WEBTRANSPORT 0)
 if(MOLINK_OPTION_WEBTRANSPORT AND UVP_UVCPP_PREFIX AND
    EXISTS "${UVP_UVCPP_PREFIX}/include/http3/uvcpp_h3_wt_session.h" AND
    EXISTS "${UVP_UVCPP_PREFIX}/include/http3/uvcpp_h3_ws_connection.h")
-  set(MOLINK_HAVE_WEBTRANSPORT 1)
-  list(APPEND MOLINK_CORE_SOURCES
-    src/transport/wt_transport.cpp
-    src/transport/wt_framing.cpp)
+  # The header alone is not enough: without HTTP/3 the class inside is
+  # compiled out and using it would fail to link. Require the feature bit.
+  file(STRINGS "${UVP_UVCPP_PREFIX}/include/uvcpp/uvcpp_config.h"
+       _molink_uvcpp_http3 REGEX "^#define UVCPP_HTTP3_ENABLE 1")
+  if(_molink_uvcpp_http3)
+    set(MOLINK_HAVE_WEBTRANSPORT 1)
+    list(APPEND MOLINK_CORE_SOURCES
+      src/transport/wt_transport.cpp
+      src/transport/wt_framing.cpp)
+  endif()
 endif()
 
 if(APPLE)

@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.9.65] — 2026-10-28
+
+### Added
+
+- **会话通道与背压**：控制 / 视频 / 音频 / 文件各走独立队列，视频只保留最新帧与
+  关键帧；relay 按在途字节数施加背压，文件入队失败保留 offset 重试。
+- **主机推送时钟**：声明 `video_push` 的客户端由主机按采集帧率推送，后台标签页
+  交还给慢速拉取。
+- **GPU 编码**：NVENC 低延迟 AV1 与 H.264 流（无限 GOP、无 B 帧、按需 IDR），
+  失败时按帧回退到 CPU；页面用 WebCodecs 解 H.264。
+- **WebRTC（可选构建）**：H.264 视频轨、控制 DataChannel、不可靠音频通道、
+  独立文件通道、PLI → 关键帧、TURN 支持；页面把轨道画进原来的会话画布。
+- **WebTransport（需 libuvcpp 1.9）**：独立端口的短期证书（ECDSA P-256 / 13 天，
+  `serverCertificateHashes` 固定）、视频与音频走 H3 datagram、控制与文件走各自的
+  双向流；断线时自动退回 WebSocket。
+- 发布工作流现在会构建 libuvcpp 1.9 与 libdatachannel：Linux 包带 WebRTC 与
+  WebTransport，Windows 安装包带 WebRTC。
+
 ## [0.9.64] — 2026-10-28
 
 ### Fixed

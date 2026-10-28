@@ -15,7 +15,8 @@ if [ -n "${MOLINK_AV1_SDK:-}" ]; then
   AV1_ARG+=("-DMOLINK_AV1_SDK=$MOLINK_AV1_SDK")
 fi
 cmake -S "$ROOT/backend" -B "$ROOT/backend/build" -DCMAKE_BUILD_TYPE=Release \
-  -DMOLINK_ENABLE_AV1=ON ${AV1_ARG[@]+"${AV1_ARG[@]}"} >/dev/null
+  -DMOLINK_ENABLE_AV1=ON ${AV1_ARG[@]+"${AV1_ARG[@]}"} \
+  ${MOLINK_EXTRA_CMAKE_ARGS:-} >/dev/null
 cmake --build "$ROOT/backend/build" --parallel
 (cd "$ROOT/frontend" && pnpm install --frozen-lockfile >/dev/null && pnpm build >/dev/null)
 cmake -S "$ROOT/shell/native" -B "$ROOT/shell/native/build" -DCMAKE_BUILD_TYPE=Release >/dev/null
@@ -49,6 +50,13 @@ for dir in ${MOLINK_AV1_SDK:+$MOLINK_AV1_SDK/usr/lib/$MULTIARCH} \
     cp -P "$dir"/$pattern "$APPDIR/usr/lib/" 2>/dev/null || true
   done
 done
+# WebRTC links libdatachannel; bundle it when the core was built with it.
+DATACHANNEL_LIB=$(ldd "$ROOT/backend/build/molink-core" 2>/dev/null \
+                  | awk '/libdatachannel/{print $3}' | head -n 1)
+if [ -n "$DATACHANNEL_LIB" ]; then
+  cp -P "$(dirname "$DATACHANNEL_LIB")"/libdatachannel.so* $APPDIR/usr/lib/
+fi
+
 cp "$ROOT/shell/assets/icons/icon.png" "$APPDIR/molink.png"
 cp "$ROOT/shell/assets/icons/icon.png" "$APPDIR/usr/share/molink/molink.png"
 cp "$ROOT/shell/assets/icons/icon.png" "$APPDIR/usr/share/icons/hicolor/256x256/apps/molink.png"
