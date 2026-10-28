@@ -478,7 +478,7 @@ if(MOLINK_BUILD_CORE)
       "RUNTIME_OUTPUT_DIRECTORY_${uvp_config_upper}" "${CMAKE_BINARY_DIR}")
   endforeach()
 
-  find_package(ZLIB QUIET)
+  find_package(ZLIB MODULE QUIET)
   if(ZLIB_FOUND)
     target_compile_definitions(molink-core PRIVATE MOLINK_HAVE_ZLIB=1)
     target_link_libraries(molink-core PRIVATE ZLIB::ZLIB)
@@ -697,7 +697,7 @@ if(MOLINK_SVT_AV1_FOUND AND MOLINK_DAV1D_FOUND)
 
   # Capture-side split: large changes become AV1 patches, small ones stay
   # tiles. This exercises frame_encode.cpp with the real encoder.
-  find_package(ZLIB QUIET)
+  find_package(ZLIB MODULE QUIET)
   add_executable(molink-core-frame-encode-av1-test
     tests/frame_encode_av1_test.cpp
     src/capture/frame_encode.cpp
