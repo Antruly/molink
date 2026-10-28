@@ -62,9 +62,12 @@ if [ -n "${VCPKG_INSTALLATION_ROOT:-}" ]; then
   # JPEG and zlib: libjpeg-turbo ships its runtime as jpeg62.dll (ABI 62) and
   # depends on vcpkg's zlib. Glob both so an ABI or naming change cannot leave
   # the installer without them again.
+  # vcpkg's zlib registers its import under the plain name z.dll, so that one
+  # is listed explicitly (the dependency check caught it).
   for dll in "$VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin"/jpeg*.dll \
              "$VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin"/zlib*.dll \
-             "$VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin"/libz*.dll; do
+             "$VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin"/libz*.dll \
+             "$VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin/z.dll"; do
     [ -f "$dll" ] && cp "$dll" "$PKG/"
   done
 fi
