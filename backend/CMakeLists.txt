@@ -206,6 +206,7 @@ set(MOLINK_CORE_SOURCES
   src/capture/dirty_rects.cpp
   src/capture/av1_encoder.cpp
   src/capture/av1_frame.cpp
+  src/capture/jpeg_encode.cpp
   src/surface/frame_surface.cpp
   src/clipboard/x11_clipboard.cpp
   src/clipboard/windows_clipboard.cpp
@@ -329,7 +330,6 @@ if(MOLINK_ENABLE_JPEG)
   endif()
   if(JPEG_INCLUDE_DIR AND JPEG_LIBRARY)
     set(MOLINK_HAVE_JPEG 1)
-    list(APPEND MOLINK_CORE_SOURCES src/capture/jpeg_encode.cpp)
   else()
     message(STATUS "molink: libjpeg-turbo not found; stream frames stay raw")
   endif()
