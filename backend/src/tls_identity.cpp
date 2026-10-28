@@ -8,6 +8,7 @@
 #include <openssl/pem.h>
 #include <openssl/x509.h>
 
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <random>
@@ -86,8 +87,8 @@ bool load_key(const std::string& path, EVP_PKEY** key) {
 }
 
 bool generate_identity(const std::string& cert_path, const std::string& key_path,
-                       const std::string& common_name, std::string& fingerprint,
-                       std::string& error) {
+                       const std::string& common_name, long validity_days,
+                       std::string& fingerprint, std::string& error) {
   EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_EC, nullptr);
   if (ctx == nullptr) {
     error = "could not create the key context";
@@ -120,9 +121,8 @@ bool generate_identity(const std::string& cert_path, const std::string& key_path
     ok = X509_gmtime_adj(X509_getm_notBefore(cert), -60) != nullptr;
   }
   if (ok) {
-    // Ten years: this is a pinned device identity, not a public certificate.
-    ok = X509_gmtime_adj(X509_getm_notAfter(cert), 60ll * 60 * 24 * 3650) !=
-         nullptr;
+    ok = X509_gmtime_adj(X509_getm_notAfter(cert),
+                         60ll * 60 * 24 * validity_days) != nullptr;
   }
   if (ok) ok = X509_set_pubkey(cert, key) == 1;
   // OpenSSL 3 returns a const pointer; the setters still take a mutable one.
@@ -192,7 +192,69 @@ tls_identity load_or_create_tls_identity(const std::string& config_dir,
   fs::remove(identity.cert_path, ec);
   fs::remove(identity.key_path, ec);
   if (!generate_identity(identity.cert_path, identity.key_path, common_name,
-                         identity.fingerprint, identity.error)) {
+                         /*validity_days=*/3650, identity.fingerprint,
+                         identity.error)) {
+    return identity;
+  }
+  return identity;
+}
+
+/// True when the certificate at @p path expires within @p seconds (or cannot
+/// be read at all).
+bool certificate_expires_within(const std::string& path, long seconds) {
+  X509* cert = nullptr;
+  if (!load_certificate(path, &cert)) return true;
+  const ASN1_TIME* not_after = X509_get0_notAfter(cert);
+  bool expiring = true;
+  if (not_after != nullptr) {
+    ASN1_TIME* deadline = ASN1_TIME_new();
+    if (deadline != nullptr) {
+      const time_t when = time(nullptr) + seconds;
+      if (ASN1_TIME_set(deadline, when) != nullptr) {
+        expiring = ASN1_TIME_compare(not_after, deadline) <= 0;
+      }
+      ASN1_TIME_free(deadline);
+    }
+  }
+  X509_free(cert);
+  return expiring;
+}
+
+tls_identity load_or_create_webtransport_identity(
+    const std::string& config_dir, const std::string& common_name) {
+  tls_identity identity;
+  if (config_dir.empty()) {
+    identity.error = "cannot resolve the configuration directory";
+    return identity;
+  }
+  const fs::path dir = fs::path(config_dir) / "tls";
+  std::error_code ec;
+  fs::create_directories(dir, ec);
+  if (ec) {
+    identity.error = "cannot create the TLS directory";
+    return identity;
+  }
+  identity.cert_path = (dir / "webtransport.crt").string();
+  identity.key_path = (dir / "webtransport.key").string();
+
+  X509* cert = nullptr;
+  EVP_PKEY* key = nullptr;
+  const bool usable =
+      !certificate_expires_within(identity.cert_path, 2 * 24 * 3600) &&
+      load_certificate(identity.cert_path, &cert) &&
+      load_key(identity.key_path, &key) &&
+      X509_check_private_key(cert, key) == 1 &&
+      fingerprint_of(cert, identity.fingerprint);
+  if (cert != nullptr) X509_free(cert);
+  if (key != nullptr) EVP_PKEY_free(key);
+  if (usable) return identity;
+
+  // Rotate two days before a browser would start refusing it.
+  fs::remove(identity.cert_path, ec);
+  fs::remove(identity.key_path, ec);
+  if (!generate_identity(identity.cert_path, identity.key_path, common_name,
+                         /*validity_days=*/13, identity.fingerprint,
+                         identity.error)) {
     return identity;
   }
   return identity;
@@ -207,6 +269,13 @@ namespace molink {
 tls_identity load_or_create_tls_identity(const std::string&, const std::string&) {
   tls_identity identity;
   identity.error = "this build has no OpenSSL; encrypted transport is unavailable";
+  return identity;
+}
+
+tls_identity load_or_create_webtransport_identity(const std::string&,
+                                                  const std::string&) {
+  tls_identity identity;
+  identity.error = "this build has no OpenSSL; WebTransport is unavailable";
   return identity;
 }
 

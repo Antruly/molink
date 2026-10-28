@@ -163,9 +163,17 @@ capture
       的 H3 封装，两者在 `wt_transport` 里共用同一套通道语义。
 - [x] 为旧版本客户端保留协议版本协商：WebTransport 是独立入口（h3 上的
       `:protocol = webtransport`），没升级的客户端继续走 WebSocket/QUIC，协议版本不变。
-- [ ] **浏览器端还没有接**：页面仍然只用 WebSocket。要接 WebTransport，页面需要
-      `new WebTransport("https://host:port/wt")`，而浏览器要求受信任的 HTTPS 证书
-      （自签证书需要用户信任），并且 draft 版本要和 libuvcpp 的实现对得上。
+- [x] 浏览器端：`frontend/src/lib/webtransport.ts` 用 `new WebTransport()` 连接，
+      证书通过 `serverCertificateHashes` 固定（welcome 里新增
+      `webtransport: {port, sha256}`）。可靠流按 MOLK 包头长度分帧收发控制消息，
+      datagram 按 8 字节分片头重组视频。页面收到 welcome 后在后台开会话、发 hello，
+      拿到 WebTransport 上的 welcome 后关闭原 WebSocket 并把收发切过去；任何一步失败
+      都继续用 WebSocket。
+- [x] 浏览器能接受的证书：core 另外生成 `tls/webtransport.crt`（ECDSA P-256，13 天），
+      剩不到 2 天时自动轮换；它跑在独立端口 **28423**（`kDefaultWebTransportPort`），
+      不与 http3/quic 端口冲突。`welcome` 只在监听真的起来时才广播。
+- [ ] 浏览器实机验证未做：需要 Chrome 系浏览器（WebTransport + H3 datagram），
+      而且本仓没法在这里跑浏览器。
 - [ ] **libuvcpp 的服务端 accept 有个 bug**（已定位，patch 见
       `docs/patches/uvcpp-wt-server-open.patch`）：`accept()` 建好会话后既不置 `open_`
       也不调 `on_open`，于是服务端 `open_bidi_stream()` 返回 nullptr、datagram 全被丢弃。
@@ -252,6 +260,17 @@ capture
   主机记录与构建/测试命令放在 `docs/testing.local.md`（含凭据，已加入 .gitignore）。
 - 新增 `av1_stream_fallback_test`（27 项断言）：GPU 正常时不创建 CPU 编码器；GPU 失败时同一帧由
   CPU 重编并强制关键帧；连续 3 次失败后丢弃 GPU；丢弃后不再重试。全量 CTest 16 项通过。
+### 2026-10-28（第七轮：Phase 5 浏览器端）
+
+- 页面新增 `lib/webtransport.ts`：`WebTransport` 会话、MOLK 流分帧、datagram 分片重组。
+- `client.ts`：welcome 后开 WebTransport 会话并发 hello；收到 WebTransport 上的 welcome
+  后关掉原 WebSocket 把收发切过去；失败则完全回退到 WebSocket（`isLive`/`sendJson`/
+  `sendRawPacket` 都先看 WT）。
+- 主机新增短期证书身份（13 天，提前 2 天轮换）与独立 WebTransport 监听端口 28423；
+  welcome 增加 `webtransport: {port, sha256}`。实测：core 起来后 welcome 里带
+  `{'port': 28423, 'sha256': '96:d8:...'}`。
+- 测试：`build/wt` 20/20、默认构建 19/19、`tsc` + `vite build` 通过。
+
 ### 2026-10-28（第六轮：Phase 5 WebTransport）
 
 - 主机侧 WebTransport 传输：`transport/wt_transport`（可靠流 + datagram 分片）与

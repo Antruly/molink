@@ -26,4 +26,13 @@ struct tls_identity {
 tls_identity load_or_create_tls_identity(const std::string& config_dir,
                                          const std::string& common_name);
 
+/// Short-lived identity for WebTransport.
+///
+/// A browser only accepts `serverCertificateHashes` for a self-signed ECDSA
+/// P-256 certificate whose validity is at most 14 days, so this identity is
+/// rotated rather than pinned: it is regenerated when fewer than two days are
+/// left. Clients learn its fingerprint from `welcome` each session.
+tls_identity load_or_create_webtransport_identity(
+    const std::string& config_dir, const std::string& common_name);
+
 }  // namespace molink

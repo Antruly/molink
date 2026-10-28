@@ -63,6 +63,11 @@ struct session_options {
   std::string device_name;
   /// Host certificate fingerprint advertised to clients for pinning.
   std::string cert_fingerprint;
+  /// SHA-256 of the short-lived WebTransport certificate, when that endpoint
+  /// is up. A browser pins it through `serverCertificateHashes`.
+  std::string webtransport_fingerprint;
+  /// The WebTransport listener is up on network->webtransport_port.
+  std::shared_ptr<std::atomic<bool>> webtransport_available;
   /// The host web listener itself speaks TLS (direct LAN encryption).
   bool tls_enabled = false;
   /// Hop a callback onto the app loop (used for clipboard results, which are

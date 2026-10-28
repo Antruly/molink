@@ -778,6 +778,15 @@ void send_welcome(session_transport* transport, const session_info& session,
   // WebRTC (Phase 4): the host can offer an H.264 video track the browser
   // decodes natively. Only advertised by builds that carry the media stack.
   j["webrtc"] = MOLINK_HAVE_WEBRTC ? true : false;
+#if MOLINK_HAVE_WEBTRANSPORT
+  // The browser opens a WebTransport session on its own port, pinning the
+  // short-lived certificate by hash instead of trusting a CA.
+  if (opt.webtransport_available && opt.webtransport_available->load() &&
+      opt.network && !opt.webtransport_fingerprint.empty()) {
+    j["webtransport"]["port"] = opt.network->webtransport_port.load();
+    j["webtransport"]["sha256"] = opt.webtransport_fingerprint;
+  }
+#endif
   // The browser builds its RTCPeerConnection with the same ICE servers the
   // host's peer uses, so both sides gather on the same paths.
   j["ice_servers"] = uvcpp_json::array();

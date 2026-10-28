@@ -619,6 +619,18 @@ int main(int argc, char** argv) {
   // listening": with remote access off the listener binds loopback, so it is
   // on but not reachable from the network.
   auto quic_supported = std::make_shared<std::atomic<bool>>(false);
+  // WebTransport runs on its own h3 endpoint with a short-lived certificate:
+  // a browser only accepts a self-signed certificate through
+  // serverCertificateHashes when it is valid for at most fourteen days.
+  auto webtransport_available = std::make_shared<std::atomic<bool>>(false);
+  const tls_identity wt_tls = load_or_create_webtransport_identity(
+      config_directory(), identity.device_id + "-webtransport");
+  session_opts.webtransport_available = webtransport_available;
+  if (wt_tls.ok()) {
+    session_opts.webtransport_fingerprint = wt_tls.fingerprint;
+  } else if (!wt_tls.error.empty()) {
+    std::fprintf(stderr, "molink webtransport: %s\n", wt_tls.error.c_str());
+  }
   deps.quic_available = quic_available;
   deps.http3_available = http3_available;
   session_opts.quic_available = quic_available;
@@ -661,8 +673,19 @@ int main(int argc, char** argv) {
         controller->start(nullptr);
       },
       [&app](std::function<void()> fn) { app.post(std::move(fn)); });
+  auto webtransport_sessions = std::make_shared<h3_ws_listener>(
+      app.loop(), wt_tls.cert_path, wt_tls.key_path,
+      [registry, session_opts](std::shared_ptr<session_transport> transport) {
+        auto controller = std::make_shared<session_controller>(
+            registry, std::move(transport), session_opts);
+        controller->start(nullptr);
+      },
+      [&app](std::function<void()> fn) { app.post(std::move(fn)); });
   deps.on_access_changed = [quic_sessions, quic_available, quic_supported,
                             http3_sessions, http3_available,
+                            webtransport_sessions, webtransport_available,
+                            wt_ok = wt_tls.ok(),
+                            network = session_opts.network,
                             bind_host = cfg.host,
                             quic_port = cfg.quic_port,
                             http3_port = cfg.http3_port](bool allow_remote) {
@@ -684,6 +707,24 @@ int main(int argc, char** argv) {
         http3_available->store(true);
       } else {
         http3_available->store(false);
+      }
+    }
+    if (webtransport_sessions) {
+      webtransport_sessions->stop();
+      webtransport_available->store(false);
+      if (wt_ok) {
+        std::string wt_error;
+        // Its own port: the certificate is a different, short-lived one.
+        if (webtransport_sessions->start(ip, kDefaultWebTransportPort,
+                                         wt_error)) {
+          webtransport_available->store(true);
+          if (network) {
+            network->webtransport_port.store(kDefaultWebTransportPort);
+          }
+        } else {
+          std::fprintf(stderr, "molink webtransport: %s\n",
+                       wt_error.c_str());
+        }
       }
     }
   };
@@ -830,6 +871,33 @@ int main(int argc, char** argv) {
       std::fprintf(stderr, "molink http3: %s\n", error.c_str());
     }
   }
+
+#if MOLINK_HAVE_WEBTRANSPORT
+  // WebTransport on its own endpoint: a second h3 listener with the
+  // short-lived certificate a browser accepts through serverCertificateHashes.
+  if (wt_tls.ok()) {
+    auto started = std::make_shared<std::promise<std::string>>();
+    auto started_future = started->get_future();
+    h3_ws_listener* listener = webtransport_sessions.get();
+    std::string bind_host =
+        auth->settings().allow_remote_access ? cfg.host : "127.0.0.1";
+    const int wt_port = kDefaultWebTransportPort;
+    app.post([listener, bind_host, wt_port, started] {
+      std::string error;
+      const bool ok = listener->start(bind_host, wt_port, error);
+      started->set_value(ok ? std::string() : error);
+    });
+    const std::string error = started_future.get();
+    if (error.empty()) {
+      webtransport_available->store(true);
+      if (session_opts.network) {
+        session_opts.network->webtransport_port.store(wt_port);
+      }
+    } else {
+      std::fprintf(stderr, "molink webtransport: %s\n", error.c_str());
+    }
+  }
+#endif
 
   {
     auto started = std::make_shared<std::promise<std::string>>();

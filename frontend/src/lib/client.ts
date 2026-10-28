@@ -14,6 +14,7 @@ import {
 } from './protocol'
 import { formatHost } from './net'
 import { H264StreamDecoder, h264StreamSupported } from './h264-stream'
+import { WtTransport, fingerprintBytes, webTransportSupported } from './webtransport'
 
 export type ClientPhase = 'idle' | 'connecting' | 'live' | 'error' | 'disconnected'
 
@@ -60,6 +61,8 @@ export interface Welcome {
   viewer_stats?: boolean
   /** The host can offer a WebRTC video track (Phase 4). */
   webrtc?: boolean
+  /** The host accepts a WebTransport session on its own port (Phase 5). */
+  webtransport?: { port: number; sha256: string }
   /** ICE servers to use for that connection, as "stun:host:port". */
   ice_servers?: string[]
   /** The host drives the frame clock for a client that asked for video_push:
@@ -340,6 +343,10 @@ export class MolinkClient {
   private ws: WebSocket | null = null
   private handlers: Partial<ClientHandlers> = {}
   private pendingFrame = false
+  /** The WebTransport session, once it replaced the socket. */
+  private wt: WtTransport | null = null
+  /** A WebTransport hello is in flight: keep the socket until it answers. */
+  private wtPending = false
   /** The WebRTC peer for this session, once the host offered one. */
   private rtc: RTCPeerConnection | null = null
   /** Its data channel: control messages prefer it while it is open. */
@@ -760,6 +767,7 @@ export class MolinkClient {
   }
 
   isLive(): boolean {
+    if (this.wt !== null && this.wt.isOpen) return true
     return this.ws !== null && this.ws.readyState === WebSocket.OPEN
   }
 
@@ -1031,7 +1039,7 @@ export class MolinkClient {
       tsUs: Date.now() * 1000,
       payload: data,
     })
-    this.ws.send(packet)
+    this.sendRawPacket(packet)
   }
 
   setClipboard(text: string): void {
@@ -1072,7 +1080,7 @@ export class MolinkClient {
       tsUs: Date.now() * 1000,
       payload,
     })
-    this.ws.send(packet)
+    this.sendRawPacket(packet)
   }
 
   /** Real-time clipboard update; the core forwards it to other sessions. */
@@ -1114,6 +1122,18 @@ export class MolinkClient {
         // quiet meanwhile so frames are not sent twice.
         this.pushSupported = welcome.video_push === true
         this.iceServers = welcome.ice_servers ?? []
+        if (this.wtPending && this.wt !== null) {
+          // This welcome came over the WebTransport session: it is up, and the
+          // socket has done its job (signaling and the certificate hash).
+          this.wtPending = false
+          this.retireSocket()
+        } else if (this.lastConnect !== null) {
+          void this.startWebTransport(
+            welcome,
+            this.lastConnect.host,
+            this.lastConnect.token,
+          )
+        }
         this.watchVisibility()
         this.handlers.onWelcome?.(welcome)
         this.retryAttempts = 0
@@ -1870,12 +1890,86 @@ export class MolinkClient {
     this.openSocket()
   }
 
+  /// One whole MOLK packet on the active transport.
+  private sendRawPacket(packet: ArrayBuffer | Uint8Array): void {
+    if (this.wt !== null && this.wt.isOpen) {
+      this.wt.sendBinary(
+        packet instanceof Uint8Array ? packet : new Uint8Array(packet),
+      )
+      return
+    }
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
+    this.ws.send(packet as BufferSource)
+  }
+
+  /// Brings up a WebTransport session and moves the client onto it.
+  ///
+  /// The socket stays alive until the host answers the hello sent over the new
+  /// session: if anything fails, the page simply keeps using the socket.
+  private async startWebTransport(
+    welcome: Welcome,
+    host: string,
+    token: string,
+  ): Promise<void> {
+    const info = welcome.webtransport
+    if (this.wt !== null || this.wtPending || info === undefined) return
+    if (!webTransportSupported()) return
+    const hash = fingerprintBytes(info.sha256)
+    if (hash === null) return
+    const url = `https://${formatHost(host)}:${info.port}/wt`
+    const transport = await WtTransport.connect(url, hash, {
+      onText: (text) => this.handleText(text),
+      onBinary: (data) =>
+        this.handleBinary(
+          data.buffer.slice(
+            data.byteOffset,
+            data.byteOffset + data.byteLength,
+          ) as ArrayBuffer,
+        ),
+      onClose: () => {
+        if (this.wt !== null) {
+          this.wt = null
+          // The session is gone; surface it instead of pretending to be live.
+          this.handlers.onPhase?.('disconnected', 'webtransport closed')
+        }
+      },
+      onError: () => undefined,
+    })
+    if (transport === null) return
+    this.wtPending = true
+    this.wt = transport
+    const hello: Record<string, unknown> = {
+      type: 'hello',
+      token,
+      seq_clock: true,
+      video_push: true,
+      h264_stream: this.h264Capable,
+      client: 'molink-web',
+      protocol: 1,
+    }
+    if (this.resumeToken !== '') hello.session = this.resumeToken
+    transport.sendText(JSON.stringify(hello))
+  }
+
+  /// Drops the socket after the WebTransport session took over.
+  private retireSocket(): void {
+    const ws = this.ws
+    this.ws = null
+    if (ws !== null && ws.readyState <= WebSocket.OPEN) {
+      ws.close(1000, 'switched to webtransport')
+    }
+  }
+
   private sendJson(payload: Record<string, unknown>, viaSocket = false): void {
     const text = JSON.stringify(payload)
     // Control prefers the WebRTC data channel once it is up: it rides the same
     // encrypted path as the video track and is not queued behind file bytes on
     // the relay socket. Signaling stays on the socket -- it is what brings the
     // channel up in the first place.
+    if (!viaSocket && this.wt !== null && this.wt.isOpen) {
+      this.wt.sendText(text)
+      return
+    }
     const channel = this.rtcChannel
     if (!viaSocket && channel !== null && channel.readyState === 'open') {
       try {

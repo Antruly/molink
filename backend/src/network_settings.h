@@ -18,6 +18,9 @@ inline constexpr int kDefaultHttp3Port = 28419;
 inline constexpr int kDefaultQuicPort = 28420;
 inline constexpr int kDefaultTcpDataPort = 28421;
 inline constexpr int kDefaultUdpPort = 28422;
+/// WebTransport has its own endpoint: its certificate is short-lived (browsers
+/// reject serverCertificateHashes otherwise) while the device identity is not.
+inline constexpr int kDefaultWebTransportPort = 28423;
 
 struct network_settings {
   /// HTTP/1.1 + WebSocket + h2c listener.
@@ -28,6 +31,10 @@ struct network_settings {
   std::atomic<int> quic_port{kDefaultQuicPort};
   std::atomic<int> tcp_data_port{kDefaultTcpDataPort};
   std::atomic<int> udp_port{kDefaultUdpPort};
+  /// WebTransport endpoint (h3, ':protocol = webtransport'). It has its own
+  /// port because the browser only accepts a short-lived certificate there,
+  /// and the pinned device identity lives for ten years.
+  std::atomic<int> webtransport_port{0};
 };
 
 }  // namespace molink
