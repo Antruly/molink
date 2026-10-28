@@ -221,5 +221,36 @@ bool parse_frame_payload(const uint8_t* data, std::size_t len,
   return true;
 }
 
+bool has_packet_header(const uint8_t* data, std::size_t len) {
+  return data != nullptr && len >= kPacketHeaderSize &&
+         std::memcmp(data, kMagic, sizeof(kMagic)) == 0;
+}
+
+packet_stream packet_stream_of(const uint8_t* data, std::size_t len) {
+  if (!has_packet_header(data, len)) return packet_stream::control;
+  switch (static_cast<packet_type>(data[5])) {
+    case packet_type::frame:
+    case packet_type::tile_clock:
+    case packet_type::tile_seq:
+      return packet_stream::video;
+    case packet_type::audio:
+    case packet_type::voice:
+      return packet_stream::audio;
+    case packet_type::file_data:
+      return packet_stream::file;
+    default:
+      return packet_stream::control;
+  }
+}
+
+bool packet_is_keyframe(const uint8_t* data, std::size_t len) {
+  if (!has_packet_header(data, len)) return false;
+  if (data[5] != static_cast<uint8_t>(packet_type::frame)) return false;
+  if ((get16(data + 6) & kPacketFlagKeyframe) != 0) return true;
+  const std::size_t frame_header_offset = kPacketHeaderSize + 7;
+  if (len <= frame_header_offset) return false;
+  return (data[frame_header_offset] & kFrameFlagKeyframe) != 0;
+}
+
 }  // namespace protocol
 }  // namespace molink

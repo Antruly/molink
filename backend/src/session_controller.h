@@ -111,7 +111,7 @@ class session_controller final
   void stop_voice();
   void send_voice(std::vector<uint8_t> pcm);
   void send_json_string(const std::string& text);
-  void send_file_chunk(uint32_t id, uint64_t offset, const uint8_t* data,
+  bool send_file_chunk(uint32_t id, uint64_t offset, const uint8_t* data,
                        std::size_t len);
   void send_audio(std::vector<uint8_t> pcm);
   /// Called from the local approval dialog (through the request registry).
@@ -152,6 +152,8 @@ class session_supervisor {
 
  private:
   void run();
+  /// Fixed frame clock for sessions that asked the host to push video.
+  void run_push_clock();
 
   uvcpp::uvcpp_web_app& app_;
   std::shared_ptr<session_registry> registry_;

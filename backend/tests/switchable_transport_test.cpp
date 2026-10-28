@@ -37,6 +37,12 @@ class fake_transport final : public session_transport {
   std::string peer_ip() const override { return label_; }
   unsigned int peer_port() const override { return 0; }
   bool is_open() const override { return open_; }
+  transport_capabilities capabilities() const override {
+    transport_capabilities value;
+    value.independent_video = label_ == "ice";
+    value.unreliable_video = label_ == "ice";
+    return value;
+  }
   bool send_text(const std::string& text) override {
     sent_text.push_back(text);
     return open_;
@@ -44,6 +50,16 @@ class fake_transport final : public session_transport {
   bool send_binary(const uint8_t* data, std::size_t len) override {
     sent_binary.emplace_back(data, data + len);
     return open_;
+  }
+  bool send_text(transport_channel channel,
+                 const std::string& text) override {
+    sent_text_channels.push_back(channel);
+    return send_text(text);
+  }
+  bool send_binary(transport_channel channel, const uint8_t* data,
+                   std::size_t len) override {
+    sent_binary_channels.push_back(channel);
+    return send_binary(data, len);
   }
   void close(int, const std::string&) override { open_ = false; }
   void set_handlers(text_handler on_text, binary_handler on_binary,
@@ -62,6 +78,8 @@ class fake_transport final : public session_transport {
 
   std::vector<std::string> sent_text;
   std::vector<std::vector<uint8_t>> sent_binary;
+  std::vector<transport_channel> sent_text_channels;
+  std::vector<transport_channel> sent_binary_channels;
 
  private:
   std::string label_;
@@ -208,6 +226,20 @@ void test_relay_split() {
          "request-tiles goes to the relay and ping to ICE");
   expect(relay->sent_binary.size() == 1 && ice->sent_binary.size() == 1,
          "keyframe goes to the relay and delta to ICE");
+
+  relay->sent_text.clear();
+  relay->sent_binary.clear();
+  ice->sent_text.clear();
+  ice->sent_binary.clear();
+  const auto file = file_data_packet();
+  switcher->send_text(transport_channel::control, "{\"type\":\"ping\"}");
+  switcher->send_binary(transport_channel::file, file.data(), file.size());
+  switcher->send_binary(transport_channel::video, delta.data(), delta.size());
+  expect(relay->sent_binary.size() == 1 && ice->sent_binary.size() == 1,
+         "explicit file channel uses relay while video uses ICE");
+  expect(ice->sent_text_channels.size() == 1 &&
+             ice->sent_text_channels.front() == transport_channel::control,
+         "explicit control channel uses active transport");
 }
 
 }  // namespace

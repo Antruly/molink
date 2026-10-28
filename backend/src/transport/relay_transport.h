@@ -11,6 +11,7 @@
 #include <thread>
 #include <utility>
 
+#include "transport/channel_scheduler.h"
 #include "transport/relay_session.h"
 
 namespace molink {
@@ -42,7 +43,11 @@ class relay_transport final : public relay_session {
 
   bool is_open() const override;
   bool send_text(const std::string& text) override;
+  bool send_text(transport_channel channel,
+                 const std::string& text) override;
   bool send_binary(const uint8_t* data, std::size_t len) override;
+  bool send_binary(transport_channel channel, const uint8_t* data,
+                   std::size_t len) override;
   void close(int code, const std::string& reason) override;
   void set_handlers(text_handler on_text, binary_handler on_binary,
                     close_handler on_close) override;
@@ -53,7 +58,8 @@ class relay_transport final : public relay_session {
 
  private:
   void thread_main();
-  bool enqueue(bool text, std::string data);
+  bool enqueue(transport_channel channel, bool text, std::string data,
+               bool keyframe = false);
   void deliver_close(int code, const std::string& reason);
 
   std::string url_;
@@ -67,8 +73,14 @@ class relay_transport final : public relay_session {
   std::atomic<bool> stop_requested_{false};
   std::atomic<bool> close_delivered_{false};
 
+  /// Bytes handed to the WebSocket client whose write has not completed yet.
+  /// libuvcpp queues frames without a bound, so this is the only place the
+  /// relay can learn that a receiver is not keeping up.
+  static constexpr std::size_t kMaxInflightBytes = 8 * 1024 * 1024;
+
   std::mutex send_mutex_;
-  std::deque<std::pair<bool, std::string>> sends_;
+  channel_scheduler sends_;
+  std::atomic<std::size_t> inflight_bytes_{0};
 
   std::mutex handler_mutex_;
   text_handler text_;

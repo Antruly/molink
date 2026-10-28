@@ -11,7 +11,30 @@
 #include <ssl/uvcpp_ssl_context.h>
 #endif
 
+#include "protocol/frame_packet.h"
+
 namespace molink {
+namespace {
+
+/// The untyped send path still carries whole sessions: the browser proxies
+/// forward page traffic through it. Classify by packet header so those bytes
+/// land in the channel whose budget and drain order they belong to instead of
+/// piling into the small control queue.
+transport_channel channel_for(const uint8_t* data, std::size_t len) {
+  switch (protocol::packet_stream_of(data, len)) {
+    case protocol::packet_stream::video:
+      return transport_channel::video;
+    case protocol::packet_stream::audio:
+      return transport_channel::audio;
+    case protocol::packet_stream::file:
+      return transport_channel::file;
+    case protocol::packet_stream::control:
+      break;
+  }
+  return transport_channel::control;
+}
+
+}  // namespace
 
 relay_transport::relay_transport(std::string url, std::string ca_path,
                                  post_fn post, bool relay_protocol)
@@ -55,22 +78,41 @@ bool relay_transport::is_open() const {
 }
 
 bool relay_transport::send_text(const std::string& text) {
-  return enqueue(true, text);
+  return enqueue(transport_channel::control, true, text);
+}
+
+bool relay_transport::send_text(transport_channel channel,
+                                const std::string& text) {
+  if (channel != transport_channel::control) return false;
+  return enqueue(channel, true, text);
 }
 
 bool relay_transport::send_binary(const uint8_t* data, std::size_t len) {
-  if (data == nullptr && len > 0) return false;
-  std::string copy(reinterpret_cast<const char*>(data), len);
-  return enqueue(false, std::move(copy));
+  return send_binary(channel_for(data, len), data, len);
 }
 
-bool relay_transport::enqueue(bool text, std::string data) {
+bool relay_transport::send_binary(transport_channel channel,
+                                  const uint8_t* data, std::size_t len) {
+  if (data == nullptr && len > 0) return false;
+  // A keyframe is the only queued frame whose loss costs a full refresh, so
+  // tell the scheduler which video messages must not be evicted.
+  const bool keyframe =
+      channel == transport_channel::video &&
+      protocol::packet_is_keyframe(data, len);
+  std::string copy(reinterpret_cast<const char*>(data), len);
+  return enqueue(channel, false, std::move(copy), keyframe);
+}
+
+bool relay_transport::enqueue(transport_channel channel, bool text,
+                              std::string data, bool keyframe) {
   if (!ready_.load() || closed_.load()) return false;
-  {
-    std::lock_guard<std::mutex> lock(send_mutex_);
-    sends_.emplace_back(text, std::move(data));
+  std::lock_guard<std::mutex> lock(send_mutex_);
+  if (text) {
+    return channel == transport_channel::control && sends_.enqueue_text(data);
   }
-  return true;
+  return sends_.enqueue(channel,
+                        reinterpret_cast<const uint8_t*>(data.data()),
+                        data.size(), keyframe);
 }
 
 void relay_transport::deliver_close(int code, const std::string& reason) {
@@ -230,18 +272,41 @@ void relay_transport::thread_main() {
 
   while (running_) {
     client.run(UV_RUN_NOWAIT);
-    std::deque<std::pair<bool, std::string>> sends;
     {
       std::lock_guard<std::mutex> lock(send_mutex_);
-      sends.swap(sends_);
-    }
-    for (const auto& message : sends) {
-      if (client.session() == nullptr || closed_) break;
-      if (message.first) {
-        client.send_text(message.second);
-      } else {
-        client.send_binary(message.second.data(), message.second.size());
-      }
+      sends_.drain(
+          [&client, this](const channel_scheduler::message& message) {
+            if (client.session() == nullptr) return false;
+            const std::size_t size = message.data.size();
+            // libuvcpp's WebSocket client queues frames without a bound and
+            // always returns 0, so a slow receiver would just grow its send
+            // queue. Count the bytes until the write completes and stop
+            // handing over messages past the cap: that is what lets
+            // backpressure reach the scheduler and the file transfer offset.
+            if (inflight_bytes_.load(std::memory_order_relaxed) + size >
+                kMaxInflightBytes) {
+              return false;
+            }
+            auto settle = [this, size](int) {
+              inflight_bytes_.fetch_sub(size, std::memory_order_relaxed);
+            };
+            inflight_bytes_.fetch_add(size, std::memory_order_relaxed);
+            int rc = 0;
+            if (message.text) {
+              rc = client.send_text(
+                  std::string(message.data.begin(), message.data.end()),
+                  settle);
+            } else {
+              rc = client.send_binary(
+                  reinterpret_cast<const char*>(message.data.data()), size,
+                  settle);
+            }
+            // The completion callback runs even when the send is refused
+            // (queued-frame accounting settles it immediately), so it is the
+            // single place that releases the bytes.
+            return rc == 0;
+          },
+          64);
     }
     if (stop_requested_ || !running_) break;
     std::this_thread::sleep_for(std::chrono::milliseconds(1));

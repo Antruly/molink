@@ -387,7 +387,14 @@ void file_transfer::pull(uint32_t id) {
     downloads_.erase(it);
     return;
   }
-  send_chunk_(id, item.sent, buffer.data(), static_cast<std::size_t>(got));
+  if (!send_chunk_(id, item.sent, buffer.data(),
+                   static_cast<std::size_t>(got))) {
+    // Keep the offset unchanged so the client can retry after transport
+    // backpressure clears. The file stream has consumed the bytes, so rewind.
+    item.in.clear();
+    item.in.seekg(static_cast<std::streamoff>(item.sent), std::ios::beg);
+    return;
+  }
   item.sent += static_cast<uint64_t>(got);
   if (item.sent >= item.size) {
     send_simple("eof", id);

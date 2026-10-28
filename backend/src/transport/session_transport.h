@@ -16,6 +16,27 @@ inline constexpr int going_away = 1001;
 inline constexpr int policy = 1008;
 }  // namespace transport_close
 
+/// Logical traffic classes. A transport implementation may map these classes
+/// to different physical paths (for example a WebRTC video track and a QUIC
+/// file stream). The legacy text/binary methods remain the compatibility API.
+enum class transport_channel : uint8_t {
+  control,
+  video,
+  audio,
+  file,
+};
+
+/// Physical capabilities advertised by a transport. The defaults describe the
+/// legacy single reliable path and let newer transports opt into independent
+/// channel delivery incrementally.
+struct transport_capabilities {
+  bool independent_control = false;
+  bool independent_video = false;
+  bool independent_audio = false;
+  bool independent_file = false;
+  bool unreliable_video = false;
+};
+
 /// Transport-independent view of one authenticated session channel.
 ///
 /// The session controller only needs text control messages, binary MOLK
@@ -45,10 +66,30 @@ class session_transport {
   virtual const char* path() const { return "direct"; }
   virtual std::string peer_ip() const = 0;
   virtual unsigned int peer_port() const = 0;
+  virtual transport_capabilities capabilities() const {
+    return transport_capabilities();
+  }
 
   virtual bool is_open() const = 0;
   virtual bool send_text(const std::string& text) = 0;
   virtual bool send_binary(const uint8_t* data, std::size_t len) = 0;
+
+  /// Sends a packet on a logical channel. Legacy transports intentionally
+  /// default to the existing binary path; specialized transports can override
+  /// this method to route video, files and control independently.
+  virtual bool send_binary(transport_channel channel, const uint8_t* data,
+                           std::size_t len) {
+    (void)channel;
+    return send_binary(data, len);
+  }
+
+  /// Sends a control message. This overload gives future transports an
+  /// explicit control boundary while preserving the old text API.
+  virtual bool send_text(transport_channel channel, const std::string& text) {
+    (void)channel;
+    return send_text(text);
+  }
+
   virtual void close(int code, const std::string& reason) = 0;
 
   /// Installs the inbound handlers. Passing empty handlers is allowed and

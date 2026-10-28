@@ -44,6 +44,7 @@ set(MOLINK_UVCPP_PREFIX "" CACHE PATH
 # that one transport is omitted instead of failing the whole build.
 set(MOLINK_HAVE_UDP_RELAY 1)
 
+
 if(MOLINK_BUILD_CORE)
   if(MOLINK_UVCPP_PREFIX)
     # CI uses the release archive directly instead of building libuvcpp from
@@ -230,6 +231,7 @@ set(MOLINK_CORE_SOURCES
   src/transport/ws_transport.cpp
   src/transport/juice_transport.cpp
   src/transport/relay_transport.cpp
+  src/transport/channel_scheduler.cpp
   src/transport/relay_stream_transport.cpp
   src/transport/quic_relay_transport.cpp
   src/transport/udp_relay_transport.cpp
@@ -592,6 +594,25 @@ set_target_properties(molink-core-stream-policy-test PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 add_test(NAME stream_policy COMMAND molink-core-stream-policy-test)
 
+# The logical channel API is backward-compatible with existing transports.
+add_executable(molink-core-session-channel-test
+  tests/session_transport_channel_test.cpp
+)
+target_include_directories(molink-core-session-channel-test PRIVATE src)
+set_target_properties(molink-core-session-channel-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME session_channel COMMAND molink-core-session-channel-test)
+
+# Channel queues are transport-independent and enforce Phase 1 backpressure.
+add_executable(molink-core-channel-scheduler-test
+  tests/channel_scheduler_test.cpp
+  src/transport/channel_scheduler.cpp
+)
+target_include_directories(molink-core-channel-scheduler-test PRIVATE src)
+set_target_properties(molink-core-channel-scheduler-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME channel_scheduler COMMAND molink-core-channel-scheduler-test)
+
 # The relay/ICE split is pure routing: no libuvcpp and no sockets.
 add_executable(molink-core-switchable-test
   tests/switchable_transport_test.cpp
@@ -607,6 +628,31 @@ foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
     "RUNTIME_OUTPUT_DIRECTORY_${uvp_config_upper}" "${CMAKE_BINARY_DIR}")
 endforeach()
 add_test(NAME switchable COMMAND molink-core-switchable-test)
+
+# This test compiles the production file-transfer implementation, which needs
+# libuvcpp's WebApp JSON header. Keep it out of dependency-free test builds;
+# the core build has already resolved UVP_UVCPP_TARGET and provides the header.
+if(MOLINK_BUILD_CORE AND UVP_UVCPP_TARGET)
+  add_executable(molink-core-file-transfer-backpressure-test
+    tests/file_transfer_backpressure_test.cpp
+    src/file_transfer.cpp
+    src/util.cpp
+  )
+  target_include_directories(molink-core-file-transfer-backpressure-test PRIVATE
+    src ${UVP_UVCPP_PREFIX}/include)
+  target_link_libraries(molink-core-file-transfer-backpressure-test PRIVATE
+    ${UVP_UVCPP_TARGET})
+  if(WIN32)
+    # util.cpp enumerates the local addresses with GetAdaptersAddresses
+    # (iphlpapi) and formats them with inet_ntop (ws2_32).
+    target_link_libraries(molink-core-file-transfer-backpressure-test PRIVATE
+      ws2_32 iphlpapi)
+  endif()
+  set_target_properties(molink-core-file-transfer-backpressure-test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+  add_test(NAME file_transfer_backpressure
+    COMMAND molink-core-file-transfer-backpressure-test)
+endif()
 
 # NVENC smoke test: encodes one rectangle and writes the AV1 OBU. Exit 77 on
 # machines without an AV1-capable NVIDIA GPU (CTest marks it skipped).
@@ -773,6 +819,42 @@ if(MOLINK_BUILD_CORE AND OpenSSL_FOUND)
   endif()
   add_test(NAME quic_loopback COMMAND molink-core-quic-loopback-test)
   set_tests_properties(quic_loopback PROPERTIES SKIP_RETURN_CODE 77)
+endif()
+
+# Slow-receiver pressure on the real relay transport: a loopback WebSocket
+# server stops reading while file traffic is pushed, and the transport has to
+# apply backpressure instead of growing the client's send queue.
+if(MOLINK_BUILD_CORE AND OpenSSL_FOUND)
+  add_executable(molink-core-relay-channel-pressure-test
+    tests/relay_channel_pressure_test.cpp
+    src/transport/relay_transport.cpp
+    src/transport/channel_scheduler.cpp
+    src/protocol/frame_packet.cpp
+  )
+  target_include_directories(molink-core-relay-channel-pressure-test PRIVATE src)
+  if(UVP_UVCPP_PREFIX)
+    target_include_directories(molink-core-relay-channel-pressure-test PRIVATE
+      "${UVP_UVCPP_PREFIX}/include")
+    target_link_directories(molink-core-relay-channel-pressure-test PRIVATE
+      "${UVP_UVCPP_PREFIX}/lib")
+  endif()
+  target_link_libraries(molink-core-relay-channel-pressure-test PRIVATE
+    ${UVP_UVCPP_TARGET} OpenSSL::SSL OpenSSL::Crypto)
+  set_target_properties(molink-core-relay-channel-pressure-test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+    BUILD_RPATH "${UVP_UVCPP_LIBDIR}")
+  foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
+    string(TOUPPER "${uvp_config}" uvp_config_upper)
+    set_target_properties(molink-core-relay-channel-pressure-test PROPERTIES
+      "RUNTIME_OUTPUT_DIRECTORY_${uvp_config_upper}" "${CMAKE_BINARY_DIR}")
+  endforeach()
+  if(UNIX AND NOT APPLE)
+    target_link_options(molink-core-relay-channel-pressure-test PRIVATE
+      "LINKER:--disable-new-dtags")
+  endif()
+  add_test(NAME relay_channel_pressure
+    COMMAND molink-core-relay-channel-pressure-test)
+  set_tests_properties(relay_channel_pressure PROPERTIES SKIP_RETURN_CODE 77)
 endif()
 
 # Relay endpoint fallback is pure sequencing; it links libuvcpp only because

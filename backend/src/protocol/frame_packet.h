@@ -100,6 +100,15 @@ enum class packet_type : uint8_t {
   pong = 0x81,       ///< empty payload
 };
 
+/// The traffic class a serialized packet belongs to. Transports use it to map
+/// callers that still take the untyped send path onto a logical channel.
+enum class packet_stream : uint8_t {
+  control,
+  video,
+  audio,
+  file,
+};
+
 enum packet_flags : uint16_t {
   kPacketFlagKeyframe = 1u << 0,
   kPacketFlagCompressed = 1u << 1,
@@ -167,6 +176,19 @@ bool encode_packet_into(std::vector<uint8_t>& out, uint8_t type, uint16_t flags,
 /// bad magic, unsupported version, or a payload length that does not match.
 bool decode_packet(const uint8_t* data, std::size_t len, packet& out,
                    std::string& err);
+
+/// True when [data, data + len) starts with a whole MOLK packet header.
+bool has_packet_header(const uint8_t* data, std::size_t len);
+
+/// Classify a serialized packet by its header type byte, without decoding the
+/// payload. Anything that does not start with a MOLK header — and every type
+/// that is not media — is control: the untyped send path predates the channel
+/// split and most of what rides it is small JSON traffic.
+packet_stream packet_stream_of(const uint8_t* data, std::size_t len);
+
+/// True when the packet is a frame that starts a decodable chain. Checks both
+/// the packet flag and the frame header, because producers set one or both.
+bool packet_is_keyframe(const uint8_t* data, std::size_t len);
 
 struct frame_header {
   uint32_t frame_seq = 0;

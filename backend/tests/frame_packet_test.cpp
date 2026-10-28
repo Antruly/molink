@@ -194,6 +194,81 @@ void test_frame_rejects() {
   }
 }
 
+/// A frame packet with a well-formed 16-byte frame header. Classification and
+/// keyframe detection only read headers, so the tile table stays empty.
+std::vector<uint8_t> encoded_frame(uint16_t packet_flags,
+                                   uint8_t frame_flags = 0) {
+  std::vector<uint8_t> payload(molink::protocol::kFrameHeaderSize, 0);
+  payload[6] = static_cast<uint8_t>(molink::protocol::codec::bgra);
+  payload[7] = frame_flags;
+  std::vector<uint8_t> bytes;
+  std::string err;
+  molink::protocol::encode_packet_into(
+      bytes, static_cast<uint8_t>(molink::protocol::packet_type::frame),
+      packet_flags, 0, 0, 0, payload.data(), payload.size(), err);
+  return bytes;
+}
+
+void test_packet_stream_classification() {
+  using namespace molink::protocol;
+  auto encoded = [](uint8_t type, uint16_t flags) {
+    std::vector<uint8_t> bytes;
+    std::string err;
+    expect(encode_packet_into(bytes, type, flags, 0, 0, 0, nullptr, 0, err),
+           "classifier sample encodes: " + err);
+    return bytes;
+  };
+
+  const struct {
+    packet_type type;
+    packet_stream expected;
+    const char* what;
+  } cases[] = {
+      {packet_type::frame, packet_stream::video, "frames are video"},
+      {packet_type::tile_clock, packet_stream::video, "tile clocks are video"},
+      {packet_type::tile_seq, packet_stream::video, "tile sequences are video"},
+      {packet_type::audio, packet_stream::audio, "audio is audio"},
+      {packet_type::voice, packet_stream::audio, "voice is audio"},
+      {packet_type::file_data, packet_stream::file, "file bytes are file"},
+      {packet_type::input, packet_stream::control, "input is control"},
+      {packet_type::control, packet_stream::control, "control is control"},
+      {packet_type::ping, packet_stream::control, "ping is control"},
+  };
+  for (const auto& item : cases) {
+    const std::vector<uint8_t> bytes = encoded(
+        static_cast<uint8_t>(item.type), 0);
+    expect(packet_stream_of(bytes.data(), bytes.size()) == item.expected,
+           item.what);
+  }
+
+  const std::vector<uint8_t> raw = {'h', 'e', 'l', 'l', 'o'};
+  expect(packet_stream_of(raw.data(), raw.size()) == packet_stream::control,
+         "a buffer that is not a MOLK packet is control");
+  expect(packet_stream_of(nullptr, 0) == packet_stream::control,
+         "an empty buffer is control");
+}
+
+void test_packet_keyframe_detection() {
+  using namespace molink::protocol;
+  const std::vector<uint8_t> packet_flag = encoded_frame(kPacketFlagKeyframe);
+  expect(packet_is_keyframe(packet_flag.data(), packet_flag.size()),
+         "a packet flag marks the keyframe");
+
+  const std::vector<uint8_t> frame_flag = encoded_frame(0, kFrameFlagKeyframe);
+  expect(packet_is_keyframe(frame_flag.data(), frame_flag.size()),
+         "the frame header flag marks the keyframe");
+
+  const std::vector<uint8_t> delta = encoded_frame(0);
+  expect(!packet_is_keyframe(delta.data(), delta.size()),
+         "a delta frame is not a keyframe");
+
+  const std::vector<uint8_t> input = encoded_frame(kPacketFlagKeyframe);
+  auto non_frame = input;
+  non_frame[5] = static_cast<uint8_t>(packet_type::input);
+  expect(!packet_is_keyframe(non_frame.data(), non_frame.size()),
+         "non-frame packets are never keyframes");
+}
+
 }  // namespace
 
 int main() {
@@ -201,6 +276,8 @@ int main() {
   test_packet_rejects();
   test_frame_roundtrip();
   test_frame_rejects();
+  test_packet_stream_classification();
+  test_packet_keyframe_detection();
 
   if (g_failures == 0) {
     std::printf("ok: %d checks passed\n", g_checks);

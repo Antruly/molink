@@ -22,8 +22,13 @@ class switchable_transport final : public session_transport {
   unsigned int peer_port() const override;
 
   bool is_open() const override;
+  transport_capabilities capabilities() const override;
   bool send_text(const std::string& text) override;
+  bool send_text(transport_channel channel,
+                 const std::string& text) override;
   bool send_binary(const uint8_t* data, std::size_t len) override;
+  bool send_binary(transport_channel channel, const uint8_t* data,
+                   std::size_t len) override;
   void close(int code, const std::string& reason) override;
   void set_handlers(text_handler on_text, binary_handler on_binary,
                     close_handler on_close) override;

@@ -19,7 +19,7 @@ class file_transfer {
  public:
   using json_sender = std::function<void(std::string)>;
   using chunk_sender =
-      std::function<void(uint32_t id, uint64_t offset, const uint8_t* data,
+      std::function<bool(uint32_t id, uint64_t offset, const uint8_t* data,
                          std::size_t len)>;
 
   static constexpr std::size_t kChunkBytes = 256 * 1024;

@@ -108,6 +108,16 @@ bool switchable_transport::is_open() const {
   return !closed_ && active_ && active_->is_open();
 }
 
+transport_capabilities switchable_transport::capabilities() const {
+  transport_capabilities result;
+  if (!active_) return result;
+  result = active_->capabilities();
+  if (!result.independent_file && relay_ && relay_->is_open()) {
+    result.independent_file = true;
+  }
+  return result;
+}
+
 bool switchable_transport::send_text(const std::string& text) {
   if (is_compensation_text(text) && relay_ && relay_->is_open()) {
     return relay_->send_text(text);
@@ -115,11 +125,33 @@ bool switchable_transport::send_text(const std::string& text) {
   return active_ && active_->send_text(text);
 }
 
+bool switchable_transport::send_text(transport_channel channel,
+                                     const std::string& text) {
+  if (channel == transport_channel::control && is_compensation_text(text) &&
+      relay_ && relay_->is_open()) {
+    return relay_->send_text(channel, text);
+  }
+  return active_ && active_->send_text(channel, text);
+}
+
 bool switchable_transport::send_binary(const uint8_t* data, std::size_t len) {
   if (rides_relay(data, len) && relay_ && relay_->is_open()) {
     return relay_->send_binary(data, len);
   }
   return active_ && active_->send_binary(data, len);
+}
+
+bool switchable_transport::send_binary(transport_channel channel,
+                                       const uint8_t* data,
+                                       std::size_t len) {
+  if (channel == transport_channel::file && relay_ && relay_->is_open()) {
+    return relay_->send_binary(channel, data, len);
+  }
+  if (channel == transport_channel::video && rides_relay(data, len) && relay_ &&
+      relay_->is_open()) {
+    return relay_->send_binary(channel, data, len);
+  }
+  return active_ && active_->send_binary(channel, data, len);
 }
 
 void switchable_transport::close(int code, const std::string& reason) {

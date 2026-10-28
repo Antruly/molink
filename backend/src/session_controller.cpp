@@ -123,7 +123,7 @@ std::string string_field(const uvcpp_json& j, const char* key) {
 void send_json(session_transport* transport, const uvcpp_json& j) {
   if (transport == nullptr || !transport->is_open()) return;
   const std::string body = uvcpp_json_dump(j);
-  transport->send_text(body);
+  transport->send_text(transport_channel::control, body);
 }
 
 void send_error(session_transport* transport, const char* code,
@@ -235,7 +235,8 @@ bool send_frame_payload(session_transport* transport,
     send_error(transport, "frame_build_failed", err);
     return false;
   }
-  if (!transport->send_binary(bytes.data(), bytes.size())) {
+  if (!transport->send_binary(transport_channel::video, bytes.data(),
+                              bytes.size())) {
     send_error(transport, "send_failed", "could not queue frame");
     return false;
   }
@@ -650,7 +651,7 @@ void send_tile_seq(session_transport* transport,
           error)) {
     return;
   }
-  transport->send_binary(bytes.data(), bytes.size());
+  transport->send_binary(transport_channel::video, bytes.data(), bytes.size());
 }
 
 void send_welcome(session_transport* transport, const session_info& session,
@@ -817,8 +818,9 @@ bool session_controller::start(const std::string* initial_token) {
       [weak](uint32_t id, uint64_t offset, const uint8_t* data,
              std::size_t len) {
         if (auto self = weak.lock()) {
-          self->send_file_chunk(id, offset, data, len);
+          return self->send_file_chunk(id, offset, data, len);
         }
+        return false;
       });
   transport->set_handlers(
       [weak](const std::string& text) {
@@ -985,20 +987,22 @@ void session_controller::send_voice(std::vector<uint8_t> pcm) {
   if (protocol::encode_packet_into(
           out, static_cast<uint8_t>(protocol::packet_type::voice), 0, 0, 0,
           epoch_us(), pcm.data(), pcm.size(), error)) {
-    transport->send_binary(out.data(), out.size());
+    transport->send_binary(transport_channel::audio, out.data(), out.size());
   }
 }
 
 void session_controller::send_json_string(const std::string& text) {
   std::shared_ptr<session_transport> transport = transport_.lock();
-  if (transport && transport->is_open()) transport->send_text(text);
+  if (transport && transport->is_open()) {
+    transport->send_text(transport_channel::control, text);
+  }
 }
 
-void session_controller::send_file_chunk(uint32_t id, uint64_t offset,
+bool session_controller::send_file_chunk(uint32_t id, uint64_t offset,
                                          const uint8_t* data,
                                          std::size_t len) {
   std::shared_ptr<session_transport> transport = transport_.lock();
-  if (!transport || !transport->is_open()) return;
+  if (!transport || !transport->is_open()) return false;
   std::vector<uint8_t> payload(16 + len);
   std::memcpy(payload.data(), &id, sizeof(id));
   std::memset(payload.data() + 4, 0, 4);
@@ -1009,8 +1013,9 @@ void session_controller::send_file_chunk(uint32_t id, uint64_t offset,
   if (protocol::encode_packet_into(
           out, static_cast<uint8_t>(protocol::packet_type::file_data), 0, 0, 0,
           epoch_us(), payload.data(), payload.size(), err)) {
-    transport->send_binary(out.data(), out.size());
+    return transport->send_binary(transport_channel::file, out.data(), out.size());
   }
+  return false;
 }
 
 void session_controller::send_audio(std::vector<uint8_t> pcm) {
@@ -1021,7 +1026,7 @@ void session_controller::send_audio(std::vector<uint8_t> pcm) {
   if (protocol::encode_packet_into(
           out, static_cast<uint8_t>(protocol::packet_type::audio), 0, 0, 0,
           epoch_us(), pcm.data(), pcm.size(), err)) {
-    transport->send_binary(out.data(), out.size());
+    transport->send_binary(transport_channel::audio, out.data(), out.size());
   }
 }
 
@@ -1045,7 +1050,7 @@ void session_controller::attach_chat() {
         const std::string body = uvcpp_json_dump(item);
         auto deliver = [transport, body] {
           if (auto open = transport.lock(); open && open->is_open()) {
-            open->send_text(body);
+            open->send_text(transport_channel::control, body);
           }
         };
         if (post) {
@@ -1626,6 +1631,10 @@ void session_controller::on_text(const std::string& text) {
     return;
   }
 
+  // A pushed viewer switches the clock off when it stops being the one
+  // looking at the picture -- a background tab, or a window that lost focus.
+  // It then falls back to its own (much slower) pull until it turns the clock
+  // back on. Without this a hidden tab keeps receiving full-rate frames.
   if (type == "call") {
     if (!require_auth()) return;
     if (!options_.call) {
@@ -1862,7 +1871,8 @@ void session_controller::on_binary(const uint8_t* data, std::size_t len) {
       pong.ts_us = epoch_us();
       std::vector<uint8_t> out;
       if (protocol::encode_packet(pong, out, err)) {
-        transport->send_binary(out.data(), out.size());
+        transport->send_binary(transport_channel::control, out.data(),
+                               out.size());
       }
       break;
     }
@@ -2006,6 +2016,8 @@ void session_supervisor::run() {
       options_.capture->set_av1_allowed(allow);
       // The low-delay stream needs a stateful decoder on every viewer; a
       // single session without one keeps the host on tiles and patches.
+      // AV1 is preferred; when it is not decodable by everyone but H.264 is,
+      // the stream switches codec instead of dropping back to tiles.
       options_.capture->set_av1_stream_allowed(allow && all_stream);
       if (!live) options_.capture->set_active(false);
     }
@@ -2075,7 +2087,7 @@ void session_supervisor::run() {
         post([registry_ref, message] {
           for (const session_info& peer : registry_ref->snapshot()) {
             if (!peer.authenticated || !peer.transport) continue;
-            peer.transport->send_text(message);
+            peer.transport->send_text(transport_channel::control, message);
           }
         });
       }
@@ -2104,7 +2116,8 @@ void session_supervisor::run() {
                     peer.id, 0, now, clock.data(), clock.size(), error)) {
               continue;
             }
-            peer.transport->send_binary(bytes.data(), bytes.size());
+            peer.transport->send_binary(transport_channel::video, bytes.data(),
+                                        bytes.size());
           }
         });
       }
