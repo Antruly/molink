@@ -51,6 +51,10 @@ void wt_transport::attach_stream(uvcpp::uvcpp_h3_wt_stream* stream) {
 void wt_transport::link_closed(int code, const std::string& reason) {
   if (closed_) return;
   closed_ = true;
+  // The session owns its streams: once the session is gone this pointer is
+  // dangling, so drop it before anything can ask is_open() again.
+  reliable_ = nullptr;
+  session_ = nullptr;
   deliver_close(code, reason);
 }
 
@@ -106,6 +110,8 @@ void wt_transport::close(int code, const std::string& reason) {
   if (closed_) return;
   closed_ = true;
   if (session_ != nullptr) session_->close(0, reason);
+  reliable_ = nullptr;
+  session_ = nullptr;
   deliver_close(code, reason);
 }
 
