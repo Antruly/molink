@@ -56,8 +56,14 @@ done
 if [ -n "${VCPKG_INSTALLATION_ROOT:-}" ]; then
   for dll in "$VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin/SvtAv1Enc.dll" \
              "$VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin/dav1d.dll" \
-             "$VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin/fastfeat.dll" \
-             "$VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin/zlib1.dll"; do
+             "$VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin/fastfeat.dll"; do
+    [ -f "$dll" ] && cp "$dll" "$PKG/"
+  done
+  # JPEG and zlib: libjpeg-turbo ships its runtime as jpeg62.dll (ABI 62) and
+  # depends on vcpkg's zlib. Glob both so an ABI or naming change cannot leave
+  # the installer without them again.
+  for dll in "$VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin"/jpeg*.dll \
+             "$VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin"/zlib*.dll; do
     [ -f "$dll" ] && cp "$dll" "$PKG/"
   done
 fi
@@ -82,3 +88,8 @@ if [ -n "${CRT:-}" ] && [ -d "$CRT" ]; then
 fi
 
 echo "staged: $(ls "$PKG" | tr '\n' ' ')"
+
+# Print the staged runtime set: a package that silently lost a DLL (jpeg62.dll
+# and zlib.dll went missing this way) is visible in the release log.
+echo "== staged runtime"
+ls -1 "$PKG"/*.dll 2>/dev/null | sed 's#.*/#  #'

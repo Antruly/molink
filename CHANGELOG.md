@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.9.64] — 2026-10-28
+
+### Fixed
+
+- **Windows 安装包缺少 JPEG / zlib 运行时**（0.9.63）：vcpkg 的 zlib 在 CMake 构建
+  下产物是 **`zlib.dll`**（不是脚本里写死的 `zlib1.dll`），而 libjpeg-turbo 的运行时
+  是 **`jpeg62.dll`**，两者都没被打进安装包——装了 0.9.63 的 Windows 观看端会因为
+  缺少依赖而无法加载核心。现在打包按 **`jpeg*.dll` / `zlib*.dll` 通配拷贝**，并在
+  发布日志里打印最终打进包的 DLL 清单，缺依赖一眼可见。
+
+### Changed
+
+- 恢复**全平台发布**（测试阶段结束）：Linux `.deb` + `.AppImage` + `.rpm`、Windows
+  安装包 + 免安装单文件、macOS x86_64/arm64 `.dmg`、Windows 7 x86 安装包 + zip。
+
 ## [0.9.63] — 2026-10-28
 
 ### Added

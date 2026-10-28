@@ -27,7 +27,7 @@ if [ -n "$AV1_PREFIX" ]; then
   AV1_ARG="-DCMAKE_PREFIX_PATH=$AV1_PREFIX${CMAKE_PREFIX_PATH:+;$CMAKE_PREFIX_PATH}"
 fi
 cmake -S "$ROOT/backend" -B "$ROOT/backend/build" -DCMAKE_BUILD_TYPE=Release \
-  -DMOLINK_ENABLE_AV1=ON ${AV1_ARG:+"$AV1_ARG"} \
+  -DMOLINK_ENABLE_AV1=ON -DMOLINK_ENABLE_JPEG=ON ${AV1_ARG:+"$AV1_ARG"} \
   ${OPENSSL_ROOT_ARG:+"$OPENSSL_ROOT_ARG"} >/dev/null
 cmake --build "$ROOT/backend/build" --parallel
 (cd "$ROOT/frontend" && pnpm install --frozen-lockfile >/dev/null && pnpm build >/dev/null)
