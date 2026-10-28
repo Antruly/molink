@@ -462,8 +462,13 @@ GtkStatusIcon* g_tray_icon = nullptr;
 GtkWidget* g_tray_menu = nullptr;
 GtkWidget* g_tray_show_item = nullptr;
 GtkWidget* g_tray_quit_item = nullptr;
+/// Native picture window over the core's shared-memory frame surface
+/// (surface_window.cpp). Defined there to keep this file about the web shell.
+int run_surface_window(const std::string& path);
+
 bool g_url_mode = false;
 std::string g_url_override;
+std::string g_surface_path;
 
 std::string exe_path() {
   char buffer[4096];
@@ -896,6 +901,8 @@ int main(int argc, char** argv) {
       g_url_override = argv[++i];
     } else if (std::strcmp(argv[i], "--host") == 0 && i + 1 < argc) {
       g_core_host = argv[++i];
+    } else if (std::strcmp(argv[i], "--surface") == 0 && i + 1 < argc) {
+      g_surface_path = argv[++i];
     }
   }
   g_url_mode = !g_url_override.empty();
@@ -915,6 +922,12 @@ int main(int argc, char** argv) {
   }
 
   gtk_init(&argc, &argv);
+
+  if (!g_surface_path.empty()) {
+    // A native picture window for the core's frame surface: no WebView is
+    // involved in the picture path at all.
+    return run_surface_window(g_surface_path);
+  }
 
   std::string url;
   if (g_url_mode) {

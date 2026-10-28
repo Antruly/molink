@@ -28,6 +28,7 @@
 #include "chat_hub.h"
 #include "clipboard/clipboard.h"
 #include "config.h"
+#include "surface/frame_surface.h"
 #include "discovery.h"
 #include "identity.h"
 #include "tls_identity.h"
@@ -284,6 +285,7 @@ class adaptive_input final : public input_injector {
 }  // namespace
 
 int main(int argc, char** argv) {
+  molink::init_frame_surface_from_env();
   using namespace molink;
 
 #if defined(_WIN32)

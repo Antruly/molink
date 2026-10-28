@@ -206,6 +206,7 @@ set(MOLINK_CORE_SOURCES
   src/capture/dirty_rects.cpp
   src/capture/av1_encoder.cpp
   src/capture/av1_frame.cpp
+  src/surface/frame_surface.cpp
   src/clipboard/x11_clipboard.cpp
   src/clipboard/windows_clipboard.cpp
   src/access_requests.cpp

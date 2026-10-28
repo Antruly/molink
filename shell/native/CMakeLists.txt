@@ -9,7 +9,7 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(GTK3 REQUIRED IMPORTED_TARGET gtk+-3.0)
 pkg_check_modules(WEBKIT REQUIRED IMPORTED_TARGET webkit2gtk-4.1)
 
-add_executable(moLink main.cpp)
+add_executable(moLink main.cpp surface_window.cpp)
 target_link_libraries(moLink PRIVATE PkgConfig::GTK3 PkgConfig::WEBKIT)
 target_compile_options(moLink PRIVATE -Wall -Wextra -Wpedantic)
 

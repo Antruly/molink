@@ -17,6 +17,7 @@
 
 #include "capture/av1_frame.h"
 #include "capture/jpeg_encode.h"
+#include "surface/frame_surface.h"
 #include "compression.h"
 #include "protocol/frame_packet.h"
 #include "transport/switchable_transport.h"
@@ -422,6 +423,12 @@ class connect_proxy final
         }
         return {};
       }
+      // Hand the decoded picture to the desktop shell's native renderer. The
+      // page still gets its JPEG; a shell that maps the surface draws the
+      // picture itself and can ignore the JPEG path later.
+      frame_surface::instance().publish(bgra.data(), width, height,
+                                        static_cast<int>(width) * 4,
+                                        frame_surface::format::bgra);
       // The page paints full-screen frames; forwarding more than ten a
       // second only adds latency and inflate work. Every frame is still
       // decoded so the reference chain stays valid.
