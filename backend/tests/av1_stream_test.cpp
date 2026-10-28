@@ -99,25 +99,21 @@ int main() {
   expect(keyframes >= 1, "the stream contains a keyframe");
   expect(bytes > 0, "the stream carries bytes");
 
-  // A forced keyframe mid-stream resets the decoder and still decodes.
-  const auto pixels = make_frame(kW, kH, 42);
+  // A forced keyframe mid-stream restarts the encoder (SVT ignores the
+  // per-picture request), and the resulting packet must be standalone
+  // decodable. The pipeline delays output by a couple of pictures, so the
+  // keyframe is sent once and then ordinary pictures flush it out.
   std::vector<uint8_t> packet;
   bool packet_keyframe = false;
-  for (int attempt = 0; attempt < 3 && packet.empty(); ++attempt) {
+  bool sent_keyframe = false;
+  for (int attempt = 0; attempt < 5 && packet.empty(); ++attempt) {
+    const auto pixels = make_frame(kW, kH, 42 + attempt * 2);
+    const bool key = !sent_keyframe;
+    sent_keyframe = true;
     expect(encoder->encode_stream(pixels.data(),
                                   static_cast<std::size_t>(kW) * 4, kW, kH, 32,
-                                  /*keyframe=*/true, packet, packet_keyframe,
-                                  error),
+                                  key, packet, packet_keyframe, error),
            "forced keyframe encodes: " + error);
-    if (packet.empty()) {
-      // Feed another picture to flush the pipeline.
-      const auto filler = make_frame(kW, kH, 48 + attempt);
-      expect(encoder->encode_stream(filler.data(),
-                                    static_cast<std::size_t>(kW) * 4, kW, kH,
-                                    32, /*keyframe=*/true, packet,
-                                    packet_keyframe, error),
-             "flush encodes: " + error);
-    }
   }
   if (!packet.empty()) {
     std::vector<uint8_t> bgra;
