@@ -142,8 +142,8 @@ capture
 - [x] 控制使用可靠 DataChannel：主机创建 `molink` 通道，页面在通道打开后优先用它发控制消息，
       主机侧 inbound 文本走同一条 `on_text` 路径。
 - [x] TURN：`MOLINK_TURN_URL` 配置，同时写进 welcome 的 `ice_servers`，两端用同一组服务器。
-- [ ] PLI/FIR 与 RTCP 反馈：libdatachannel 自带 PLI/NACK handler，但还没接到
-      “收到 PLI 就请求关键帧”的链路上，需要在真实浏览器里调。
+- [x] PLI/FIR：视频轨上挂了 `rtc::PliHandler`，收到就调 `capture->request_keyframe()`；
+      NACK/REMB 由 libdatachannel 自己处理。浏览器侧表现仍需真机验证。
 - [x] WebSocket 保留兼容回退：没有 `webrtc` 能力、或 offer/answer 失败时，一切照旧走 MOLK。
 
 验收：浏览器能在 P2P、TURN 和 WebSocket 回退之间自动选择，并显示当前路径。
@@ -174,10 +174,13 @@ capture
       不与 http3/quic 端口冲突。`welcome` 只在监听真的起来时才广播。
 - [ ] 浏览器实机验证未做：需要 Chrome 系浏览器（WebTransport + H3 datagram），
       而且本仓没法在这里跑浏览器。
-- [ ] **libuvcpp 的服务端 accept 有个 bug**（已定位，patch 见
-      `docs/patches/uvcpp-wt-server-open.patch`）：`accept()` 建好会话后既不置 `open_`
-      也不调 `on_open`，于是服务端 `open_bidi_stream()` 返回 nullptr、datagram 全被丢弃。
-      打上这个 patch 后，`wt_loopback` 端到端通过。
+- [ ] 切到 WebTransport 之后没有回退：WT 断开时页面直接报 disconnected，不会退回
+      WebSocket（WebRTC 那条路径是有回退的）。
+- [ ] 音频与文件还没上实时/独立通道：WebRTC 只承载视频轨道，音频、控制、文件仍在
+      原会话 socket 或 WebTransport 的共享可靠流上。
+- [x] libuvcpp 服务端 `accept()` 不触发 `on_open` 的缺陷：已修复并合入 libuvcpp
+      master（`a6fc56b`，`http3_webtransport_func` 加了断言）。molink 侧同步改成用
+      `on_open` 的回调参数取会话（`state->wt` 那时还是空的）。
 
 ## 5. 当前变更记录
 
