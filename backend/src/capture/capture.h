@@ -560,6 +560,9 @@ class capture_base : public capture_source {
   /// Codec the live stream encoder produces; a viewer set that changes which
   /// codec is decodable rebuilds the encoder.
   video_codec video_codec_ = video_codec::av1_stream;
+  /// Earliest time to try creating a stream encoder again after a failure
+  /// (0 = no pending cooldown).
+  uint64_t encoder_retry_at_ms_ = 0;
   std::atomic<bool> av1_stream_allowed_{false};
   std::atomic<bool> h264_stream_allowed_{false};
   std::atomic<bool> stream_keyframe_pending_{true};

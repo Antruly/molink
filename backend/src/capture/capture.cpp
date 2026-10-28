@@ -296,6 +296,14 @@ av1_stream_encoder* capture_base::stream_for_frame(
     stream_keyframe_pending_.store(true);
   }
   if (!stream_policy_.streaming && !stream_policy_.armed) return nullptr;
+  // A host without any stream encoder (no GPU, no SVT) would otherwise retry
+  // and log on every frame. Look again a few seconds later: the device can
+  // show up late (driver ready, GPU freed), but not at frame rate.
+  constexpr uint64_t kEncoderRetryMs = 5000;
+  if (!stream_encoder_ && encoder_retry_at_ms_ != 0 &&
+      monotonic_ms() < encoder_retry_at_ms_) {
+    return nullptr;
+  }
   if (!stream_encoder_) {
     // Created when the content approaches the threshold, so the switch itself
     // does not pay the encoder start-up.
@@ -323,6 +331,9 @@ av1_stream_encoder* capture_base::stream_for_frame(
       }
       std::fprintf(stderr, "molink: %s\n", error.c_str());
     }
+    // Remember a failed attempt so the next frames skip the retry (and the
+    // log line). A success clears it.
+    encoder_retry_at_ms_ = stream_encoder_ ? 0 : monotonic_ms() + kEncoderRetryMs;
     video_codec_ = chosen;
     stream_keyframe_pending_.store(true);
   }
