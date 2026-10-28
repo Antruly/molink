@@ -176,8 +176,11 @@ capture
       而且本仓没法在这里跑浏览器。
 - [ ] 切到 WebTransport 之后没有回退：WT 断开时页面直接报 disconnected，不会退回
       WebSocket（WebRTC 那条路径是有回退的）。
-- [ ] 音频与文件还没上实时/独立通道：WebRTC 只承载视频轨道，音频、控制、文件仍在
-      原会话 socket 或 WebTransport 的共享可靠流上。
+- [x] 音频实时通道：WebRTC 上另开一条 **unreliable + unordered** 的 `audio` 数据通道
+      （`maxRetransmits = 0`），`send_audio` / `send_voice` 优先走它；WebTransport 上音频
+      走 datagram（与视频同一分片格式，帧头新增 1 字节 channel，音视频各自重组），
+      不再排在文件字节后面。
+- [ ] 文件还没走 WebRTC DataChannel / WebTransport 专用 stream：仍在共享可靠流上。
 - [x] libuvcpp 服务端 `accept()` 不触发 `on_open` 的缺陷：已修复并合入 libuvcpp
       master（`a6fc56b`，`http3_webtransport_func` 加了断言）。molink 侧同步改成用
       `on_open` 的回调参数取会话（`state->wt` 那时还是空的）。
@@ -263,6 +266,18 @@ capture
   主机记录与构建/测试命令放在 `docs/testing.local.md`（含凭据，已加入 .gitignore）。
 - 新增 `av1_stream_fallback_test`（27 项断言）：GPU 正常时不创建 CPU 编码器；GPU 失败时同一帧由
   CPU 重编并强制关键帧；连续 3 次失败后丢弃 GPU；丢弃后不再重试。全量 CTest 16 项通过。
+### 2026-10-28（第八轮：音频实时通道）
+
+- WebRTC：`rtc_session` 多开一条 `audio` 通道（unreliable/unordered，`maxRetransmits=0`），
+  `send_audio` / `send_voice` 在通道打开时优先走它，失败再回落到会话 socket。
+  页面按 label 区分两条通道，音频包直接进 `handleBinary`。
+- WebTransport：datagram 分片头加 1 字节 channel（video/audio），音频走 datagram、
+  与视频各自独立重组，不会被文件拖住；`wt_transport` 因此有两套 reassembler。
+- 测试：`webrtc_loopback` 增加音频通道开关与字节往返（16 项断言）；
+  `wt_framing_test` 增加"音频帧夹在视频分片中间互不干扰"；
+  `wt_loopback` 增加音频 datagram 到达断言。
+- 三套构建全绿：默认 19/19、WebRTC 20/20、WebTransport 20/20。
+
 ### 2026-10-28（第七轮：Phase 5 浏览器端）
 
 - 页面新增 `lib/webtransport.ts`：`WebTransport` 会话、MOLK 流分帧、datagram 分片重组。

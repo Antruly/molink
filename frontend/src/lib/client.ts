@@ -908,6 +908,15 @@ export class MolinkClient {
       this.handlers.onVideoPath?.('webrtc')
     }
     pc.ondatachannel = (event) => {
+      // The host opens two channels: "molink" for control and "audio" for the
+      // realtime audio packets, which are unreliable and therefore kept off
+      // the control channel.
+      if (event.channel.label === 'audio') {
+        event.channel.onmessage = (message: MessageEvent) => {
+          if (message.data instanceof ArrayBuffer) this.handleBinary(message.data)
+        }
+        return
+      }
       this.rtcChannel = event.channel
       event.channel.onmessage = (message: MessageEvent) => {
         if (typeof message.data === 'string') this.handleText(message.data)

@@ -58,6 +58,9 @@ struct peer_link {
   std::shared_ptr<rtc::DataChannel> channel;
 
   bool browser_connected = false;
+  std::shared_ptr<rtc::DataChannel> audio;
+  std::vector<uint8_t> audio_bytes;
+  std::atomic<bool> audio_open{false};
   bool data_channel_open = false;
   bool host_ready = false;
   std::vector<std::pair<std::string, std::string>> pending_candidates;
@@ -154,6 +157,20 @@ int main() {
     }
   });
   state->browser->onDataChannel([state](std::shared_ptr<rtc::DataChannel> dc) {
+    if (dc->label() == "audio") {
+      std::lock_guard<std::mutex> lock(state->mutex);
+      state->audio = dc;
+      dc->onOpen([state]() { state->audio_open.store(true); });
+      dc->onMessage([state](rtc::message_variant message) {
+        if (!std::holds_alternative<rtc::binary>(message)) return;
+        const auto& bytes = std::get<rtc::binary>(message);
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->audio_bytes.assign(
+            reinterpret_cast<const uint8_t*>(bytes.data()),
+            reinterpret_cast<const uint8_t*>(bytes.data()) + bytes.size());
+      });
+      return;
+    }
     {
       std::lock_guard<std::mutex> lock(state->mutex);
       state->channel = dc;
@@ -277,6 +294,24 @@ int main() {
              },
              5s),
          "the binary payload arrives intact");
+
+  // Audio: the unreliable channel has to open and carry a packet.
+  expect(wait_for([&] { return state->audio_open.load(); }, 10s),
+         "the audio channel opens");
+  const std::vector<uint8_t> audio_packet = {1, 2, 3, 4, 5, 6, 7, 8};
+  bool audio_sent = false;
+  for (int attempt = 0; attempt < 20 && !audio_sent; ++attempt) {
+    audio_sent = session.send_audio(audio_packet.data(), audio_packet.size());
+    if (!audio_sent) std::this_thread::sleep_for(50ms);
+  }
+  expect(audio_sent, "the host sends audio on the realtime channel");
+  expect(wait_for(
+             [&] {
+               std::lock_guard<std::mutex> lock(state->mutex);
+               return state->audio_bytes == audio_packet;
+             },
+             5s),
+         "the audio packet arrives intact");
 
   // Video: the track must open, and the access unit must come out of the
   // depacketizer with its start codes intact.

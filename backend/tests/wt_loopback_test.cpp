@@ -84,9 +84,19 @@ int main() {
   bool client_saw_welcome = false;
   bool server_saw_datagram = false;
   bool server_datagram_ok = false;
+  bool server_saw_audio = false;
   bool finished = false;
 
   const std::vector<uint8_t> frame = video_packet();
+  // One audio packet on the same datagram path, tagged audio.
+  molink::protocol::packet audio;
+  audio.type = static_cast<uint8_t>(molink::protocol::packet_type::audio);
+  audio.payload.assign(600, 0x11);
+  std::vector<uint8_t> audio_frame;
+  {
+    std::string error;
+    molink::protocol::encode_packet(audio, audio_frame, error);
+  }
 
   auto finish = [&] {
     if (finished) return;
@@ -140,6 +150,11 @@ int main() {
                          std::string error;
                          if (molink::protocol::decode_packet(data, len, packet,
                                                              error)) {
+                           if (packet.type == static_cast<uint8_t>(
+                                                  molink::protocol::packet_type::audio)) {
+                             server_saw_audio = true;
+                             return;
+                           }
                            server_link->send_binary(data, len);
                          }
                        },
@@ -262,9 +277,15 @@ int main() {
       }
     }
     if (!sent_frame && client_wt && server_saw_hello) {
-      const auto fragments =
-          molink::fragment_frame(frame.data(), frame.size(), 1);
+      const auto fragments = molink::fragment_frame(
+          molink::datagram_channel::video, frame.data(), frame.size(), 1);
       for (const auto& fragment : fragments) {
+        client_wt->send_datagram(fragment.bytes.data(), fragment.bytes.size());
+      }
+      const auto audio = molink::fragment_frame(
+          molink::datagram_channel::audio, audio_frame.data(),
+          audio_frame.size(), 1);
+      for (const auto& fragment : audio) {
         client_wt->send_datagram(fragment.bytes.data(), fragment.bytes.size());
       }
       sent_frame = true;
@@ -277,6 +298,7 @@ int main() {
   expect(client_saw_welcome, "the client receives the control reply");
   expect(server_saw_datagram, "a datagram reaches the host");
   expect(server_datagram_ok, "the fragmented frame reassembles");
+  expect(server_saw_audio, "an audio datagram reaches the host");
 
   server_wt.reset();
   server_h3.reset();

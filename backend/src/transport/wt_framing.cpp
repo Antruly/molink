@@ -5,7 +5,7 @@
 namespace molink {
 namespace {
 
-constexpr std::size_t kFragmentHeader = 8;
+constexpr std::size_t kFragmentHeader = 9;
 
 void put32(uint8_t* out, uint32_t value) {
   for (int i = 0; i < 4; ++i) {
@@ -32,7 +32,15 @@ uint16_t get16(const uint8_t* in) {
 
 }  // namespace
 
-std::vector<datagram_fragment> fragment_frame(const uint8_t* data,
+datagram_channel datagram_channel_of(const uint8_t* data, std::size_t len) {
+  if (data == nullptr || len < kFragmentHeader) return datagram_channel::video;
+  return data[0] == static_cast<uint8_t>(datagram_channel::audio)
+             ? datagram_channel::audio
+             : datagram_channel::video;
+}
+
+std::vector<datagram_fragment> fragment_frame(datagram_channel channel,
+                                              const uint8_t* data,
                                               std::size_t len,
                                               uint32_t frame_id) {
   std::vector<datagram_fragment> fragments;
@@ -47,9 +55,10 @@ std::vector<datagram_fragment> fragment_frame(const uint8_t* data,
     const std::size_t size = (len - offset) < chunk ? (len - offset) : chunk;
     datagram_fragment fragment;
     fragment.bytes.resize(kFragmentHeader + size);
-    put32(fragment.bytes.data(), frame_id);
-    put16(fragment.bytes.data() + 4, static_cast<uint16_t>(index));
-    put16(fragment.bytes.data() + 6, static_cast<uint16_t>(count));
+    fragment.bytes[0] = static_cast<uint8_t>(channel);
+    put32(fragment.bytes.data() + 1, frame_id);
+    put16(fragment.bytes.data() + 5, static_cast<uint16_t>(index));
+    put16(fragment.bytes.data() + 7, static_cast<uint16_t>(count));
     std::memcpy(fragment.bytes.data() + kFragmentHeader, data + offset, size);
     fragments.push_back(std::move(fragment));
   }
@@ -59,9 +68,9 @@ std::vector<datagram_fragment> fragment_frame(const uint8_t* data,
 bool datagram_reassembler::push(const uint8_t* data, std::size_t len,
                                 std::vector<uint8_t>& out) {
   if (data == nullptr || len <= kFragmentHeader) return false;
-  const uint32_t frame_id = get32(data);
-  const uint16_t index = get16(data + 4);
-  const uint16_t count = get16(data + 6);
+  const uint32_t frame_id = get32(data + 1);
+  const uint16_t index = get16(data + 5);
+  const uint16_t count = get16(data + 7);
   if (count == 0 || index >= count) return false;
 
   if (!active_ || frame_id != frame_id_) {

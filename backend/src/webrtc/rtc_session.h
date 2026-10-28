@@ -35,6 +35,9 @@ class rtc_session {
     uint32_t video_ssrc = 42;
     /// Data channel label; the browser sees it in `ondatachannel`.
     std::string data_channel_label = "molink";
+    /// Audio channel label. This one is unreliable and unordered: a late
+    /// audio packet is worth less than a queued one.
+    std::string audio_channel_label = "audio";
   };
 
   struct callbacks {
@@ -74,6 +77,11 @@ class rtc_session {
 
   bool send_text(const std::string& text);
   bool send_binary(const uint8_t* data, std::size_t len);
+
+  /// Sends one audio packet on the unreliable channel. False when the channel
+  /// is not open, so the caller can fall back to the session transport.
+  bool send_audio(const uint8_t* data, std::size_t len);
+  bool audio_open() const;
 
   /// Sends one Annex-B access unit on the video track. `ts_us` stamps the
   /// frame; RTP timestamps run at 90 kHz.

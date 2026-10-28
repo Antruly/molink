@@ -82,10 +82,16 @@ bool wt_transport::send_binary(const uint8_t* data, std::size_t len) {
 bool wt_transport::send_binary(transport_channel channel, const uint8_t* data,
                                std::size_t len) {
   if (!is_open() || (data == nullptr && len > 0)) return false;
-  if (channel == transport_channel::video && session_ != nullptr &&
-      len <= kDatagramFrameLimit) {
+  // Audio and video both take the datagram path: they are latency-sensitive
+  // and must not queue behind file bytes on the reliable stream.
+  const bool datagram = channel == transport_channel::video ||
+                        channel == transport_channel::audio;
+  if (datagram && session_ != nullptr && len <= kDatagramFrameLimit) {
+    const datagram_channel tag = channel == transport_channel::audio
+                                     ? datagram_channel::audio
+                                     : datagram_channel::video;
     const std::vector<datagram_fragment> fragments =
-        fragment_frame(data, len, next_frame_++);
+        fragment_frame(tag, data, len, next_frame_++);
     if (!fragments.empty()) {
       bool ok = true;
       for (const datagram_fragment& fragment : fragments) {
@@ -127,8 +133,12 @@ void wt_transport::feed_reliable(const uint8_t* data, std::size_t len) {
 }
 
 void wt_transport::feed_datagram(const uint8_t* data, std::size_t len) {
+  const datagram_channel tag = datagram_channel_of(data, len);
+  datagram_reassembler& assembler = tag == datagram_channel::audio
+                                        ? audio_reassembly_
+                                        : video_reassembly_;
   std::vector<uint8_t> frame;
-  if (!reassembly_.push(data, len, frame)) return;
+  if (!assembler.push(data, len, frame)) return;
   if (frame.empty()) return;
   ++frames_received_;
   if (binary_) binary_(frame.data(), frame.size());

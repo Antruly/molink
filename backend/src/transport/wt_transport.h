@@ -71,7 +71,10 @@ class wt_transport final : public session_transport {
   uvcpp::uvcpp_h3_wt_session* session_ = nullptr;
   uvcpp::uvcpp_h3_wt_stream* reliable_ = nullptr;
   std::shared_ptr<stream_transport> stream_;
-  datagram_reassembler reassembly_;
+  /// Video and audio have separate reassembly state: an audio datagram in the
+  /// middle of a video frame must not tear either apart.
+  datagram_reassembler video_reassembly_;
+  datagram_reassembler audio_reassembly_;
   uint32_t next_frame_ = 1;
   std::size_t frames_received_ = 0;
   bool closed_ = false;

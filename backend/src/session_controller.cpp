@@ -278,6 +278,23 @@ bool can_decode_stream(const std::shared_ptr<session_info>& session,
   return session->av1;
 }
 
+/// Audio and voice take the realtime channel when the session has one: the
+/// WebRTC audio channel is unreliable and unordered, so a packet never queues
+/// behind video, file bytes or retransmissions.
+bool send_realtime_audio(const std::weak_ptr<session_info>& weak_session,
+                         const std::vector<uint8_t>& packet) {
+#if MOLINK_HAVE_WEBRTC
+  const std::shared_ptr<session_info> session = weak_session.lock();
+  if (session && session->rtc && session->rtc->audio_open()) {
+    return session->rtc->send_audio(packet.data(), packet.size());
+  }
+#else
+  (void)weak_session;
+  (void)packet;
+#endif
+  return false;
+}
+
 bool send_frame_with_av1(session_transport* transport,
                          const std::shared_ptr<session_info>& session,
                          const captured_frame& frame) {
@@ -1114,6 +1131,7 @@ void session_controller::send_voice(std::vector<uint8_t> pcm) {
   if (protocol::encode_packet_into(
           out, static_cast<uint8_t>(protocol::packet_type::voice), 0, 0, 0,
           epoch_us(), pcm.data(), pcm.size(), error)) {
+    if (send_realtime_audio(session_, out)) return;
     transport->send_binary(transport_channel::audio, out.data(), out.size());
   }
 }
@@ -1250,6 +1268,7 @@ void session_controller::send_audio(std::vector<uint8_t> pcm) {
   if (protocol::encode_packet_into(
           out, static_cast<uint8_t>(protocol::packet_type::audio), 0, 0, 0,
           epoch_us(), pcm.data(), pcm.size(), err)) {
+    if (send_realtime_audio(session_, out)) return;
     transport->send_binary(transport_channel::audio, out.data(), out.size());
   }
 }

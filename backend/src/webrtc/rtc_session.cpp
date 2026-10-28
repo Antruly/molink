@@ -13,6 +13,8 @@ struct rtc_session::impl {
   std::shared_ptr<rtc::PeerConnection> peer;
   std::shared_ptr<rtc::Track> video;
   std::shared_ptr<rtc::DataChannel> channel;
+  std::shared_ptr<rtc::DataChannel> audio;
+  bool audio_open = false;
   std::shared_ptr<rtc::RtpPacketizationConfig> video_config;
   bool channel_open = false;
   uint32_t last_timestamp = 0;
@@ -143,6 +145,24 @@ bool rtc_session::start(const config& cfg, callbacks cb, std::string* error) {
       self->channel_open = false;
       self->emit_state("channel-closed");
     });
+    rtc::DataChannelInit audio_init;
+    audio_init.reliability.unordered = true;
+    audio_init.reliability.maxRetransmits = 0;
+    impl_->audio = impl_->peer->createDataChannel(cfg.audio_channel_label,
+                                                  audio_init);
+    impl_->audio->onOpen([weak]() {
+      const auto self = weak.lock();
+      if (!self) return;
+      self->audio_open = true;
+      self->emit_state("audio-open");
+    });
+    impl_->audio->onClosed([weak]() {
+      const auto self = weak.lock();
+      if (!self) return;
+      self->audio_open = false;
+      self->emit_state("audio-closed");
+    });
+
     impl_->channel->onMessage([weak](rtc::message_variant message) {
       const auto self = weak.lock();
       if (!self) return;
@@ -212,6 +232,19 @@ bool rtc_session::send_text(const std::string& text) {
   }
 }
 
+bool rtc_session::send_audio(const uint8_t* data, std::size_t len) {
+  if (!audio_open() || data == nullptr || len == 0) return false;
+  try {
+    return impl_->audio->send(reinterpret_cast<const std::byte*>(data), len);
+  } catch (...) {
+    return false;
+  }
+}
+
+bool rtc_session::audio_open() const {
+  return impl_ != nullptr && impl_->audio_open;
+}
+
 bool rtc_session::send_binary(const uint8_t* data, std::size_t len) {
   if (!channel_open() || data == nullptr) return false;
   try {
@@ -246,8 +279,13 @@ bool rtc_session::send_video(const uint8_t* annexb, std::size_t len,
 void rtc_session::close() {
   if (impl_ == nullptr) return;
   impl_->channel_open = false;
+  impl_->audio_open = false;
   try {
     if (impl_->channel) impl_->channel->close();
+  } catch (...) {
+  }
+  try {
+    if (impl_->audio) impl_->audio->close();
   } catch (...) {
   }
   try {
@@ -255,6 +293,7 @@ void rtc_session::close() {
   } catch (...) {
   }
   impl_->channel.reset();
+  impl_->audio.reset();
   impl_->video.reset();
   impl_->peer.reset();
 }

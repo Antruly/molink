@@ -7,6 +7,18 @@
 
 namespace molink {
 
+/// Which stream a datagram belongs to. Video and audio share the datagram
+/// path but must not share reassembly state: an audio packet that arrives in
+/// the middle of a video frame would otherwise tear both apart.
+enum class datagram_channel : uint8_t {
+  video = 0,
+  audio = 1,
+};
+
+/// The channel a datagram belongs to (video when the byte is unknown, which is
+/// what a peer that predates this field would send).
+datagram_channel datagram_channel_of(const uint8_t* data, std::size_t len);
+
 /// Splits one frame into datagram-sized fragments.
 ///
 /// H3 datagrams are unreliable and MTU-sized (about 1200 bytes), so a video
@@ -28,7 +40,8 @@ inline constexpr std::size_t kDatagramPayloadBytes = 1100;
 
 /// Fragments @p data into one datagram per chunk. Returns an empty list when
 /// the frame is too large to send as datagrams.
-std::vector<datagram_fragment> fragment_frame(const uint8_t* data,
+std::vector<datagram_fragment> fragment_frame(datagram_channel channel,
+                                              const uint8_t* data,
                                               std::size_t len,
                                               uint32_t frame_id);
 
