@@ -174,8 +174,9 @@ capture
       不与 http3/quic 端口冲突。`welcome` 只在监听真的起来时才广播。
 - [ ] 浏览器实机验证未做：需要 Chrome 系浏览器（WebTransport + H3 datagram），
       而且本仓没法在这里跑浏览器。
-- [ ] 切到 WebTransport 之后没有回退：WT 断开时页面直接报 disconnected，不会退回
-      WebSocket（WebRTC 那条路径是有回退的）。
+- [x] WebTransport 断开回退：会话或通道断开时页面用 resume token 重开原 WebSocket
+      继续（不需要新的接入码），并在本次页面生命周期内不再尝试 WebTransport，
+      避免在两种传输之间来回切换；WT 尚未接管时失败则直接沿用还开着的 socket。
 - [x] 音频实时通道：WebRTC 上另开一条 **unreliable + unordered** 的 `audio` 数据通道
       （`maxRetransmits = 0`），`send_audio` / `send_voice` 优先走它；WebTransport 上音频
       走 datagram（与视频同一分片格式，帧头新增 1 字节 channel，音视频各自重组），
@@ -266,6 +267,13 @@ capture
   主机记录与构建/测试命令放在 `docs/testing.local.md`（含凭据，已加入 .gitignore）。
 - 新增 `av1_stream_fallback_test`（27 项断言）：GPU 正常时不创建 CPU 编码器；GPU 失败时同一帧由
   CPU 重编并强制关键帧；连续 3 次失败后丢弃 GPU；丢弃后不再重试。全量 CTest 16 项通过。
+### 2026-10-28（第九轮：WebTransport 断线回退）
+
+- `client.ts`：`fallBackToSocket()` —— WT 关闭/出错时用 `resumeToken` 重开 WebSocket，
+  并把 `wtDisabled` 置位，本次页面生命周期内不再尝试 WT；WT 在接管前失败时
+  socket 还在，直接沿用不重连。
+- 只在 `tsc` / `vite build` 层面验证过：本仓没有前端测试运行器，浏览器实机仍未验。
+
 ### 2026-10-28（第八轮：音频实时通道）
 
 - WebRTC：`rtc_session` 多开一条 `audio` 通道（unreliable/unordered，`maxRetransmits=0`），

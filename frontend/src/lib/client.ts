@@ -347,6 +347,8 @@ export class MolinkClient {
   private wt: WtTransport | null = null
   /** A WebTransport hello is in flight: keep the socket until it answers. */
   private wtPending = false
+  /** The page already fell back from WebTransport; do not try it again. */
+  private wtDisabled = false
   /** The WebRTC peer for this session, once the host offered one. */
   private rtc: RTCPeerConnection | null = null
   /** Its data channel: control messages prefer it while it is open. */
@@ -1921,7 +1923,8 @@ export class MolinkClient {
     token: string,
   ): Promise<void> {
     const info = welcome.webtransport
-    if (this.wt !== null || this.wtPending || info === undefined) return
+    if (this.wt !== null || this.wtPending || this.wtDisabled) return
+    if (info === undefined) return
     if (!webTransportSupported()) return
     const hash = fingerprintBytes(info.sha256)
     if (hash === null) return
@@ -1935,14 +1938,8 @@ export class MolinkClient {
             data.byteOffset + data.byteLength,
           ) as ArrayBuffer,
         ),
-      onClose: () => {
-        if (this.wt !== null) {
-          this.wt = null
-          // The session is gone; surface it instead of pretending to be live.
-          this.handlers.onPhase?.('disconnected', 'webtransport closed')
-        }
-      },
-      onError: () => undefined,
+      onClose: () => this.fallBackToSocket('webtransport closed'),
+      onError: () => this.fallBackToSocket('webtransport failed'),
     })
     if (transport === null) return
     this.wtPending = true
@@ -1958,6 +1955,37 @@ export class MolinkClient {
     }
     if (this.resumeToken !== '') hello.session = this.resumeToken
     transport.sendText(JSON.stringify(hello))
+  }
+
+  /// Moves the page back onto the socket after the WebTransport session died.
+  ///
+  /// WebTransport replaces the socket, so losing it used to end the session
+  /// outright. The socket door is still there: reopen it with the resume
+  /// token (no new code needed) and stay on it -- a flapping WebTransport
+  /// endpoint must not trade the session back and forth.
+  private fallBackToSocket(reason: string): void {
+    if (this.closedByUser) return
+    if (this.wt === null && !this.wtPending) return
+    const transport = this.wt
+    const wasPending = this.wtPending
+    this.wt = null
+    this.wtPending = false
+    this.wtDisabled = true
+    if (transport !== null) transport.close()
+
+    // The WebTransport never took over: the socket is still open and live,
+    // so falling back is just dropping the attempt.
+    if (wasPending && this.ws !== null &&
+        this.ws.readyState === WebSocket.OPEN) {
+      return
+    }
+    if (this.lastConnect === null) {
+      this.handlers.onPhase?.('disconnected', reason)
+      return
+    }
+    this.handlers.onPhase?.('connecting', reason)
+    this.retryAttempts = 0
+    this.openSocket()
   }
 
   /// Drops the socket after the WebTransport session took over.
