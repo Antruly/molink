@@ -22,8 +22,13 @@ void expect(bool ok, const char* what) {
 
 class fake_transport final : public molink::relay_session {
  public:
-  fake_transport(std::string name, bool fail_on_start)
-      : name_(std::move(name)), fail_on_start_(fail_on_start) {}
+  /// `announce_ready = false` models an attempt that is still pairing: it has
+  /// started but the relay has not sent `relay-ready` yet.
+  explicit fake_transport(std::string name, bool fail_on_start,
+                          bool announce_ready = true)
+      : name_(std::move(name)),
+        fail_on_start_(fail_on_start),
+        announce_ready_(announce_ready) {}
 
   const char* name() const override { return name_.c_str(); }
   const char* path() const override { return "relay"; }
@@ -59,11 +64,18 @@ class fake_transport final : public molink::relay_session {
       }
       return;
     }
+    if (!announce_ready_) return;   // still pairing
     opened_ = true;
     if (ready_cb_) {
       std::function<void()> handler = ready_cb_;
       handler();
     }
+  }
+
+  /// Feeds a text frame the way a transport's read callback would.
+  void deliver_text(const std::string& text) {
+    text_handler handler = text_;
+    if (handler) handler(text);
   }
 
   void emit_close() {
@@ -78,6 +90,7 @@ class fake_transport final : public molink::relay_session {
  private:
   std::string name_;
   bool fail_on_start_;
+  bool announce_ready_;
   bool opened_ = false;
   molink::session_transport::text_handler text_;
   molink::session_transport::close_handler close_;
@@ -149,7 +162,46 @@ int main() {
     expect(!ladder.is_open(), "a failed ladder is not open");
   }
 
-  // 3. No factories at all also closes exactly once.
+  // 3. A transport that fails from inside its own data callback must outlive
+  //    that callback. Letting the last reference go there frees the WebSocket
+  //    parser while the frame it is dispatching is still on the stack -- the
+  //    h3 relay crash of 2026-10-29 (trampoline_frame with a null argument).
+  {
+    std::weak_ptr<fake_transport> first_weak;
+    fake_transport* first_raw = nullptr;
+    auto working = std::make_shared<fake_transport>("tcp", false);
+    std::vector<molink::relay_ladder::factory> factories = {
+        [&first_weak, &first_raw] {
+          auto transport = std::make_shared<fake_transport>(
+              "h3", false, /*announce_ready=*/false);
+          first_weak = transport;
+          first_raw = transport.get();
+          return as_session(transport);   // only the ladder keeps it alive
+        },
+        [working] { return as_session(working); },
+    };
+    molink::relay_ladder ladder(nullptr, std::move(factories));
+    bool ready = false;
+    bool alive_in_callback = false;
+    ladder.set_ready_handler([&] { ready = true; });
+    ladder.set_handlers(
+        [&](const std::string&) {
+          // This runs inside the transport's read callback: the relay answered
+          // and the ladder decides to give up on this endpoint right here.
+          first_raw->emit_close();
+          alive_in_callback = !first_weak.expired();
+        },
+        [](const std::uint8_t*, std::size_t) {},
+        [](int, const std::string&) {});
+    ladder.start();
+    expect(first_raw != nullptr, "the first endpoint was created");
+    if (first_raw != nullptr) first_raw->deliver_text("relay-error");
+    expect(alive_in_callback,
+           "the abandoned transport outlives its own data callback");
+    expect(ready, "the ladder falls through to the next endpoint");
+  }
+
+  // 4. No factories at all also closes exactly once.
   {
     molink::relay_ladder ladder(nullptr, {});
     int closes = 0;

@@ -19,7 +19,10 @@ relay_ladder::relay_ladder(uvcpp::uvcpp_loop* loop,
   }
 }
 
-relay_ladder::~relay_ladder() { close(transport_close::normal, "gone"); }
+relay_ladder::~relay_ladder() {
+  destroying_ = true;
+  close(transport_close::normal, "gone");
+}
 
 bool relay_ladder::is_open() const { return ready_ && !closed_; }
 
@@ -104,13 +107,31 @@ void relay_ladder::on_active_closed(int code, const std::string& reason) {
     deliver_close(code, reason);
     return;
   }
-  // Failed before pairing: keep the abandoned transport alive until this
-  // callback returns, then move on.
+  // Failed before pairing: keep the abandoned transport alive past this
+  // callback. It is usually closed from inside its own data callback, so
+  // dropping the last reference here would free its parser mid-read.
   std::shared_ptr<relay_session> failed = active_;
   active_.reset();
   stop_timer();
-  (void)failed;
+  retire(std::move(failed));
   try_next();
+}
+
+void relay_ladder::retire(std::shared_ptr<relay_session> transport) {
+  if (!transport) return;
+  retired_.push_back(std::move(transport));
+  // Tests build a ladder without a loop: nothing can tick, so the transport
+  // stays parked until the ladder itself goes away. Same while the destructor
+  // runs — arming a timer there would only race its own teardown.
+  if (loop_ == nullptr || destroying_) return;
+  if (retire_timer_ == nullptr) {
+    retire_timer_ = std::make_unique<uvcpp::uvcpp_timer>(loop_);
+    retire_timer_->init();
+  }
+  // Zero delay: the next tick, which is after every frame callback on this
+  // stack has returned.
+  retire_timer_->start(
+      [this](uvcpp::uvcpp_timer*) { retired_.clear(); }, 0, 0);
 }
 
 void relay_ladder::start_timer() {
@@ -123,6 +144,7 @@ void relay_ladder::start_timer() {
         active_.reset();
         if (failed) {
           failed->close(transport_close::normal, "relay attempt timed out");
+          retire(std::move(failed));
         }
         try_next();
       },
@@ -153,6 +175,8 @@ void relay_ladder::close(int code, const std::string& reason) {
   active_.reset();
   if (transport) {
     transport->close(transport_close::normal, "relay closed");
+    // close() may be reached from inside that transport's data callback too.
+    retire(std::move(transport));
   }
 }
 
