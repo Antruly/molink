@@ -330,7 +330,10 @@ class x11_capture final : public capture_base {
         descriptor.fd = ConnectionNumber(display_);
         descriptor.events = POLLIN;
         descriptor.revents = 0;
-        ::poll(&descriptor, 1, 200);
+        // A static screen produces no damage event, and a 200 ms wait would
+        // cap the AV1 stream at five frames a second. Poll briefly while the
+        // stream is the active path so its cadence follows the frame rate.
+        ::poll(&descriptor, 1, stream_active() ? 5 : 200);
 
         if (drain_damage_events(dirty)) {
           if (!ever_damaged) {
@@ -345,6 +348,9 @@ class x11_capture final : public capture_base {
             safety_interval) {
           want_capture = true;
         }
+        // The AV1 stream keeps a steady cadence; a static screen still has to
+        // produce its (tiny) P frame every tick.
+        if (stream_active()) want_capture = true;
         if (!want_capture) continue;
       } else {
         want_capture = true;

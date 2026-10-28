@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <deque>
 #include <thread>
 #include <type_traits>
 #include <utility>
@@ -426,6 +427,15 @@ class svt_stream_encoder final : public av1_stream_encoder {
       if (!init(padded_w, padded_h, qp, error)) return false;
       keyframe_pending_ = true;  // a fresh encoder starts with a keyframe
     }
+    if (keyframe && !keyframe_pending_) {
+      // SVT 1.x ignores a KEY pic_type in low-delay mode; the only reliable
+      // way to start a new reference chain is a fresh encoder, whose first
+      // picture is always a keyframe. It costs one re-initialisation, which
+      // happens only when a viewer joins or a decoder lost the stream.
+      shutdown();
+      if (!init(padded_w, padded_h, qp, error)) return false;
+      keyframe_pending_ = true;
+    }
     if (!convert(bgra, stride, width, height, padded_w, padded_h)) {
       error = "av1 stream: could not convert the frame";
       return false;
@@ -448,6 +458,10 @@ class svt_stream_encoder final : public av1_stream_encoder {
     const bool key = keyframe || keyframe_pending_;
     header.pic_type = key ? EB_AV1_KEY_PICTURE : EB_AV1_INTER_PICTURE;
     if (key) keyframe_pending_ = false;
+    // The pipeline delays output by more than one picture, and the packet's
+    // own pic_type does not tell the truth in this configuration, so the
+    // keyframe flag travels with the picture through a small queue.
+    pending_keyframes_.push_back(key);
 
     const EbErrorType sent = svt_av1_enc_send_picture(handle_, &header);
     if (sent != EB_ErrorNone) {
@@ -469,10 +483,10 @@ class svt_stream_encoder final : public av1_stream_encoder {
     if (packet != nullptr) {
       if (packet->p_buffer != nullptr && packet->n_filled_len > 0) {
         out.assign(packet->p_buffer, packet->p_buffer + packet->n_filled_len);
-        // The packet may belong to an earlier picture (the pipeline holds
-        // one), so the receiver learns from the packet itself whether it can
-        // start decoding here.
-        out_keyframe = packet->pic_type == EB_AV1_KEY_PICTURE;
+        if (!pending_keyframes_.empty()) {
+          out_keyframe = pending_keyframes_.front();
+          pending_keyframes_.pop_front();
+        }
       }
       svt_av1_enc_release_out_buffer(&packet);
     }
@@ -545,6 +559,7 @@ class svt_stream_encoder final : public av1_stream_encoder {
     u_plane_.clear();
     v_plane_.clear();
     keyframe_pending_ = true;
+    pending_keyframes_.clear();
     width_ = 0;
     height_ = 0;
     qp_ = 0;
@@ -605,6 +620,9 @@ class svt_stream_encoder final : public av1_stream_encoder {
   av1_encoder_config config_;
   EbComponentType* handle_ = nullptr;
   bool keyframe_pending_ = true;
+  /// One entry per picture sent, consumed per packet returned: the pipeline
+  /// delays output, so the packet that arrives now was requested earlier.
+  std::deque<bool> pending_keyframes_;
   int width_ = 0;
   int height_ = 0;
   int qp_ = 0;

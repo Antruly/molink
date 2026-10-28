@@ -876,8 +876,10 @@ class direct_proxy final : public std::enable_shared_from_this<direct_proxy> {
       // second only adds latency and inflate work. Every frame is still
       // decoded so the reference chain stays valid.
       const auto now = std::chrono::steady_clock::now();
+      // The page paints a full-screen frame in ~17 ms (measured in the real
+      // WebKit shell), so fifteen a second is what the viewer can take.
       if (last_stream_forward_.time_since_epoch().count() != 0 &&
-          now - last_stream_forward_ < std::chrono::milliseconds(100)) {
+          now - last_stream_forward_ < std::chrono::milliseconds(66)) {
         return {};
       }
       last_stream_forward_ = now;
@@ -919,19 +921,12 @@ class direct_proxy final : public std::enable_shared_from_this<direct_proxy> {
       }
       std::vector<protocol::tile_blob> tiles;
       tiles.push_back(std::move(tile));
+      // No deflate: a full-screen frame compresses to ~1.5 MB, which costs
+      // ~43 ms on the core and ~15 ms to inflate in the page, while the raw
+      // RGB565 is 4.1 MB that loops back in a couple of milliseconds. The
+      // page's paint path measured ~17 ms per frame, so the wire is the cheap
+      // part here and zlib was the bottleneck.
       const auto deflate_start = std::chrono::steady_clock::now();
-      std::vector<std::vector<uint8_t>> packed(tiles.size());
-      if (compression_available()) {
-        std::string deflate_error;
-        for (std::size_t i = 0; i < tiles.size(); ++i) {
-          if (!deflate_buffer(tiles[i].data.data(), tiles[i].data.size(), 1,
-                              packed[i], deflate_error)) {
-            return {};
-          }
-          tiles[i].data = std::move(packed[i]);
-        }
-        header.codec = static_cast<uint8_t>(protocol::codec::deflate_rgb565);
-      }
       std::vector<uint8_t> payload;
       if (!protocol::build_frame_payload(header, tiles, payload, error)) {
         return {};

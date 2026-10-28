@@ -444,18 +444,9 @@ class connect_proxy final
       }
       std::vector<protocol::tile_blob> tiles;
       tiles.push_back(std::move(tile));
-      std::vector<std::vector<uint8_t>> packed(tiles.size());
-      if (compression_available()) {
-        std::string deflate_error;
-        for (std::size_t i = 0; i < tiles.size(); ++i) {
-          if (!deflate_buffer(tiles[i].data.data(), tiles[i].data.size(), 1,
-                              packed[i], deflate_error)) {
-            return {};
-          }
-          tiles[i].data = std::move(packed[i]);
-        }
-        header.codec = static_cast<uint8_t>(protocol::codec::deflate_rgb565);
-      }
+      // No deflate: a full-screen frame compresses to ~1.5 MB, which costs
+      // ~43 ms on the core and ~15 ms to inflate in the page, while raw
+      // RGB565 is 4.1 MB that loops back in a couple of milliseconds.
       std::vector<uint8_t> payload;
       if (!protocol::build_frame_payload(header, tiles, payload, error)) {
         return {};

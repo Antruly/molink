@@ -467,6 +467,11 @@ class capture_base : public capture_source {
   void set_av1_stream_allowed(bool allowed) override {
     av1_stream_allowed_.store(allowed);
   }
+  /// True while the AV1 stream is the active path. The backend should then
+  /// publish a frame on every tick, even when nothing changed: a video stream
+  /// needs a steady cadence, and a P frame of an unchanged screen costs a few
+  /// kilobytes.
+  bool stream_active() const { return stream_policy_.streaming; }
   /// Feeds the moving-area policy for this frame. Returns the stream encoder
   /// to use, or null while the frame stays on tiles; `keyframe` asks for a
   /// stream keyframe (the first frame after a switch).

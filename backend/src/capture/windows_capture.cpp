@@ -222,6 +222,11 @@ class windows_capture final : public capture_base {
           keyframe_requested_.store(false);
           publish_frame(pixels, true);
           last_full = now;
+        } else if (pixels_valid && stream_active()) {
+          // The AV1 stream keeps its own cadence: publish the retained
+          // (unchanged) desktop so the encoder emits a P frame per tick
+          // instead of only when something moves.
+          publish_frame(pixels, false);
         }
       } else if (grab_error != last_grab_error) {
         // A persistent runtime failure (HDR/non-BGRA format, a lost device)
