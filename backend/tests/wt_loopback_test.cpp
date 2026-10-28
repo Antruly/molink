@@ -121,10 +121,11 @@ int main() {
                [&](uvcpp_h3_connection& h3, const h3_request& request) {
                  if (request.protocol != "webtransport") return;
                  uvcpp_h3_wt_session::callbacks wt_callbacks;
-                 wt_callbacks.on_open = [&](uvcpp_h3_wt_session&) {
+                 wt_callbacks.on_open = [&](uvcpp_h3_wt_session& session) {
                    server_link = std::make_shared<molink::wt_transport>(
                        "webtransport");
-                   server_link->attach(server_wt.get());
+                   // on_open runs inside accept(); server_wt is still empty.
+                   server_link->attach(&session);
                    server_link->set_handlers(
                        [&](const std::string& text) {
                          server_saw_hello =

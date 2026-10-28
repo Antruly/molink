@@ -145,12 +145,15 @@ bool h3_ws_listener::start(const std::string& ip, int port,
                 uvcpp::uvcpp_h3_wt_session::callbacks wt_callbacks;
                 wt_callbacks.on_open = [weak_self, weak_state,
                                         weak_transport](
-                                           uvcpp::uvcpp_h3_wt_session&) {
+                                           uvcpp::uvcpp_h3_wt_session&
+                                               session) {
                   auto state = weak_state.lock();
                   auto link = weak_transport.lock();
                   if (!state || !link) return;
-                  if (!state->wt) return;
-                  link->attach(state->wt.get());
+                  // on_open fires *inside* accept(), before `state->wt` is
+                  // assigned: the callback parameter is the only handle the
+                  // session has at that moment.
+                  link->attach(&session);
                   if (auto owner = weak_self.lock()) {
                     if (owner->accept) owner->accept(link);
                   }
