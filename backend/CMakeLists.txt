@@ -697,8 +697,8 @@ if(MOLINK_BUILD_CORE AND UVP_UVCPP_TARGET)
   )
   target_include_directories(molink-core-file-transfer-backpressure-test PRIVATE
     src ${UVP_UVCPP_PREFIX}/include)
-  target_link_libraries(molink-core-file-transfer-backpressure-test PRIVATE
-    ${UVP_UVCPP_TARGET})
+  # The test needs libuvcpp's JSON header, not its symbols: linking the
+  # library would drag in libuv (and fail on macOS runners without it).
   if(WIN32)
     # util.cpp enumerates the local addresses with GetAdaptersAddresses
     # (iphlpapi) and formats them with inet_ntop (ws2_32).
