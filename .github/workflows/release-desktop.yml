@@ -135,8 +135,12 @@ jobs:
       - name: Install AV1 libraries
         shell: bash
         run: |
+          # libjpeg-turbo is left out on purpose: it drags vcpkg's dynamic
+          # zlib into the include path, which collides with the static zlib
+          # this job builds (__imp_compress2). Windows viewers fall back to
+          # raw RGB565; the Linux build has JPEG.
           "$VCPKG_INSTALLATION_ROOT/vcpkg.exe" install \
-            svt-av1:x64-windows dav1d:x64-windows libjpeg-turbo:x64-windows
+            svt-av1:x64-windows dav1d:x64-windows
 
       - name: Build core
         shell: bash
@@ -148,7 +152,6 @@ jobs:
             -DZLIB_INCLUDE_DIR="$(cygpath -m "$RUNNER_TEMP/zlib/prefix/include")" \
             -DZLIB_LIBRARY="$(cygpath -m "$RUNNER_TEMP/zlib/prefix/lib/zlibstatic.lib")" \
             -DMOLINK_ENABLE_AV1=ON \
-            -DMOLINK_ENABLE_JPEG=ON \
             -DCMAKE_PREFIX_PATH="$(cygpath -m "$VCPKG_INSTALLATION_ROOT/installed/x64-windows")"
           cmake --build backend/build --config Release --parallel
 
