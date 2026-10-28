@@ -31,3 +31,6 @@ backend/cmake-build-*/
 *.keystore
 *.p12
 *.mobileprovision
+
+# 本机测试机记录（含凭据，不要提交）
+docs/testing.local.md
