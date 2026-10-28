@@ -36,6 +36,33 @@ export function applyFrameToSession(key: string, frame: Frame): void {
   }
 }
 
+/**
+ * Applies one JPEG frame to the session picture. Stream frames arrive as whole
+ * screens, already decoded by the browser into bitmaps, so they are blitted
+ * instead of being expanded pixel by pixel.
+ */
+export function applyJpegFrameToSession(key: string, frame: Frame,
+                                        bitmaps: ImageBitmap[]): void {
+  if (key === '') return
+  const keyframe = (frame.flags & FrameFlag.keyframe) !== 0
+  let back = buffers.get(key)
+  if (!back || back.width !== frame.screenW || back.height !== frame.screenH) {
+    if (!keyframe) return
+    back = document.createElement('canvas')
+    back.width = frame.screenW
+    back.height = frame.screenH
+    buffers.set(key, back)
+  }
+  const context = back.getContext('2d', { alpha: false })
+  if (!context) return
+  context.imageSmoothingEnabled = true
+  for (let i = 0; i < frame.tiles.length && i < bitmaps.length; i += 1) {
+    const tile = frame.tiles[i]!
+    if (tile.w === 0 || tile.h === 0) continue
+    context.drawImage(bitmaps[i]!, tile.x, tile.y, tile.w, tile.h)
+  }
+}
+
 export function sessionScreenBuffer(key: string): HTMLCanvasElement | null {
   return buffers.get(key) ?? null
 }

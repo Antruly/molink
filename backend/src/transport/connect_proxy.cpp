@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "capture/av1_frame.h"
+#include "capture/jpeg_encode.h"
 #include "compression.h"
 #include "protocol/frame_packet.h"
 #include "transport/switchable_transport.h"
@@ -424,22 +425,41 @@ class connect_proxy final
       tile.h = static_cast<uint16_t>(
           std::min<int>(height, header.screen_h > 0 ? header.screen_h : height));
       tile.flags = protocol::kTileFlagChanged;
-      // A stream frame is a whole screen: pack it as RGB565, which halves
-      // everything the core deflates and the page inflates on every frame.
-      tile.data.resize(static_cast<std::size_t>(tile.w) * tile.h * 2);
-      for (int row = 0; row < tile.h; ++row) {
-        const uint8_t* src =
-            bgra.data() + static_cast<std::size_t>(row) * width * 4;
-        uint8_t* dst =
-            tile.data.data() + static_cast<std::size_t>(row) * tile.w * 2;
-        for (int x = 0; x < tile.w; ++x) {
-          const uint8_t* px = src + static_cast<std::size_t>(x) * 4;
-          const uint16_t value = static_cast<uint16_t>(
-              (static_cast<uint16_t>(px[2] >> 3) << 11) |
-              (static_cast<uint16_t>(px[1] >> 2) << 5) |
-              static_cast<uint16_t>(px[0] >> 3));
-          dst[x * 2] = static_cast<uint8_t>(value & 0xff);
-          dst[x * 2 + 1] = static_cast<uint8_t>(value >> 8);
+      // JPEG: a 1080p desktop frame is a few hundred kilobytes and the page
+      // decodes it with the browser's native image decoder. Raw RGB565 (four
+      // megabytes per frame here) hit the WebSocket's throughput ceiling.
+      const int quality = 80;
+      bool packed_jpeg = false;
+      if (jpeg_encode_available()) {
+        std::string jpeg_error;
+        std::vector<uint8_t> jpeg;
+        if (jpeg_encode_bgra(bgra.data(), static_cast<std::size_t>(width) * 4,
+                             width, height, quality, jpeg, jpeg_error)) {
+          tile.data = std::move(jpeg);
+          header.codec = static_cast<uint8_t>(protocol::codec::jpeg);
+          packed_jpeg = true;
+        } else if (std::getenv("MOLINK_STREAM_LOG") != nullptr) {
+          std::fprintf(stderr, "%s: jpeg encode failed: %s\n", "connect proxy",
+                       jpeg_error.c_str());
+        }
+      }
+      if (!packed_jpeg) {
+        // Fallback: raw RGB565, half the bytes of BGRA.
+        tile.data.resize(static_cast<std::size_t>(tile.w) * tile.h * 2);
+        for (int row = 0; row < tile.h; ++row) {
+          const uint8_t* src =
+              bgra.data() + static_cast<std::size_t>(row) * width * 4;
+          uint8_t* dst =
+              tile.data.data() + static_cast<std::size_t>(row) * tile.w * 2;
+          for (int x = 0; x < tile.w; ++x) {
+            const uint8_t* px = src + static_cast<std::size_t>(x) * 4;
+            const uint16_t value = static_cast<uint16_t>(
+                (static_cast<uint16_t>(px[2] >> 3) << 11) |
+                (static_cast<uint16_t>(px[1] >> 2) << 5) |
+                static_cast<uint16_t>(px[0] >> 3));
+            dst[x * 2] = static_cast<uint8_t>(value & 0xff);
+            dst[x * 2 + 1] = static_cast<uint8_t>(value >> 8);
+          }
         }
       }
       std::vector<protocol::tile_blob> tiles;

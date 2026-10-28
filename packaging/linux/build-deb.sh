@@ -21,7 +21,8 @@ if [ -n "${MOLINK_AV1_SDK:-}" ]; then
   AV1_ARG+=("-DMOLINK_AV1_SDK=$MOLINK_AV1_SDK")
 fi
 cmake -S "$ROOT/backend" -B "$ROOT/backend/build" -DCMAKE_BUILD_TYPE=Release \
-  -DMOLINK_ENABLE_AV1=ON ${AV1_ARG[@]+"${AV1_ARG[@]}"} >/dev/null
+  -DMOLINK_ENABLE_AV1=ON -DMOLINK_ENABLE_JPEG=ON \
+  ${AV1_ARG[@]+"${AV1_ARG[@]}"} >/dev/null
 cmake --build "$ROOT/backend/build" --parallel
 
 echo "== build frontend"
@@ -80,7 +81,7 @@ Package: molink
 Version: $VERSION
 Architecture: $ARCH
 Maintainer: moLink Contributors <molink@example.invalid>
-Depends: libgtk-3-0t64 | libgtk-3-0, libwebkit2gtk-4.1-0, libx11-6, libxext6, libxtst6, libxfixes3, libxdamage1, libxrender1, libxi6, libxkbcommon0, zlib1g, libuv1t64 | libuv1, libsqlite3-0, libssl3t64 | libssl3
+Depends: libgtk-3-0t64 | libgtk-3-0, libwebkit2gtk-4.1-0, libx11-6, libxext6, libxtst6, libxfixes3, libxdamage1, libxrender1, libxi6, libxkbcommon0, zlib1g, libuv1t64 | libuv1, libsqlite3-0, libssl3t64 | libssl3, libjpeg-turbo8 | libjpeg8
 Section: net
 Priority: optional
 Description: Web-first remote desktop

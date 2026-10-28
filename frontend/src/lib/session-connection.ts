@@ -12,6 +12,7 @@ import { PcmPlayer } from './audio'
 import { ClipboardFileSync } from './clipboard-sync'
 import {
   applyFrameToSession,
+  applyJpegFrameToSession,
   forgetSessionScreenBuffer,
 } from './screen-buffer'
 
@@ -217,11 +218,15 @@ export class SessionConnection {
           this.sink.onPatch({ stats: this.snapshot(now) })
         }
       },
-      onFrame: (frame, bytes) => {
+      onFrame: (frame, bytes, bitmaps) => {
         // Compose into the session buffer even while the tab is in the
         // background: the pull loop keeps every live tab current, and a
         // switch then shows the last picture instead of an empty canvas.
-        applyFrameToSession(this.sessionKey, frame)
+        if (bitmaps !== undefined && bitmaps.length > 0) {
+          applyJpegFrameToSession(this.sessionKey, frame, bitmaps)
+        } else {
+          applyFrameToSession(this.sessionKey, frame)
+        }
         const now = performance.now()
         this.frames += 1
         this.frameTimes.push(now)

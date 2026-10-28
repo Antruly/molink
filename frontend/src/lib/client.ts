@@ -154,7 +154,10 @@ export type SessionEventListener = (event: SessionEvent) => void
 export interface ClientHandlers {
   onPhase: (phase: ClientPhase, detail?: string) => void
   onWelcome: (welcome: Welcome) => void
-  onFrame: (frame: Frame, byteLength: number) => void
+  /// `bitmaps` is set for JPEG stream frames, which the client already decoded
+  /// with the browser's native image decoder; the sink blits them instead of
+  /// expanding pixels.
+  onFrame: (frame: Frame, byteLength: number, bitmaps?: ImageBitmap[]) => void
   onLatency: (ms: number) => void
   onError: (message: string, code?: string) => void
   /// Live path/protocol changes, e.g. relay switching to ICE. `mode` is the
@@ -1175,6 +1178,43 @@ export class MolinkClient {
       this.noteFrameClock(packet.tsUs)
       this.noteReceived(frame, (packet.flags & PacketFlag.tileRefresh) !== 0)
       this.reconcileQualityPreset(frame)
+      if (frame.codec === Codec.jpeg) {
+        // Stream frames: one whole screen per packet, decoded natively by the
+        // browser and blitted. They arrive as tile refreshes, so they carry
+        // their own base image and never depend on the delta chain.
+        if ((frame.flags & FrameFlag.keyframe) !== 0) this.hasImage = true
+        if (frame.tiles.length === 0) return
+        if (!this.hasImage) {
+          this.requestKeyframeThrottled()
+          return
+        }
+        if (this.frameAgeMs(packet.tsUs) > 1000) {
+          this.handlers.onFrameDropped?.()
+          return
+        }
+        this.handlers.onWireFrame?.()
+        if (frame.frameSeq > this.latestFrameSeq) {
+          this.latestFrameSeq = frame.frameSeq
+        }
+        const tiles = frame.tiles
+        this.frameQueue = this.frameQueue
+          .then(async () => {
+            const bitmaps = await Promise.all(
+              tiles.map(async (tile) => {
+                // A copy gives the Blob a plain ArrayBuffer (no shared one).
+                const bytes = new Uint8Array(tile.data)
+                return createImageBitmap(new Blob([bytes], { type: 'image/jpeg' }))
+              }),
+            )
+            try {
+              this.handlers.onFrame?.(frame, buffer.byteLength, bitmaps)
+            } finally {
+              for (const bitmap of bitmaps) bitmap.close()
+            }
+          })
+          .catch(() => undefined)
+        return
+      }
       if ((packet.flags & PacketFlag.tileRefresh) !== 0) {
         // A tile refresh carries exact pixels, so it can establish the first
         // picture: the AV1 stream sends everything as a refresh, and without

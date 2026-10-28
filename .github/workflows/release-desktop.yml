@@ -27,7 +27,7 @@ jobs:
           sudo timeout 900 apt-get update $APT_OPTS
           sudo timeout 2400 apt-get install -y $APT_OPTS cmake libgtk-3-dev \
             libwebkit2gtk-4.1-dev librsvg2-dev patchelf libuv1-dev libssl-dev \
-            zlib1g-dev curl rpm libsvtav1-dev libdav1d-dev
+            zlib1g-dev curl rpm libsvtav1-dev libdav1d-dev libjpeg-turbo8-dev
 
       - uses: pnpm/action-setup@v4
         with:
@@ -136,7 +136,7 @@ jobs:
         shell: bash
         run: |
           "$VCPKG_INSTALLATION_ROOT/vcpkg.exe" install \
-            svt-av1:x64-windows dav1d:x64-windows
+            svt-av1:x64-windows dav1d:x64-windows libjpeg-turbo:x64-windows
 
       - name: Build core
         shell: bash
@@ -148,6 +148,7 @@ jobs:
             -DZLIB_INCLUDE_DIR="$(cygpath -m "$RUNNER_TEMP/zlib/prefix/include")" \
             -DZLIB_LIBRARY="$(cygpath -m "$RUNNER_TEMP/zlib/prefix/lib/zlibstatic.lib")" \
             -DMOLINK_ENABLE_AV1=ON \
+            -DMOLINK_ENABLE_JPEG=ON \
             -DCMAKE_PREFIX_PATH="$(cygpath -m "$VCPKG_INSTALLATION_ROOT/installed/x64-windows")"
           cmake --build backend/build --config Release --parallel
 

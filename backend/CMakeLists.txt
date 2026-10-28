@@ -308,6 +308,32 @@ if(MOLINK_ENABLE_AV1)
   endif()
 endif()
 
+# JPEG for full-screen stream frames handed to the page: the browser decodes a
+# JPEG with its native image decoder, which is far cheaper than inflating zlib
+# and much smaller than raw pixels. libjpeg-turbo provides JCS_EXT_BGRX, which
+# takes our BGRA rows without a conversion.
+option(MOLINK_ENABLE_JPEG "Encode stream frames as JPEG (needs libjpeg-turbo)" OFF)
+set(MOLINK_JPEG_SDK "" CACHE PATH
+  "Unpacked libjpeg-turbo dev tree (usr/include, usr/lib) when absent")
+set(MOLINK_HAVE_JPEG 0)
+if(MOLINK_ENABLE_JPEG)
+  if(MOLINK_JPEG_SDK)
+    find_path(JPEG_INCLUDE_DIR jpeglib.h HINTS "${MOLINK_JPEG_SDK}/usr/include")
+    find_library(JPEG_LIBRARY NAMES jpeg
+      HINTS "${MOLINK_JPEG_SDK}/usr/lib/x86_64-linux-gnu"
+            "${MOLINK_JPEG_SDK}/usr/lib")
+  else()
+    find_path(JPEG_INCLUDE_DIR jpeglib.h)
+    find_library(JPEG_LIBRARY NAMES jpeg)
+  endif()
+  if(JPEG_INCLUDE_DIR AND JPEG_LIBRARY)
+    set(MOLINK_HAVE_JPEG 1)
+    list(APPEND MOLINK_CORE_SOURCES src/capture/jpeg_encode.cpp)
+  else()
+    message(STATUS "molink: libjpeg-turbo not found; stream frames stay raw")
+  endif()
+endif()
+
 # NVIDIA NVENC AV1 rectangles. The header is vendored under third_party, so
 # the feature is available on any build with the NVIDIA driver at runtime; the
 # encoder is loaded with LoadLibrary/dlopen and no import library is needed.
@@ -383,6 +409,12 @@ if(MOLINK_BUILD_CORE)
     target_include_directories(molink-core PRIVATE ${DAV1D_INCLUDE_DIR})
     target_link_libraries(molink-core PRIVATE ${DAV1D_LIBRARY})
     message(STATUS "molink: AV1 rectangle decoding enabled (dav1d)")
+  endif()
+  if(MOLINK_HAVE_JPEG)
+    target_compile_definitions(molink-core PRIVATE MOLINK_HAVE_JPEG=1)
+    target_include_directories(molink-core PRIVATE ${JPEG_INCLUDE_DIR})
+    target_link_libraries(molink-core PRIVATE ${JPEG_LIBRARY})
+    message(STATUS "molink: JPEG stream frames enabled (libjpeg-turbo)")
   endif()
   if(MOLINK_HAVE_NVENC)
     target_compile_definitions(molink-core PRIVATE MOLINK_HAVE_NVENC=1)

@@ -125,6 +125,10 @@ enum class codec : uint8_t {
   /// decodable once the stream's keyframe has been seen. Receivers that did
   /// not advertise the capability never see this codec.
   av1_stream = 12,
+  /// A baseline JPEG tile. Full-screen stream frames use it on the way to the
+  /// page: the browser decodes it natively, which is far cheaper than zlib and
+  /// much smaller than raw pixels.
+  jpeg = 13,
 };
 
 enum frame_flags : uint8_t {

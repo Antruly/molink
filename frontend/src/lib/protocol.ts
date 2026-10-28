@@ -55,6 +55,9 @@ export const Codec = {
   deflateRgb565: 9,
   gray8: 10,
   deflateGray8: 11,
+  av1Stream: 12,
+  /** Baseline JPEG tile: decoded by the browser's native image decoder. */
+  jpeg: 13,
 } as const
 
 /** Bytes per pixel after decompression; 0 when the codec is not pixel-based. */
