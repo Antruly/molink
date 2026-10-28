@@ -63,7 +63,8 @@ if [ -n "${VCPKG_INSTALLATION_ROOT:-}" ]; then
   # depends on vcpkg's zlib. Glob both so an ABI or naming change cannot leave
   # the installer without them again.
   for dll in "$VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin"/jpeg*.dll \
-             "$VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin"/zlib*.dll; do
+             "$VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin"/zlib*.dll \
+             "$VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin"/libz*.dll; do
     [ -f "$dll" ] && cp "$dll" "$PKG/"
   done
 fi

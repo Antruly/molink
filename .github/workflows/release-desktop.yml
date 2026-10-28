@@ -209,6 +209,35 @@ jobs:
             /DPKG_DIR="$PKG_DIR" /DOUT_DIR="$OUT_DIR" \
             packaging/windows/portable.nsi
 
+      # A package that silently lost a runtime DLL (jpeg62.dll and the zlib
+      # runtime went missing this way) installs but cannot start. Check the
+      # core's imports against what was staged before anything is published.
+      # A package that silently lost a runtime DLL (jpeg62.dll and the zlib
+      # runtime went missing this way) installs but cannot start. Check the
+      # core's imports against what was staged before anything is published.
+      - name: Verify runtime dependencies
+        shell: pwsh
+        run: |
+          $dumpbin = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -find "VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe" | Select-Object -First 1
+          if (-not $dumpbin) { throw "dumpbin not found" }
+          $pkg = "build/windows/pkg"
+          $core = Join-Path $pkg "molink-core.exe"
+          if (-not (Test-Path $core)) { throw "molink-core.exe is not staged" }
+          $systemDir = Join-Path $env:SystemRoot "System32"
+          $names = & $dumpbin /nologo /dependents $core |
+            Select-String -Pattern '^\s+([^\s]+\.dll)$' |
+            ForEach-Object { $_.Matches[0].Groups[1].Value.ToLower() }
+          $missing = @()
+          foreach ($name in $names) {
+            if ($name -like 'api-ms-win-*' -or $name -like 'ext-ms-*') { continue }
+            if (Test-Path (Join-Path $systemDir $name)) { continue }
+            if (-not (Test-Path (Join-Path $pkg $name))) { $missing += $name }
+          }
+          if ($missing.Count -gt 0) {
+            throw ("the package is missing runtime DLLs: " + ($missing -join ", "))
+          }
+          Write-Host "runtime dependencies OK"
+
       - uses: softprops/action-gh-release@v2
         with:
           name: moLink ${{ github.ref_name }}
