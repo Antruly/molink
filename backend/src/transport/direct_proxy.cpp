@@ -632,6 +632,8 @@ class direct_proxy final : public std::enable_shared_from_this<direct_proxy> {
     if (text.find("\"hello\"") != std::string::npos) {
       outgoing = inject_av1(text);
       hello_text_ = outgoing;
+    } else if (text.find("\"quality\"") != std::string::npos) {
+      note_quality(text);
     }
     if (!transport_ || !transport_->is_open()) {
       pending_text_.push_back(outgoing);
@@ -669,6 +671,28 @@ class direct_proxy final : public std::enable_shared_from_this<direct_proxy> {
     stop_h2();
 #endif
     if (tcp_client_) tcp_client_->close();
+  }
+
+  /// The page pushes the quality preset through this proxy; stream frames
+  /// follow it (a sharp preset gets a sharper JPEG).
+  void note_quality(const std::string& text) {
+    try {
+      const auto document = nlohmann::json::parse(text);
+      if (!document.is_object()) return;
+      if (document.value("type", std::string()) != "quality") return;
+      const std::string mode = document.value("mode", std::string());
+      if (mode == "smooth" || mode == "game") {
+        stream_quality_ = 72;
+      } else if (mode == "turbo") {
+        stream_quality_ = 70;
+      } else if (mode == "balanced") {
+        stream_quality_ = 80;
+      } else if (mode == "quality" || mode == "ultra" || mode == "lossless") {
+        stream_quality_ = 88;
+      }
+    } catch (...) {
+      // A malformed control message is not this proxy's business.
+    }
   }
 
   void flush_pending() {
@@ -880,7 +904,7 @@ class direct_proxy final : public std::enable_shared_from_this<direct_proxy> {
       // The page paints a full-screen frame in ~17 ms (measured in the real
       // WebKit shell), so fifteen a second is what the viewer can take.
       if (last_stream_forward_.time_since_epoch().count() != 0 &&
-          now - last_stream_forward_ < std::chrono::milliseconds(66)) {
+          now - last_stream_forward_ < std::chrono::milliseconds(50)) {
         return {};
       }
       last_stream_forward_ = now;
@@ -905,7 +929,7 @@ class direct_proxy final : public std::enable_shared_from_this<direct_proxy> {
       // JPEG: a 1080p desktop frame is a few hundred kilobytes and the page
       // decodes it with the browser's native image decoder. Raw RGB565 (four
       // megabytes per frame here) hit the WebSocket's throughput ceiling.
-      const int quality = 80;
+      const int quality = stream_quality_;
       bool packed_jpeg = false;
       if (jpeg_encode_available()) {
         std::string jpeg_error;
@@ -1086,6 +1110,8 @@ class direct_proxy final : public std::enable_shared_from_this<direct_proxy> {
   /// The low-delay stream keeps reference frames, so one decoder lives for the
   /// whole session.
   av1_stream_decoder stream_decoder_;
+  /// JPEG quality for stream frames, following the viewer's preset.
+  int stream_quality_ = 80;
   /// Last keyframe request for a broken stream (one a second).
   std::chrono::steady_clock::time_point last_stream_keyframe_request_{};
   /// Last time a stream frame was forwarded to the page (rate limit).

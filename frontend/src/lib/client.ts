@@ -1196,6 +1196,10 @@ export class MolinkClient {
         if (frame.frameSeq > this.latestFrameSeq) {
           this.latestFrameSeq = frame.frameSeq
         }
+        // The one-second timestamp clock compares against what was painted;
+        // without this every cell would look stale after a JPEG frame and the
+        // page would ask for tile refreshes it already has.
+        this.noteApplied(frame, packet.tsUs)
         const tiles = frame.tiles
         this.frameQueue = this.frameQueue
           .then(async () => {
