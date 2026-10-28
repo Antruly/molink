@@ -59,6 +59,9 @@ struct peer_link {
 
   bool browser_connected = false;
   std::shared_ptr<rtc::DataChannel> audio;
+  std::shared_ptr<rtc::DataChannel> file;
+  std::vector<uint8_t> file_bytes;
+  std::atomic<bool> file_open{false};
   std::vector<uint8_t> audio_bytes;
   std::atomic<bool> audio_open{false};
   bool data_channel_open = false;
@@ -157,6 +160,20 @@ int main() {
     }
   });
   state->browser->onDataChannel([state](std::shared_ptr<rtc::DataChannel> dc) {
+    if (dc->label() == "file") {
+      std::lock_guard<std::mutex> lock(state->mutex);
+      state->file = dc;
+      dc->onOpen([state]() { state->file_open.store(true); });
+      dc->onMessage([state](rtc::message_variant message) {
+        if (!std::holds_alternative<rtc::binary>(message)) return;
+        const auto& bytes = std::get<rtc::binary>(message);
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->file_bytes.assign(
+            reinterpret_cast<const uint8_t*>(bytes.data()),
+            reinterpret_cast<const uint8_t*>(bytes.data()) + bytes.size());
+      });
+      return;
+    }
     if (dc->label() == "audio") {
       std::lock_guard<std::mutex> lock(state->mutex);
       state->audio = dc;
@@ -312,6 +329,24 @@ int main() {
              },
              5s),
          "the audio packet arrives intact");
+
+  // Files: the dedicated reliable channel carries a chunk.
+  expect(wait_for([&] { return state->file_open.load(); }, 10s),
+         "the file channel opens");
+  const std::vector<uint8_t> file_chunk(700, 0x5a);
+  bool file_sent = false;
+  for (int attempt = 0; attempt < 20 && !file_sent; ++attempt) {
+    file_sent = session.send_file(file_chunk.data(), file_chunk.size());
+    if (!file_sent) std::this_thread::sleep_for(50ms);
+  }
+  expect(file_sent, "the host sends a file chunk");
+  expect(wait_for(
+             [&] {
+               std::lock_guard<std::mutex> lock(state->mutex);
+               return state->file_bytes == file_chunk;
+             },
+             5s),
+         "the file chunk arrives intact on its own channel");
 
   // Video: the track must open, and the access unit must come out of the
   // depacketizer with its start codes intact.

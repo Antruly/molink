@@ -37,8 +37,10 @@ class wt_transport final : public session_transport {
   /// the peer opens; `attach_stream` wires it up when it arrives.
   void attach(uvcpp::uvcpp_h3_wt_session* session);
 
-  /// Takes the peer's bidirectional stream (not owned) as the reliable path.
-  void attach_stream(uvcpp::uvcpp_h3_wt_stream* stream);
+  /// Takes one of the peer's bidirectional streams. The first byte says which
+  /// path it is: `kFileStreamTag` marks the file stream, anything else is the
+  /// control stream.
+  void attach_peer_stream(uvcpp::uvcpp_h3_wt_stream* stream);
 
   /// The session or its stream ended.
   void link_closed(int code, const std::string& reason);
@@ -67,10 +69,19 @@ class wt_transport final : public session_transport {
  private:
   void deliver_close(int code, const std::string& reason);
 
+  /// First byte of a peer-opened stream that marks it as the file path.
+  static constexpr uint8_t kFileStreamTag = 0x02;
+
+  void attach_control_stream(uvcpp::uvcpp_h3_wt_stream* stream);
+  void attach_file_stream(uvcpp::uvcpp_h3_wt_stream* stream);
+  void feed_file(const uint8_t* data, std::size_t len);
+
   std::string peer_;
   uvcpp::uvcpp_h3_wt_session* session_ = nullptr;
   uvcpp::uvcpp_h3_wt_stream* reliable_ = nullptr;
+  uvcpp::uvcpp_h3_wt_stream* file_stream_ = nullptr;
   std::shared_ptr<stream_transport> stream_;
+  std::shared_ptr<stream_transport> file_transport_;
   /// Video and audio have separate reassembly state: an audio datagram in the
   /// middle of a video frame must not tear either apart.
   datagram_reassembler video_reassembly_;

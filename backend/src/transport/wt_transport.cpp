@@ -18,17 +18,37 @@ void wt_transport::attach(uvcpp::uvcpp_h3_wt_session* session) {
   session_ = session;
 }
 
-void wt_transport::attach_stream(uvcpp::uvcpp_h3_wt_stream* stream) {
-  if (stream == nullptr || reliable_ != nullptr) return;
-  reliable_ = stream;
-  reliable_->on_data([this](const uint8_t* data, std::size_t len) {
-    feed_reliable(data, len);
+void wt_transport::attach_peer_stream(uvcpp::uvcpp_h3_wt_stream* stream) {
+  if (stream == nullptr) return;
+  // The channel tag rides the first data callback, so this handler decides
+  // the stream's role once and then keeps routing.
+  auto first = std::make_shared<bool>(true);
+  stream->on_data([this, stream, first](const uint8_t* data, std::size_t len) {
+    if (*first && len > 0) {
+      *first = false;
+      if (data[0] == kFileStreamTag) {
+        attach_file_stream(stream);
+        if (len > 1) feed_file(data + 1, len - 1);
+        return;
+      }
+      attach_control_stream(stream);
+      feed_reliable(data, len);
+      return;
+    }
+    if (stream == file_stream_) {
+      feed_file(data, len);
+    } else {
+      feed_reliable(data, len);
+    }
   });
+}
+
+void wt_transport::attach_control_stream(uvcpp::uvcpp_h3_wt_stream* stream) {
+  if (reliable_ != nullptr || stream == nullptr) return;
+  reliable_ = stream;
   reliable_->on_end([this] {
     link_closed(transport_close::normal, "webtransport stream ended");
   });
-  // The shared framing lives in stream_transport: it turns a byte pipe into
-  // MOLK packets and routes control text to the text handler.
   stream_ = std::make_shared<stream_transport>(
       [this](const uint8_t* data, std::size_t len) {
         if (reliable_ == nullptr || !reliable_->is_open()) return false;
@@ -48,12 +68,39 @@ void wt_transport::attach_stream(uvcpp::uvcpp_h3_wt_stream* stream) {
       });
 }
 
+void wt_transport::attach_file_stream(uvcpp::uvcpp_h3_wt_stream* stream) {
+  if (file_stream_ != nullptr || stream == nullptr) return;
+  file_stream_ = stream;
+  // Its own framing instance: a file chunk must not interleave with control
+  // bytes on the shared parser, and it has its own write path.
+  file_transport_ = std::make_shared<stream_transport>(
+      [this](const uint8_t* data, std::size_t len) {
+        if (file_stream_ == nullptr || !file_stream_->is_open()) return false;
+        return file_stream_->write(data, len) == 0;
+      },
+      [this](int, const std::string&) {},
+      "webtransport", peer_, 0);
+  file_transport_->set_handlers(
+      [this](const std::string& text) {
+        if (text_) text_(text);
+      },
+      [this](const uint8_t* data, std::size_t len) {
+        if (binary_) binary_(data, len);
+      },
+      [this](int, const std::string&) {});
+}
+
+void wt_transport::feed_file(const uint8_t* data, std::size_t len) {
+  if (file_transport_ != nullptr) file_transport_->feed(data, len);
+}
+
 void wt_transport::link_closed(int code, const std::string& reason) {
   if (closed_) return;
   closed_ = true;
   // The session owns its streams: once the session is gone this pointer is
   // dangling, so drop it before anything can ask is_open() again.
   reliable_ = nullptr;
+  file_stream_ = nullptr;
   session_ = nullptr;
   deliver_close(code, reason);
 }
@@ -107,8 +154,13 @@ bool wt_transport::send_binary(transport_channel channel, const uint8_t* data,
       return ok;
     }
   }
-  // Everything else -- control, audio, file, and any frame too large to
-  // fragment -- rides the reliable stream.
+  // Files get their own stream when the peer opened one: a transfer cannot
+  // then sit in front of control messages.
+  if (channel == transport_channel::file && file_transport_ != nullptr) {
+    return file_transport_->send_binary(data, len);
+  }
+  // Everything else -- control, and any frame too large to fragment -- rides
+  // the control stream.
   return stream_ != nullptr && stream_->send_binary(data, len);
 }
 
@@ -117,6 +169,7 @@ void wt_transport::close(int code, const std::string& reason) {
   closed_ = true;
   if (session_ != nullptr) session_->close(0, reason);
   reliable_ = nullptr;
+  file_stream_ = nullptr;
   session_ = nullptr;
   deliver_close(code, reason);
 }

@@ -171,7 +171,7 @@ bool h3_ws_listener::start(const std::string& ip, int port,
                                      bool bidi) {
                       if (!bidi) return;
                       if (auto link = weak_transport.lock()) {
-                        link->attach_stream(&stream);
+                        link->attach_peer_stream(&stream);
                       }
                     };
                 wt_callbacks.on_close = [weak_transport](

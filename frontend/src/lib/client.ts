@@ -913,6 +913,14 @@ export class MolinkClient {
       // The host opens two channels: "molink" for control and "audio" for the
       // realtime audio packets, which are unreliable and therefore kept off
       // the control channel.
+      if (event.channel.label === 'file') {
+        // File transfers have their own reliable channel, so they never sit
+        // in front of control messages.
+        event.channel.onmessage = (message: MessageEvent) => {
+          if (message.data instanceof ArrayBuffer) this.handleBinary(message.data)
+        }
+        return
+      }
       if (event.channel.label === 'audio') {
         event.channel.onmessage = (message: MessageEvent) => {
           if (message.data instanceof ArrayBuffer) this.handleBinary(message.data)
@@ -1904,9 +1912,12 @@ export class MolinkClient {
   /// One whole MOLK packet on the active transport.
   private sendRawPacket(packet: ArrayBuffer | Uint8Array): void {
     if (this.wt !== null && this.wt.isOpen) {
-      this.wt.sendBinary(
-        packet instanceof Uint8Array ? packet : new Uint8Array(packet),
-      )
+      const bytes = packet instanceof Uint8Array ? packet : new Uint8Array(packet)
+      // packet_type::file_data = 0x12: file chunks take the dedicated stream.
+      if (bytes.length > 5 && bytes[5] === 0x12 && this.wt.sendFile(bytes)) {
+        return
+      }
+      this.wt.sendBinary(bytes)
       return
     }
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
@@ -1955,6 +1966,9 @@ export class MolinkClient {
     }
     if (this.resumeToken !== '') hello.session = this.resumeToken
     transport.sendText(JSON.stringify(hello))
+    // The file stream is a second byte pipe with its own channel tag; a
+    // transfer on it never queues behind control messages.
+    void transport.openFileStream()
   }
 
   /// Moves the page back onto the socket after the WebTransport session died.

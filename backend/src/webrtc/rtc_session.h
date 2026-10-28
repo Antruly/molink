@@ -38,6 +38,9 @@ class rtc_session {
     /// Audio channel label. This one is unreliable and unordered: a late
     /// audio packet is worth less than a queued one.
     std::string audio_channel_label = "audio";
+    /// File channel label. Reliable and ordered, but its own SCTP stream, so
+    /// a transfer never occupies the control channel's queue.
+    std::string file_channel_label = "file";
   };
 
   struct callbacks {
@@ -82,6 +85,10 @@ class rtc_session {
   /// is not open, so the caller can fall back to the session transport.
   bool send_audio(const uint8_t* data, std::size_t len);
   bool audio_open() const;
+
+  /// Sends one file packet on the dedicated reliable channel.
+  bool send_file(const uint8_t* data, std::size_t len);
+  bool file_open() const;
 
   /// Sends one Annex-B access unit on the video track. `ts_us` stamps the
   /// frame; RTP timestamps run at 90 kHz.

@@ -85,6 +85,7 @@ int main() {
   bool server_saw_datagram = false;
   bool server_datagram_ok = false;
   bool server_saw_audio = false;
+  bool server_saw_file = false;
   bool finished = false;
 
   const std::vector<uint8_t> frame = video_packet();
@@ -155,6 +156,11 @@ int main() {
                              server_saw_audio = true;
                              return;
                            }
+                           if (packet.type == static_cast<uint8_t>(
+                                                  molink::protocol::packet_type::file_data)) {
+                             server_saw_file = true;
+                             return;
+                           }
                            server_link->send_binary(data, len);
                          }
                        },
@@ -163,7 +169,7 @@ int main() {
                  wt_callbacks.on_stream = [&](uvcpp_h3_wt_session&,
                                              uvcpp_h3_wt_stream& stream,
                                              bool bidi) {
-                  server_link->attach_stream(&stream);
+                  server_link->attach_peer_stream(&stream);
                 };
                 wt_callbacks.on_datagram = [&](uvcpp_h3_wt_session&,
                                                 const uint8_t* data,
@@ -195,6 +201,7 @@ int main() {
   std::unique_ptr<uvcpp_h3_connection> client_h3;
   std::unique_ptr<uvcpp_h3_wt_session> client_wt;
   uvcpp_h3_wt_stream* client_stream = nullptr;
+  uvcpp_h3_wt_stream* client_file = nullptr;
 
   uvcpp_quic_client client(&loop);
   client.set_ssl_context(&client_tls);
@@ -220,6 +227,7 @@ int main() {
     uvcpp_h3_wt_session::callbacks wt_callbacks;
     wt_callbacks.on_open = [&](uvcpp_h3_wt_session& session) {
       client_stream = session.open_bidi_stream();
+      client_file = session.open_bidi_stream();
       if (client_stream != nullptr) {
         client_stream->on_data([&](const uint8_t* data, std::size_t len) {
           molink::protocol::packet packet;
@@ -261,6 +269,7 @@ int main() {
   const auto start = std::chrono::steady_clock::now();
   bool sent_hello = false;
   bool sent_frame = false;
+  bool sent_file = false;
   while (!finished) {
     loop.run(UV_RUN_NOWAIT);
     const auto now = std::chrono::steady_clock::now();
@@ -274,6 +283,21 @@ int main() {
       if (molink::protocol::encode_packet(hello, bytes, error)) {
         client_stream->write(bytes.data(), bytes.size());
         sent_hello = true;
+      }
+    }
+    if (!sent_file && client_wt && client_file != nullptr && server_saw_hello) {
+      // A file packet on its own stream: tag byte, then MOLK.
+      const uint8_t tag = 0x02;
+      client_file->write(&tag, 1);
+      molink::protocol::packet chunk;
+      chunk.type =
+          static_cast<uint8_t>(molink::protocol::packet_type::file_data);
+      chunk.payload.assign(128, 0x33);
+      std::vector<uint8_t> bytes;
+      std::string error;
+      if (molink::protocol::encode_packet(chunk, bytes, error)) {
+        client_file->write(bytes.data(), bytes.size());
+        sent_file = true;
       }
     }
     if (!sent_frame && client_wt && server_saw_hello) {
@@ -299,6 +323,7 @@ int main() {
   expect(server_saw_datagram, "a datagram reaches the host");
   expect(server_datagram_ok, "the fragmented frame reassembles");
   expect(server_saw_audio, "an audio datagram reaches the host");
+  expect(server_saw_file, "a file packet arrives on its own stream");
 
   server_wt.reset();
   server_h3.reset();

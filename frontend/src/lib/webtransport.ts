@@ -47,6 +47,8 @@ const kPacketHeader = 32
 const kFragmentHeader = 8
 const kDatagramPayload = 1100
 const kMaxFrameBytes = 256 * 1024
+/// First byte of a peer-opened stream that marks it as the file path.
+const kFileStreamTag = 0x02
 
 /// One video frame reassembled from its datagrams.
 class DatagramAssembler {
@@ -96,6 +98,7 @@ export class WtTransport {
     private readonly handlers: WebTransportHandlers,
   ) {}
 
+  private fileWriter: WritableStreamDefaultWriter<Uint8Array> | null = null
   private assembler = new DatagramAssembler()
   private pending: Uint8Array[] = []
   private pendingBytes = 0
@@ -153,6 +156,30 @@ export class WtTransport {
 
   get isOpen(): boolean {
     return !this.closed
+  }
+
+  /// Opens the dedicated file stream: the first byte tags it, then the same
+  /// MOLK framing as the control stream. A transfer then never sits in front
+  /// of control messages.
+  async openFileStream(): Promise<boolean> {
+    if (this.closed) return false
+    try {
+      const stream = await this.transport.createBidirectionalStream()
+      const writer = stream.writable.getWriter()
+      await writer.write(new Uint8Array([kFileStreamTag]))
+      this.fileWriter = writer
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  /// Sends one whole MOLK packet on the file stream, false when it is not up.
+  sendFile(data: Uint8Array): boolean {
+    const writer = this.fileWriter
+    if (this.closed || writer === null) return false
+    writer.write(data).catch(() => this.fail('file stream write failed'))
+    return true
   }
 
   /// Sends one whole MOLK packet on the reliable stream.

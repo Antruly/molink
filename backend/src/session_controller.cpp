@@ -295,6 +295,22 @@ bool send_realtime_audio(const std::weak_ptr<session_info>& weak_session,
   return false;
 }
 
+/// File chunks take the dedicated reliable channel when the session has one:
+/// its own SCTP stream, so a transfer never occupies the control queue.
+bool send_realtime_file(const std::weak_ptr<session_info>& weak_session,
+                        const std::vector<uint8_t>& packet) {
+#if MOLINK_HAVE_WEBRTC
+  const std::shared_ptr<session_info> session = weak_session.lock();
+  if (session && session->rtc && session->rtc->file_open()) {
+    return session->rtc->send_file(packet.data(), packet.size());
+  }
+#else
+  (void)weak_session;
+  (void)packet;
+#endif
+  return false;
+}
+
 bool send_frame_with_av1(session_transport* transport,
                          const std::shared_ptr<session_info>& session,
                          const captured_frame& frame) {
@@ -1255,6 +1271,7 @@ bool session_controller::send_file_chunk(uint32_t id, uint64_t offset,
   if (protocol::encode_packet_into(
           out, static_cast<uint8_t>(protocol::packet_type::file_data), 0, 0, 0,
           epoch_us(), payload.data(), payload.size(), err)) {
+    if (send_realtime_file(session_, out)) return true;
     return transport->send_binary(transport_channel::file, out.data(), out.size());
   }
   return false;

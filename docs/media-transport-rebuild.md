@@ -181,7 +181,9 @@ capture
       （`maxRetransmits = 0`），`send_audio` / `send_voice` 优先走它；WebTransport 上音频
       走 datagram（与视频同一分片格式，帧头新增 1 字节 channel，音视频各自重组），
       不再排在文件字节后面。
-- [ ] 文件还没走 WebRTC DataChannel / WebTransport 专用 stream：仍在共享可靠流上。
+- [x] 文件独立通道：WebRTC 另开一条可靠有序的 `file` 数据通道；WebTransport 另开一条
+      双向流（首字节 `0x02` 标记，其后同样是 MOLK 分帧），主机与页面各有一套独立的
+      分帧实例。`send_file_chunk` 优先走它，通道没开时回落到会话 socket / 控制流。
 - [x] libuvcpp 服务端 `accept()` 不触发 `on_open` 的缺陷：已修复并合入 libuvcpp
       master（`a6fc56b`，`http3_webtransport_func` 加了断言）。molink 侧同步改成用
       `on_open` 的回调参数取会话（`state->wt` 那时还是空的）。
@@ -267,6 +269,17 @@ capture
   主机记录与构建/测试命令放在 `docs/testing.local.md`（含凭据，已加入 .gitignore）。
 - 新增 `av1_stream_fallback_test`（27 项断言）：GPU 正常时不创建 CPU 编码器；GPU 失败时同一帧由
   CPU 重编并强制关键帧；连续 3 次失败后丢弃 GPU；丢弃后不再重试。全量 CTest 16 项通过。
+### 2026-10-28（第十轮：文件独立通道）
+
+- WebRTC：`rtc_session` 多开一条可靠有序的 `file` 通道，`send_file_chunk` 优先使用；
+  页面按 label 分发到 `handleBinary`。
+- WebTransport：页面在控制流之后另开一条双向流，首字节 `0x02` 作为通道标记；主机
+  `attach_peer_stream()` 用第一个字节决定这条流是文件还是控制，文件流有独立的
+  `stream_transport`（分帧、写路径、背压都分开）。页面上传的 `file_data` 包
+  （type 0x12）自动走文件流。
+- 测试：`webrtc_loopback` 增加文件通道开关与 700 字节chunk 往返（19 项断言）；
+  `wt_loopback` 增加"文件包走独立流到达"；三套构建 19/19、20/20、20/20。
+
 ### 2026-10-28（第九轮：WebTransport 断线回退）
 
 - `client.ts`：`fallBackToSocket()` —— WT 关闭/出错时用 `resumeToken` 重开 WebSocket，

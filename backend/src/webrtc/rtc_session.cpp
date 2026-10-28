@@ -14,7 +14,9 @@ struct rtc_session::impl {
   std::shared_ptr<rtc::Track> video;
   std::shared_ptr<rtc::DataChannel> channel;
   std::shared_ptr<rtc::DataChannel> audio;
+  std::shared_ptr<rtc::DataChannel> file;
   bool audio_open = false;
+  bool file_open = false;
   std::shared_ptr<rtc::RtpPacketizationConfig> video_config;
   bool channel_open = false;
   uint32_t last_timestamp = 0;
@@ -163,6 +165,22 @@ bool rtc_session::start(const config& cfg, callbacks cb, std::string* error) {
       self->emit_state("audio-closed");
     });
 
+    // File traffic gets its own reliable, ordered channel: a transfer then
+    // cannot occupy the control channel's send queue.
+    impl_->file = impl_->peer->createDataChannel(cfg.file_channel_label);
+    impl_->file->onOpen([weak]() {
+      const auto self = weak.lock();
+      if (!self) return;
+      self->file_open = true;
+      self->emit_state("file-open");
+    });
+    impl_->file->onClosed([weak]() {
+      const auto self = weak.lock();
+      if (!self) return;
+      self->file_open = false;
+      self->emit_state("file-closed");
+    });
+
     impl_->channel->onMessage([weak](rtc::message_variant message) {
       const auto self = weak.lock();
       if (!self) return;
@@ -241,6 +259,19 @@ bool rtc_session::send_audio(const uint8_t* data, std::size_t len) {
   }
 }
 
+bool rtc_session::send_file(const uint8_t* data, std::size_t len) {
+  if (!file_open() || data == nullptr || len == 0) return false;
+  try {
+    return impl_->file->send(reinterpret_cast<const std::byte*>(data), len);
+  } catch (...) {
+    return false;
+  }
+}
+
+bool rtc_session::file_open() const {
+  return impl_ != nullptr && impl_->file_open;
+}
+
 bool rtc_session::audio_open() const {
   return impl_ != nullptr && impl_->audio_open;
 }
@@ -280,6 +311,7 @@ void rtc_session::close() {
   if (impl_ == nullptr) return;
   impl_->channel_open = false;
   impl_->audio_open = false;
+  impl_->file_open = false;
   try {
     if (impl_->channel) impl_->channel->close();
   } catch (...) {
@@ -289,11 +321,16 @@ void rtc_session::close() {
   } catch (...) {
   }
   try {
+    if (impl_->file) impl_->file->close();
+  } catch (...) {
+  }
+  try {
     if (impl_->peer) impl_->peer->close();
   } catch (...) {
   }
   impl_->channel.reset();
   impl_->audio.reset();
+  impl_->file.reset();
   impl_->video.reset();
   impl_->peer.reset();
 }
