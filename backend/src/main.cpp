@@ -622,6 +622,7 @@ int main(int argc, char** argv) {
   // WebTransport runs on its own h3 endpoint with a short-lived certificate:
   // a browser only accepts a self-signed certificate through
   // serverCertificateHashes when it is valid for at most fourteen days.
+#if MOLINK_HAVE_WEBTRANSPORT
   auto webtransport_available = std::make_shared<std::atomic<bool>>(false);
   const tls_identity wt_tls = load_or_create_webtransport_identity(
       config_directory(), identity.device_id + "-webtransport");
@@ -631,6 +632,7 @@ int main(int argc, char** argv) {
   } else if (!wt_tls.error.empty()) {
     std::fprintf(stderr, "molink webtransport: %s\n", wt_tls.error.c_str());
   }
+#endif
   deps.quic_available = quic_available;
   deps.http3_available = http3_available;
   session_opts.quic_available = quic_available;
@@ -673,6 +675,7 @@ int main(int argc, char** argv) {
         controller->start(nullptr);
       },
       [&app](std::function<void()> fn) { app.post(std::move(fn)); });
+#if MOLINK_HAVE_WEBTRANSPORT
   auto webtransport_sessions = std::make_shared<h3_ws_listener>(
       app.loop(), wt_tls.cert_path, wt_tls.key_path,
       [registry, session_opts](std::shared_ptr<session_transport> transport) {
@@ -681,10 +684,13 @@ int main(int argc, char** argv) {
         controller->start(nullptr);
       },
       [&app](std::function<void()> fn) { app.post(std::move(fn)); });
+#endif
   deps.on_access_changed = [quic_sessions, quic_available, quic_supported,
                             http3_sessions, http3_available,
+#if MOLINK_HAVE_WEBTRANSPORT
                             webtransport_sessions, webtransport_available,
                             wt_ok = wt_tls.ok(),
+#endif
                             network = session_opts.network,
                             bind_host = cfg.host,
                             quic_port = cfg.quic_port,
@@ -709,6 +715,7 @@ int main(int argc, char** argv) {
         http3_available->store(false);
       }
     }
+#if MOLINK_HAVE_WEBTRANSPORT
     if (webtransport_sessions) {
       webtransport_sessions->stop();
       webtransport_available->store(false);
@@ -727,6 +734,7 @@ int main(int argc, char** argv) {
         }
       }
     }
+#endif
   };
 
   auto p2p = std::make_shared<p2p_manager>(
