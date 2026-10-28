@@ -58,6 +58,10 @@ export interface Welcome {
   session_token?: string
   /** The host accepts per-second viewer health reports. */
   viewer_stats?: boolean
+  /** The host can offer a WebRTC video track (Phase 4). */
+  webrtc?: boolean
+  /** ICE servers to use for that connection, as "stun:host:port". */
+  ice_servers?: string[]
   /** The host drives the frame clock for a client that asked for video_push:
    *  frames arrive on their own and the pull loop stops. */
   video_push?: boolean
@@ -200,6 +204,12 @@ export interface ClientHandlers {
   onCaptureStats?: (info: { fps: number; buildMs: number }) => void
   /** Every FRAME packet, including empty "nothing changed" responses. */
   onWireFrame?: () => void
+  /** A live WebRTC video track arrived; the sink paints it into the session
+   *  buffer and every existing render/input path keeps working. */
+  onRemoteVideo?: (video: HTMLVideoElement) => void
+  /** The path the picture actually takes changed: "webrtc" while the track is
+   *  live, null when it is gone. The header badge shows it. */
+  onVideoPath?: (path: string | null) => void
   /** A frame was dropped because it was stale or overtaken by a newer one. */
   onFrameDropped?: () => void
   /** All quick retries failed; the next automatic attempt is at `atMs`. */
@@ -330,10 +340,16 @@ export class MolinkClient {
   private ws: WebSocket | null = null
   private handlers: Partial<ClientHandlers> = {}
   private pendingFrame = false
+  /** The WebRTC peer for this session, once the host offered one. */
+  private rtc: RTCPeerConnection | null = null
+  /** Its data channel: control messages prefer it while it is open. */
+  private rtcChannel: RTCDataChannel | null = null
   /** WebCodecs decoder for the host's low-delay H.264 stream. */
   private h264 = new H264StreamDecoder()
   /** This browser can decode the H.264 stream (probed once, before hello). */
   private h264Capable = false
+  /** ICE servers the host advertised for the WebRTC track. */
+  private iceServers: string[] = []
   /** The host offered to drive the frame clock for this session. */
   private pushSupported = false
   /** The clock is on right now: the page is visible and pulling is off. */
@@ -586,6 +602,9 @@ export class MolinkClient {
           // This browser can decode the host's H.264 stream through WebCodecs;
           // the host picks it when AV1 is not decodable by every viewer.
           h264_stream: this.h264Capable,
+          // A browser with WebRTC lets the host send H.264 as a real video
+          // track instead of MOLK frames.
+          webrtc: typeof RTCPeerConnection !== 'undefined',
           ...(this.resumeToken ? { session: this.resumeToken } : {}),
           ...(clientName ? { name: clientName } : {}),
           ...(clientId ? { device_id: clientId } : {}),
@@ -619,6 +638,7 @@ export class MolinkClient {
       this.pushSupported = false
       this.pushVideo = false
       this.h264.close()
+      this.closeRtc()
       this.pendingFrame = false
       this.ws = null
       // Wrong code / locked host / denied request: the host answered and
@@ -845,6 +865,79 @@ export class MolinkClient {
     return true
   }
 
+  /// Brings up the peer the host offered and answers with our SDP.
+  private async acceptRtcOffer(sdp: string): Promise<void> {
+    if (sdp === '' || typeof RTCPeerConnection === 'undefined') return
+    this.closeRtc()
+    const pc = new RTCPeerConnection({
+      iceServers: (this.iceServers ?? []).map((url) => ({ urls: url })),
+    })
+    this.rtc = pc
+    pc.onicecandidate = (event) => {
+      if (event.candidate === null) return
+      this.sendJson(
+        {
+          type: 'rtc-ice',
+          candidate: event.candidate.candidate,
+          mid: event.candidate.sdpMid ?? '',
+        },
+        true,
+      )
+    }
+    pc.ontrack = (event) => {
+      const stream = event.streams[0] ?? new MediaStream([event.track])
+      // The sink paints this into the session buffer; a detached element is
+      // enough and never fights the canvas for layout.
+      const video = document.createElement('video')
+      video.autoplay = true
+      video.muted = true
+      video.playsInline = true
+      video.srcObject = stream
+      void video.play().catch(() => undefined)
+      this.handlers.onRemoteVideo?.(video)
+      // The picture no longer travels as MOLK frames: say so, or the header
+      // would keep claiming the WebSocket path.
+      this.handlers.onVideoPath?.('webrtc')
+    }
+    pc.ondatachannel = (event) => {
+      this.rtcChannel = event.channel
+      event.channel.onmessage = (message: MessageEvent) => {
+        if (typeof message.data === 'string') this.handleText(message.data)
+      }
+      event.channel.onclose = () => {
+        if (this.rtcChannel === event.channel) this.rtcChannel = null
+      }
+    }
+    try {
+      await pc.setRemoteDescription({ type: 'offer', sdp })
+      const answer = await pc.createAnswer()
+      await pc.setLocalDescription(answer)
+      this.sendJson({ type: 'rtc-answer', sdp: answer.sdp ?? '' }, true)
+    } catch {
+      this.closeRtc()
+    }
+  }
+
+  private closeRtc(): void {
+    this.handlers.onVideoPath?.(null)
+    if (this.rtcChannel !== null) {
+      try {
+        this.rtcChannel.close()
+      } catch {
+        // already closed
+      }
+      this.rtcChannel = null
+    }
+    if (this.rtc !== null) {
+      try {
+        this.rtc.close()
+      } catch {
+        // already closed
+      }
+      this.rtc = null
+    }
+  }
+
   sendInput(payload: Record<string, unknown>): void {
     this.sendJson({ type: 'input', ...payload })
   }
@@ -1020,6 +1113,7 @@ export class MolinkClient {
         // while this page is the one being looked at; the pull loop stays
         // quiet meanwhile so frames are not sent twice.
         this.pushSupported = welcome.video_push === true
+        this.iceServers = welcome.ice_servers ?? []
         this.watchVisibility()
         this.handlers.onWelcome?.(welcome)
         this.retryAttempts = 0
@@ -1033,6 +1127,19 @@ export class MolinkClient {
         // gets its first picture from the host's clock instead.
         this.requestKeyframe()
         this.requestFrame()
+        break
+      }
+      case 'rtc-offer':
+        void this.acceptRtcOffer((message as unknown as { sdp?: string }).sdp ?? '')
+        break
+      case 'rtc-ice': {
+        const ice = message as unknown as { candidate?: string; mid?: string }
+        if (this.rtc && typeof ice.candidate === 'string' &&
+            ice.candidate !== '') {
+          void this.rtc
+            .addIceCandidate({ candidate: ice.candidate, sdpMid: ice.mid ?? '' })
+            .catch(() => undefined)
+        }
         break
       }
       case 'hello_required':
@@ -1763,9 +1870,23 @@ export class MolinkClient {
     this.openSocket()
   }
 
-  private sendJson(payload: Record<string, unknown>): void {
+  private sendJson(payload: Record<string, unknown>, viaSocket = false): void {
+    const text = JSON.stringify(payload)
+    // Control prefers the WebRTC data channel once it is up: it rides the same
+    // encrypted path as the video track and is not queued behind file bytes on
+    // the relay socket. Signaling stays on the socket -- it is what brings the
+    // channel up in the first place.
+    const channel = this.rtcChannel
+    if (!viaSocket && channel !== null && channel.readyState === 'open') {
+      try {
+        channel.send(text)
+        return
+      } catch {
+        // Fall through to the socket.
+      }
+    }
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
-    this.ws.send(JSON.stringify(payload))
+    this.ws.send(text)
   }
 }
 

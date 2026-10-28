@@ -13,6 +13,7 @@ import { ClipboardFileSync } from './clipboard-sync'
 import {
   applyFrameToSession,
   applyStreamFrameToSession,
+  drawVideoToSession,
   forgetSessionScreenBuffer,
 } from './screen-buffer'
 
@@ -44,6 +45,8 @@ export interface TabPatch {
   error?: string | null
   errorCode?: string | null
   transport?: string
+  /// Data path the picture takes: direct | p2p | relay | webrtc.
+  path?: string
   /// The client core decoded an AV1 patch within the last few seconds.
   av1Active?: boolean
   /// True when the wire carries AV1 only, not AV1 patches over a tile image.
@@ -232,6 +235,27 @@ export class SessionConnection {
         this.frameTimes.push(now)
         this.byteWindow.push({ t: now, n: bytes })
         this.sink.onPatch({ frame, stats: this.snapshot(now) })
+      },
+      onRemoteVideo: (video) => {
+        // The RTC track is whole pictures: paint each decoded frame into the
+        // session buffer and let the canvas component repaint from it, so the
+        // cursor overlay, input mapping and fullscreen keep one code path.
+        const paint = () => {
+          if (video.readyState >= 2) {
+            const frame = drawVideoToSession(this.sessionKey, video)
+            if (frame !== null) {
+              const now = performance.now()
+              this.frames += 1
+              this.frameTimes.push(now)
+              this.sink.onPatch({ frame, stats: this.snapshot(now) })
+            }
+          }
+          video.requestVideoFrameCallback(paint)
+        }
+        video.requestVideoFrameCallback(paint)
+      },
+      onVideoPath: (path) => {
+        if (path !== null) this.sink.onPatch({ path })
       },
       onLatency: (ms) => {
         this.latency = ms

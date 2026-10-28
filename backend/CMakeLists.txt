@@ -44,6 +44,11 @@ set(MOLINK_UVCPP_PREFIX "" CACHE PATH
 # that one transport is omitted instead of failing the whole build.
 set(MOLINK_HAVE_UDP_RELAY 1)
 
+# WebRTC (Phase 4): an H.264 video track and a data channel per session, with
+# signaling over the existing session socket. Off by default: it needs
+# libdatachannel, which is not part of any of the release kits yet.
+option(MOLINK_ENABLE_WEBRTC
+  "Build the WebRTC video track and data channel (needs libdatachannel)" OFF)
 
 if(MOLINK_BUILD_CORE)
   if(MOLINK_UVCPP_PREFIX)
@@ -355,6 +360,20 @@ if(MOLINK_ENABLE_NVENC)
   endif()
 endif()
 
+if(MOLINK_ENABLE_WEBRTC)
+  find_package(LibDataChannel CONFIG QUIET)
+  if(NOT LibDataChannel_FOUND)
+    message(FATAL_ERROR
+      "MOLINK_ENABLE_WEBRTC=ON but libdatachannel was not found; point "
+      "CMAKE_PREFIX_PATH at its install tree")
+  endif()
+  list(APPEND MOLINK_CORE_SOURCES src/webrtc/rtc_session.cpp)
+  set(MOLINK_HAVE_WEBRTC 1)
+  message(STATUS "molink: WebRTC video track + data channel enabled")
+else()
+  set(MOLINK_HAVE_WEBRTC 0)
+endif()
+
 if(MOLINK_BUILD_CORE)
   if(NOT MOLINK_HAVE_UDP_RELAY)
     list(REMOVE_ITEM MOLINK_CORE_SOURCES src/transport/udp_relay_transport.cpp)
@@ -378,6 +397,15 @@ if(MOLINK_BUILD_CORE)
   endif()
   target_compile_definitions(molink-core PRIVATE
     MOLINK_HAVE_H3_WS=${MOLINK_HAVE_H3_WS})
+
+  # WebRTC video track + data channel (Phase 4). The library brings its own
+  # libjuice, so ICE behaviour matches the native P2P path.
+  if(MOLINK_HAVE_WEBRTC)
+    target_compile_definitions(molink-core PRIVATE MOLINK_HAVE_WEBRTC=1)
+    target_link_libraries(molink-core PRIVATE LibDataChannel::LibDataChannel)
+  else()
+    target_compile_definitions(molink-core PRIVATE MOLINK_HAVE_WEBRTC=0)
+  endif()
 
   # HTTP/2 WebSocket (RFC 8441) needs both the h2 WS connection and the
   # webapp's transport-agnostic extended CONNECT session (libuvcpp 1.8.6).
@@ -732,6 +760,23 @@ if(MOLINK_HAVE_NVENC)
   endforeach()
   add_test(NAME nvenc_stream COMMAND molink-core-nvenc-stream-test)
   set_tests_properties(nvenc_stream PROPERTIES SKIP_RETURN_CODE 77)
+endif()
+
+# WebRTC loopback: the host session against a peer that speaks the browser's
+# side of the handshake, all in one process over loopback ICE.
+if(MOLINK_ENABLE_WEBRTC)
+  add_executable(molink-core-webrtc-loopback-test
+    tests/webrtc_loopback_test.cpp
+    src/webrtc/rtc_session.cpp
+  )
+  target_include_directories(molink-core-webrtc-loopback-test PRIVATE src)
+  target_compile_definitions(molink-core-webrtc-loopback-test PRIVATE
+    MOLINK_HAVE_WEBRTC=1)
+  target_link_libraries(molink-core-webrtc-loopback-test PRIVATE
+    LibDataChannel::LibDataChannel)
+  set_target_properties(molink-core-webrtc-loopback-test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+  add_test(NAME webrtc_loopback COMMAND molink-core-webrtc-loopback-test)
 endif()
 
 # The round-trip test needs both halves of the AV1 SDK.

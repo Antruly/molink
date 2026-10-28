@@ -114,6 +114,8 @@ class session_controller final
   bool send_file_chunk(uint32_t id, uint64_t offset, const uint8_t* data,
                        std::size_t len);
   void send_audio(std::vector<uint8_t> pcm);
+  /// Brings up the WebRTC peer for a session that asked for one (Phase 4).
+  void start_rtc(const std::shared_ptr<session_info>& session);
   /// Called from the local approval dialog (through the request registry).
   void approve_access_request();
   void deny_access_request();

@@ -193,6 +193,7 @@ const PATH_LABELS: Record<string, string> = {
   direct: 'DIRECT',
   p2p: 'P2P',
   relay: 'RELAY',
+  webrtc: 'WEBRTC',
 }
 
 const PROTOCOL_LABELS: Record<string, string> = {

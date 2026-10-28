@@ -26,6 +26,9 @@
 #include "compression.h"
 #include "capture/replay_policy.h"
 #include "capture/video_push.h"
+#if MOLINK_HAVE_WEBRTC
+#include "webrtc/rtc_session.h"
+#endif
 #include "protocol/frame_packet.h"
 #include "service_control.h"
 #include "transport/ws_transport.h"
@@ -280,6 +283,27 @@ bool send_frame_with_av1(session_transport* transport,
                          const captured_frame& frame) {
   if (frame.av1_only) {
     if (!can_decode_stream(session, frame.av1_payload)) return false;
+#if MOLINK_HAVE_WEBRTC
+    // WebRTC path: the H.264 stream goes out as RTP on the video track, which
+    // the browser decodes natively. The MOLK packet stays off the wire, so the
+    // same picture is not paid for twice.
+    if (session->rtc && session->rtc->video_open() &&
+        frame_payload_codec(frame.av1_payload) ==
+            static_cast<uint8_t>(protocol::codec::h264_stream)) {
+      protocol::parsed_frame parsed;
+      std::string parse_error;
+      if (protocol::parse_frame_payload(frame.av1_payload.data(),
+                                        frame.av1_payload.size(), parsed,
+                                        parse_error) &&
+          !parsed.tiles.empty()) {
+        const protocol::tile_view& view = parsed.tiles.front();
+        if (session->rtc->send_video(view.data, view.size, frame.ts_us)) {
+          ++session->frames_sent;
+          return true;
+        }
+      }
+    }
+#endif
     return send_frame_payload(
         transport, session,
         frame.keyframe ? protocol::kPacketFlagKeyframe : 0, frame.ts_us,
@@ -700,6 +724,32 @@ void send_tile_seq(session_transport* transport,
   transport->send_binary(transport_channel::video, bytes.data(), bytes.size());
 }
 
+#if MOLINK_HAVE_WEBRTC
+/// Sends one WebRTC signaling message to the browser over the session socket.
+/// The signaling itself never moves to the data channel: it is what brings
+/// that channel up.
+static void post_rtc_signal(std::function<void(std::function<void()>)> post,
+                     std::shared_ptr<session_registry> registry,
+                     uint32_t id, const char* type, const std::string& sdp,
+                     const std::string& candidate, const std::string& mid) {
+  if (!post) return;
+  post([registry, id, type = std::string(type), sdp, candidate, mid] {
+    const std::shared_ptr<session_info> session = registry->find(id);
+    if (!session || !session->transport) return;
+    uvcpp_json j;
+    if (type == "ice") {
+      j["type"] = "rtc-ice";
+      j["candidate"] = candidate;
+      j["mid"] = mid;
+    } else {
+      j["type"] = "rtc-" + type;
+      j["sdp"] = sdp;
+    }
+    send_json(session->transport.get(), j);
+  });
+}
+#endif
+
 void send_welcome(session_transport* transport, const session_info& session,
                   const session_options& opt,
                   const std::string& resume_token) {
@@ -725,6 +775,20 @@ void send_welcome(session_transport* transport, const session_info& session,
   // that advertises `h264_stream` in hello gets one when not every viewer can
   // decode AV1; clients that do not ask never see it.
   j["h264_stream"] = true;
+  // WebRTC (Phase 4): the host can offer an H.264 video track the browser
+  // decodes natively. Only advertised by builds that carry the media stack.
+  j["webrtc"] = MOLINK_HAVE_WEBRTC ? true : false;
+  // The browser builds its RTCPeerConnection with the same ICE servers the
+  // host's peer uses, so both sides gather on the same paths.
+  j["ice_servers"] = uvcpp_json::array();
+  if (const char* stun = std::getenv("MOLINK_STUN_HOST");
+      stun != nullptr && *stun != '\0') {
+    j["ice_servers"].push_back(std::string("stun:") + stun + ":3478");
+  }
+  if (const char* turn = std::getenv("MOLINK_TURN_URL");
+      turn != nullptr && *turn != '\0') {
+    j["ice_servers"].push_back(turn);
+  }
   // `transport` stays the wire protocol for older clients; `transport_path`
   // is the orthogonal axis (direct / p2p / relay), so a relayed QUIC session
   // reads as path=relay, protocol=quic.
@@ -1045,6 +1109,103 @@ void session_controller::send_voice(std::vector<uint8_t> pcm) {
   }
 }
 
+void session_controller::start_rtc(const std::shared_ptr<session_info>& session) {
+#if MOLINK_HAVE_WEBRTC
+  if (!session || session->rtc) return;
+  std::shared_ptr<session_transport> transport = transport_.lock();
+  if (!transport) return;
+
+  rtc_session::config config;
+  // Field setup: MOLINK_STUN_HOST is the same variable the native P2P path
+  // uses, so one environment configures both. TURN is opt-in.
+  if (const char* stun = std::getenv("MOLINK_STUN_HOST");
+      stun != nullptr && *stun != '\0') {
+    config.ice_servers.push_back(std::string("stun:") + stun + ":3478");
+  }
+  if (const char* turn = std::getenv("MOLINK_TURN_URL");
+      turn != nullptr && *turn != '\0') {
+    config.ice_servers.push_back(turn);
+  }
+
+  auto rtc = std::make_shared<rtc_session>();
+  session->rtc = rtc;
+  const uint32_t id = session->id;
+  auto registry_ref = registry_;
+  auto post = options_.post;
+  std::weak_ptr<session_controller> weak = weak_from_this();
+
+  rtc_session::callbacks cb;
+  cb.on_local_description = [post, registry_ref, id](const std::string& type,
+                                                     const std::string& sdp) {
+    post_rtc_signal(post, registry_ref, id, type.c_str(), sdp, "", "");
+  };
+  cb.on_local_candidate = [post, registry_ref, id](
+                              const std::string& candidate,
+                              const std::string& mid) {
+    post_rtc_signal(post, registry_ref, id, "ice", "", candidate, mid);
+  };
+  cb.on_state = [post, registry_ref, id](const char* state) {
+    if (std::getenv("MOLINK_RTC_LOG") != nullptr) {
+      std::fprintf(stderr, "webrtc[%u]: %s\n", id, state);
+    }
+    // A failed or closed peer keeps ICE sockets and a DTLS context alive
+    // forever otherwise; the session falls back to the MOLK path.
+    const std::string name(state);
+    if (name != "failed" && name != "closed") return;
+    if (!post) return;
+    post([registry_ref, id] {
+      if (auto session = registry_ref->find(id)) {
+        if (session->rtc) {
+          session->rtc->close();
+          session->rtc.reset();
+        }
+      }
+    });
+  };
+  // A live video track is a decoder: from now on this session can take the
+  // H.264 stream even if it never advertised WebCodecs support.
+  cb.on_data_channel_open = [post, registry_ref, id] {
+    if (!post) return;
+    post([registry_ref, id] {
+      if (auto session = registry_ref->find(id)) session->h264_stream = true;
+    });
+  };
+  cb.on_text = [weak, id](const std::string& text) {
+    if (auto self = weak.lock()) {
+      if (auto post = self->options_.post) {
+        post([weak, id, text] {
+          if (auto controller = weak.lock()) controller->on_text(text);
+        });
+      }
+    }
+  };
+  cb.on_keyframe_request = [weak] {
+    if (auto self = weak.lock()) {
+      if (self->options_.capture) self->options_.capture->request_keyframe();
+    }
+  };
+  cb.on_binary = [weak](const std::vector<uint8_t>& data) {
+    if (auto self = weak.lock()) {
+      if (auto post = self->options_.post) {
+        post([weak, data] {
+          if (auto controller = weak.lock()) {
+            controller->on_binary(data.data(), data.size());
+          }
+        });
+      }
+    }
+  };
+
+  std::string error;
+  if (!rtc->start(config, std::move(cb), &error)) {
+    std::fprintf(stderr, "webrtc[%u]: %s\n", id, error.c_str());
+    session->rtc.reset();
+  }
+#else
+  (void)session;
+#endif
+}
+
 void session_controller::send_json_string(const std::string& text) {
   std::shared_ptr<session_transport> transport = transport_.lock();
   if (transport && transport->is_open()) {
@@ -1259,6 +1420,7 @@ void session_controller::on_text(const std::string& text) {
     session->seq_clock = bool_field(j, "seq_clock", false);
     session->video_push = bool_field(j, "video_push", false);
     session->h264_stream = bool_field(j, "h264_stream", false);
+    session->webrtc = bool_field(j, "webrtc", false);
     if (std::getenv("MOLINK_AV1_LOG") != nullptr) {
       std::fprintf(stderr, "host: session av1=%d\n", session->av1 ? 1 : 0);
     }
@@ -1270,6 +1432,9 @@ void session_controller::on_text(const std::string& text) {
     if (options_.lock) options_.lock->record_success(peer_ip);
     if (options_.capture) options_.capture->set_active(true);
     send_welcome_message();
+    // The peer is built after the welcome so the browser already knows the
+    // ICE servers and the host's capabilities when the offer arrives.
+    if (session->webrtc) start_rtc(session);
     return;
   }
 
@@ -1679,6 +1844,32 @@ void session_controller::on_text(const std::string& text) {
       // The backend cannot hand out current pixels; fall back to a keyframe.
       if (options_.capture) options_.capture->request_keyframe();
     }
+    return;
+  }
+
+  if (type == "rtc-answer") {
+    if (!require_auth()) return;
+#if MOLINK_HAVE_WEBRTC
+    if (session->rtc) {
+      std::string rtc_error;
+      if (!session->rtc->accept_answer(string_field(j, "sdp"), &rtc_error) &&
+          !rtc_error.empty()) {
+        std::fprintf(stderr, "webrtc: answer rejected: %s\n",
+                     rtc_error.c_str());
+      }
+    }
+#endif
+    return;
+  }
+
+  if (type == "rtc-ice") {
+    if (!require_auth()) return;
+#if MOLINK_HAVE_WEBRTC
+    if (session->rtc) {
+      session->rtc->add_remote_candidate(string_field(j, "candidate"),
+                                         string_field(j, "mid"));
+    }
+#endif
     return;
   }
 

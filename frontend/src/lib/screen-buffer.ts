@@ -66,6 +66,49 @@ export function applyStreamFrameToSession(
   }
 }
 
+/**
+ * Paints a decoded WebRTC video frame into the session buffer.
+ *
+ * The RTC path delivers whole pictures as a media track instead of tiles, but
+ * everything downstream -- the canvas component, the cursor overlay, the input
+ * mapping, fullscreen -- reads this buffer. Writing the track here keeps one
+ * rendering path for both transports.
+ *
+ * Returns a synthetic frame with no tiles, so callers can trigger the same
+ * repaint they do for a tile frame.
+ */
+export function drawVideoToSession(
+  key: string,
+  video: HTMLVideoElement,
+): Frame | null {
+  if (key === '') return null
+  const width = video.videoWidth
+  const height = video.videoHeight
+  if (width === 0 || height === 0) return null
+  let back = buffers.get(key)
+  if (!back || back.width !== width || back.height !== height) {
+    back = document.createElement('canvas')
+    back.width = width
+    back.height = height
+    buffers.set(key, back)
+  }
+  const context = back.getContext('2d', { alpha: false })
+  if (!context) return null
+  context.imageSmoothingEnabled = true
+  context.drawImage(video, 0, 0, width, height)
+  return {
+    frameSeq: 0,
+    tileCount: 0,
+    codec: 0,
+    flags: 0,
+    screenW: width,
+    screenH: height,
+    tileW: 0,
+    tileH: 0,
+    tiles: [],
+  }
+}
+
 export function sessionScreenBuffer(key: string): HTMLCanvasElement | null {
   return buffers.get(key) ?? null
 }

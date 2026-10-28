@@ -11,6 +11,7 @@
 namespace molink {
 
 class session_controller;
+class rtc_session;
 
 struct session_info {
   uint32_t id = 0;
@@ -31,6 +32,11 @@ struct session_info {
   /// The client advertised `seq_clock` in hello: it understands the per-cell
   /// applied-sequence map and can name the cells it missed.
   bool seq_clock = false;
+  /// The client can take a WebRTC video track and data channel (Phase 4).
+  bool webrtc = false;
+  /// The peer for that track, once it exists. Shared because its callbacks hop
+  /// to the app loop and may outlive one snapshot.
+  std::shared_ptr<rtc_session> rtc;
   /// The client advertised `video_push` in hello: it wants frames on the
   /// host's clock instead of polling `request-frame`. Pull stays the
   /// compatibility path for every client that does not ask for this.
