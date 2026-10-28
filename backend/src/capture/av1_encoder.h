@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 
+#include "capture/video_encoder.h"
+
 namespace molink {
 
 /// One encoder backend this build can use. "auto" prefers "gpu-nvenc" (NVENC)
@@ -32,38 +34,48 @@ struct av1_encoder_config {
 /// The rectangle is padded to a multiple of 8 pixels (and to the encoder's
 /// 64-pixel minimum); the decoded picture has the padded size, and the caller
 /// crops it back to the rectangle's real width and height.
-class av1_encoder {
+class av1_encoder : public video_encoder {
  public:
-  virtual ~av1_encoder() = default;
+  video_codec codec() const override { return video_codec::av1_patches; }
 
   /// `bgra` is tightly packed BGRA with `stride` bytes per row (usually
   /// width * 4). `qp` is the AV1 constant quantizer: 0 is best quality, 63 the
   /// worst. `out` receives the AV1 OBUs. The encoder reconfigures itself when
   /// the size or qp changes.
-  virtual bool encode_intra(const uint8_t* bgra, std::size_t stride, int width,
-                            int height, int qp, std::vector<uint8_t>& out,
-                            std::string& error) = 0;
+  bool encode_intra(const uint8_t* bgra, std::size_t stride, int width,
+                    int height, int qp, std::vector<uint8_t>& out,
+                    std::string& error) override = 0;
 };
 
-/// Encodes a low-delay AV1 stream of full-screen frames: the first picture is
-/// a keyframe and later ones are P frames that only carry what changed. This
-/// is what makes a moving 1080p screen affordable, but the receiver has to
-/// keep a matching decoder alive -- a frame cannot be decoded on its own.
-class av1_stream_encoder {
+/// Encodes a low-delay stream of full-screen frames: the first picture is a
+/// keyframe and later ones are P frames that only carry what changed. This is
+/// what makes a moving 1080p screen affordable, but the receiver has to keep a
+/// matching decoder alive -- a frame cannot be decoded on its own.
+///
+/// Classes are named for AV1 because that was the first codec on this
+/// interface; @ref codec says which bitstream an implementation produces.
+class av1_stream_encoder : public video_encoder {
  public:
-  virtual ~av1_stream_encoder() = default;
+  video_codec codec() const override { return video_codec::av1_stream; }
 
   /// Encodes one full-screen frame. `out` is empty when the encoder has no
   /// packet ready yet (its low-delay pipeline holds one picture), which is
   /// normal for the first frame. `keyframe` forces this picture to be a
   /// keyframe, which is also what a receiver needs after a decode failure.
-  virtual bool encode_stream(const uint8_t* bgra, std::size_t stride, int width,
-                             int height, int qp, bool keyframe,
-                             std::vector<uint8_t>& out, bool& out_keyframe,
-                             std::string& error) = 0;
+  bool encode_stream(const uint8_t* bgra, std::size_t stride, int width,
+                     int height, int qp, bool keyframe,
+                     std::vector<uint8_t>& out, bool& out_keyframe,
+                     std::string& error) override = 0;
 };
 
-/// Null (with `error` filled) when this build has no encoder for the stream.
+/// Null (with `error` filled) when this build has no encoder for the stream in
+/// the requested codec. The caller picks the codec from what the viewers
+/// advertised; asking for h264 never silently returns an AV1 stream.
+std::shared_ptr<av1_stream_encoder> make_stream_encoder(
+    const av1_encoder_config& config, video_codec codec,
+    std::string* error = nullptr);
+
+/// Convenience wrapper for the AV1 stream (the historical call).
 std::shared_ptr<av1_stream_encoder> make_av1_stream_encoder(
     const av1_encoder_config& config, std::string* error = nullptr);
 

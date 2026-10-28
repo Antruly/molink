@@ -373,7 +373,10 @@ bool encode_capture_frame(protocol::frame_header& header,
         std::vector<protocol::tile_blob> only;
         only.push_back(std::move(tile));
         protocol::frame_header out = header;
-        out.codec = static_cast<uint8_t>(protocol::codec::av1_stream);
+        out.codec = static_cast<uint8_t>(
+            options.av1_stream->codec() == video_codec::h264_stream
+                ? protocol::codec::h264_stream
+                : protocol::codec::av1_stream);
         out.flags = picture_keyframe ? protocol::kFrameFlagKeyframe
                                      : protocol::kFrameFlagPartial;
         if (protocol::build_frame_payload(out, only, *av1_payload, err)) {

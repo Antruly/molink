@@ -254,11 +254,32 @@ bool send_frame_payload(session_transport* transport,
 ///
 /// Returns false when the frame could not be given to this session at all
 /// (an AV1-only picture for a viewer that cannot decode AV1).
+/// The codec of a complete FRAME payload (the frame header's codec byte).
+uint8_t frame_payload_codec(const std::vector<uint8_t>& payload) {
+  const std::size_t offset = 6;
+  if (payload.size() <= offset) return 0;
+  return payload[offset];
+}
+
+/// True when this session can decode the stream picture in @p payload. The
+/// stream is only produced for a viewer set that can all decode it, but a
+/// session can join mid-stream without the capability, and the supervisor
+/// needs a second to notice.
+bool can_decode_stream(const std::shared_ptr<session_info>& session,
+                       const std::vector<uint8_t>& payload) {
+  if (payload.empty()) return false;
+  if (frame_payload_codec(payload) ==
+      static_cast<uint8_t>(protocol::codec::h264_stream)) {
+    return session->h264_stream;
+  }
+  return session->av1;
+}
+
 bool send_frame_with_av1(session_transport* transport,
                          const std::shared_ptr<session_info>& session,
                          const captured_frame& frame) {
   if (frame.av1_only) {
-    if (!session->av1 || frame.av1_payload.empty()) return false;
+    if (!can_decode_stream(session, frame.av1_payload)) return false;
     return send_frame_payload(
         transport, session,
         frame.keyframe ? protocol::kPacketFlagKeyframe : 0, frame.ts_us,
@@ -607,7 +628,7 @@ void send_capture_frame(session_transport* transport,
       send_empty_frame(transport, session, latest->width, latest->height, false);
       return;
     }
-    if (frame->av1_only && !session->av1) {
+    if (frame->av1_only && !can_decode_stream(session, frame->av1_payload)) {
       // A viewer that cannot decode AV1 joined while the capture was already
       // building AV1-only frames. Drop back to "no picture" so the next poll
       // replays a tile keyframe; the supervisor turns AV1 off for the next
@@ -700,6 +721,10 @@ void send_welcome(session_transport* transport, const session_info& session,
   // `video_push` in hello stops polling `request-frame`; clients that never
   // ask keep the pull path, which stays the compatibility default.
   j["video_push"] = true;
+  // The host can encode a low-delay H.264 stream on the GPU as well. A viewer
+  // that advertises `h264_stream` in hello gets one when not every viewer can
+  // decode AV1; clients that do not ask never see it.
+  j["h264_stream"] = true;
   // `transport` stays the wire protocol for older clients; `transport_path`
   // is the orthogonal axis (direct / p2p / relay), so a relayed QUIC session
   // reads as path=relay, protocol=quic.
@@ -1233,6 +1258,7 @@ void session_controller::on_text(const std::string& text) {
     // frame response, so a lost frame is repaired immediately and precisely.
     session->seq_clock = bool_field(j, "seq_clock", false);
     session->video_push = bool_field(j, "video_push", false);
+    session->h264_stream = bool_field(j, "h264_stream", false);
     if (std::getenv("MOLINK_AV1_LOG") != nullptr) {
       std::fprintf(stderr, "host: session av1=%d\n", session->av1 ? 1 : 0);
     }
@@ -2105,11 +2131,15 @@ void session_supervisor::run() {
       bool live = false;
       bool all_av1 = true;
       bool all_stream = true;
+      bool all_h264_stream = true;
+      int viewers = 0;
       for (const session_info& peer : registry_->snapshot()) {
         if (!peer.authenticated) continue;
         live = true;
+        ++viewers;
         if (!peer.av1) all_av1 = false;
         if (!peer.av1_stream) all_stream = false;
+        if (!peer.h264_stream) all_h264_stream = false;
       }
       // The host settings page can switch AV1 off entirely; it still only
       // runs when every watching client can decode it.
@@ -2125,7 +2155,12 @@ void session_supervisor::run() {
       // single session without one keeps the host on tiles and patches.
       // AV1 is preferred; when it is not decodable by everyone but H.264 is,
       // the stream switches codec instead of dropping back to tiles.
-      options_.capture->set_av1_stream_allowed(allow && all_stream);
+      const stream_choice stream =
+          live && viewers > 0
+              ? choose_video_codec(allow, all_stream, all_h264_stream)
+              : stream_choice::none;
+      options_.capture->set_av1_stream_allowed(stream == stream_choice::av1);
+      options_.capture->set_h264_stream_allowed(stream == stream_choice::h264);
       if (!live) options_.capture->set_active(false);
     }
 

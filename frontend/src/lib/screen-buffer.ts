@@ -37,12 +37,15 @@ export function applyFrameToSession(key: string, frame: Frame): void {
 }
 
 /**
- * Applies one JPEG frame to the session picture. Stream frames arrive as whole
- * screens, already decoded by the browser into bitmaps, so they are blitted
- * instead of being expanded pixel by pixel.
+ * Applies one whole-screen stream frame (JPEG or H.264) to the session
+ * picture. It arrives already decoded -- an ImageBitmap or a VideoFrame -- and
+ * is blitted instead of being expanded pixel by pixel.
  */
-export function applyJpegFrameToSession(key: string, frame: Frame,
-                                        bitmaps: ImageBitmap[]): void {
+export function applyStreamFrameToSession(
+  key: string,
+  frame: Frame,
+  bitmaps: (ImageBitmap | VideoFrame)[],
+): void {
   if (key === '') return
   const keyframe = (frame.flags & FrameFlag.keyframe) !== 0
   let back = buffers.get(key)

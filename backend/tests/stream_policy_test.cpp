@@ -60,6 +60,27 @@ void test_movement_resets_the_exit_clock() {
   expect(policy.streaming, "still streaming after a fresh still window");
   expect(policy.note(0.01, 22000), "ten quiet seconds after the last movement");
 }
+void test_video_codec_choice() {
+  using molink::stream_choice;
+  // AV1 whenever every viewer can decode it: it compresses far better.
+  expect(molink::choose_video_codec(true, true, true) == stream_choice::av1,
+         "all viewers on AV1 choose AV1");
+  expect(molink::choose_video_codec(true, true, false) == stream_choice::av1,
+         "AV1 does not need the H.264 capability");
+  // A viewer without AV1 still gets a stream when everyone can take H.264.
+  expect(molink::choose_video_codec(false, true, true) ==
+             stream_choice::h264,
+         "AV1 switched off falls back to H.264");
+  expect(molink::choose_video_codec(true, false, true) == stream_choice::h264,
+         "one AV1-less viewer moves the stream to H.264");
+  // Mixed decoders: nothing both can take.
+  expect(molink::choose_video_codec(true, false, false) ==
+             stream_choice::none,
+         "viewers with no shared codec stay on tiles");
+  expect(molink::choose_video_codec(false, false, false) ==
+             stream_choice::none,
+         "no decoder at all stays on tiles");
+}
 }  // namespace
 
 int main() {
@@ -68,6 +89,7 @@ int main() {
   test_short_burst_does_not_enter();
   test_leaves_after_ten_seconds_still();
   test_movement_resets_the_exit_clock();
+  test_video_codec_choice();
   std::printf("%d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;
 }

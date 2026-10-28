@@ -58,6 +58,8 @@ export const Codec = {
   av1Stream: 12,
   /** Baseline JPEG tile: decoded by the browser's native image decoder. */
   jpeg: 13,
+  /** Low-delay H.264 stream frame (Annex-B); decoded through WebCodecs. */
+  h264Stream: 14,
 } as const
 
 /** Bytes per pixel after decompression; 0 when the codec is not pixel-based. */

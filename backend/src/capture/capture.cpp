@@ -282,7 +282,19 @@ av1_stream_encoder* capture_base::stream_for_frame(
     // The viewer's decoder has no reference frame for this stream yet.
     stream_keyframe_pending_.store(true);
   }
-  if (!av1_stream_allowed_.load()) return nullptr;
+  // Walk the ladder the viewers can decode, best first, and take the first
+  // codec this host can actually encode: AV1 stream, then H.264 stream. A
+  // viewer set that can decode neither keeps the capture on tiles.
+  const std::vector<video_codec> ladder =
+      video_ladder(av1_stream_allowed_.load(), h264_stream_allowed_.load(),
+                   /*av1_patches_ok=*/false);
+  if (ladder.empty()) return nullptr;
+  if (stream_encoder_ && video_codec_ != ladder.front()) {
+    // A better rung became available (or the old one stopped being
+    // decodable): the old bitstream cannot continue.
+    stream_encoder_.reset();
+    stream_keyframe_pending_.store(true);
+  }
   if (!stream_policy_.streaming && !stream_policy_.armed) return nullptr;
   if (!stream_encoder_) {
     // Created when the content approaches the threshold, so the switch itself
@@ -293,14 +305,25 @@ av1_stream_encoder* capture_base::stream_for_frame(
       settings = av1_settings_;
     }
     av1_encoder_config config;
-    config.device = "cpu-svt";
+    // The configured device, which defaults to "auto": that prefers the GPU
+    // stream encoder and keeps SVT-AV1 behind it. A 1080p screen at the CPU's
+    // few hundred milliseconds per frame cannot sustain the moving-picture
+    // path the stream exists for, so the host settings still let an operator
+    // pin "cpu-svt" when the GPU is reserved for something else.
+    config.device = settings.device;
     config.speed = settings.speed;
     config.threads = settings.threads;
-    std::string error;
-    stream_encoder_ = make_av1_stream_encoder(config, &error);
-    if (!stream_encoder_ && !error.empty()) {
+    video_codec chosen = ladder.front();
+    for (const video_codec codec : ladder) {
+      std::string error;
+      if (auto encoder = make_stream_encoder(config, codec, &error)) {
+        stream_encoder_ = std::move(encoder);
+        chosen = codec;
+        break;
+      }
       std::fprintf(stderr, "molink: %s\n", error.c_str());
     }
+    video_codec_ = chosen;
     stream_keyframe_pending_.store(true);
   }
   if (!stream_policy_.streaming || !stream_encoder_) return nullptr;

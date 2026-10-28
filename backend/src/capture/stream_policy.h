@@ -75,4 +75,22 @@ struct stream_policy {
   void reset() { *this = stream_policy{}; }
 };
 
+/// Which codec the low-delay stream should use for the current viewer set.
+enum class stream_choice : uint8_t {
+  none,
+  av1,
+  h264,
+};
+
+/// AV1 wins whenever every viewer can decode it and the host allows it: it
+/// compresses far better. H.264 is the fallback for a viewer set that cannot
+/// take AV1 (the browser decodes it through WebCodecs), and when any viewer
+/// can decode neither, the capture stays on tiles.
+inline stream_choice choose_video_codec(bool av1_enabled, bool all_av1,
+                                         bool all_h264) {
+  if (av1_enabled && all_av1) return stream_choice::av1;
+  if (all_h264) return stream_choice::h264;
+  return stream_choice::none;
+}
+
 }  // namespace molink

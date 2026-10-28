@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstring>
 #include <deque>
+#include <functional>
 #include <thread>
 #include <type_traits>
 #include <utility>
@@ -15,10 +16,12 @@
 #define MOLINK_HAVE_NVENC 0
 #endif
 #if MOLINK_HAVE_NVENC
+#include "capture/av1_stream_fallback.h"
 #include "capture/nvenc_av1_encoder.h"
 #endif
 
 namespace molink {
+
 
 int av1_padded_extent(int extent) {
   // SVT-AV1 wants at least 64 pixels and works on 8-pixel blocks for 4:2:0.
@@ -646,6 +649,36 @@ std::vector<av1_encoder_device> av1_encoder_devices() {
 
 bool av1_encode_available() { return true; }
 
+std::vector<video_encoder_backend> video_encoder_backends() {
+  std::vector<video_encoder_backend> backends;
+#if MOLINK_HAVE_NVENC
+  {
+    video_encoder_backend gpu;
+    gpu.id = "gpu-nvenc";
+    gpu.name = "GPU · NVIDIA NVENC";
+    gpu.hardware = true;
+    gpu.av1_patches = nvenc_av1_available();
+    gpu.av1_stream = gpu.av1_patches;
+    gpu.h264_stream = nvenc_h264_available();
+    gpu.available = gpu.av1_patches || gpu.h264_stream;
+    gpu.detail = gpu.available ? "NVENC" : "no AV1/H.264 encoder was detected";
+    // Only present backends are listed: callers treat the list as "what I can
+    // encode with right now", not as a catalogue.
+    if (gpu.available) backends.push_back(std::move(gpu));
+  }
+#endif
+  {
+    video_encoder_backend cpu;
+    cpu.id = "cpu-svt";
+    cpu.name = "CPU · SVT-AV1";
+    cpu.av1_patches = true;
+    cpu.av1_stream = true;
+    cpu.available = true;
+    backends.push_back(std::move(cpu));
+  }
+  return backends;
+}
+
 namespace {
 
 /// Runs the GPU encoder first and keeps CPU SVT-AV1 behind it. NVENC can
@@ -729,13 +762,53 @@ std::shared_ptr<av1_encoder> make_av1_encoder(
   return std::make_shared<svt_av1_encoder>(config);
 }
 
+std::shared_ptr<av1_stream_encoder> make_stream_encoder(
+    const av1_encoder_config& config, video_codec codec, std::string* error) {
+  if (error != nullptr) error->clear();
+#if MOLINK_HAVE_NVENC
+  const bool wants_gpu =
+      config.device == "auto" || config.device == "gpu-nvenc";
+  if (wants_gpu) {
+    std::string gpu_error;
+    if (auto gpu = make_nvenc_stream_encoder(config, codec, &gpu_error)) {
+      // One line so a host log answers "is the stream on the GPU?" -- the
+      // difference is hundreds of milliseconds per frame against a few.
+      std::fprintf(stderr, "stream: nvenc (%s)\n",
+                   codec == video_codec::h264_stream ? "h264" : "av1");
+      if (codec == video_codec::h264_stream) {
+        // SVT-AV1 cannot continue an H.264 stream, so there is nothing to
+        // hand over to: a failing GPU session ends the stream and the capture
+        // falls back to tiles.
+        return gpu;
+      }
+      return std::make_shared<fallback_av1_stream_encoder>(
+          std::move(gpu), [config] {
+            return std::make_shared<svt_stream_encoder>(config);
+          });
+    }
+    if (config.device == "gpu-nvenc") {
+      if (error != nullptr) *error = gpu_error;
+      return nullptr;
+    }
+  }
+#endif
+  if (codec == video_codec::h264_stream) {
+    // No CPU H.264 encoder in this build: the browser path needs the GPU.
+    if (error != nullptr) {
+      *error = "h264 stream: no hardware encoder is available on this host";
+    }
+    return nullptr;
+  }
+  if (config.device == "gpu-nvenc") {
+    if (error != nullptr) *error = "nvenc: unavailable";
+    return nullptr;
+  }
+  return std::make_shared<svt_stream_encoder>(config);
+}
+
 std::shared_ptr<av1_stream_encoder> make_av1_stream_encoder(
     const av1_encoder_config& config, std::string* error) {
-  if (error != nullptr) error->clear();
-  // The stream path is CPU SVT-AV1 for now: NVENC's low-delay session state
-  // and our rectangle path share the same device limits, so keep it simple
-  // until the CPU path is proven on real hosts.
-  return std::make_shared<svt_stream_encoder>(config);
+  return make_stream_encoder(config, video_codec::av1_stream, error);
 }
 
 #else
@@ -754,6 +827,22 @@ bool av1_encode_available() {
 #else
   return false;
 #endif
+}
+
+std::vector<video_encoder_backend> video_encoder_backends() {
+  std::vector<video_encoder_backend> backends;
+#if MOLINK_HAVE_NVENC
+  video_encoder_backend gpu;
+  gpu.id = "gpu-nvenc";
+  gpu.name = "GPU · NVIDIA NVENC";
+  gpu.hardware = true;
+  gpu.av1_patches = nvenc_av1_available();
+  gpu.av1_stream = gpu.av1_patches;
+  gpu.h264_stream = nvenc_h264_available();
+  gpu.available = gpu.av1_patches || gpu.h264_stream;
+  if (gpu.available) backends.push_back(std::move(gpu));
+#endif
+  return backends;
 }
 
 std::shared_ptr<av1_encoder> make_av1_encoder(
@@ -777,11 +866,31 @@ std::shared_ptr<av1_encoder> make_av1_encoder(
   return nullptr;
 }
 
+std::shared_ptr<av1_stream_encoder> make_stream_encoder(
+    const av1_encoder_config& config, video_codec codec, std::string* error) {
+  if (error != nullptr) error->clear();
+  // No SVT in this build, but the GPU can still carry the stream on its own.
+#if MOLINK_HAVE_NVENC
+  if (config.device == "auto" || config.device == "gpu-nvenc") {
+    if (auto gpu = make_nvenc_stream_encoder(config, codec, error)) {
+      std::fprintf(stderr, "stream: nvenc (%s)\n",
+                   codec == video_codec::h264_stream ? "h264" : "av1");
+      return gpu;
+    }
+    if (config.device == "gpu-nvenc") return nullptr;
+  }
+#endif
+  if (error != nullptr) {
+    *error = codec == video_codec::h264_stream
+                 ? "this build has no H.264 stream encoder"
+                 : "this build has no AV1 encoder for the stream";
+  }
+  return nullptr;
+}
+
 std::shared_ptr<av1_stream_encoder> make_av1_stream_encoder(
     const av1_encoder_config& config, std::string* error) {
-  (void)config;
-  if (error != nullptr) *error = "this build has no AV1 encoder";
-  return nullptr;
+  return make_stream_encoder(config, video_codec::av1_stream, error);
 }
 
 #endif  // MOLINK_HAVE_SVT_AV1

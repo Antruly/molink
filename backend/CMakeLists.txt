@@ -594,6 +594,26 @@ set_target_properties(molink-core-stream-policy-test PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 add_test(NAME stream_policy COMMAND molink-core-stream-policy-test)
 
+# The unified encoder face is policy only: the ladder and the backend list.
+add_executable(molink-core-video-encoder-test
+  tests/video_encoder_test.cpp
+  src/capture/av1_encoder.cpp
+)
+target_include_directories(molink-core-video-encoder-test PRIVATE src)
+set_target_properties(molink-core-video-encoder-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME video_encoder COMMAND molink-core-video-encoder-test)
+
+# The GPU-to-CPU hand-over is pure policy over two encoders, so it builds and
+# runs without a GPU (or even an encoder library) present.
+add_executable(molink-core-av1-stream-fallback-test
+  tests/av1_stream_fallback_test.cpp
+)
+target_include_directories(molink-core-av1-stream-fallback-test PRIVATE src)
+set_target_properties(molink-core-av1-stream-fallback-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME av1_stream_fallback COMMAND molink-core-av1-stream-fallback-test)
+
 # The host-side frame clock is pure scheduling, so it needs no transport.
 add_executable(molink-core-video-push-test
   tests/video_push_test.cpp
@@ -686,6 +706,32 @@ if(MOLINK_HAVE_NVENC)
   endforeach()
   add_test(NAME nvenc COMMAND molink-core-nvenc-test)
   set_tests_properties(nvenc PROPERTIES SKIP_RETURN_CODE 77)
+
+  # The low-delay stream encoders: a keyframe, deltas, and a forced resync for
+  # each codec the GPU reports. Exit 77 on machines without NVENC.
+  add_executable(molink-core-nvenc-stream-test
+    tests/nvenc_stream_test.cpp
+    src/capture/nvenc_av1_encoder.cpp
+    src/capture/av1_encoder.cpp
+  )
+  target_include_directories(molink-core-nvenc-stream-test PRIVATE
+    src ${NVENC_INCLUDE_DIR})
+  target_compile_definitions(molink-core-nvenc-stream-test PRIVATE
+    MOLINK_HAVE_NVENC=1)
+  if(WIN32)
+    target_link_libraries(molink-core-nvenc-stream-test PRIVATE d3d11 dxgi dxguid)
+  else()
+    target_link_libraries(molink-core-nvenc-stream-test PRIVATE ${CMAKE_DL_LIBS})
+  endif()
+  set_target_properties(molink-core-nvenc-stream-test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+  foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
+    string(TOUPPER "${uvp_config}" uvp_config_upper)
+    set_target_properties(molink-core-nvenc-stream-test PROPERTIES
+      "RUNTIME_OUTPUT_DIRECTORY_${uvp_config_upper}" "${CMAKE_BINARY_DIR}")
+  endforeach()
+  add_test(NAME nvenc_stream COMMAND molink-core-nvenc-stream-test)
+  set_tests_properties(nvenc_stream PROPERTIES SKIP_RETURN_CODE 77)
 endif()
 
 # The round-trip test needs both halves of the AV1 SDK.

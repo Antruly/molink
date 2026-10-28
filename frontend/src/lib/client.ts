@@ -13,6 +13,7 @@ import {
   type Frame,
 } from './protocol'
 import { formatHost } from './net'
+import { H264StreamDecoder, h264StreamSupported } from './h264-stream'
 
 export type ClientPhase = 'idle' | 'connecting' | 'live' | 'error' | 'disconnected'
 
@@ -157,10 +158,14 @@ export type SessionEventListener = (event: SessionEvent) => void
 export interface ClientHandlers {
   onPhase: (phase: ClientPhase, detail?: string) => void
   onWelcome: (welcome: Welcome) => void
-  /// `bitmaps` is set for JPEG stream frames, which the client already decoded
-  /// with the browser's native image decoder; the sink blits them instead of
-  /// expanding pixels.
-  onFrame: (frame: Frame, byteLength: number, bitmaps?: ImageBitmap[]) => void
+  /// `bitmaps` is set for whole-screen stream frames the client already
+  /// decoded -- JPEG through the browser's native image decoder, H.264 through
+  /// WebCodecs. The sink blits them instead of expanding pixels.
+  onFrame: (
+    frame: Frame,
+    byteLength: number,
+    bitmaps?: (ImageBitmap | VideoFrame)[],
+  ) => void
   onLatency: (ms: number) => void
   onError: (message: string, code?: string) => void
   /// Live path/protocol changes, e.g. relay switching to ICE. `mode` is the
@@ -325,6 +330,10 @@ export class MolinkClient {
   private ws: WebSocket | null = null
   private handlers: Partial<ClientHandlers> = {}
   private pendingFrame = false
+  /** WebCodecs decoder for the host's low-delay H.264 stream. */
+  private h264 = new H264StreamDecoder()
+  /** This browser can decode the H.264 stream (probed once, before hello). */
+  private h264Capable = false
   /** The host offered to drive the frame clock for this session. */
   private pushSupported = false
   /** The clock is on right now: the page is visible and pulling is off. */
@@ -413,6 +422,20 @@ export class MolinkClient {
   private hasImage = false
   // Decompression is asynchronous; chaining keeps frames applied in order.
   private frameQueue: Promise<void> = Promise.resolve()
+
+  constructor() {
+    // One probe, up front: hello goes out on the first connect, and the host
+    // only streams H.264 to viewers that asked for it.
+    void h264StreamSupported().then((supported) => {
+      if (supported === this.h264Capable) return
+      this.h264Capable = supported
+      // A hello may already have gone out without the flag. Sending it again
+      // makes the host re-evaluate which stream codec every viewer can take.
+      if (supported && this.isLive() && this.helloPayload !== null) {
+        this.sendHello()
+      }
+    })
+  }
 
   setHandlers(handlers: Partial<ClientHandlers>): void {
     this.handlers = handlers
@@ -562,6 +585,7 @@ export class MolinkClient {
           video_push: true,
           // This browser can decode the host's H.264 stream through WebCodecs;
           // the host picks it when AV1 is not decodable by every viewer.
+          h264_stream: this.h264Capable,
           ...(this.resumeToken ? { session: this.resumeToken } : {}),
           ...(clientName ? { name: clientName } : {}),
           ...(clientId ? { device_id: clientId } : {}),
@@ -594,7 +618,8 @@ export class MolinkClient {
       this.stopWatchingVisibility()
       this.pushSupported = false
       this.pushVideo = false
-        this.pendingFrame = false
+      this.h264.close()
+      this.pendingFrame = false
       this.ws = null
       // Wrong code / locked host / denied request: the host answered and
       // closed on purpose. Falling back to a direct socket or retrying would
@@ -1272,6 +1297,47 @@ export class MolinkClient {
               this.handlers.onFrame?.(frame, buffer.byteLength, bitmaps)
             } finally {
               for (const bitmap of bitmaps) bitmap.close()
+            }
+          })
+          .catch(() => undefined)
+        return
+      }
+      if (frame.codec === Codec.h264Stream) {
+        // Low-delay H.264 stream: one whole screen per packet, decoded by
+        // WebCodecs. Like the AV1 stream it only decodes on top of the
+        // previous picture, so nothing is painted until a keyframe arrived.
+        if ((frame.flags & FrameFlag.keyframe) !== 0) this.hasImage = true
+        if (frame.tiles.length === 0) return
+        if (!this.hasImage) {
+          this.requestKeyframeThrottled()
+          return
+        }
+        if (this.frameAgeMs(packet.tsUs) > 1000) {
+          this.handlers.onFrameDropped?.()
+          return
+        }
+        this.handlers.onWireFrame?.()
+        if (frame.frameSeq > this.latestFrameSeq) {
+          this.latestFrameSeq = frame.frameSeq
+        }
+        this.noteApplied(frame, packet.tsUs)
+        const keyframe = (frame.flags & FrameFlag.keyframe) !== 0
+        // A copy: WebCodecs keeps the buffer until the chunk is consumed, and
+        // the packet's view belongs to the caller.
+        const accessUnit = new Uint8Array(frame.tiles[0]!.data)
+        this.frameQueue = this.frameQueue
+          .then(async () => {
+            const picture = await this.h264.decode(accessUnit, keyframe)
+            if (picture === null) {
+              // Behind, broken, or a delta with no reference: only a keyframe
+              // brings the stream back.
+              this.requestKeyframeThrottled()
+              return
+            }
+            try {
+              this.handlers.onFrame?.(frame, buffer.byteLength, [picture])
+            } finally {
+              picture.close()
             }
           })
           .catch(() => undefined)

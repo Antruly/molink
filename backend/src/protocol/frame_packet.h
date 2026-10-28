@@ -138,6 +138,12 @@ enum class codec : uint8_t {
   /// page: the browser decodes it natively, which is far cheaper than zlib and
   /// much smaller than raw pixels.
   jpeg = 13,
+  /// A frame of a low-delay H.264 stream, in Annex-B (the SPS/PPS ride the
+  /// keyframe). Distinct from @ref h264, which is a self-contained tile: a
+  /// stream frame only decodes on top of the previous one, and the browser
+  /// decodes it through WebCodecs. This is the codec a viewer falls back to
+  /// when it cannot decode AV1.
+  h264_stream = 14,
 };
 
 enum frame_flags : uint8_t {

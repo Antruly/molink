@@ -252,6 +252,11 @@ class capture_source {
   /// session can decode it.
   virtual void set_av1_stream_allowed(bool allowed) { (void)allowed; }
 
+  /// Whether a hardware H.264 stream may be used instead. This is the fallback
+  /// for viewers that cannot decode AV1 (the browser decodes H.264 through
+  /// WebCodecs); AV1 still wins when every viewer can decode it.
+  virtual void set_h264_stream_allowed(bool allowed) { (void)allowed; }
+
   /// Monitors this source can capture. Empty means the source is not ready or
   /// does not support selection (clients fall back to the whole screen).
   virtual std::vector<display_info> displays() const { return {}; }
@@ -467,6 +472,9 @@ class capture_base : public capture_source {
   void set_av1_stream_allowed(bool allowed) override {
     av1_stream_allowed_.store(allowed);
   }
+  void set_h264_stream_allowed(bool allowed) override {
+    h264_stream_allowed_.store(allowed);
+  }
   /// True while the AV1 stream is the active path. The backend should then
   /// publish a frame on every tick, even when nothing changed: a video stream
   /// needs a steady cadence, and a P frame of an unchanged screen costs a few
@@ -549,7 +557,11 @@ class capture_base : public capture_source {
   /// Tile <-> AV1 stream hand-over, fed once per frame.
   stream_policy stream_policy_;
   std::shared_ptr<av1_stream_encoder> stream_encoder_;
+  /// Codec the live stream encoder produces; a viewer set that changes which
+  /// codec is decodable rebuilds the encoder.
+  video_codec video_codec_ = video_codec::av1_stream;
   std::atomic<bool> av1_stream_allowed_{false};
+  std::atomic<bool> h264_stream_allowed_{false};
   std::atomic<bool> stream_keyframe_pending_{true};
   /// A viewer is behind; box-average large tiles and stop lifting the AV1
   /// downscale while it lasts.

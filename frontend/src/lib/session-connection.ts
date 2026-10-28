@@ -12,7 +12,7 @@ import { PcmPlayer } from './audio'
 import { ClipboardFileSync } from './clipboard-sync'
 import {
   applyFrameToSession,
-  applyJpegFrameToSession,
+  applyStreamFrameToSession,
   forgetSessionScreenBuffer,
 } from './screen-buffer'
 
@@ -223,7 +223,7 @@ export class SessionConnection {
         // background: the pull loop keeps every live tab current, and a
         // switch then shows the last picture instead of an empty canvas.
         if (bitmaps !== undefined && bitmaps.length > 0) {
-          applyJpegFrameToSession(this.sessionKey, frame, bitmaps)
+          applyStreamFrameToSession(this.sessionKey, frame, bitmaps)
         } else {
           applyFrameToSession(this.sessionKey, frame)
         }
