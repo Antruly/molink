@@ -853,7 +853,7 @@ export function FileTransferPanel({
             ) : (
               <ul className="space-y-0.5">
                 {listing?.entries.map((entry) => (
-                  <li key={entry.name}>
+                  <li key={entry.name} className="group flex items-center gap-1">
                     <button
                       type="button"
                       onClick={() => {
@@ -865,7 +865,7 @@ export function FileTransferPanel({
                           startDownload(path)
                         }
                       }}
-                      className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left transition hover:bg-panel"
+                      className="flex min-w-0 flex-1 items-center gap-2 rounded-lg px-2 py-1.5 text-left transition hover:bg-panel"
                     >
                       {entry.dir ? (
                         <Folder size={14} className="shrink-0 text-accent/80" />
@@ -879,6 +879,19 @@ export function FileTransferPanel({
                         {entry.dir ? '' : formatSize(entry.size)}
                       </span>
                     </button>
+                    {entry.dir ? null : (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          listing && startDownload(joinPath(listing.path, entry.name))
+                        }
+                        className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-muted opacity-0 transition hover:bg-panel hover:text-accent group-hover:opacity-100"
+                        aria-label={t('files.download')}
+                        title={t('files.download')}
+                      >
+                        <ArrowDownToLine size={13} />
+                      </button>
+                    )}
                   </li>
                 ))}
               </ul>
