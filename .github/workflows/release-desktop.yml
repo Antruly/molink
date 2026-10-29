@@ -59,7 +59,13 @@ jobs:
           ./Configure --prefix="$RUNNER_TEMP/openssl-quic" --libdir=lib no-shared no-tests
           make -j"$(nproc)"
           make install_sw
-          nm -D "$RUNNER_TEMP/openssl-quic/lib/libssl.so" | grep -qE ' [TW] SSL_set_quic_tls_cbs($|@)' || {
+          # The build is static (no-shared), so the symbol lives in libssl.a;
+          # a shared build would expose it through libssl.so's dynamic table.
+          if [ -f "$RUNNER_TEMP/openssl-quic/lib/libssl.so" ]; then
+            nm -D "$RUNNER_TEMP/openssl-quic/lib/libssl.so"
+          else
+            nm "$RUNNER_TEMP/openssl-quic/lib/libssl.a"
+          fi | grep -qE ' [TW] SSL_set_quic_tls_cbs($|@)' || {
             echo "::error title=quic-openssl::libssl has no SSL_set_quic_tls_cbs"; exit 1; }
 
       - name: Build libuvcpp (1.9 line, WebTransport)

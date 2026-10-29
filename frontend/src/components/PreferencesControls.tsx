@@ -356,27 +356,6 @@ function Av1Controls({ token }: { token: string }) {
           {t('settings.keyframeIntervalHint')}
         </p>
       </div>
-      <div className="border-t border-line-soft" />
-      <div className="flex items-center gap-2 text-[12px] font-medium text-ink">
-        <Cpu size={14} className="text-accent" />
-        {t('settings.av1Title')}
-        <span
-          className={
-            'ml-auto rounded-full px-2 py-0.5 text-[10px] font-normal ' +
-            (data.available
-              ? 'bg-accent-soft text-accent'
-              : 'bg-panel text-muted')
-          }
-        >
-          {data.available
-            ? t('settings.av1Available')
-            : t('settings.av1UnavailableBadge')}
-        </span>
-      </div>
-      <p className="text-[11px] leading-relaxed text-muted">
-        {t('settings.av1Hint')}
-      </p>
-
       <label className="block">
         <span className="mb-1 block text-[12px] font-medium text-ink">
           {t('settings.videoMode')}
