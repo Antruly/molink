@@ -77,9 +77,8 @@ std::optional<fs::path> resolve_path(const std::string& raw) {
   return canonical;
 }
 
-std::string safe_file_name(const std::string& raw) {
-  fs::path parsed(raw);
-  std::string name = parsed.filename().string();
+/// The character filter shared by file names and path segments.
+std::string clean_file_name(const std::string& name) {
   std::string out;
   out.reserve(name.size());
   for (unsigned char c : name) {
@@ -105,6 +104,11 @@ std::string safe_file_name(const std::string& raw) {
     out.resize(cut);
   }
   return out;
+}
+
+std::string safe_file_name(const std::string& raw) {
+  fs::path parsed(raw);
+  return clean_file_name(parsed.filename().string());
 }
 
 std::string unique_path_in(const fs::path& dir, const std::string& name) {
@@ -137,10 +141,68 @@ uint64_t file_mtime_ms(const fs::path& path) {
 }
 
 std::string receive_directory() {
-  const fs::path dir = home_root() / "Downloads" / "moLink";
+  const fs::path dir = home_root() / "moLink";
   std::error_code ec;
   fs::create_directories(dir, ec);
   return dir.string();
+}
+
+/// Resolves the viewer's destination folder. Empty means ~/moLink; `~` is the
+/// host user's home; relative paths are taken relative to home. Any absolute
+/// path the host user can create is allowed -- the host owner decides what the
+/// remote side may write.
+std::string resolve_destination(const std::string& requested) {
+  if (requested.empty()) return receive_directory();
+  std::string text = requested;
+  fs::path target;
+  if (text == "~") {
+    target = home_root();
+  } else if (text.rfind("~/", 0) == 0 || text.rfind("~\\", 0) == 0) {
+    target = home_root() / text.substr(2);
+  } else {
+    target = fs::path(text);
+    if (target.is_relative()) target = home_root() / target;
+  }
+  std::error_code ec;
+  fs::create_directories(target, ec);
+  if (ec) return std::string();
+  if (!fs::is_directory(target, ec) || ec) return std::string();
+  return target.lexically_normal().string();
+}
+
+/// Splits an upload name into a relative parent (from a folder drag) and the
+/// file name. Every segment is cleaned like a bare file name and `..` is
+/// rejected, so a crafted name cannot climb out of the destination folder.
+bool split_upload_name(const std::string& raw, std::string& parent,
+                       std::string& base) {
+  std::string text = raw;
+  for (char& c : text) {
+    if (c == '\\') c = '/';
+  }
+  std::size_t cut = text.rfind('/');
+  const std::string dirs = cut == std::string::npos ? std::string()
+                                                    : text.substr(0, cut);
+  const std::string name =
+      cut == std::string::npos ? text : text.substr(cut + 1);
+  parent.clear();
+  std::size_t start = 0;
+  while (start <= dirs.size()) {
+    const std::size_t end = dirs.find('/', start);
+    const std::string segment =
+        dirs.substr(start, end == std::string::npos ? std::string::npos
+                                                    : end - start);
+    if (!segment.empty() && segment != ".") {
+      if (segment == "..") return false;
+      const std::string clean = clean_file_name(segment);
+      if (clean.empty() || clean == ".") return false;
+      if (!parent.empty()) parent += '/';
+      parent += clean;
+    }
+    if (end == std::string::npos) break;
+    start = end + 1;
+  }
+  base = clean_file_name(name);
+  return !base.empty();
 }
 
 }  // namespace
@@ -170,21 +232,40 @@ void file_transfer::send_simple(const std::string& action, uint32_t id) {
   send_json_(dump_json(j));
 }
 
-void file_transfer::offer(const std::string& name, uint64_t size) {
+void file_transfer::offer(const std::string& name, uint64_t size,
+                          const std::string& destination) {
   if (size > kMaxFileBytes) {
     fail("reject", 0, "file is larger than 8 GiB");
     return;
   }
-  const std::string dir = receive_directory();
+  const std::string dir = resolve_destination(destination);
   if (dir.empty()) {
     fail("reject", 0, "could not create the receive folder");
     return;
   }
+  // A folder drag sends `sub/dir/file`; keep the relative parents and create
+  // them under the destination.
+  std::string parent;
+  std::string base;
+  if (!split_upload_name(name, parent, base)) {
+    fail("reject", 0, "invalid file name");
+    return;
+  }
+  fs::path final_dir(dir);
+  if (!parent.empty()) {
+    final_dir /= parent;
+    std::error_code dir_ec;
+    fs::create_directories(final_dir, dir_ec);
+    if (dir_ec) {
+      fail("reject", 0, "could not create the destination folder");
+      return;
+    }
+  }
   const uint32_t id = next_id_++;
   upload item;
   item.id = id;
-  item.name = safe_file_name(name);
-  item.final_dir = dir;
+  item.name = base;
+  item.final_dir = final_dir.string();
   item.temp_path = (fs::path(dir) / (".upload-" + std::to_string(id) + ".part"))
                        .string();
   item.size = size;

@@ -46,6 +46,10 @@ import {
   parseFpsSetting,
 } from '../lib/frame-rate'
 import { codecName } from '../lib/protocol'
+import {
+  collectDropEntries,
+  stageDroppedFiles,
+} from '../lib/file-drop'
 import { shellInfo, windowAction } from '../lib/shell'
 import { openSessionWindow } from '../lib/windows'
 import {
@@ -1793,8 +1797,10 @@ export function SessionView({
     ? tab.av1Full
       ? t('session.watermarkAv1')
       : t('session.watermarkAv1Tiles')
-    : tab.streamCodec === 'h264'
-      ? t('session.watermarkH264')
+    : tab.streamCodec !== undefined && tab.streamCodec !== ''
+      ? tab.streamCodec === 'h264'
+        ? 'H.264'
+        : tab.streamCodec.toUpperCase()
       : t('session.watermarkTiles')
 
   return (
@@ -1899,13 +1905,21 @@ export function SessionView({
             }
           }}
           onDrop={(event) => {
-            const files = event.dataTransfer.files
-            if (files.length === 0) return
+            const transfer = event.dataTransfer
+            if (transfer === null) return
+            const hasFiles =
+              (transfer.files?.length ?? 0) > 0 ||
+              Array.from(transfer.items ?? []).some(
+                (item) => item.kind === 'file',
+              )
+            if (!hasFiles) return
             event.preventDefault()
             event.stopPropagation()
-            connection()?.uploadDroppedFiles(
-              Array.from(files),
-              tab.controlEnabled,
+            // The drop belongs to the file drawer: it stages the list, lets
+            // the user pick the remote folder and send explicitly.
+            setFilesOpen(true)
+            void collectDropEntries(transfer).then((entries) =>
+              stageDroppedFiles(entries),
             )
           }}
           onContextMenu={(event) => {

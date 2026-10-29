@@ -144,6 +144,10 @@ enum class codec : uint8_t {
   /// decodes it through WebCodecs. This is the codec a viewer falls back to
   /// when it cannot decode AV1.
   h264_stream = 14,
+  /// Low-delay VP8 and VP9 streams (libvpx on the host, WebCodecs in the
+  /// page). Raw codec frames: no SPS/PPS description, no Annex-B framing.
+  vp8_stream = 15,
+  vp9_stream = 16,
 };
 
 enum frame_flags : uint8_t {

@@ -270,6 +270,10 @@ class capture_source {
   /// for viewers that cannot decode AV1 (the browser decodes H.264 through
   /// WebCodecs); AV1 still wins when every viewer can decode it.
   virtual void set_h264_stream_allowed(bool allowed) { (void)allowed; }
+  /// Low-delay VP9/VP8 streams (libvpx on the host). Only set while every
+  /// live session can decode them.
+  virtual void set_vp9_stream_allowed(bool allowed) { (void)allowed; }
+  virtual void set_vp8_stream_allowed(bool allowed) { (void)allowed; }
 
   /// Monitors this source can capture. Empty means the source is not ready or
   /// does not support selection (clients fall back to the whole screen).
@@ -517,6 +521,12 @@ class capture_base : public capture_source {
   void set_av1_stream_allowed(bool allowed) override {
     av1_stream_allowed_.store(allowed);
   }
+  void set_vp9_stream_allowed(bool allowed) override {
+    vp9_stream_allowed_.store(allowed);
+  }
+  void set_vp8_stream_allowed(bool allowed) override {
+    vp8_stream_allowed_.store(allowed);
+  }
   void set_h264_stream_allowed(bool allowed) override {
     h264_stream_allowed_.store(allowed);
   }
@@ -622,6 +632,8 @@ class capture_base : public capture_source {
   uint64_t encoder_retry_at_ms_ = 0;
   std::atomic<bool> av1_stream_allowed_{false};
   std::atomic<bool> h264_stream_allowed_{false};
+  std::atomic<bool> vp9_stream_allowed_{false};
+  std::atomic<bool> vp8_stream_allowed_{false};
   std::atomic<bool> stream_keyframe_pending_{true};
   /// A viewer is behind; box-average large tiles and stop lifting the AV1
   /// downscale while it lasts.

@@ -271,11 +271,17 @@ uint8_t frame_payload_codec(const std::vector<uint8_t>& payload) {
 bool can_decode_stream(const std::shared_ptr<session_info>& session,
                        const std::vector<uint8_t>& payload) {
   if (payload.empty()) return false;
-  if (frame_payload_codec(payload) ==
-      static_cast<uint8_t>(protocol::codec::h264_stream)) {
-    return session->h264_stream;
+  switch (frame_payload_codec(payload)) {
+    case static_cast<uint8_t>(protocol::codec::h264_stream):
+      return session->h264_stream;
+    case static_cast<uint8_t>(protocol::codec::vp9_stream):
+      return session->vp9_stream;
+    case static_cast<uint8_t>(protocol::codec::vp8_stream):
+      return session->vp8_stream;
+    default:
+      // AV1 stream.
+      return session->av1;
   }
-  return session->av1;
 }
 
 /// Audio and voice take the realtime channel when the session has one: the
@@ -1468,6 +1474,8 @@ void session_controller::on_text(const std::string& text) {
     session->seq_clock = bool_field(j, "seq_clock", false);
     session->video_push = bool_field(j, "video_push", false);
     session->h264_stream = bool_field(j, "h264_stream", false);
+    session->vp9_stream = bool_field(j, "vp9_stream", false);
+    session->vp8_stream = bool_field(j, "vp8_stream", false);
     session->webrtc = bool_field(j, "webrtc", false);
     if (std::getenv("MOLINK_AV1_LOG") != nullptr) {
       std::fprintf(stderr, "host: session av1=%d\n", session->av1 ? 1 : 0);
@@ -1477,10 +1485,11 @@ void session_controller::on_text(const std::string& text) {
     if (std::getenv("MOLINK_STREAM_LOG") != nullptr) {
       std::fprintf(stderr,
                    "host: hello av1=%d av1_stream=%d h264_stream=%d webrtc=%d "
-                   "video_push=%d\n",
+                   "video_push=%d vp9=%d vp8=%d\n",
                    session->av1 ? 1 : 0, session->av1_stream ? 1 : 0,
                    session->h264_stream ? 1 : 0, session->webrtc ? 1 : 0,
-                   session->video_push ? 1 : 0);
+                   session->video_push ? 1 : 0, session->vp9_stream ? 1 : 0,
+                   session->vp8_stream ? 1 : 0);
     }
     registry_->set_authenticated(session);
     // A session without AV1 must stop patches immediately; the supervisor
@@ -2061,7 +2070,8 @@ void session_controller::on_text(const std::string& text) {
           it != j.end() && it->is_number()) {
         size = it->get<uint64_t>();
       }
-      files_->offer(string_field(j, "name"), size);
+      files_->offer(string_field(j, "name"), size,
+                    string_field(j, "dest"));
     } else if (action == "complete") {
       files_->complete(id);
     } else if (action == "cancel") {
@@ -2387,6 +2397,8 @@ void session_supervisor::run() {
       bool all_av1 = true;
       bool all_stream = true;
       bool all_h264_stream = true;
+      bool all_vp9_stream = true;
+      bool all_vp8_stream = true;
       int viewers = 0;
       for (const session_info& peer : registry_->snapshot()) {
         if (!peer.authenticated) continue;
@@ -2395,6 +2407,8 @@ void session_supervisor::run() {
         if (!peer.av1) all_av1 = false;
         if (!peer.av1_stream) all_stream = false;
         if (!peer.h264_stream) all_h264_stream = false;
+        if (!peer.vp9_stream) all_vp9_stream = false;
+        if (!peer.vp8_stream) all_vp8_stream = false;
       }
       // The host settings page can switch AV1 off entirely; it still only
       // runs when every watching client can decode it.
@@ -2412,10 +2426,24 @@ void session_supervisor::run() {
       // the stream switches codec instead of dropping back to tiles.
       const stream_choice stream =
           live && viewers > 0
-              ? choose_video_codec(allow, all_stream, all_h264_stream)
+              ? choose_video_codec(allow, all_stream, all_h264_stream,
+                                   all_vp9_stream, all_vp8_stream)
               : stream_choice::none;
       options_.capture->set_av1_stream_allowed(stream == stream_choice::av1);
       options_.capture->set_h264_stream_allowed(stream == stream_choice::h264);
+      if (std::getenv("MOLINK_STREAM_LOG") != nullptr) {
+        static int last_stream = -1;
+        if (static_cast<int>(stream) != last_stream) {
+          last_stream = static_cast<int>(stream);
+          std::fprintf(stderr,
+                       "host: stream choice=%d (all av1=%d h264=%d vp9=%d vp8=%d)\n",
+                       static_cast<int>(stream), all_stream ? 1 : 0,
+                       all_h264_stream ? 1 : 0, all_vp9_stream ? 1 : 0,
+                       all_vp8_stream ? 1 : 0);
+        }
+      }
+      options_.capture->set_vp9_stream_allowed(stream == stream_choice::vp9);
+      options_.capture->set_vp8_stream_allowed(stream == stream_choice::vp8);
       if (!live) options_.capture->set_active(false);
     }
 

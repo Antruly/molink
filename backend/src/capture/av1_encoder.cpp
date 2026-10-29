@@ -1,3 +1,4 @@
+#include "capture/vpx_stream_encoder.h"
 #include "capture/av1_encoder.h"
 
 #include <algorithm>
@@ -765,6 +766,10 @@ std::shared_ptr<av1_encoder> make_av1_encoder(
 std::shared_ptr<av1_stream_encoder> make_stream_encoder(
     const av1_encoder_config& config, video_codec codec, std::string* error) {
   if (error != nullptr) error->clear();
+  // libvpx is the only backend for VP8/VP9; NVENC has no encoder for them.
+  if (codec == video_codec::vp9_stream || codec == video_codec::vp8_stream) {
+    return make_vpx_stream_encoder(config, codec, error);
+  }
 #if MOLINK_HAVE_NVENC
   const bool wants_gpu =
       config.device == "auto" || config.device == "gpu-nvenc";
@@ -869,6 +874,10 @@ std::shared_ptr<av1_encoder> make_av1_encoder(
 std::shared_ptr<av1_stream_encoder> make_stream_encoder(
     const av1_encoder_config& config, video_codec codec, std::string* error) {
   if (error != nullptr) error->clear();
+  // libvpx is the only backend for VP8/VP9; NVENC has no encoder for them.
+  if (codec == video_codec::vp9_stream || codec == video_codec::vp8_stream) {
+    return make_vpx_stream_encoder(config, codec, error);
+  }
   // No SVT in this build, but the GPU can still carry the stream on its own.
 #if MOLINK_HAVE_NVENC
   if (config.device == "auto" || config.device == "gpu-nvenc") {

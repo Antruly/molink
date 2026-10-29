@@ -29,7 +29,10 @@ class file_transfer {
   ~file_transfer();
 
   /// `name` is a bare file name from the peer; `size` is the declared length.
-  void offer(const std::string& name, uint64_t size);
+  /// `destination` is the viewer's chosen folder; empty means ~/moLink. A
+  /// relative parent inside `name` (a folder drag) is created underneath it.
+  void offer(const std::string& name, uint64_t size,
+             const std::string& destination);
   void chunk(uint32_t id, uint64_t offset, const uint8_t* data,
              std::size_t len);
   void complete(uint32_t id);

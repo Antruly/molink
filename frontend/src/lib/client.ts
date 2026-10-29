@@ -14,6 +14,11 @@ import {
 } from './protocol'
 import { formatHost } from './net'
 import { H264StreamDecoder, h264StreamSupported } from './h264-stream'
+import {
+  VpxStreamDecoder,
+  vpxStreamSupported,
+  type VpxCodec,
+} from './vpx-stream'
 import { WtTransport, fingerprintBytes, webTransportSupported } from './webtransport'
 
 export type ClientPhase = 'idle' | 'connecting' | 'live' | 'error' | 'disconnected'
@@ -364,6 +369,9 @@ export class MolinkClient {
   private h264Capable = false
   /// The UI has already been told this session is on the H.264 stream.
   private streamCodecNotified = false
+  private vp8Capable = false
+  private vp9Capable = false
+  private vpxDecoders: Partial<Record<VpxCodec, VpxStreamDecoder>> = {}
   /** ICE servers the host advertised for the WebRTC track. */
   private iceServers: string[] = []
   /** The host offered to drive the frame clock for this session. */
@@ -467,6 +475,16 @@ export class MolinkClient {
         this.sendHello()
       }
     })
+    // VP8/VP9 are decoded through WebCodecs too; the host only uses them when
+    // every viewer says it can.
+    const announce = (codec: VpxCodec, capable: boolean) => {
+      if (capable) return
+      if (codec === 'vp8') this.vp8Capable = true
+      else this.vp9Capable = true
+      if (this.isLive() && this.helloPayload !== null) this.sendHello()
+    }
+    void vpxStreamSupported('vp9').then((ok) => announce('vp9', ok))
+    void vpxStreamSupported('vp8').then((ok) => announce('vp8', ok))
   }
 
   setHandlers(handlers: Partial<ClientHandlers>): void {
@@ -618,6 +636,8 @@ export class MolinkClient {
           // This browser can decode the host's H.264 stream through WebCodecs;
           // the host picks it when AV1 is not decodable by every viewer.
           h264_stream: this.h264Capable,
+          vp9_stream: this.vp9Capable,
+          vp8_stream: this.vp8Capable,
           // A browser with WebRTC lets the host send H.264 as a real video
           // track instead of MOLK frames.
           webrtc: typeof RTCPeerConnection !== 'undefined',
@@ -654,6 +674,8 @@ export class MolinkClient {
       this.pushSupported = false
       this.pushVideo = false
       this.h264.close()
+      for (const decoder of Object.values(this.vpxDecoders)) decoder?.close()
+      this.vpxDecoders = {}
       this.streamCodecNotified = false
       this.closeRtc()
       this.pendingFrame = false
@@ -1456,10 +1478,15 @@ export class MolinkClient {
           .catch(() => undefined)
         return
       }
-      if (frame.codec === Codec.h264Stream) {
-        // Low-delay H.264 stream: one whole screen per packet, decoded by
-        // WebCodecs. Like the AV1 stream it only decodes on top of the
-        // previous picture, so nothing is painted until a keyframe arrived.
+      if (
+        frame.codec === Codec.h264Stream ||
+        frame.codec === Codec.vp8Stream ||
+        frame.codec === Codec.vp9Stream
+      ) {
+        // Low-delay stream: one whole screen per packet, decoded by WebCodecs
+        // (H.264 as Annex-B, VP8/VP9 as raw codec frames). Like the AV1 stream
+        // it only decodes on top of the previous picture, so nothing is
+        // painted until a keyframe arrived.
         if ((frame.flags & FrameFlag.keyframe) !== 0) this.hasImage = true
         if (frame.tiles.length === 0) return
         if (!this.hasImage) {
@@ -1477,7 +1504,13 @@ export class MolinkClient {
         this.noteApplied(frame, packet.tsUs)
         if (!this.streamCodecNotified) {
           this.streamCodecNotified = true
-          this.handlers.onStreamVideo?.('h264')
+          this.handlers.onStreamVideo?.(
+            frame.codec === Codec.h264Stream
+              ? 'h264'
+              : frame.codec === Codec.vp9Stream
+                ? 'vp9'
+                : 'vp8',
+          )
         }
         const keyframe = (frame.flags & FrameFlag.keyframe) !== 0
         // A copy: WebCodecs keeps the buffer until the chunk is consumed, and
@@ -1489,9 +1522,13 @@ export class MolinkClient {
         // deadlocks after the first frame: one chunk goes in, nothing comes
         // out, and the queue never moves again. Output order follows input
         // order, so painting as promises resolve keeps the picture ordered.
+        const decoder =
+          frame.codec === Codec.h264Stream
+            ? this.h264
+            : this.vpxDecoder(frame.codec === Codec.vp9Stream ? 'vp9' : 'vp8')
         this.frameQueue = this.frameQueue
           .then(() => {
-            void this.h264
+            void decoder
               .decode(accessUnit, keyframe)
               .then((picture) => {
                 if (picture === null) {
@@ -1889,6 +1926,15 @@ export class MolinkClient {
   }
 
   /// Coalesces keyframe requests while stale frames are being dropped.
+  private vpxDecoder(codec: VpxCodec): VpxStreamDecoder {
+    let decoder = this.vpxDecoders[codec]
+    if (decoder === undefined) {
+      decoder = new VpxStreamDecoder(codec)
+      this.vpxDecoders[codec] = decoder
+    }
+    return decoder
+  }
+
   private requestKeyframeThrottled(): void {
     const now = performance.now()
     if (now - this.lastKeyframeRequest < 300) return

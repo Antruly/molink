@@ -18,12 +18,24 @@ import {
   type DragEvent,
 } from 'react'
 import { useTranslation } from 'react-i18next'
+import {
+  collectDropEntries,
+  onDroppedFiles,
+  type StagedFile,
+} from '../lib/file-drop'
 import type {
   ClipboardFileEntry,
   FileEntry,
   FileMessage,
 } from '../lib/client'
 import type { SessionConnection } from '../lib/session-connection'
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`
+}
 
 interface UploadItem {
   key: number
@@ -92,8 +104,15 @@ export function FileTransferPanel({
   const [clipboardFiles, setClipboardFiles] = useState<ClipboardFileEntry[]>([])
   const [clipboardNote, setClipboardNote] = useState<string | null>(null)
 
-  const queueRef = useRef<{ key: number; file: File }[]>([])
-  const activeRef = useRef<{ key: number; file: File } | null>(null)
+  const queueRef = useRef<{ key: number; file: File; path: string }[]>([])
+  const activeRef = useRef<{ key: number; file: File; path: string } | null>(
+    null,
+  )
+  // The remote folder uploads land in. Empty means the host default
+  // (~/moLink); any path the host user can write is accepted.
+  const [dest, setDest] = useState('~/moLink')
+  const destRef = useRef(dest)
+  destRef.current = dest
   const connectionRef = useRef<SessionConnection | null>(connection)
   const downloadRef = useRef<{
     id: number
@@ -179,8 +198,9 @@ export function FileTransferPanel({
       ),
     )
     connectionRef.current?.sendFileAction('offer', {
-      name: next.file.name,
+      name: next.path,
       size: next.file.size,
+      dest: destRef.current,
     })
   }, [])
 
@@ -348,32 +368,44 @@ export function FileTransferPanel({
     }
   }
 
-  const enqueue = (files: FileList | File[]) => {
-    const items = Array.from(files)
-    if (items.length === 0) return
-    for (const file of items) {
+  // Stages what will be sent; "send" starts the queue. A folder drag arrives
+  // as `sub/dir/file` paths so the host can recreate the tree.
+  const enqueue = (entries: StagedFile[]) => {
+    if (entries.length === 0) return
+    for (const entry of entries) {
       const key = nextKey.current++
-      queueRef.current.push({ key, file })
+      const path = entry.path === '' ? entry.file.name : entry.path
+      queueRef.current.push({ key, file: entry.file, path })
       setUploads((previous) => [
         ...previous,
         {
           key,
-          name: file.name,
-          size: file.size,
+          name: path,
+          size: entry.file.size,
           sent: 0,
           status: 'queued',
         },
       ])
     }
-    startNext()
   }
 
   const onDrop = (event: DragEvent) => {
     event.preventDefault()
     // Keep the session surface from treating this as a drop-to-paste too.
     event.stopPropagation()
-    enqueue(event.dataTransfer.files)
+    if (event.dataTransfer) {
+      void collectDropEntries(event.dataTransfer).then((items) =>
+        enqueue(items),
+      )
+    }
   }
+
+  // A drop on the session surface is handed to this drawer.
+  useEffect(() => {
+    return onDroppedFiles((items) => enqueue(items))
+    // enqueue only touches refs and the upload list.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   if (!open) return null
 
@@ -473,10 +505,44 @@ export function FileTransferPanel({
               multiple
               className="hidden"
               onChange={(event) => {
-                if (event.target.files) enqueue(event.target.files)
+                const picked = event.target.files
+                if (picked) {
+                  enqueue(
+                    Array.from(picked).map((file) => ({
+                      file,
+                      path: file.name,
+                    })),
+                  )
+                }
                 event.target.value = ''
               }}
             />
+          </div>
+
+          <div className="rounded-lg border border-line-soft bg-panel/50 p-2.5">
+            <div className="text-[10px] uppercase tracking-[0.16em] text-muted">
+              {t('files.destination')}
+            </div>
+            <div className="mt-1 flex items-center gap-2">
+              <input
+                value={dest}
+                onChange={(event) => setDest(event.target.value)}
+                placeholder="~/moLink"
+                className="field flex-1 font-mono text-[11px]"
+                aria-label={t('files.destination')}
+              />
+              <button
+                type="button"
+                disabled={busy || !uploads.some((item) => item.status === 'queued')}
+                onClick={() => startNext()}
+                className="btn btn-primary h-8 px-3 text-[11px]"
+              >
+                {t('files.send')}
+              </button>
+            </div>
+            <div className="mt-1 text-[10px] leading-relaxed text-muted">
+              {t('files.destinationHint')}
+            </div>
           </div>
 
           <div className="space-y-1.5">
@@ -496,6 +562,9 @@ export function FileTransferPanel({
                     <FileIcon size={13} className="shrink-0 text-muted" />
                     <span className="min-w-0 flex-1 truncate text-[11px] text-ink">
                       {item.name}
+                    </span>
+                    <span className="shrink-0 text-[10px] text-muted">
+                      {formatBytes(item.size)}
                     </span>
                     <span className="shrink-0 text-[10px] text-muted">
                       {item.status === 'done'

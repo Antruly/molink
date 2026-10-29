@@ -80,16 +80,25 @@ enum class stream_choice : uint8_t {
   none,
   av1,
   h264,
+  vp9,
+  vp8,
 };
 
 /// AV1 wins whenever every viewer can decode it and the host allows it: it
 /// compresses far better. H.264 is the fallback for a viewer set that cannot
 /// take AV1 (the browser decodes it through WebCodecs), and when any viewer
 /// can decode neither, the capture stays on tiles.
+/// The rungs a viewer set can all decode, best first, with the hardware codecs
+/// (AV1, H.264) ahead of the CPU ones (VP9, VP8). `av1_enabled` is the host
+/// switch: disabling AV1 in the settings drops that rung even when everyone
+/// can decode it.
 inline stream_choice choose_video_codec(bool av1_enabled, bool all_av1,
-                                         bool all_h264) {
+                                         bool all_h264, bool all_vp9 = false,
+                                         bool all_vp8 = false) {
   if (av1_enabled && all_av1) return stream_choice::av1;
   if (all_h264) return stream_choice::h264;
+  if (all_vp9) return stream_choice::vp9;
+  if (all_vp8) return stream_choice::vp8;
   return stream_choice::none;
 }
 

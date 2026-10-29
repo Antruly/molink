@@ -17,6 +17,8 @@ enum class video_codec : uint8_t {
   av1_patches,  ///< intra-only AV1 rectangles over a tile base image
   av1_stream,   ///< low-delay AV1 stream: keyframe, then P frames
   h264_stream,  ///< low-delay H.264 stream: keyframe, then P frames
+  vp9_stream,   ///< low-delay VP9 stream (libvpx, CPU)
+  vp8_stream,   ///< low-delay VP8 stream (libvpx, CPU)
 };
 
 inline const char* video_codec_name(video_codec codec) {
@@ -27,6 +29,10 @@ inline const char* video_codec_name(video_codec codec) {
       return "av1-stream";
     case video_codec::h264_stream:
       return "h264-stream";
+    case video_codec::vp9_stream:
+      return "vp9-stream";
+    case video_codec::vp8_stream:
+      return "vp8-stream";
   }
   return "unknown";
 }
@@ -43,6 +49,8 @@ struct video_encoder_backend {
   bool av1_patches = false;
   bool av1_stream = false;
   bool h264_stream = false;
+  bool vp9_stream = false;
+  bool vp8_stream = false;
   std::string detail;
 };
 
@@ -105,12 +113,20 @@ class video_encoder {
 /// A stream beats patches (a moving picture costs a fraction of the bytes), and
 /// AV1 beats H.264 when both are decodable because it is smaller. The caller
 /// walks this list and takes the first codec the host can actually encode.
+/// Rungs in preference order. The hardware codecs (NVENC AV1, then NVENC
+/// H.264) rank above the CPU ones (libvpx VP9, then VP8) because the user's
+/// rule is "use hardware acceleration when it is there"; within the same
+/// acceleration class the better compressor wins.
 inline std::vector<video_codec> video_ladder(bool av1_stream_ok,
                                              bool h264_stream_ok,
-                                             bool av1_patches_ok) {
+                                             bool av1_patches_ok,
+                                             bool vp9_stream_ok = false,
+                                             bool vp8_stream_ok = false) {
   std::vector<video_codec> ladder;
   if (av1_stream_ok) ladder.push_back(video_codec::av1_stream);
   if (h264_stream_ok) ladder.push_back(video_codec::h264_stream);
+  if (vp9_stream_ok) ladder.push_back(video_codec::vp9_stream);
+  if (vp8_stream_ok) ladder.push_back(video_codec::vp8_stream);
   if (av1_patches_ok) ladder.push_back(video_codec::av1_patches);
   return ladder;
 }

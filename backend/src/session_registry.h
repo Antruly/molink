@@ -29,6 +29,8 @@ struct session_info {
   /// The client advertised that it can decode a low-delay H.264 stream
   /// (WebCodecs in the browser). Used when not every viewer can decode AV1.
   bool h264_stream = false;
+  bool vp9_stream = false;
+  bool vp8_stream = false;
   /// The client advertised `seq_clock` in hello: it understands the per-cell
   /// applied-sequence map and can name the cells it missed.
   bool seq_clock = false;

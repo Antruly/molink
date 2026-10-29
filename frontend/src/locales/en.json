@@ -476,8 +476,8 @@
     "close": "Close file transfer",
     "send": "Send",
     "receive": "Receive",
-    "dropHint": "Drop files here, or choose files",
-    "receivePath": "Saved to Downloads/moLink on the remote device",
+    "dropHint": "Drop files or folders, or choose files",
+    "receivePath": "Saved under ~/moLink by default (editable)",
     "choose": "Choose files",
     "done": "Done",
     "failed": "Failed",
@@ -493,7 +493,9 @@
     "receiveAll": "Receive all",
     "copyToClipboard": "Copy to remote clipboard",
     "copied": "Copied {{count}} file(s) to the remote clipboard",
-    "copyFailed": "Could not set the remote clipboard"
+    "copyFailed": "Could not set the remote clipboard",
+    "destination": "Destination",
+    "destinationHint": "Defaults to ~/moLink (created when missing). Any folder the host user can write is accepted; dropped folders keep their structure."
   },
   "update": {
     "available": "Update",

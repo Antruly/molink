@@ -386,19 +386,32 @@ av1_stream_encoder* capture_base::stream_for_frame(
   // caused it. Without this a session that stays on tiles looks identical to
   // one the policy never armed.
   if (mode_changed && std::getenv("MOLINK_STREAM_LOG") != nullptr) {
-    std::fprintf(stderr, "host: stream %s (moving=%.1f%%, viewers av1_stream=%d "
-                         "h264_stream=%d)\n",
+    std::fprintf(stderr,
+                 "host: stream %s (moving=%.1f%%, viewers av1=%d h264=%d "
+                 "vp9=%d vp8=%d)\n",
                  stream_policy_.streaming ? "on" : "off", moving * 100.0,
                  av1_stream_allowed_.load() ? 1 : 0,
-                 h264_stream_allowed_.load() ? 1 : 0);
+                 h264_stream_allowed_.load() ? 1 : 0,
+                 vp9_stream_allowed_.load() ? 1 : 0,
+                 vp8_stream_allowed_.load() ? 1 : 0);
   }
   // Walk the ladder the viewers can decode, best first, and take the first
   // codec this host can actually encode: AV1 stream, then H.264 stream. A
   // viewer set that can decode neither keeps the capture on tiles.
   const std::vector<video_codec> ladder =
       video_ladder(av1_stream_allowed_.load(), h264_stream_allowed_.load(),
-                   /*av1_patches_ok=*/false);
-  if (ladder.empty()) return nullptr;
+                   /*av1_patches_ok=*/false, vp9_stream_allowed_.load(),
+                   vp8_stream_allowed_.load());
+  if (ladder.empty()) {
+    if (std::getenv("MOLINK_STREAM_LOG") != nullptr) {
+      static bool logged = false;
+      if (!logged) {
+        logged = true;
+        std::fprintf(stderr, "host: no stream codec every viewer can decode\n");
+      }
+    }
+    return nullptr;
+  }
   if (stream_encoder_ && video_codec_ != ladder.front()) {
     // A better rung became available (or the old one stopped being
     // decodable): the old bitstream cannot continue.

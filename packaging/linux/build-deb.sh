@@ -21,7 +21,7 @@ if [ -n "${MOLINK_AV1_SDK:-}" ]; then
   AV1_ARG+=("-DMOLINK_AV1_SDK=$MOLINK_AV1_SDK")
 fi
 cmake -S "$ROOT/backend" -B "$ROOT/backend/build" -DCMAKE_BUILD_TYPE=Release \
-  -DMOLINK_ENABLE_AV1=ON -DMOLINK_ENABLE_JPEG=ON \
+  -DMOLINK_ENABLE_AV1=ON -DMOLINK_ENABLE_JPEG=ON -DMOLINK_ENABLE_VPX=ON \
   ${AV1_ARG[@]+"${AV1_ARG[@]}"} ${MOLINK_EXTRA_CMAKE_ARGS:-} >/dev/null
 cmake --build "$ROOT/backend/build" --parallel
 
@@ -64,6 +64,12 @@ DATACHANNEL_LIB=$(ldd "$ROOT/backend/build/molink-core" 2>/dev/null \
                   | awk '/libdatachannel/{print $3}' | head -n 1)
 if [ -n "$DATACHANNEL_LIB" ]; then
   cp -P "$(dirname "$DATACHANNEL_LIB")"/libdatachannel.so* $STAGE$PREFIX/lib/
+fi
+# VP9/VP8 stream encoding links libvpx; bundle whatever the core resolved.
+VPX_LIB=$(ldd "$ROOT/backend/build/molink-core" 2>/dev/null \
+          | awk '/libvpx/{print $3}' | head -n 1)
+if [ -n "$VPX_LIB" ]; then
+  cp -P "$(dirname "$VPX_LIB")"/libvpx.so* $STAGE$PREFIX/lib/
 fi
 
 ln -sf "$PREFIX/bin/moLink" "$STAGE/usr/bin/moLink"

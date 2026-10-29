@@ -214,6 +214,7 @@ set(MOLINK_CORE_SOURCES
   src/capture/frame_encode.cpp
   src/capture/dirty_rects.cpp
   src/capture/av1_encoder.cpp
+  src/capture/vpx_stream_encoder.cpp
   src/capture/av1_frame.cpp
   src/capture/jpeg_encode.cpp
   src/surface/frame_surface.cpp
@@ -342,6 +343,36 @@ if(MOLINK_ENABLE_AV1)
   endif()
   if(NOT MOLINK_DAV1D_FOUND)
     message(STATUS "molink: dav1d not found; AV1 decoding disabled")
+  endif()
+endif()
+
+# VP9/VP8 stream encoding is optional: libvpx provides the encoder cells. The
+# page decodes both through WebCodecs. Point MOLINK_VPX_SDK at an unpacked
+# libvpx dev tree when the headers are not installed:
+#
+#   cmake -S backend -B backend/build -DMOLINK_ENABLE_VPX=ON \
+#     -DMOLINK_VPX_SDK=/path/to/libvpx-dev-root
+option(MOLINK_ENABLE_VPX
+  "Enable VP9/VP8 stream encoding (needs libvpx)" OFF)
+set(MOLINK_VPX_SDK "" CACHE PATH
+  "Unpacked libvpx dev tree (usr/include, usr/lib) when the package is absent")
+set(MOLINK_HAVE_VPX 0)
+if(MOLINK_ENABLE_VPX)
+  if(MOLINK_VPX_SDK)
+    find_path(VPX_INCLUDE_DIR vpx/vpx_encoder.h
+      HINTS "${MOLINK_VPX_SDK}/usr/include")
+    find_library(VPX_LIBRARY NAMES vpx
+      HINTS "${MOLINK_VPX_SDK}/usr/lib/x86_64-linux-gnu"
+            "${MOLINK_VPX_SDK}/usr/lib")
+  else()
+    find_path(VPX_INCLUDE_DIR vpx/vpx_encoder.h)
+    find_library(VPX_LIBRARY NAMES vpx)
+  endif()
+  if(VPX_INCLUDE_DIR AND VPX_LIBRARY)
+    set(MOLINK_HAVE_VPX 1)
+    message(STATUS "molink: VP9/VP8 stream encoding enabled (libvpx ${VPX_LIBRARY})")
+  else()
+    message(STATUS "molink: libvpx not found; VP9/VP8 streams disabled")
   endif()
 endif()
 
@@ -485,6 +516,11 @@ if(MOLINK_BUILD_CORE)
     target_include_directories(molink-core PRIVATE ${DAV1D_INCLUDE_DIR})
     target_link_libraries(molink-core PRIVATE ${DAV1D_LIBRARY})
     message(STATUS "molink: AV1 rectangle decoding enabled (dav1d)")
+  endif()
+  if(MOLINK_HAVE_VPX)
+    target_compile_definitions(molink-core PRIVATE MOLINK_HAVE_VPX=1)
+    target_include_directories(molink-core PRIVATE ${VPX_INCLUDE_DIR})
+    target_link_libraries(molink-core PRIVATE ${VPX_LIBRARY})
   endif()
   if(MOLINK_HAVE_JPEG)
     target_compile_definitions(molink-core PRIVATE MOLINK_HAVE_JPEG=1)
@@ -676,6 +712,24 @@ set_target_properties(molink-core-rate-quality-test PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 add_test(NAME rate_quality COMMAND molink-core-rate-quality-test)
 
+# The libvpx stream encoder: keyframe, then cheaper deltas. Skips without a
+# libvpx build.
+add_executable(molink-core-vpx-stream-test
+  tests/vpx_stream_test.cpp
+  src/capture/vpx_stream_encoder.cpp
+)
+target_include_directories(molink-core-vpx-stream-test PRIVATE src)
+if(MOLINK_HAVE_VPX)
+  target_compile_definitions(molink-core-vpx-stream-test PRIVATE
+    MOLINK_HAVE_VPX=1)
+  target_include_directories(molink-core-vpx-stream-test PRIVATE
+    ${VPX_INCLUDE_DIR})
+  target_link_libraries(molink-core-vpx-stream-test PRIVATE ${VPX_LIBRARY})
+endif()
+set_target_properties(molink-core-vpx-stream-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME vpx_stream COMMAND molink-core-vpx-stream-test)
+
 # WebTransport loopback: a real session over loopback QUIC, both halves of the
 # transport (reliable stream + fragmented datagrams). Skips without HTTP/3.
 if(MOLINK_HAVE_WEBTRANSPORT AND OpenSSL_FOUND)
@@ -728,6 +782,7 @@ add_test(NAME wt_framing COMMAND molink-core-wt-framing-test)
 add_executable(molink-core-video-encoder-test
   tests/video_encoder_test.cpp
   src/capture/av1_encoder.cpp
+  src/capture/vpx_stream_encoder.cpp
 )
 target_include_directories(molink-core-video-encoder-test PRIVATE src)
 set_target_properties(molink-core-video-encoder-test PROPERTIES
@@ -843,6 +898,7 @@ if(MOLINK_HAVE_NVENC)
     tests/nvenc_stream_test.cpp
     src/capture/nvenc_av1_encoder.cpp
     src/capture/av1_encoder.cpp
+    src/capture/vpx_stream_encoder.cpp
   )
   target_include_directories(molink-core-nvenc-stream-test PRIVATE
     src ${NVENC_INCLUDE_DIR})
@@ -886,6 +942,7 @@ if(MOLINK_SVT_AV1_FOUND AND MOLINK_DAV1D_FOUND)
   add_executable(molink-core-av1-test
     tests/av1_roundtrip_test.cpp
     src/capture/av1_encoder.cpp
+    src/capture/vpx_stream_encoder.cpp
   )
   target_include_directories(molink-core-av1-test PRIVATE
     src ${SVT_AV1_INCLUDE_DIR} ${DAV1D_INCLUDE_DIR})
@@ -905,6 +962,7 @@ if(MOLINK_SVT_AV1_FOUND AND MOLINK_DAV1D_FOUND)
     tests/av1_frame_test.cpp
     src/capture/av1_frame.cpp
     src/capture/av1_encoder.cpp
+    src/capture/vpx_stream_encoder.cpp
     src/protocol/frame_packet.cpp
   )
   target_include_directories(molink-core-av1-frame-test PRIVATE
@@ -926,6 +984,7 @@ if(MOLINK_SVT_AV1_FOUND AND MOLINK_DAV1D_FOUND)
     tests/av1_stream_test.cpp
     src/capture/av1_frame.cpp
     src/capture/av1_encoder.cpp
+    src/capture/vpx_stream_encoder.cpp
     src/protocol/frame_packet.cpp
   )
   target_include_directories(molink-core-av1-stream-test PRIVATE
@@ -952,6 +1011,7 @@ if(MOLINK_SVT_AV1_FOUND AND MOLINK_DAV1D_FOUND)
     src/capture/dirty_rects.cpp
     src/capture/av1_frame.cpp
     src/capture/av1_encoder.cpp
+    src/capture/vpx_stream_encoder.cpp
     src/protocol/frame_packet.cpp
     src/compression.cpp
   )

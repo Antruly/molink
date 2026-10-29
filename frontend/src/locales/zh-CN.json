@@ -476,8 +476,8 @@
     "close": "关闭文件传输",
     "send": "发送",
     "receive": "接收",
-    "dropHint": "拖入文件，或选择文件",
-    "receivePath": "远程保存到 Downloads/moLink",
+    "dropHint": "拖入文件或文件夹，或选择文件",
+    "receivePath": "远程默认保存到 ~/moLink（可改）",
     "choose": "选择文件",
     "done": "已完成",
     "failed": "失败",
@@ -493,7 +493,9 @@
     "receiveAll": "全部接收",
     "copyToClipboard": "复制到远程剪贴板",
     "copied": "已复制 {{count}} 个文件到远程剪贴板",
-    "copyFailed": "复制到远程剪贴板失败"
+    "copyFailed": "复制到远程剪贴板失败",
+    "destination": "接收目录",
+    "destinationHint": "默认 ~/moLink（不存在会自动创建）；可以填任何主机用户有权限写入的目录，文件夹会按原结构创建。"
   },
   "update": {
     "available": "可更新",

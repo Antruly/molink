@@ -60,6 +60,8 @@ export const Codec = {
   jpeg: 13,
   /** Low-delay H.264 stream frame (Annex-B); decoded through WebCodecs. */
   h264Stream: 14,
+  vp8Stream: 15,
+  vp9Stream: 16,
 } as const
 
 /** Bytes per pixel after decompression; 0 when the codec is not pixel-based. */
