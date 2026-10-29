@@ -92,8 +92,9 @@ class secure_capture final : public capture_base {
       err = "secure desktop has no size";
       return false;
     }
-    secure_desktop_ = info.find("\"desktop\":\"Default\"") ==
-                      std::string::npos;
+    secure_desktop_ =
+        info.find("\"locked\":1") != std::string::npos ||
+        info.find("\"desktop\":\"Default\"") == std::string::npos;
     running_.store(true);
     thread_ = std::thread([this] { run(); });
     return true;
@@ -229,7 +230,7 @@ class secure_capture final : public capture_base {
     const uint16_t tile = std::max<uint16_t>(
         64, options_.tile_size == 0 ? 256 : options_.tile_size);
     protocol::frame_header frame_header;
-    frame_header.frame_seq = seq_++;
+    frame_header.frame_seq = next_capture_seq();
     frame_header.codec = static_cast<uint8_t>(protocol::codec::bgra);
     frame_header.flags = keyframe ? protocol::kFrameFlagKeyframe
                                   : protocol::kFrameFlagPartial;
@@ -301,7 +302,6 @@ class secure_capture final : public capture_base {
   mutable std::mutex pixels_mutex_;
   bool have_previous_ = false;
   std::chrono::steady_clock::time_point last_full_{};
-  uint32_t seq_ = 0;
   /// Last distinct helper/capture error, so the log shows it once.
   std::string last_error;
   std::thread thread_;
@@ -315,6 +315,38 @@ std::unique_ptr<capture_source> make_windows_secure_capture(
 }
 
 }  // namespace molink
+
+namespace molink {
+bool helper_secure_desktop(bool& reachable) {
+  reachable = false;
+  std::vector<uint8_t> reply;
+  if (!helper_command("info", reply) || reply.size() < 8) return false;
+  reachable = true;
+  const std::string info(reinterpret_cast<const char*>(reply.data()),
+                         reply.size());
+  // A locked console can report the "Default" desktop once the logon UI takes
+  // over, so the lock state is the reliable signal.
+  if (info.find("\"locked\":1") != std::string::npos) return true;
+  return info.find("\"desktop\":\"Default\"") == std::string::npos;
+}
+
+bool secure_desktop_showing() {
+  HDESK desk = OpenInputDesktop(0, FALSE, DESKTOP_READOBJECTS);
+  if (desk == nullptr) return false;
+  wchar_t name[64] = {};
+  DWORD needed = 0;
+  bool secure = false;
+  if (GetUserObjectInformationW(desk, UOI_NAME, name,
+                                sizeof(name) - sizeof(wchar_t), &needed)) {
+    // "Default" is the desktop DXGI can capture; Winlogon and the UAC secure
+    // desktop are the ones only the SYSTEM helper can see.
+    secure = _wcsicmp(name, L"Default") != 0;
+  }
+  CloseDesktop(desk);
+  return secure;
+}
+}  // namespace molink
+
 #else
 namespace molink {
 std::unique_ptr<capture_source> make_windows_secure_capture(
@@ -322,4 +354,13 @@ std::unique_ptr<capture_source> make_windows_secure_capture(
   return nullptr;
 }
 }  // namespace molink
+
+namespace molink {
+bool secure_desktop_showing() { return false; }
+bool helper_secure_desktop(bool& reachable) {
+  reachable = false;
+  return false;
+}
+}  // namespace molink
+
 #endif

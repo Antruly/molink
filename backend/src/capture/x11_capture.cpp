@@ -905,7 +905,8 @@ class x11_capture final : public capture_base {
     }
 
     protocol::frame_header header;
-    header.frame_seq = seq_;
+    const uint32_t frame_seq = next_capture_seq();
+    header.frame_seq = frame_seq;
     header.codec = static_cast<uint8_t>(protocol::codec::bgra);
     header.flags = keyframe ? protocol::kFrameFlagKeyframe
                             : protocol::kFrameFlagPartial;
@@ -963,7 +964,7 @@ class x11_capture final : public capture_base {
             .count()));
 
     auto frame = std::make_shared<captured_frame>();
-    frame->seq = seq_++;
+    frame->seq = frame_seq;
     frame->ts_us = epoch_us();
     frame->keyframe = keyframe;
     frame->width = width_;
@@ -1031,7 +1032,6 @@ class x11_capture final : public capture_base {
   mutable std::recursive_mutex pixels_mutex_;
   std::vector<uint8_t> previous_;
   bool have_previous_ = false;
-  uint32_t seq_ = 0;
 };
 
 }  // namespace

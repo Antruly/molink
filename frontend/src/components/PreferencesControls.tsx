@@ -246,6 +246,7 @@ function Av1Controls({ token }: { token: string }) {
   const [maxArea, setMaxArea] = useState(35)
   const [threads, setThreads] = useState(4)
   const [keyframeInterval, setKeyframeInterval] = useState(0)
+  const [streamEnter, setStreamEnter] = useState(15)
   const [codecPreference, setCodecPreference] = useState('auto')
   const [busy, setBusy] = useState(false)
   const [note, setNote] = useState<'saved' | 'failed' | null>(null)
@@ -262,6 +263,7 @@ function Av1Controls({ token }: { token: string }) {
     setMaxArea(next.effective?.max_area_percent ?? 35)
     setThreads(next.effective?.threads ?? 4)
     setKeyframeInterval(next.keyframe_interval_seconds ?? 0)
+    setStreamEnter(next.stream_enter_percent ?? 15)
     setCodecPreference(next.codec_preference ?? 'auto')
   }
 
@@ -290,6 +292,7 @@ function Av1Controls({ token }: { token: string }) {
         max_area_percent: autoParams ? 0 : maxArea,
         threads: autoParams ? 0 : threads,
         keyframe_interval_seconds: keyframeInterval,
+        stream_enter_percent: streamEnter,
         stream_codec: codecPreference,
       })
       apply(next)
@@ -372,6 +375,28 @@ function Av1Controls({ token }: { token: string }) {
           <option value="mixed">{t('settings.videoModeMixed')}</option>
           <option value="tiles">{t('settings.videoModeTiles')}</option>
         </select>
+      </label>
+
+      <label className="block">
+        <span className="mb-1 block text-[12px] font-medium text-ink">
+          {t('settings.streamEnter')}
+        </span>
+        <p className="mb-1 text-[11px] leading-relaxed text-muted">
+          {t('settings.streamEnterHint')}
+        </p>
+        <input
+          type="number"
+          min={1}
+          max={100}
+          step={1}
+          value={streamEnter}
+          onChange={(event) =>
+            setStreamEnter(
+              Math.min(100, Math.max(1, Number(event.target.value) || 15)),
+            )
+          }
+          className="field"
+        />
       </label>
 
       <label className="block">

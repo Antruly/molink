@@ -129,6 +129,7 @@ quality_profile quality_profile_for(quality_mode mode) {
       profile.lossless = false;
       profile.av1_qp = 32;
       profile.av1_max_area_percent = 60;
+      profile.stream_bits_per_pixel_x1000 = 25;
       break;
     case quality_mode::quality:
       // Keep every colour bit, spend more CPU on zlib, and never ignore a
@@ -140,6 +141,7 @@ quality_profile quality_profile_for(quality_mode mode) {
       // area is much faster than QP 4 over the whole screen.
       profile.av1_qp = 12;
       profile.av1_max_area_percent = 20;
+      profile.stream_bits_per_pixel_x1000 = 70;
       profile.maximum_change_threshold = 1;
       break;
     case quality_mode::turbo:
@@ -151,6 +153,7 @@ quality_profile quality_profile_for(quality_mode mode) {
       profile.lossless = false;
       profile.av1_qp = 36;
       profile.av1_grayscale = true;
+      profile.stream_bits_per_pixel_x1000 = 15;
       profile.av1_max_area_percent = 60;
       break;
     case quality_mode::ultra:
@@ -161,6 +164,8 @@ quality_profile quality_profile_for(quality_mode mode) {
       profile.lossless = true;
       profile.av1_qp = 8;
       profile.av1_max_area_percent = 15;
+      // The top of the ladder: constant quality, no bitrate ceiling.
+      profile.stream_bits_per_pixel_x1000 = 0;
       profile.maximum_change_threshold = 1;
       break;
     case quality_mode::lossless:
@@ -170,6 +175,7 @@ quality_profile quality_profile_for(quality_mode mode) {
       profile.lossless = true;
       profile.av1_qp = 3;
       profile.av1_max_area_percent = 12;
+      profile.stream_bits_per_pixel_x1000 = 0;
       profile.maximum_change_threshold = 1;
       break;
     case quality_mode::automatic:
@@ -186,6 +192,7 @@ quality_profile quality_profile_for(quality_mode mode) {
       profile.lossless = true;
       profile.av1_qp = 1;
       profile.av1_max_area_percent = 20;
+      profile.stream_bits_per_pixel_x1000 = 0;
       profile.maximum_change_threshold = 1;
       // Undeflated BGRA is the most expensive stream there is; giving AV1 up
       // here would not buy a usable frame rate, only a much larger one.
@@ -197,6 +204,7 @@ quality_profile quality_profile_for(quality_mode mode) {
       profile.effort = compression_effort::balanced;
       profile.av1_qp = 24;
       profile.av1_max_area_percent = 35;
+      profile.stream_bits_per_pixel_x1000 = 45;
       break;
   }
   return profile;
@@ -353,9 +361,23 @@ av1_stream_encoder* capture_base::stream_for_frame(
   const double moving = area > 0 ? static_cast<double>(changed) / area : 0.0;
   // Field diagnosis: MOLINK_STREAM_FORCE=1 pins the stream path on so a host
   // can be checked without making the screen move.
+  // Host setting: how much of the screen must move before the stream takes
+  // over. Read here, on the capture thread, so the setting needs no locking.
+  const double wanted_enter =
+      static_cast<double>(std::clamp(stream_enter_percent_.load(), 1, 100)) /
+      100.0;
+  if (wanted_enter != applied_enter_fraction_) {
+    applied_enter_fraction_ = wanted_enter;
+    stream_policy_.set_enter_fraction(wanted_enter);
+  }
   const bool forced = std::getenv("MOLINK_STREAM_FORCE") != nullptr;
+  // The secure desktop (lock screen, UAC) is captured through the SYSTEM
+  // helper at a few frames per second; its tiles never arrive in time to
+  // paint, so it always uses the stream, whatever the movement rule or the
+  // viewer's codec choice says.
+  const bool secure_desktop = is_secure_desktop();
   bool mode_changed = false;
-  if (forced) {
+  if (forced || secure_desktop) {
     stream_policy_.armed = true;
     mode_changed = !stream_policy_.streaming;
     stream_policy_.streaming = true;
@@ -383,6 +405,9 @@ av1_stream_encoder* capture_base::stream_for_frame(
       request_keyframe();
     }
   }
+  // Mirror the mode for other threads: a session that joins now uses it to
+  // wait for the stream keyframe instead of replaying a tile keyframe.
+  stream_live_.store(stream_policy_.streaming);
   // MOLINK_STREAM_LOG=1: one line per mode change, with the movement that
   // caused it. Without this a session that stays on tiles looks identical to
   // one the policy never armed.
@@ -399,10 +424,33 @@ av1_stream_encoder* capture_base::stream_for_frame(
   // Walk the ladder the viewers can decode, best first, and take the first
   // codec this host can actually encode: AV1 stream, then H.264 stream. A
   // viewer set that can decode neither keeps the capture on tiles.
-  const std::vector<video_codec> ladder =
+  // Stream bitrate budget from the quality preset, shared by every codec:
+  // bit/s = pixels x (bpp/1000) x fps. The top presets return 0, which means
+  // constant quality with no ceiling.
+  const quality_profile budget_profile =
+      quality_profile_for(effective_quality());
+  int budget_kbps = 0;
+  if (budget_profile.stream_bits_per_pixel_x1000 > 0) {
+    const double pixels = static_cast<double>(screen_w) * screen_h;
+    const int fps = (std::max)(1, target_fps_.load());
+    budget_kbps = static_cast<int>(pixels *
+                                  budget_profile.stream_bits_per_pixel_x1000 *
+                                  fps / 1000000.0);
+    budget_kbps = std::clamp(budget_kbps, 400, 60000);
+  }
+  std::vector<video_codec> ladder =
       video_ladder(av1_stream_allowed_.load(), h264_stream_allowed_.load(),
                    /*av1_patches_ok=*/false, vp9_stream_allowed_.load(),
                    vp8_stream_allowed_.load());
+  if (ladder.empty() && (forced || secure_desktop)) {
+    // The secure desktop must stream. If the supervisor has not enabled a
+    // codec for this viewer set yet (it evaluates once a second, and the lock
+    // can land between ticks), fall back to the two the browsers decode
+    // rather than dropping to tiles.
+    ladder = video_ladder(/*av1_stream_ok=*/false, /*h264_stream_ok=*/true,
+                          /*av1_patches_ok=*/false, /*vp9_stream_ok=*/true,
+                          /*vp8_stream_ok=*/false);
+  }
   if (ladder.empty()) {
     if (std::getenv("MOLINK_STREAM_LOG") != nullptr) {
       static bool logged = false;
@@ -413,11 +461,50 @@ av1_stream_encoder* capture_base::stream_for_frame(
     }
     return nullptr;
   }
-  if (stream_encoder_ && video_codec_ != ladder.front()) {
-    // A better rung became available (or the old one stopped being
-    // decodable): the old bitstream cannot continue.
-    stream_encoder_.reset();
-    stream_keyframe_pending_.store(true);
+  const bool budget_changed = applied_budget_kbps_ != budget_kbps;
+  if (stream_encoder_ && (video_codec_ != ladder.front() || budget_changed)) {
+    const bool pending_matches =
+        switch_pending_ && next_codec_ == ladder.front() &&
+        next_budget_kbps_ == budget_kbps;
+    if (pending_matches) {
+      // The new encoder exists and its first encode is a keyframe: take over
+      // now and let the old bitstream go.
+      stream_encoder_ = std::move(stream_encoder_next_);
+      video_codec_ = next_codec_;
+      applied_budget_kbps_ = next_budget_kbps_;
+      switch_pending_ = false;
+      stream_keyframe_pending_.store(true);
+    } else {
+      // Make before break: building the new encoder can take a second on the
+      // CPU VP9/VP8 path. Keep the old one producing frames meanwhile, so the
+      // viewer's picture never stops updating; the swap happens next frame.
+      av1_encoding_settings settings;
+      {
+        std::lock_guard<std::mutex> lock(av1_settings_mutex_);
+        settings = av1_settings_;
+      }
+      av1_encoder_config config;
+      config.device = settings.device;
+      config.speed = settings.speed;
+      config.threads = settings.threads;
+      config.max_bitrate_kbps = budget_kbps;
+      for (const video_codec codec : ladder) {
+        std::string error;
+        if (auto encoder = make_stream_encoder(config, codec, &error)) {
+          stream_encoder_next_ = std::move(encoder);
+          next_codec_ = codec;
+          next_budget_kbps_ = budget_kbps;
+          break;
+        }
+      }
+      if (stream_encoder_next_ != nullptr) {
+        switch_pending_ = true;
+      } else {
+        // The new rung cannot be built: keep the old picture instead of
+        // dropping to tiles, and let the next evaluation try again.
+        stream_keyframe_pending_.store(false);
+      }
+    }
   }
   if (!stream_policy_.streaming && !stream_policy_.armed) return nullptr;
   // A host without any stream encoder (no GPU, no SVT) would otherwise retry
@@ -445,6 +532,7 @@ av1_stream_encoder* capture_base::stream_for_frame(
     config.device = settings.device;
     config.speed = settings.speed;
     config.threads = settings.threads;
+    config.max_bitrate_kbps = budget_kbps;
     video_codec chosen = ladder.front();
     for (const video_codec codec : ladder) {
       std::string error;
@@ -459,7 +547,21 @@ av1_stream_encoder* capture_base::stream_for_frame(
     // log line). A success clears it.
     encoder_retry_at_ms_ = stream_encoder_ ? 0 : monotonic_ms() + kEncoderRetryMs;
     video_codec_ = chosen;
+    applied_budget_kbps_ = stream_encoder_ ? budget_kbps : -1;
     stream_keyframe_pending_.store(true);
+  }
+  if (std::getenv("MOLINK_STREAM_LOG") != nullptr) {
+    static thread_local uint64_t last_mode_log = 0;
+    const uint64_t now = monotonic_ms();
+    if (now - last_mode_log >= 1000) {
+      last_mode_log = now;
+      std::fprintf(stderr,
+                   "host: capture mode streaming=%d secure=%d ladder=%zu "
+                   "encoder=%d backend=%s\n",
+                   stream_policy_.streaming ? 1 : 0, secure_desktop ? 1 : 0,
+                   ladder.size(), stream_encoder_ ? 1 : 0,
+                   backend().c_str());
+    }
   }
   if (!stream_policy_.streaming || !stream_encoder_) return nullptr;
   keyframe = stream_keyframe_pending_.load();
@@ -581,6 +683,11 @@ bool capture_base::cursor(cursor_snapshot& out) const {
   if (!cursor_.valid) return false;
   out = cursor_;
   return true;
+}
+
+uint32_t next_capture_seq() {
+  static std::atomic<uint32_t> seq{0};
+  return ++seq;
 }
 
 capture_stats capture_base::stats() const {

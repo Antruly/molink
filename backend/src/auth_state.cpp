@@ -351,8 +351,9 @@ bool auth_state::set_video_mode(const std::string& mode) {
 }
 
 bool auth_state::set_stream_codec(const std::string& codec) {
-  if (codec != "auto" && codec != "av1" && codec != "h264" &&
-      codec != "vp9" && codec != "vp8") {
+  // "tiles" is the explicit never-stream choice offered by the toolbar.
+  if (codec != "auto" && codec != "tiles" && codec != "av1" &&
+      codec != "h264" && codec != "vp9" && codec != "vp8") {
     return false;
   }
   std::lock_guard<std::mutex> lock(mutex_);
@@ -436,6 +437,12 @@ void auth_state::set_av1_encoding(bool enabled, std::string device,
 void auth_state::set_keyframe_interval_seconds(int seconds) {
   std::lock_guard<std::mutex> lock(mutex_);
   settings_.keyframe_interval_seconds = seconds;
+  persist_locked();
+}
+
+void auth_state::set_stream_enter_percent(int percent) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  settings_.stream_enter_percent = percent < 1 || percent > 100 ? 15 : percent;
   persist_locked();
 }
 

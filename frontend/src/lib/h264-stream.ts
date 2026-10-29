@@ -115,6 +115,9 @@ export class H264StreamDecoder {
   private decoder: VideoDecoder | null = null
   private pending: Array<(frame: VideoFrame | null) => void> = []
   private broken = false
+  /// A delta was dropped, so the reference chain is broken. Later deltas would
+  /// decode into garbage until a keyframe; stay idle until one arrives.
+  private needsKeyframe = false
   private timestamp = 0
   private dropped = 0
 
@@ -134,6 +137,10 @@ export class H264StreamDecoder {
   /// the decoder failed.
   async decode(bytes: Uint8Array, keyframe: boolean): Promise<VideoFrame | null> {
     if (this.broken) return null
+    if (this.needsKeyframe) {
+      if (!keyframe) return null
+      this.close()
+    }
     const nals = splitNalUnits(bytes)
     if (nals.length === 0) return null
     if (this.decoder === null) {
@@ -176,8 +183,10 @@ export class H264StreamDecoder {
     if (decoder.state !== 'configured') return null
     if (!keyframe && decoder.decodeQueueSize >= kMaxQueuedDeltas) {
       // Behind: dropping one delta costs a resync, queueing it costs latency
-      // that never comes back.
+      // that never comes back -- but decoding the deltas after it paints
+      // garbage on a broken reference. Wait for a keyframe instead.
       this.dropped += 1
+      this.needsKeyframe = true
       return null
     }
     const picture = new Promise<VideoFrame | null>((resolve) => {
@@ -213,6 +222,7 @@ export class H264StreamDecoder {
       this.decoder = null
     }
     this.broken = false
+    this.needsKeyframe = false
     this.dropped = 0
   }
 

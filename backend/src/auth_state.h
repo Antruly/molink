@@ -91,6 +91,8 @@ class auth_state {
                         bool full_frame);
   /// Host capture keyframe cadence in seconds; 0 = off.
   void set_keyframe_interval_seconds(int seconds);
+  /// Percentage of the screen that must move before the capture streams.
+  void set_stream_enter_percent(int percent);
   /// Phase-2 directory: the switch is independent from the custom URL (an
   /// empty URL with the switch on means the built-in default).
   bool set_server(std::string url, std::string invite, std::string ca,

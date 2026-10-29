@@ -45,6 +45,10 @@ void run_codec(molink::video_codec codec, const char* name) {
   molink::av1_encoder_config config;
   config.device = "auto";
   config.threads = 2;
+  // Production always hands the encoder a bitrate budget (a preset tier); a
+  // config without one means constant quality, where a cheap delta is not
+  // guaranteed to be smaller than a cheap keyframe.
+  config.max_bitrate_kbps = 4000;
   std::string error;
   std::shared_ptr<molink::av1_stream_encoder> encoder =
       molink::make_vpx_stream_encoder(config, codec, &error);

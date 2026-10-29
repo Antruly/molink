@@ -661,8 +661,10 @@ class nvenc_stream_encoder final : public av1_stream_encoder {
         codec_ == video_codec::h264_stream
             ? (std::min)(51, (std::max)(1, qp) * 51 / 63)
             : (std::clamp)(qp, 1, 63) * 4;
-    if (padded_w != width_ || padded_h != height_ || nv_qp != qp_) {
-      if (!init(padded_w, padded_h, nv_qp, error)) return false;
+    const int wanted_kbps = (std::max)(0, config_.max_bitrate_kbps);
+    if (padded_w != width_ || padded_h != height_ || nv_qp != qp_ ||
+        wanted_kbps != bitrate_kbps_) {
+      if (!init(padded_w, padded_h, nv_qp, wanted_kbps, error)) return false;
       // A new session has no reference picture; the first frame must be a
       // keyframe whatever the caller asked for.
       keyframe = true;
@@ -754,7 +756,8 @@ class nvenc_stream_encoder final : public av1_stream_encoder {
     return true;
   }
 
-  bool init(int width, int height, int qp, std::string& error) {
+  bool init(int width, int height, int qp, int max_kbps,
+            std::string& error) {
     shutdown_buffers();
     if (session_ != nullptr) {
       api_.fn.nvEncDestroyEncoder(session_);
@@ -796,10 +799,25 @@ class nvenc_stream_encoder final : public av1_stream_encoder {
     // previous-picture chain whose length the capture controls.
     config.gopLength = NVENC_INFINITE_GOPLENGTH;
     config.frameIntervalP = 1;
-    config.rcParams.rateControlMode = NV_ENC_PARAMS_RC_CONSTQP;
-    config.rcParams.constQP.qpIntra = static_cast<uint32_t>(qp);
-    config.rcParams.constQP.qpInterP = static_cast<uint32_t>(qp);
-    config.rcParams.constQP.qpInterB = static_cast<uint32_t>(qp);
+    if (max_kbps > 0) {
+      // A bitrate ceiling from the quality preset. VBR lets a keyframe spend
+      // more than the average and a still screen spend almost nothing, while
+      // the whole stream stays inside the budget every codec shares.
+      config.rcParams.rateControlMode = NV_ENC_PARAMS_RC_VBR;
+      config.rcParams.averageBitRate = static_cast<uint32_t>(max_kbps) * 1000u;
+      config.rcParams.maxBitRate =
+          static_cast<uint32_t>(max_kbps) * 1000u * 4u / 3u;
+      config.rcParams.vbvBufferSize =
+          config.rcParams.maxBitRate / 2u;  // half a second
+      config.rcParams.vbvInitialDelay = config.rcParams.vbvBufferSize;
+    } else {
+      // The top presets keep constant quality and take whatever the picture
+      // costs; there is no ceiling to spend against.
+      config.rcParams.rateControlMode = NV_ENC_PARAMS_RC_CONSTQP;
+      config.rcParams.constQP.qpIntra = static_cast<uint32_t>(qp);
+      config.rcParams.constQP.qpInterP = static_cast<uint32_t>(qp);
+      config.rcParams.constQP.qpInterB = static_cast<uint32_t>(qp);
+    }
 
     if (codec_ == video_codec::h264_stream) {
       NV_ENC_CONFIG_H264& h264 = config.encodeCodecConfig.h264Config;
@@ -884,6 +902,7 @@ class nvenc_stream_encoder final : public av1_stream_encoder {
     width_ = width;
     height_ = height;
     qp_ = qp;
+    bitrate_kbps_ = max_kbps;
     return true;
   }
 
@@ -900,6 +919,7 @@ class nvenc_stream_encoder final : public av1_stream_encoder {
     width_ = 0;
     height_ = 0;
     qp_ = 0;
+    bitrate_kbps_ = 0;
   }
 
   void shutdown() {
@@ -921,6 +941,7 @@ class nvenc_stream_encoder final : public av1_stream_encoder {
   int width_ = 0;
   int height_ = 0;
   int qp_ = 0;
+  int bitrate_kbps_ = 0;
   uint64_t frame_index_ = 0;
 };
 

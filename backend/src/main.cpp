@@ -25,6 +25,8 @@
 #include "auth_state.h"
 #include "call_hub.h"
 #include "capture/capture.h"
+#include "capture/capture_switch.h"
+#include "capture/windows_secure_capture.h"
 #include "chat_hub.h"
 #include "clipboard/clipboard.h"
 #include "config.h"
@@ -412,6 +414,73 @@ int main(int argc, char** argv) {
     std::cerr << "molink-core: " << capture_note << "\n";
     return 1;
   }
+#if defined(_WIN32)
+  // The input desktop can change in the middle of a session: a lock or a UAC
+  // prompt swaps it to one DXGI cannot capture. Watch it and rebuild the
+  // capture source for whichever desktop is in front, so the picture keeps
+  // working where input already does (the injector falls back to the helper).
+  if (!cfg.no_capture) {
+    const bool secure_now = capture->is_secure_desktop();
+    auto factory = [capture_opts](bool) {
+      std::string note;
+      return start_capture(capture_opts, true, note);
+    };
+    auto switcher = std::make_shared<capture_switch>(
+        std::move(capture), factory, secure_now);
+    capture = switcher;
+    std::thread([switcher] {
+      bool secure = switcher->secure_desktop();
+      // The lock screen and the logon UI transition through states where the
+      // helper briefly reports the other desktop. Switching on a single sample
+      // swapped to a source that cannot see the secure desktop (black tiles),
+      // so a change has to hold for three samples before it is followed.
+      bool candidate = secure;
+      int candidate_seen = 0;
+      while (true) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        // A normal user process cannot reliably open the Winlogon desktop, so
+        // the SYSTEM helper answers instead; fall back to the local probe when
+        // the helper is not running.
+        bool reachable = false;
+        const bool helper_secure = helper_secure_desktop(reachable);
+        const bool now = reachable ? helper_secure : secure_desktop_showing();
+        if (now == secure) {
+          // Keep the forced-stream window alive for as long as the desktop is
+          // secure: a one-shot request expired mid-login and the picture fell
+          // back to tiles.
+          if (secure) switcher->request_stream(2500);
+          candidate = secure;
+          candidate_seen = 0;
+          continue;
+        }
+        if (now != candidate) {
+          candidate = now;
+          candidate_seen = 1;
+          continue;
+        }
+        // Asymmetric: enter the secure desktop quickly (a lock should show up
+        // at once) but leave it slowly. Dismissing the lock screen hands the
+        // input desktop a Default for a moment while the logon UI starts; a
+        // short window swapped sources there and the picture fell back to
+        // tiles on the invisible desktop.
+        const int needed = now ? 1 : 6;
+        if (++candidate_seen < needed) continue;
+        candidate_seen = 0;
+        if (!switcher->switch_desktop(now)) continue;
+        secure = now;
+        // The secure desktop (and the few seconds after leaving it) always
+        // means the stream: its helper capture cannot keep up with tiles, and
+        // the movement rule would keep a static screen on them while the
+        // logon desktop is dismissed.
+        switcher->request_stream(now ? 10000 : 5000);
+        if (std::getenv("MOLINK_STREAM_LOG") != nullptr) {
+          std::fprintf(stderr, "host: desktop switched (secure=%d)\n",
+                       now ? 1 : 0);
+        }
+      }
+    }).detach();
+  }
+#endif
   {
     const app_settings prefs = auth->settings();
     av1_encoding_settings av1;

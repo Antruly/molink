@@ -77,6 +77,10 @@ struct app_settings {
   /// "mixed" streams moving content and tiles a still screen, "tiles" never
   /// streams (a LAN-only, lossless-but-heavy option).
   std::string video_mode = "mixed";
+  /// Percentage of the screen that must keep moving before the capture
+  /// switches from tiles to a low-delay stream. 1..100, default 15. The exit
+  /// threshold follows it, so a still screen drops back after the dwell.
+  int stream_enter_percent = 15;
 
   /// Temporary code shown on the home page.
   std::string temp_mode = "single";  // "single" | "multi"

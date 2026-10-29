@@ -10,6 +10,7 @@
 #include <cstring>
 #include <deque>
 #include <memory>
+#include <map>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -126,7 +127,7 @@ class direct_proxy final : public std::enable_shared_from_this<direct_proxy> {
 
   void start() {
     if (browser_ == nullptr) return;
-    browser_->set_max_message_size(1024u * 1024u);
+    browser_->set_max_message_size(16u * 1024u * 1024u);
     std::shared_ptr<direct_proxy> self = shared_from_this();
     browser_->on_text([self](const std::string& text) {
       self->on_browser_text(text);
@@ -629,6 +630,11 @@ class direct_proxy final : public std::enable_shared_from_this<direct_proxy> {
 
   void on_browser_text(const std::string& text) {
     if (closed_) return;
+    // The page cannot reach a console here; it tunnels decoder failures over
+    // this channel so the core's log can carry the WebKit error text.
+    if (text.find("\"client-log\"") != std::string::npos) {
+      std::fprintf(stderr, "proxy: %s\n", text.c_str());
+    }
     std::string outgoing = text;
     if (text.find("\"hello\"") != std::string::npos) {
       outgoing = inject_av1(text);
@@ -773,17 +779,83 @@ class direct_proxy final : public std::enable_shared_from_this<direct_proxy> {
     // Every packet here crossed the network to the host, whether or not the
     // page will see its bytes: an AV1 patch is transcoded, so the page's own
     // byte counter would show the decoded (several times larger) size.
+    note_frame_for_stats(data, len);
     wire_window_.fetch_add(len);
+    // Forwarded on the loop thread: transcode() is a passthrough now, so the
+    // worker only added a thread hop -- and its 8-packet queue dropped the
+    // oldest packet under a burst. A dropped stream frame breaks the reference
+    // chain and the picture smears until a keyframe.
     if (!worker_started_) {
       browser_->send_binary(reinterpret_cast<const char*>(data), len);
       return;
     }
     {
       std::lock_guard<std::mutex> lock(queue_mutex_);
+      // A decoder slower than the link must not grow memory without bound;
+      // drop the oldest packet, the next frame carries newer pixels.
       while (binary_queue_.size() >= 8) binary_queue_.pop_front();
       binary_queue_.emplace_back(data, data + len);
     }
     queue_cv_.notify_one();
+  }
+
+  /// Counts frames by codec and prints one line a second. This is what tells
+  /// "the host's stream never reaches the proxy" apart from "the page receives
+  /// it and does not paint it".
+  void note_frame_for_stats(const uint8_t* data, std::size_t len) {
+    if (len >= protocol::kPacketHeaderSize + protocol::kFrameHeaderSize &&
+        data[5] == static_cast<uint8_t>(protocol::packet_type::frame)) {
+      ++frame_codec_counts_[data[protocol::kPacketHeaderSize + 6]];
+      ++frame_count_;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (last_frame_log_.time_since_epoch().count() != 0 &&
+        now - last_frame_log_ < std::chrono::seconds(1)) {
+      return;
+    }
+    last_frame_log_ = now;
+    if (frame_count_ == 0) return;
+    std::string line = "proxy: frames received";
+    for (const auto& [codec, count] : frame_codec_counts_) {
+      line += " codec" + std::to_string(codec) + "=" + std::to_string(count);
+    }
+    std::fprintf(stderr, "%s\n", line.c_str());
+    frame_codec_counts_.clear();
+    frame_count_ = 0;
+  }
+
+  /// One codec stat per second for the page's wire/decoded readout.
+  void maybe_announce_codec(const uint8_t* data, std::size_t len) {
+    if (closed_ || browser_ == nullptr) return;
+    // Header-only check: copying a whole frame just to read six bytes was
+    // pure overhead on the loop thread.
+    if (len < protocol::kPacketHeaderSize + protocol::kFrameHeaderSize) return;
+    if (std::memcmp(data, protocol::kMagic, sizeof(protocol::kMagic)) != 0) {
+      return;
+    }
+    if (data[5] != static_cast<uint8_t>(protocol::packet_type::frame)) return;
+    const uint8_t codec = data[protocol::kPacketHeaderSize + 6];
+    if (codec != static_cast<uint8_t>(protocol::codec::av1) &&
+        codec != static_cast<uint8_t>(protocol::codec::av1_stream)) {
+      return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (last_stat_.time_since_epoch().count() != 0 &&
+        now - last_stat_ < std::chrono::seconds(1)) {
+      return;
+    }
+    const double seconds =
+        window_start_.time_since_epoch().count() == 0
+            ? 0.0
+            : std::chrono::duration<double>(now - window_start_).count();
+    const std::size_t bytes = wire_window_.exchange(0);
+    std::size_t wire_rate = 0;
+    if (seconds > 0.2) wire_rate = static_cast<std::size_t>(bytes / seconds);
+    window_start_ = now;
+    last_stat_ = now;
+    const bool full_frame =
+        len > 6 && (data[6] & protocol::kPacketFlagTileRefresh) == 0;
+    send_codec_stat(len, len, full_frame, wire_rate);
   }
 
   void worker_loop() {
@@ -920,6 +992,10 @@ class direct_proxy final : public std::enable_shared_from_this<direct_proxy> {
   /// the start of that window. The window start is only touched by the worker.
   std::atomic<std::size_t> wire_window_{0};
   std::chrono::steady_clock::time_point window_start_{};
+  /// Frame counts per codec since the last diagnostic line.
+  std::map<uint8_t, int> frame_codec_counts_;
+  int frame_count_ = 0;
+  std::chrono::steady_clock::time_point last_frame_log_{};
 };
 
 }  // namespace

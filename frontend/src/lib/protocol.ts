@@ -106,6 +106,12 @@ export function codecName(codec: number): string {
       return 'gray8'
     case Codec.deflateGray8:
       return 'deflate-gray8'
+    case Codec.h264Stream:
+      return 'h264'
+    case Codec.vp8Stream:
+      return 'vp8'
+    case Codec.vp9Stream:
+      return 'vp9'
     case Codec.bgra:
     default:
       return 'bgra'

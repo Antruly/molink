@@ -191,7 +191,8 @@ class gdi_capture final : public capture_base {
     }
 
     protocol::frame_header header;
-    header.frame_seq = seq_;
+    const uint32_t frame_seq = next_capture_seq();
+    header.frame_seq = frame_seq;
     header.flags = keyframe ? protocol::kFrameFlagKeyframe
                             : protocol::kFrameFlagPartial;
     header.screen_w = width_;
@@ -237,7 +238,7 @@ class gdi_capture final : public capture_base {
             .count()));
 
     auto frame = std::make_shared<captured_frame>();
-    frame->seq = seq_++;
+    frame->seq = frame_seq;
     frame->ts_us = epoch_us();
     frame->keyframe = keyframe;
     frame->width = width_;
@@ -348,7 +349,6 @@ class gdi_capture final : public capture_base {
   mutable std::mutex pixels_mutex_;
   bool have_previous_ = false;
   std::chrono::steady_clock::time_point last_full_{};
-  uint32_t seq_ = 0;
   std::thread thread_;
 };
 

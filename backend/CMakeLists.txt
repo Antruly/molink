@@ -211,6 +211,7 @@ set(MOLINK_CORE_SOURCES
   src/capture/windows_capture.cpp
   src/capture/windows_gdi_capture.cpp
   src/capture/windows_secure_capture.cpp
+  src/capture/capture_switch.cpp
   src/capture/frame_encode.cpp
   src/capture/dirty_rects.cpp
   src/capture/av1_encoder.cpp

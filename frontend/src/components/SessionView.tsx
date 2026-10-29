@@ -1,5 +1,6 @@
 import {
   Activity,
+  ChevronDown,
   ClipboardCheck,
   ClipboardCopy,
   ClipboardPaste,
@@ -22,6 +23,8 @@ import {
   Monitor,
   Moon,
   MousePointer2,
+  Pin,
+  PinOff,
   Phone,
   PhoneOff,
   Radio,
@@ -29,14 +32,17 @@ import {
   Sun,
   Volume2,
   VolumeX,
+  Wrench,
   X,
 } from 'lucide-react'
+import { createPortal } from 'react-dom'
 import {
   useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
+  type ReactNode,
   type PointerEvent as ReactPointerEvent,
 } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -46,11 +52,7 @@ import {
   fpsPlan,
   parseFpsSetting,
 } from '../lib/frame-rate'
-import { codecName } from '../lib/protocol'
-import {
-  collectDropEntries,
-  stageDroppedFiles,
-} from '../lib/file-drop'
+import { Codec, codecName } from '../lib/protocol'
 import { shellInfo, windowAction } from '../lib/shell'
 import { openSessionWindow } from '../lib/windows'
 import {
@@ -210,6 +212,121 @@ const PROTOCOL_LABELS: Record<string, string> = {
   tcp: 'TCP',
 }
 
+/// One compact toolbar button that opens a menu of related actions. The
+/// session toolbar is long; when it would scroll, the button groups collapse
+/// into these menus instead of squeezing every button into one row.
+interface ToolbarMenuItem {
+  key: string
+  label: string
+  icon?: ReactNode
+  onSelect: () => void
+  disabled?: boolean
+  active?: boolean
+}
+
+function ToolbarMenu({
+  icon,
+  label,
+  title,
+  items,
+}: {
+  icon: ReactNode
+  label: string
+  title: string
+  items: ToolbarMenuItem[]
+}) {
+  const [open, setOpen] = useState(false)
+  const [spot, setSpot] = useState<{ left: number; top: number } | null>(null)
+  const button = useRef<HTMLButtonElement>(null)
+  const holder = useRef<HTMLDivElement>(null)
+  const surface = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!open) return
+    const close = (event: Event) => {
+      const target = event.target as Node
+      // The popup is portalled to the body, so it is not inside `holder`.
+      if (holder.current?.contains(target)) return
+      if (surface.current?.contains(target)) return
+      setOpen(false)
+    }
+    document.addEventListener('pointerdown', close, true)
+    const onScroll = () => setOpen(false)
+    window.addEventListener('resize', onScroll)
+    return () => {
+      document.removeEventListener('pointerdown', close, true)
+      window.removeEventListener('resize', onScroll)
+    }
+  }, [open])
+  // The toolbar scrolls horizontally (`overflow-x: auto`), which clips any
+  // absolutely positioned child. The menu is therefore portalled to the body
+  // and placed from the button's viewport rect.
+  const toggle = () => {
+    if (open) {
+      setOpen(false)
+      return
+    }
+    const rect = button.current?.getBoundingClientRect()
+    if (!rect) return
+    const width = 200
+    setSpot({
+      left: Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)),
+      top: rect.bottom + 6,
+    })
+    setOpen(true)
+  }
+  return (
+    <div ref={holder} className="shrink-0">
+      <button
+        ref={button}
+        type="button"
+        onClick={toggle}
+        className="btn btn-quiet flex h-7 shrink-0 items-center gap-0.5 !px-1.5"
+        title={title}
+        aria-label={title}
+        aria-haspopup="menu"
+        aria-expanded={open}
+      >
+        {icon}
+        <ChevronDown size={10} />
+      </button>
+      {open && spot
+        ? createPortal(
+            <div
+              ref={surface}
+              role="menu"
+              aria-label={label}
+              data-toolbar-menu="true"
+              style={{ position: 'fixed', left: spot.left, top: spot.top }}
+              className="z-[100] min-w-44 rounded-md border border-line bg-surface p-1 text-[12px] text-ink shadow-lg"
+            >
+              {items.map((item) => (
+                <button
+                  key={item.key}
+                  type="button"
+                  role="menuitem"
+                  disabled={item.disabled}
+                  onClick={() => {
+                    setOpen(false)
+                    item.onSelect()
+                  }}
+                  className={
+                    'flex w-full items-center gap-2 rounded px-2 py-1.5 text-left ' +
+                    (item.active ? 'text-accent ' : '') +
+                    (item.disabled ? 'opacity-40' : 'hover:bg-panel')
+                  }
+                >
+                  {item.icon}
+                  <span className="flex-1">{item.label}</span>
+                </button>
+              ))}
+            </div>,
+            document.body,
+          )
+        : null}
+    </div>
+  )
+}
+
 export function SessionView({
   tab,
   popout = false,
@@ -304,6 +421,14 @@ export function SessionView({
   const [quickOpen, setQuickOpen] = useState(false)
   const [quickPos, setQuickPos] = useState<{ x: number; y: number } | null>(null)
   const quickBarRef = useRef<HTMLDivElement>(null)
+  /// The toolbar would scroll at this width: collapse the button groups into
+  /// menus instead of hiding actions behind a horizontal scroll.
+  const [compactBar, setCompactBar] = useState(false)
+  /// Pinned toolbar: stays open instead of collapsing back into the floating
+  /// ball. The choice is a per-device UI preference, kept in localStorage.
+  const [barPinned, setBarPinned] = useState(false)
+  /// Width the expanded toolbar needs, measured while it still fits.
+  const expandedBarWidth = useRef(0)
   const quickDrag = useRef<{
     offsetX: number
     offsetY: number
@@ -680,11 +805,52 @@ export function SessionView({
   }, [tab.phase, tab.id, tab.intent])
 
 
-  // The expanded quick bar collapses when focus or the pointer moves outside.
+  useEffect(() => {
+    try {
+      setBarPinned(window.localStorage.getItem('molink.toolbarPinned') === '1')
+    } catch {
+      // A blocked storage API just means the pin starts off.
+    }
+  }, [])
+
+  useEffect(() => {
+    if (barPinned) setQuickOpen(true)
+  }, [barPinned])
+
+  // Collapse the toolbar into menus when its content would not fit. Expand
+  // again only once there is room for the width it needed while expanded, so
+  // the two states do not flip back and forth at the boundary.
   useEffect(() => {
     if (!quickOpen) return
+    const bar = quickBarRef.current
+    if (!bar) return
+    const measure = () => {
+      if (!compactBar) {
+        const needed = bar.scrollWidth
+        if (needed > 0) expandedBarWidth.current = needed
+        if (needed > bar.clientWidth + 2) setCompactBar(true)
+        return
+      }
+      if (expandedBarWidth.current > 0 &&
+          bar.clientWidth >= expandedBarWidth.current) {
+        setCompactBar(false)
+      }
+    }
+    const observer = new ResizeObserver(measure)
+    observer.observe(bar)
+    measure()
+    return () => observer.disconnect()
+  }, [compactBar, quickOpen])
+
+  // The expanded quick bar collapses when focus or the pointer moves outside.
+  useEffect(() => {
+    if (!quickOpen || barPinned) return
     const onPointerDown = (event: PointerEvent) => {
-      if (!quickBarRef.current?.contains(event.target as Node)) {
+      const target = event.target as Element | null
+      // A menu is portalled to the body: it is outside the bar's DOM but still
+      // part of the toolbar, and closing here would unmount it mid-click.
+      if (target?.closest?.('[data-toolbar-menu]')) return
+      if (!quickBarRef.current?.contains(target as Node | null)) {
         setQuickOpen(false)
       }
     }
@@ -697,7 +863,7 @@ export function SessionView({
       document.removeEventListener('pointerdown', onPointerDown, true)
       document.removeEventListener('keydown', onKeyDown)
     }
-  }, [quickOpen])
+  }, [quickOpen, barPinned])
 
   // In 1:1 mode the image can be larger than the window. Keep scrolling while
   // the pointer rests near an edge, so panning follows the mouse.
@@ -1234,7 +1400,7 @@ export function SessionView({
 
   const changeDisplayMode = (mode: DisplayMode) => {
     setDisplayMode(mode)
-    setQuickOpen(false)
+    if (!barPinned) setQuickOpen(false)
   }
 
   const quickHandleDown = (event: ReactPointerEvent<HTMLButtonElement>) => {
@@ -1784,8 +1950,11 @@ export function SessionView({
     : '—'
   // Follow the frame actually on screen; the welcome codec is only a snapshot
   // from connect time and goes stale when the preset changes.
+  // The tile transport picks per frame whether zlib helps, so the wire codec
+  // flips between `bgra` and `deflate-bgra`. The watermark shows the pixel
+  // format instead: the compression choice is not something to read off it.
   const codecLabel = tab.frame
-    ? codecName(tab.frame.codec)
+    ? codecName(tab.frame.codec).replace(/^deflate-/, '')
     : (tab.welcome?.tiles.codec ?? '')
   // The session transport names the HTTP leg directly: http2/http3 are the
   // RFC 8441/9220 WebSockets, websocket is the h1 baseline, and quic/tcp/udp
@@ -1798,15 +1967,24 @@ export function SessionView({
         : protocolName === 'websocket'
           ? 'HTTP/1.1'
           : '—'
-  const encodingLabel = tab.av1Active
-    ? tab.av1Full
-      ? t('session.watermarkAv1')
-      : t('session.watermarkAv1Tiles')
-    : tab.streamCodec !== undefined && tab.streamCodec !== ''
-      ? tab.streamCodec === 'h264'
-        ? 'H.264'
-        : tab.streamCodec.toUpperCase()
-      : t('session.watermarkTiles')
+  // Follow the frame that is actually on screen: switching codecs (or a drop
+  // back to tiles) shows up in the watermark on the next frame, not only when
+  // the host restarts the stream.
+  const frameCodec = tab.frame?.codec
+  const encodingLabel =
+    frameCodec === Codec.h264Stream
+      ? 'H.264'
+      : frameCodec === Codec.vp9Stream
+        ? 'VP9'
+        : frameCodec === Codec.vp8Stream
+          ? 'VP8'
+          : frameCodec === Codec.av1Stream
+            ? 'AV1'
+            : frameCodec === undefined && tab.streamCodec
+              ? tab.streamCodec === 'h264'
+                ? 'H.264'
+                : tab.streamCodec.toUpperCase()
+              : t('session.watermarkTiles')
 
   return (
     <div ref={sessionRootRef} className="flex min-h-0 flex-1 flex-col">
@@ -1903,30 +2081,9 @@ export function SessionView({
           onPointerLeave={() => {
             panPointer.current = null
           }}
-          onDragOver={(event) => {
-            if (event.dataTransfer.types.includes('Files')) {
-              event.preventDefault()
-              event.dataTransfer.dropEffect = 'copy'
-            }
-          }}
-          onDrop={(event) => {
-            const transfer = event.dataTransfer
-            if (transfer === null) return
-            const hasFiles =
-              (transfer.files?.length ?? 0) > 0 ||
-              Array.from(transfer.items ?? []).some(
-                (item) => item.kind === 'file',
-              )
-            if (!hasFiles) return
-            event.preventDefault()
-            event.stopPropagation()
-            // The drop belongs to the file drawer: it stages the list, lets
-            // the user pick the remote folder and send explicitly.
-            setFilesOpen(true)
-            void collectDropEntries(transfer).then((entries) =>
-              stageDroppedFiles(entries),
-            )
-          }}
+          // Files are dropped on the transfer panel's own drop zone, not on
+          // the picture: a stray drop over the remote desktop must not start a
+          // transfer, and a browser shell may not even deliver it.
           onContextMenu={(event) => {
             if (tab.controlEnabled) event.preventDefault()
           }}
@@ -2100,16 +2257,53 @@ export function SessionView({
               onPointerDown={(event) => event.stopPropagation()}
               onPointerUp={(event) => event.stopPropagation()}
               onBlur={(event) => {
-                if (
-                  !event.currentTarget.contains(event.relatedTarget as Node)
-                ) {
+                if (barPinned) return
+                const next = event.relatedTarget as Element | null
+                if (next?.closest?.('[data-toolbar-menu]')) return
+                if (!event.currentTarget.contains(next as Node | null)) {
                   setQuickOpen(false)
                 }
               }}
             >
               <button
                 type="button"
-                onClick={() => setQuickOpen(false)}
+                onClick={() => {
+                  const next = !barPinned
+                  setBarPinned(next)
+                  try {
+                    window.localStorage.setItem(
+                      'molink.toolbarPinned',
+                      next ? '1' : '0',
+                    )
+                  } catch {
+                    // The pin still works for this session.
+                  }
+                }}
+                className={
+                  'btn h-7 w-7 shrink-0 !px-0 ' +
+                  (barPinned ? 'text-accent' : 'btn-quiet')
+                }
+                title={
+                  barPinned ? t('session.unpinToolbar') : t('session.pinToolbar')
+                }
+                aria-label={
+                  barPinned ? t('session.unpinToolbar') : t('session.pinToolbar')
+                }
+                aria-pressed={barPinned}
+              >
+                {barPinned ? <PinOff size={13} /> : <Pin size={13} />}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setBarPinned(false)
+                  try {
+                    window.localStorage.setItem('molink.toolbarPinned', '0')
+                  } catch {
+                    // Ignore: closing matters more than remembering it.
+                  }
+                  setQuickOpen(false)
+                }}
                 className="btn btn-quiet h-7 w-7 shrink-0 !px-0"
                 title={t('session.quickActions')}
                 aria-label={t('session.quickActions')}
@@ -2221,7 +2415,11 @@ export function SessionView({
                     <option value="auto">{t('session.codecAuto')}</option>
                     {codecOptions.map((codec) => (
                       <option key={codec} value={codec}>
-                        {codec === 'h264' ? 'H.264' : codec.toUpperCase()}
+                        {codec === 'tiles'
+                          ? t('session.codecTiles')
+                          : codec === 'h264'
+                            ? 'H.264'
+                            : codec.toUpperCase()}
                       </option>
                     ))}
                   </select>
@@ -2303,7 +2501,7 @@ export function SessionView({
                 </label>
               ) : null}
               <span className="mx-0.5 h-4 w-px shrink-0 bg-line" />
-              {clipboardAvailable ? (
+              {clipboardAvailable && !compactBar ? (
                 <>
                   <button
                     type="button"
@@ -2354,6 +2552,49 @@ export function SessionView({
                   </button>
                 </>
               ) : null}
+              {clipboardAvailable && compactBar ? (
+                <ToolbarMenu
+                  icon={
+                    tab.clipboardEnabled ? (
+                      <ClipboardCheck size={13} />
+                    ) : (
+                      <ClipboardX size={13} />
+                    )
+                  }
+                  label={t('session.clipboard')}
+                  title={t('session.clipboard')}
+                  items={[
+                    {
+                      key: 'toggle',
+                      label: tab.clipboardEnabled
+                        ? t('session.clipboardOff')
+                        : t('session.clipboardOn'),
+                      icon: tab.clipboardEnabled ? (
+                        <ClipboardCheck size={12} />
+                      ) : (
+                        <ClipboardX size={12} />
+                      ),
+                      active: tab.clipboardEnabled,
+                      onSelect: () =>
+                        setClipboardEnabled(tab.id, !tab.clipboardEnabled),
+                    },
+                    {
+                      key: 'get',
+                      label: t('session.clipboardGet'),
+                      icon: <ClipboardCopy size={12} />,
+                      disabled: !tab.clipboardEnabled,
+                      onSelect: copyFromRemote,
+                    },
+                    {
+                      key: 'set',
+                      label: t('session.clipboardSet'),
+                      icon: <ClipboardPaste size={12} />,
+                      disabled: !tab.clipboardEnabled,
+                      onSelect: sendToRemote,
+                    },
+                  ]}
+                />
+              ) : null}
               {audioAvailable ? (
                 <button
                   type="button"
@@ -2386,6 +2627,74 @@ export function SessionView({
                   aria-label={t('session.audioVolume')}
                 />
               ) : null}
+              {compactBar ? (
+                <ToolbarMenu
+                  icon={<Wrench size={13} />}
+                  label={t('session.tools')}
+                  title={t('session.tools')}
+                  items={[
+                    {
+                      key: 'chat',
+                      label: t('session.chat'),
+                      icon: <MessageSquare size={12} />,
+                      active: chatOpen,
+                      onSelect: () => {
+                        setChatUnread(0)
+                        setChatOpen(true)
+                      },
+                    },
+                    {
+                      key: 'files',
+                      label: t('session.files'),
+                      icon: <FolderOpen size={12} />,
+                      active: filesOpen,
+                      onSelect: () => {
+                        setFilesOpen(true)
+                        setChatOpen(false)
+                      },
+                    },
+                    ...(inputAvailable
+                      ? [
+                          {
+                            key: 'control',
+                            label: tab.controlEnabled
+                              ? t('session.stopControl')
+                              : t('session.startControl'),
+                            icon: tab.controlEnabled ? (
+                              <Hand size={12} />
+                            ) : (
+                              <MousePointer2 size={12} />
+                            ),
+                            active: tab.controlEnabled,
+                            onSelect: () => {
+                              const next = !tab.controlEnabled
+                              setControlEnabled(tab.id, next)
+                              if (!next) setVirtualMouse(false)
+                            },
+                          },
+                          {
+                            key: 'sas',
+                            label: t('session.ctrlAltDel'),
+                            icon: <Keyboard size={12} />,
+                            onSelect: () => connection()?.sendInput({ k: 'sas' }),
+                          },
+                        ]
+                      : []),
+                    ...(!popout && localMode
+                      ? [
+                          {
+                            key: 'popout',
+                            label: t('session.popOut'),
+                            icon: <ExternalLink size={12} />,
+                            onSelect: openPopout,
+                          },
+                        ]
+                      : []),
+                  ]}
+                />
+              ) : null}
+              {!compactBar ? (
+                <>
               <button
                 type="button"
                 onClick={() => {
@@ -2476,32 +2785,72 @@ export function SessionView({
                   <ExternalLink size={13} />
                 </button>
               ) : null}
+                </>
+              ) : null}
               <span className="mx-0.5 h-4 w-px shrink-0 bg-line" />
-              <button
-                type="button"
-                onClick={toggleTheme}
-                className="btn btn-quiet h-7 w-7 shrink-0 !px-0"
-                title={theme === 'dark' ? t('settings.themeLight') : t('settings.themeDark')}
-                aria-label={theme === 'dark' ? t('settings.themeLight') : t('settings.themeDark')}
-              >
-                {theme === 'dark' ? <Sun size={13} /> : <Moon size={13} />}
-              </button>
-              <button
-                type="button"
-                onClick={() => setSettingsOpen(true)}
-                className="btn btn-quiet h-7 w-7 shrink-0 !px-0"
-                title={t('settings.title')}
-                aria-label={t('settings.title')}
-              >
-                <Settings2 size={13} />
-              </button>
+              {compactBar ? (
+                <ToolbarMenu
+                  icon={theme === 'dark' ? <Sun size={13} /> : <Moon size={13} />}
+                  label={t('session.appearance')}
+                  title={t('session.appearance')}
+                  items={[
+                    {
+                      key: 'theme',
+                      label:
+                        theme === 'dark'
+                          ? t('settings.themeLight')
+                          : t('settings.themeDark'),
+                      icon: theme === 'dark' ? <Sun size={12} /> : <Moon size={12} />,
+                      onSelect: toggleTheme,
+                    },
+                    {
+                      key: 'settings',
+                      label: t('settings.title'),
+                      icon: <Settings2 size={12} />,
+                      onSelect: () => setSettingsOpen(true),
+                    },
+                  ]}
+                />
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    onClick={toggleTheme}
+                    className="btn btn-quiet h-7 w-7 shrink-0 !px-0"
+                    title={theme === 'dark' ? t('settings.themeLight') : t('settings.themeDark')}
+                    aria-label={theme === 'dark' ? t('settings.themeLight') : t('settings.themeDark')}
+                  >
+                    {theme === 'dark' ? <Sun size={13} /> : <Moon size={13} />}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSettingsOpen(true)}
+                    className="btn btn-quiet h-7 w-7 shrink-0 !px-0"
+                    title={t('settings.title')}
+                    aria-label={t('settings.title')}
+                  >
+                    <Settings2 size={13} />
+                  </button>
+                </>
+              )}
               <span className="mx-0.5 h-4 w-px shrink-0 bg-line" />
-              <span className="chip !px-1.5 !py-0 text-[10px]" title={t('session.path')}>
-                {pathLabel}
-              </span>
-              <span className="chip !px-1.5 !py-0 text-[10px]" title={t('session.protocol')}>
-                {protocolLabel}
-              </span>
+              {compactBar ? (
+                <span
+                  className="chip !px-1.5 !py-0 text-[10px]"
+                  title={`${t('session.path')}: ${pathLabel} · ${t('session.protocol')}: ${protocolLabel}`}
+                >
+                  {pathLabel}·{protocolLabel}
+                </span>
+              ) : (
+                <>
+                  <span className="chip !px-1.5 !py-0 text-[10px]" title={t('session.path')}>
+                    {pathLabel}
+                  </span>
+                  <span className="chip !px-1.5 !py-0 text-[10px]" title={t('session.protocol')}>
+                    {protocolLabel}
+                  </span>
+                </>
+              )}
               {tab.av1Active ? (
                 <span
                   className="chip !px-1.5 !py-0 text-[10px] text-emerald-500"

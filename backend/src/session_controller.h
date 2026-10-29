@@ -170,6 +170,13 @@ class session_supervisor {
   std::atomic<bool> running_{false};
   /// Last AV1 policy value announced to the capture source (diagnostics).
   bool av1_allowed_ = false;
+  /// A viewer joined: the picture starts on the stream instead of tiles so the
+  /// first seconds do not pay the full-screen tile keyframe.
+  bool had_viewers_ = false;
+  static constexpr uint64_t kJoinStreamMs = 10000;
+  /// Tiles send changed pixels every frame; above this the link and the
+  /// viewer's decompressor are the limit, not the codec.
+  static constexpr int kTileMaxFps = 30;
   /// Capture-stats reporting: previous sample, to derive the achieved rate.
   std::chrono::steady_clock::time_point last_capture_at_{};
   uint64_t last_capture_frames_ = 0;

@@ -199,6 +199,8 @@ app_settings load_settings() {
       settings.server_ca = value;
     } else if (key == "stun_server") {
       settings.stun_server = value;
+    } else if (key == "stream_enter_percent") {
+      settings.stream_enter_percent = parse_int(value, 15);
     } else if (key == "video_mode") {
       if (value == "stream" || value == "mixed" || value == "tiles") {
         settings.video_mode = value;
@@ -242,6 +244,10 @@ app_settings load_settings() {
   if (settings.keyframe_interval_seconds < 0 ||
       settings.keyframe_interval_seconds > 60) {
     settings.keyframe_interval_seconds = 0;
+  }
+  if (settings.stream_enter_percent < 1 ||
+      settings.stream_enter_percent > 100) {
+    settings.stream_enter_percent = 15;
   }
   // Discovery cannot be on without remote access.
   if (!settings.allow_remote_access) settings.discovery_enabled = false;
@@ -288,6 +294,7 @@ void save_settings(const app_settings& settings) {
   stream << "server_ca=" << settings.server_ca << "\n";
   stream << "stun_server=" << settings.stun_server << "\n";
   stream << "video_mode=" << settings.video_mode << "\n";
+  stream << "stream_enter_percent=" << settings.stream_enter_percent << "\n";
   stream << "stream_codec=" << settings.stream_codec << "\n";
   stream << "long_term_code=" << settings.long_term_code << "\n";
   stream << "temp_mode=" << settings.temp_mode << "\n";

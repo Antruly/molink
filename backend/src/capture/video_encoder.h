@@ -110,13 +110,12 @@ class video_encoder {
 
 /// The rungs the capture may use for this viewer set, best first.
 ///
-/// A stream beats patches (a moving picture costs a fraction of the bytes), and
-/// AV1 beats H.264 when both are decodable because it is smaller. The caller
-/// walks this list and takes the first codec the host can actually encode.
-/// Rungs in preference order. The hardware codecs (NVENC AV1, then NVENC
-/// H.264) rank above the CPU ones (libvpx VP9, then VP8) because the user's
-/// rule is "use hardware acceleration when it is there"; within the same
-/// acceleration class the better compressor wins.
+/// A stream beats patches (a moving picture costs a fraction of the bytes).
+/// The caller walks this list and takes the first codec the host can encode.
+/// Rungs in the order the product wants them: AV1 > VP9 > VP8 > H.264, then
+/// tiles. Compression quality wins over hardware acceleration -- a CPU VP9
+/// stream is smaller than a hardware H.264 one, so VP9 outranks H.264 -- and
+/// tiles are the last resort when no stream codec is usable.
 inline std::vector<video_codec> video_ladder(bool av1_stream_ok,
                                              bool h264_stream_ok,
                                              bool av1_patches_ok,
@@ -124,9 +123,9 @@ inline std::vector<video_codec> video_ladder(bool av1_stream_ok,
                                              bool vp8_stream_ok = false) {
   std::vector<video_codec> ladder;
   if (av1_stream_ok) ladder.push_back(video_codec::av1_stream);
-  if (h264_stream_ok) ladder.push_back(video_codec::h264_stream);
   if (vp9_stream_ok) ladder.push_back(video_codec::vp9_stream);
   if (vp8_stream_ok) ladder.push_back(video_codec::vp8_stream);
+  if (h264_stream_ok) ladder.push_back(video_codec::h264_stream);
   if (av1_patches_ok) ladder.push_back(video_codec::av1_patches);
   return ladder;
 }

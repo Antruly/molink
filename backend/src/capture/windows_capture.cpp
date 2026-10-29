@@ -504,7 +504,8 @@ class windows_capture final : public capture_base {
     }
 
     protocol::frame_header header;
-    header.frame_seq = seq_;
+    const uint32_t frame_seq = next_capture_seq();
+    header.frame_seq = frame_seq;
     header.flags = keyframe ? protocol::kFrameFlagKeyframe
                             : protocol::kFrameFlagPartial;
     header.screen_w = width_;
@@ -552,7 +553,7 @@ class windows_capture final : public capture_base {
             .count()));
 
     auto frame = std::make_shared<captured_frame>();
-    frame->seq = seq_++;
+    frame->seq = frame_seq;
     frame->ts_us = epoch_us();
     frame->keyframe = keyframe;
     frame->width = width_;
@@ -674,7 +675,6 @@ class windows_capture final : public capture_base {
   std::vector<uint8_t> previous_;
   mutable std::mutex pixels_mutex_;
   bool have_previous_ = false;
-  uint32_t seq_ = 0;
   std::thread thread_;
 
   std::vector<display_info> displays_;

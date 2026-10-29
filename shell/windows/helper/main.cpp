@@ -10,6 +10,7 @@
 #endif
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <wtsapi32.h>
 #include <sddl.h>
 
 #include <atomic>
@@ -141,9 +142,20 @@ bool refresh_input_desktop() {
                             &needed);
   GetUserObjectInformationW(current, UOI_NAME, new_name, sizeof(new_name),
                             &needed);
-  if (_wcsicmp(old_name, new_name) == 0) {
-    CloseDesktop(current);
-    return true;
+  bool same_name = _wcsicmp(old_name, new_name) == 0;
+  if (same_name) {
+    // Two different desktops can carry the same name. The lock screen and the
+    // logon UI are both "Winlogon": the handle that captures the lock screen
+    // shows black once the logon page takes over, while input still works.
+    // Re-open the desktop periodically even when the name is unchanged so the
+    // DC follows the desktop that is really in front.
+    static thread_local ULONGLONG last_forced = 0;
+    const ULONGLONG now = GetTickCount64();
+    if (now - last_forced < 2000) {
+      CloseDesktop(current);
+      return true;
+    }
+    last_forced = now;
   }
   if (!SetThreadDesktop(current)) {
     CloseDesktop(current);
@@ -153,8 +165,32 @@ bool refresh_input_desktop() {
   }
   CloseDesktop(g_desktop);
   g_desktop = current;
-  log_line("desktop -> " + utf8(new_name));
+  // A periodic re-open of the same-named desktop is routine; only a real
+  // desktop change is worth a log line.
+  if (!same_name) log_line("desktop -> " + utf8(new_name));
   return true;
+}
+
+/// Whether the console session is locked. The logon UI (after the lock screen
+/// is dismissed) reports the normal "Default" desktop on some builds, so the
+/// desktop name alone cannot tell the secure desktop from the user's own.
+bool session_locked() {
+  LPWSTR buffer = nullptr;
+  DWORD bytes = 0;
+  const DWORD session = WTSGetActiveConsoleSessionId();
+  if (session == 0xFFFFFFFF) return false;
+  if (!WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, session,
+                                   WTSSessionInfoEx, &buffer, &bytes)) {
+    return false;
+  }
+  bool locked = false;
+  const auto* info = reinterpret_cast<const WTSINFOEXW*>(buffer);
+  if (info != nullptr && info->Level == 1) {
+    // WTS_SESSIONSTATE_LOCK is 0 and UNLOCK is 1.
+    locked = info->Data.WTSInfoExLevel1.SessionFlags == WTS_SESSIONSTATE_LOCK;
+  }
+  WTSFreeMemory(buffer);
+  return locked;
 }
 
 std::string desktop_json() {
@@ -166,9 +202,11 @@ std::string desktop_json() {
   if (screen != nullptr) ReleaseDC(nullptr, screen);
   char buffer[512] = {};
   std::snprintf(buffer, sizeof(buffer),
-                R"({"ok":true,"desktop":"%s","width":%d,"height":%d,"dpi":%d})",
-                utf8(name).c_str(), GetSystemMetrics(SM_CXSCREEN),
-                GetSystemMetrics(SM_CYSCREEN), dpi);
+                R"({"ok":true,"desktop":"%s","locked":%d,"width":%d,)"
+                R"("height":%d,"dpi":%d})",
+                utf8(name).c_str(), session_locked() ? 1 : 0,
+                GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN),
+                dpi);
   return buffer;
 }
 
@@ -424,9 +462,13 @@ void pipe_loop(std::atomic<bool>& running) {
       &attributes.lpSecurityDescriptor, nullptr);
   std::vector<uint8_t> frame;
   while (running.load()) {
+    // Several instances: the capture asks for a frame while the core's desktop
+    // watcher asks which desktop is in front. A single instance made the two
+    // evict each other, and a failed capture fell back to a source that cannot
+    // see the secure desktop.
     HANDLE pipe = CreateNamedPipeW(
         kPipeName, PIPE_ACCESS_DUPLEX,
-        PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT, 1,
+        PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT, 8,
         64 * 1024 * 1024, 64 * 1024 * 1024, 0, &attributes);
     if (pipe == INVALID_HANDLE_VALUE) {
       Sleep(500);
@@ -435,34 +477,44 @@ void pipe_loop(std::atomic<bool>& running) {
     const BOOL connected = ConnectNamedPipe(pipe, nullptr) != 0 ||
                            GetLastError() == ERROR_PIPE_CONNECTED;
     if (connected) {
-      std::vector<char> buffer(64 * 1024);
-      DWORD read = 0;
-      const BOOL read_ok =
-          ReadFile(pipe, buffer.data(), static_cast<DWORD>(buffer.size() - 1),
-                   &read, nullptr);
-      if (!read_ok || read == 0) {
-        log_line("pipe read failed: " + std::to_string(GetLastError()) +
-                 " bytes=" + std::to_string(read));
-      } else {
-        buffer[read] = '\0';
-        const std::string command(buffer.data(), read);
-        int width = 0;
-        int height = 0;
-        const std::string reply =
-            handle_line(command, frame, width, height);
-        DWORD written = 0;
-        if (!WriteFile(pipe, reply.data(), static_cast<DWORD>(reply.size()),
-                       &written, nullptr)) {
-          log_line("pipe write failed: " + std::to_string(GetLastError()) +
-                   " bytes=" + std::to_string(reply.size()));
+      // One thread per connection. The capture (called a few times a second)
+      // and the core's desktop watcher used to queue behind each other on a
+      // single-threaded accept loop, and a queued capture timed out -- which
+      // froze the secure-desktop picture while the page kept asking for
+      // keyframes. Each thread opens its own desktop handle (thread_local).
+      std::thread([pipe, &running] {
+        std::vector<uint8_t> frame;
+        std::vector<char> buffer(64 * 1024);
+        DWORD read = 0;
+        const BOOL read_ok = ReadFile(
+            pipe, buffer.data(), static_cast<DWORD>(buffer.size() - 1), &read,
+            nullptr);
+        if (!read_ok || read == 0) {
+          log_line("pipe read failed: " + std::to_string(GetLastError()) +
+                   " bytes=" + std::to_string(read));
+        } else {
+          buffer[read] = '\0';
+          const std::string command(buffer.data(), read);
+          int width = 0;
+          int height = 0;
+          const std::string reply = handle_line(command, frame, width, height);
+          DWORD written = 0;
+          if (!WriteFile(pipe, reply.data(), static_cast<DWORD>(reply.size()),
+                         &written, nullptr)) {
+            log_line("pipe write failed: " + std::to_string(GetLastError()) +
+                     " bytes=" + std::to_string(reply.size()));
+          }
+          // DisconnectNamedPipe discards messages the client has not read yet.
+          // Flush waits for the read to drain, so the reply is never lost.
+          FlushFileBuffers(pipe);
+          if (reply.find("\"quit\":true") != std::string::npos) {
+            running.store(false);
+          }
         }
-        // DisconnectNamedPipe discards messages the client has not read yet.
-        // Flush waits for the read to drain, so the reply is never lost.
-        FlushFileBuffers(pipe);
-        if (reply.find("\"quit\":true") != std::string::npos) {
-          running.store(false);
-        }
-      }
+        DisconnectNamedPipe(pipe);
+        CloseHandle(pipe);
+      }).detach();
+      continue;
     }
     DisconnectNamedPipe(pipe);
     CloseHandle(pipe);
@@ -482,7 +534,7 @@ void input_pipe_loop(std::atomic<bool>& running) {
   while (running.load()) {
     HANDLE pipe = CreateNamedPipeW(
         kInputPipeName, PIPE_ACCESS_DUPLEX,
-        PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT, 1, 64 * 1024,
+        PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT, 8, 64 * 1024,
         64 * 1024, 0, &attributes);
     if (pipe == INVALID_HANDLE_VALUE) {
       Sleep(500);

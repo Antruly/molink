@@ -26,6 +26,9 @@ struct av1_encoder_config {
   std::string device = "auto";
   std::string speed = "auto";
   int threads = 0;
+  /// Stream bitrate ceiling in kbit/s; 0 keeps constant quality with no cap
+  /// (the top quality presets). Every stream codec honours the same value.
+  int max_bitrate_kbps = 0;
 };
 
 /// Encodes one screen rectangle as a standalone AV1 keyframe (intra-only), so

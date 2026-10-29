@@ -395,6 +395,7 @@ bool encode_capture_frame(protocol::frame_header& header,
         tile.w = header.screen_w;
         tile.h = header.screen_h;
         tile.flags = protocol::kTileFlagChanged;
+        const std::size_t picture_bytes = picture.size();
         tile.data = std::move(picture);
         std::vector<protocol::tile_blob> only;
         only.push_back(std::move(tile));
@@ -416,6 +417,24 @@ bool encode_capture_frame(protocol::frame_header& header,
         out.codec = static_cast<uint8_t>(stream_codec);
         out.flags = picture_keyframe ? protocol::kFrameFlagKeyframe
                                      : protocol::kFrameFlagPartial;
+        if (std::getenv("MOLINK_STREAM_LOG") != nullptr) {
+          static thread_local uint64_t last_kf_log = 0;
+          static thread_local std::size_t last_pkt = 0;
+          static thread_local bool last_key = false;
+          const uint64_t now_ms = static_cast<uint64_t>(
+              std::chrono::duration_cast<std::chrono::milliseconds>(
+                  std::chrono::steady_clock::now().time_since_epoch())
+                  .count());
+          if (now_ms - last_kf_log >= 1000) {
+            last_kf_log = now_ms;
+            std::fprintf(stderr,
+                         "host: stream packet key=%d bytes=%zu (prev=%d/%zu)\n",
+                         picture_keyframe ? 1 : 0, picture_bytes,
+                         last_key ? 1 : 0, last_pkt);
+          }
+          last_key = picture_keyframe;
+          last_pkt = picture_bytes;
+        }
         if (protocol::build_frame_payload(out, only, *av1_payload, err)) {
           if (av1_only != nullptr) *av1_only = true;
           return true;

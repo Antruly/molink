@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <map>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -40,7 +41,7 @@ class connect_proxy final
 
   void start() {
     if (browser_ == nullptr) return;
-    browser_->set_max_message_size(1024u * 1024u);
+    browser_->set_max_message_size(16u * 1024u * 1024u);
     // The browser connection is the owner of this proxy: its callbacks keep a
     // strong reference until the WebSocket is gone. The ICE/transport
     // callbacks stay weak so proxy -> transport -> callback is not a cycle.
@@ -55,7 +56,11 @@ class connect_proxy final
         [self](uvcpp::ws_close_code code, const std::string& reason) {
           self->on_browser_close(code, reason);
         });
+    probe_enabled_ = std::getenv("MOLINK_AV1_PROBE") != nullptr;
     start_worker();
+    if (probe_enabled_ && !worker_started_) {
+      std::fprintf(stderr, "proxy: av1 probe off (no dav1d worker)\n");
+    }
     manager_->connect(
         target_, relay_only_,
         [self](std::shared_ptr<session_transport> transport) {
@@ -67,6 +72,11 @@ class connect_proxy final
  private:
   void on_browser_text(const std::string& text) {
     if (closed_) return;
+    // The page cannot reach a console here; it tunnels decoder failures over
+    // this channel so the core's log can carry the WebKit error text.
+    if (text.find("\"client-log\"") != std::string::npos) {
+      std::fprintf(stderr, "proxy: %s\n", text.c_str());
+    }
     std::string outgoing = text;
     if (text.find("\"hello\"") != std::string::npos) {
       outgoing = inject_av1(text);
@@ -275,7 +285,13 @@ class connect_proxy final
     // Every packet here crossed the network to the host, whether or not the
     // page will see its bytes: an AV1 patch is transcoded, so the page's own
     // byte counter would show the decoded (several times larger) size.
+    note_frame_for_stats(data, len);
     wire_window_.fetch_add(len);
+    // Forwarded on the loop thread: transcode() is a passthrough now, so the
+    // worker only added a thread hop -- and its 8-packet queue dropped the
+    // oldest packet under a burst. A dropped stream frame breaks the reference
+    // chain and the picture smears until a keyframe, which is exactly the
+    // intermittent "VP9 corruption" that was reported.
     if (!worker_started_) {
       browser_->send_binary(reinterpret_cast<const char*>(data), len);
       return;
@@ -288,6 +304,66 @@ class connect_proxy final
       binary_queue_.emplace_back(data, data + len);
     }
     queue_cv_.notify_one();
+  }
+
+  /// Counts frames by codec and prints one line a second. This is what tells
+  /// "the host's stream never reaches the proxy" apart from "the page receives
+  /// it and does not paint it".
+  void note_frame_for_stats(const uint8_t* data, std::size_t len) {
+    if (len >= protocol::kPacketHeaderSize + protocol::kFrameHeaderSize &&
+        data[5] == static_cast<uint8_t>(protocol::packet_type::frame)) {
+      ++frame_codec_counts_[data[protocol::kPacketHeaderSize + 6]];
+      ++frame_count_;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (last_frame_log_.time_since_epoch().count() != 0 &&
+        now - last_frame_log_ < std::chrono::seconds(1)) {
+      return;
+    }
+    last_frame_log_ = now;
+    if (frame_count_ == 0) return;
+    std::string line = "proxy: frames received";
+    for (const auto& [codec, count] : frame_codec_counts_) {
+      line += " codec" + std::to_string(codec) + "=" + std::to_string(count);
+    }
+    std::fprintf(stderr, "%s\n", line.c_str());
+    frame_codec_counts_.clear();
+    frame_count_ = 0;
+  }
+
+  /// One codec stat per second for the page's wire/decoded readout.
+  void maybe_announce_codec(const uint8_t* data, std::size_t len) {
+    if (closed_ || browser_ == nullptr) return;
+    // Header-only check: copying a whole frame just to read six bytes was
+    // pure overhead on the loop thread.
+    if (len < protocol::kPacketHeaderSize + protocol::kFrameHeaderSize) return;
+    if (std::memcmp(data, protocol::kMagic, sizeof(protocol::kMagic)) != 0) {
+      return;
+    }
+    if (data[5] != static_cast<uint8_t>(protocol::packet_type::frame)) return;
+    const uint8_t codec = data[protocol::kPacketHeaderSize + 6];
+    if (codec != static_cast<uint8_t>(protocol::codec::av1) &&
+        codec != static_cast<uint8_t>(protocol::codec::av1_stream)) {
+      return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (last_stat_.time_since_epoch().count() != 0 &&
+        now - last_stat_ < std::chrono::seconds(1)) {
+      return;
+    }
+    const double seconds =
+        window_start_.time_since_epoch().count() == 0
+            ? 0.0
+            : std::chrono::duration<double>(now - window_start_).count();
+    const std::size_t bytes = wire_window_.exchange(0);
+    std::size_t wire_rate = 0;
+    if (seconds > 0.2) {
+      wire_rate = static_cast<std::size_t>(bytes / seconds);
+    }
+    window_start_ = now;
+    last_stat_ = now;
+    const bool full_frame = len > 6 && (data[6] & protocol::kPacketFlagTileRefresh) == 0;
+    send_codec_stat(len, len, full_frame, wire_rate);
   }
 
   void worker_loop() {
@@ -303,6 +379,7 @@ class connect_proxy final
         binary_queue_.pop_front();
       }
       const bool av1 = packet_is_av1(packet);
+      if (av1 && probe_enabled_) probe_av1_frame(packet);
       // A patch follows a tile frame (tile-refresh flag); an AV1-only picture
       // does not. The page uses this to label the stream as AV1 or AV1+tiles.
       const bool full_frame =
@@ -342,6 +419,43 @@ class connect_proxy final
         }
       });
     }
+  }
+
+  /// Diagnostic (MOLINK_AV1_PROBE=1): decode the host's AV1 stream with the
+  /// core's own dav1d. A valid picture here with the page still failing means
+  /// the WebView's WebCodecs decoder is the problem, not the bitstream.
+  void probe_av1_frame(const std::vector<uint8_t>& packet) {
+    protocol::parsed_frame parsed;
+    std::string parse_error;
+    if (!protocol::parse_frame_payload(
+            packet.data() + protocol::kPacketHeaderSize,
+            packet.size() - protocol::kPacketHeaderSize, parsed,
+            parse_error) ||
+        parsed.tiles.empty()) {
+      std::fprintf(stderr, "proxy: av1 probe parse failed: %s\n",
+                   parse_error.c_str());
+      return;
+    }
+    const bool keyframe = (packet[6] & protocol::kPacketFlagKeyframe) != 0;
+    if (keyframe && !probe_dumped_) {
+      probe_dumped_ = true;
+      if (FILE* file = std::fopen("/tmp/molink-av1-key.obu", "wb")) {
+        std::fwrite(parsed.tiles[0].data, 1, parsed.tiles[0].size, file);
+        std::fclose(file);
+        std::fprintf(stderr, "proxy: av1 probe dumped keyframe (%zu bytes)\n",
+                     parsed.tiles[0].size);
+      }
+    }
+    std::vector<uint8_t> bgra;
+    int width = 0;
+    int height = 0;
+    std::string error;
+    const bool ok = stream_decoder_.decode(
+        parsed.tiles[0].data, parsed.tiles[0].size, keyframe, bgra, width,
+        height, error);
+    std::fprintf(stderr, "proxy: av1 probe key=%d size=%zu ok=%d %dx%d%s%s\n",
+                 keyframe ? 1 : 0, parsed.tiles[0].size, ok ? 1 : 0, width,
+                 height, ok ? "" : " error=", ok ? "" : error.c_str());
   }
 
   static bool packet_is_av1(const std::vector<uint8_t>& bytes) {
@@ -398,6 +512,9 @@ class connect_proxy final
   std::deque<std::vector<uint8_t>> binary_queue_;
   bool worker_started_ = false;
   bool stopping_ = false;
+  /// MOLINK_AV1_PROBE=1: decode the incoming AV1 stream for diagnostics only.
+  bool probe_enabled_ = false;
+  bool probe_dumped_ = false;
   std::chrono::steady_clock::time_point last_stat_{};
   /// The low-delay stream keeps reference frames per session.
   av1_stream_decoder stream_decoder_;
@@ -411,6 +528,10 @@ class connect_proxy final
   /// the start of that window. The window start is only touched by the worker.
   std::atomic<std::size_t> wire_window_{0};
   std::chrono::steady_clock::time_point window_start_{};
+  /// Frame counts per codec since the last diagnostic line.
+  std::map<uint8_t, int> frame_codec_counts_;
+  int frame_count_ = 0;
+  std::chrono::steady_clock::time_point last_frame_log_{};
   std::shared_ptr<session_transport> transport_;
   std::deque<std::string> pending_text_;
   std::deque<std::vector<uint8_t>> pending_binary_;

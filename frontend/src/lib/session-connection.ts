@@ -109,6 +109,9 @@ export class SessionConnection {
   /// Audio playback lives with the connection so a background tab keeps
   /// playing; created from the format the welcome announced.
   private player: PcmPlayer | null = null
+  /// When the last audio packet arrived, for the stall watchdog below.
+  private lastAudioAt = 0
+  private audioWatchdog: number | null = null
   private audioVolume = 0.8
   private audioFormat: { sampleRate: number; channels: number } | null = null
   /// Host accepts per-second viewer health reports (welcome.viewer_stats).
@@ -335,7 +338,10 @@ export class SessionConnection {
       },
       onSessionEvent: (event: SessionEvent) => {
         if (event.kind === 'file') this.fileSync?.handleMessage(event.message)
-        if (event.kind === 'audio') this.player?.push(event.data)
+        if (event.kind === 'audio') {
+          this.lastAudioAt = performance.now()
+          this.player?.push(event.data)
+        }
         for (const listener of this.listeners) listener(event)
       },
     })
@@ -648,14 +654,45 @@ export class SessionConnection {
     // is what a click after a policy-suspended context needs.
     void this.player.start()
     this.client.startAudio()
+    this.watchAudio()
   }
 
   stopAudio(): void {
+    if (this.audioWatchdog !== null) {
+      window.clearInterval(this.audioWatchdog)
+      this.audioWatchdog = null
+    }
     if (this.player !== null) {
       this.player.stop()
       this.player = null
     }
     this.client.stopAudio()
+  }
+
+  /// The host keeps sending audio through a codec switch, but the page's
+  /// decoder could take the audio context down with it and the sound stayed
+  /// off until the toggle was used twice. Rebuild the player after a few
+  /// silent seconds, which is what toggling did by hand.
+  private watchAudio(): void {
+    if (this.audioWatchdog !== null) return
+    this.lastAudioAt = performance.now()
+    this.audioWatchdog = window.setInterval(() => {
+      if (this.player === null) {
+        if (this.audioWatchdog !== null) {
+          window.clearInterval(this.audioWatchdog)
+          this.audioWatchdog = null
+        }
+        return
+      }
+      if (performance.now() - this.lastAudioAt < 3000) return
+      const format = this.audioFormat
+      if (format === null) return
+      this.lastAudioAt = performance.now()
+      this.player.stop()
+      this.player = new PcmPlayer(format.sampleRate, format.channels,
+                                  this.audioVolume)
+      void this.player.start()
+    }, 1000)
   }
 
   audioActive(): boolean {

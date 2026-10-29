@@ -16,7 +16,7 @@ import { formatHost } from './net'
 import { H264StreamDecoder, h264StreamSupported } from './h264-stream'
 import {
   VpxStreamDecoder,
-  vpxStreamSupported,
+  streamCodecDecodes,
   type VpxCodec,
 } from './vpx-stream'
 import { WtTransport, fingerprintBytes, webTransportSupported } from './webtransport'
@@ -409,6 +409,37 @@ export class MolinkClient {
   private lastQualityAssertAt = 0
   /// Last keyframe request made because no picture exists yet.
   private lastKeyframeRecovery = 0
+  /// Last time a stream-decoder failure was forwarded to the core's log.
+  private lastDecoderLog = 0
+  /// Mean brightness of the last decoded picture, for the black-frame probe.
+  private lastFrameLuma = 0
+  private lumaCanvas: HTMLCanvasElement | null = null
+  /// Bumped when the codec changes: frames queued under an older epoch are
+  /// dropped instead of keeping the decoder busy through the switch.
+  private tileEpoch = 0
+  /// Capture sequence of the last low-delay stream frame, to notice a frame
+  /// lost on an unreliable datagram path. -1 before the first one.
+  private lastStreamSeq = -1
+  /// Stream codec the sequence above belongs to, and whether it has painted
+  /// from a keyframe yet.
+  private lastStreamCodecKey = ''
+  private streamHasImage = false
+  /// Rate limit for the stream-rejection diagnostic.
+  private lastStreamRejectLog = 0
+  /// The host's codec preference ("auto", a codec name, or "tiles").
+  private preferredCodec = 'auto'
+  /// Codec of the last picture painted, for the paint diagnostic.
+  private lastPaintedCodec = -1
+  /// When a stream picture was last painted. A capture-source swap (lock
+  /// screen, UAC) restarts the host's encoder and it falls back to tiles for a
+  /// few seconds; those tiles are ignored so the picture holds the last frame
+  /// instead of flashing tiles and stuttering.
+  private lastStreamPaintAt = 0
+  /// Consecutive decode failures per stream codec, to tell "this WebView
+  /// cannot decode it at all" apart from a one-off broken frame.
+  private streamDecodeFailures = new Map<VpxCodec, number>()
+  /// Stream codecs this session already gave up on.
+  private disabledStreamCodecs = new Set<string>()
   /// Last tile-clock-driven refresh request, to keep it to one per second.
   private lastClockRequest = 0
   /// Last capture timestamp applied per 128 px screen cell, in microseconds.
@@ -487,7 +518,7 @@ export class MolinkClient {
       // makes the host re-evaluate which stream codec every viewer can take.
       this.emitCodecOptions()
       if (supported && this.isLive() && this.helloPayload !== null) {
-        this.sendHello()
+        this.sendHello(false)
       }
     })
     // VP8/VP9 are decoded through WebCodecs too; the host only uses them when
@@ -505,13 +536,14 @@ export class MolinkClient {
         this.av1NativeCapable = true
       }
       this.emitCodecOptions()
-      if (this.isLive() && this.helloPayload !== null) this.sendHello()
+      if (this.isLive() && this.helloPayload !== null) this.sendHello(false)
     }
-    void vpxStreamSupported('vp9').then((ok) => announce('vp9', ok))
-    void vpxStreamSupported('vp8').then((ok) => announce('vp8', ok))
-    // The proxy forwards AV1 only to a page that decodes it itself; without
-    // this flag the host falls back to H.264/VP9/tiles.
-    void vpxStreamSupported('av1').then((ok) => announce('av1', ok))
+    // A WebKit that merely accepts the configuration is not enough: several
+    // versions fail every frame (see streamCodecDecodes), so each flag
+    // follows a real decode of a probe keyframe.
+    void streamCodecDecodes('vp9').then((ok) => announce('vp9', ok))
+    void streamCodecDecodes('vp8').then((ok) => announce('vp8', ok))
+    void streamCodecDecodes('av1').then((ok) => announce('av1', ok))
   }
 
   setHandlers(handlers: Partial<ClientHandlers>): void {
@@ -860,11 +892,21 @@ export class MolinkClient {
 
   /// Sends the hello and keeps resending it until a welcome arrives. The ICE
   /// path is UDP, so either direction can be lost without notice.
-  private sendHello(): void {
+  /// `retry` arms the lossy-path retry loop; a capability update is sent once,
+  /// since the host has already answered this session.
+  private sendHello(retry = true): void {
     if (this.helloPayload === null || !this.isLive()) return
+    // The payload is built when the socket opens; the codec probes settle
+    // afterwards. Refresh the capability flags so a re-send after a probe (or
+    // after a codec turned out undecodable) reaches the host instead of
+    // replaying the snapshot taken at connect time.
+    this.helloPayload.h264_stream = this.h264Capable
+    this.helloPayload.vp9_stream = this.vp9Capable
+    this.helloPayload.vp8_stream = this.vp8Capable
+    this.helloPayload.av1_native = this.av1NativeCapable
     this.sendJson(this.helloPayload)
     this.helloAttempts += 1
-    if (this.helloTimer !== null) return
+    if (!retry || this.helloTimer !== null) return
     this.helloTimer = window.setInterval(() => {
       if (this.helloPayload === null || this.helloAttempts >= kHelloAttempts) {
         this.stopHelloRetry()
@@ -879,7 +921,8 @@ export class MolinkClient {
       window.clearInterval(this.helloTimer)
       this.helloTimer = null
     }
-    this.helloPayload = null
+    // Keep the payload: capability probes finish after the welcome, and the
+    // host has to hear about a codec this WebView can (or cannot) decode.
     this.helloAttempts = 0
   }
 
@@ -1141,7 +1184,11 @@ export class MolinkClient {
   }
 
   sendFileChunk(id: number, offset: number, data: Uint8Array): void {
-    if (!this.isLive() || this.ws === null) return
+    // No socket guard here: the session may be on WebTransport, where `ws` is
+    // null and the chunk rides the dedicated file stream. sendRawPacket picks
+    // the live transport; guarding on `ws` dropped every chunk of a WT session
+    // and left the upload stuck at 0 bytes.
+    if (!this.isLive()) return
     const payload = new Uint8Array(16 + data.byteLength)
     const view = new DataView(payload.buffer)
     view.setUint32(0, id, true)
@@ -1217,6 +1264,7 @@ export class MolinkClient {
           : []
         this.emitCodecOptions()
         if (typeof welcome.codec_preference === 'string') {
+          this.preferredCodec = welcome.codec_preference
           this.handlers.onCodecPreference?.(welcome.codec_preference)
         }
         this.handlers.onWelcome?.(welcome)
@@ -1460,9 +1508,12 @@ export class MolinkClient {
         // describes have been received.
         if ((packet.flags & PacketFlag.compressed) !== 0) {
           const payload = packet.payload
+          const epoch = this.tileEpoch
           this.frameQueue = this.frameQueue
             .then(async () => {
-              this.handleTileSeq(await inflateTile(payload))
+              const inflated = await inflateTile(payload)
+              if (epoch !== this.tileEpoch) return
+              this.handleTileSeq(inflated)
             })
             .catch(() => {})
         } else {
@@ -1484,22 +1535,49 @@ export class MolinkClient {
         frame.codec === Codec.vp9Stream ||
         frame.codec === Codec.av1Stream
       ) {
+        const streamCodecKey =
+          frame.codec === Codec.av1Stream
+            ? 'av1'
+            : frame.codec === Codec.vp9Stream
+              ? 'vp9'
+              : frame.codec === Codec.vp8Stream
+                ? 'vp8'
+                : 'h264'
+        // A different stream codec starts from zero: its first picture must
+        // be a keyframe, or the deltas decode onto the previous codec's chain.
+        if (streamCodecKey !== this.lastStreamCodecKey) {
+          this.lastStreamCodecKey = streamCodecKey
+          this.lastStreamSeq = -1
+          this.streamHasImage = false
+        }
+        // A codec this WebView already proved it cannot decode: ignore its
+        // frames until the host switches (it will, on the next hello).
+        if (this.disabledStreamCodecs.has(streamCodecKey)) return
         // Low-delay stream: one whole screen per packet, decoded by WebCodecs
         // (H.264 as Annex-B, VP8/VP9 as raw codec frames). Like the AV1 stream
         // it only decodes on top of the previous picture, so nothing is
         // painted until a keyframe arrived.
         if ((frame.flags & FrameFlag.keyframe) !== 0) this.hasImage = true
-        if (frame.tiles.length === 0) return
+        if (frame.tiles.length === 0) {
+          this.rejectStream('empty', frame, packet.tsUs)
+          return
+        }
         if (!this.hasImage) {
+          this.rejectStream('no-image', frame, packet.tsUs)
           this.requestKeyframeThrottled()
           return
         }
         if (this.frameAgeMs(packet.tsUs) > 1000) {
+          this.rejectStream('stale', frame, packet.tsUs)
           this.handlers.onFrameDropped?.()
           return
         }
         this.handlers.onWireFrame?.()
-        if (frame.frameSeq > this.latestFrameSeq) {
+        const isKeyframe = (frame.flags & FrameFlag.keyframe) !== 0
+        // A keyframe is authoritative even after the capture sequence was
+        // reset by a source swap; without this the tile path would keep
+        // dropping the new, lower-numbered frames as stale.
+        if (frame.frameSeq > this.latestFrameSeq || isKeyframe) {
           this.latestFrameSeq = frame.frameSeq
         }
         this.noteApplied(frame, packet.tsUs)
@@ -1519,22 +1597,39 @@ export class MolinkClient {
         // A copy: WebCodecs keeps the buffer until the chunk is consumed, and
         // the packet's view belongs to the caller.
         const accessUnit = new Uint8Array(frame.tiles[0]!.data)
+        // Video rides unreliable datagrams on WebTransport and P2P, so a
+        // stream frame can go missing without any error. A delta decoded on a
+        // gap paints artifacts until the next keyframe, so a gap restarts the
+        // decoder and asks for one.
+        if (keyframe) this.streamHasImage = true
+        if (!this.streamHasImage) {
+          // Nothing painted for this codec yet: a delta has no reference what
+          // it can use. Wait for the keyframe the switch starts with.
+          this.rejectStream('no-keyframe', frame, packet.tsUs)
+          this.requestKeyframeThrottled()
+          return
+        }
+        const previousSeq = this.lastStreamSeq
+        this.lastStreamSeq = frame.frameSeq
+        // Strictly consecutive, or the reference chain is broken. The capture
+        // sequence also restarts when the host swaps its capture source (the
+        // secure desktop and back), so a decrease counts as a break too;
+        // checking only "greater" left the decoder painting artifacts until a
+        // keyframe happened to arrive.
+        const contiguous = previousSeq < 0 || frame.frameSeq === previousSeq + 1
+        if (!keyframe && !contiguous) {
+          this.rejectStream('gap', frame, packet.tsUs)
+          this.streamDecoderFor(frame).close()
+          this.requestKeyframeThrottled()
+          return
+        }
         // Feed the decoder without waiting for the previous picture. WebKit's
         // decoder only emits a picture once the next chunk (or a flush)
         // arrives, so awaiting each output before submitting the next chunk
         // deadlocks after the first frame: one chunk goes in, nothing comes
         // out, and the queue never moves again. Output order follows input
         // order, so painting as promises resolve keeps the picture ordered.
-        const decoder =
-          frame.codec === Codec.h264Stream
-            ? this.h264
-            : this.vpxDecoder(
-                frame.codec === Codec.vp9Stream
-                  ? 'vp9'
-                  : frame.codec === Codec.av1Stream
-                    ? 'av1'
-                    : 'vp8',
-              )
+        const decoder = this.streamDecoderFor(frame)
         this.frameQueue = this.frameQueue
           .then(() => {
             void decoder
@@ -1543,9 +1638,13 @@ export class MolinkClient {
                 if (picture === null) {
                   // Behind, broken, or a delta with no reference: only a
                   // keyframe brings the stream back.
-                  this.requestKeyframeThrottled()
+                  if (!this.disabledStreamCodecs.has(streamCodecKey)) {
+                    this.requestKeyframeThrottled()
+                  }
                   return
                 }
+                this.noteFrameLuma(picture, streamCodecKey, keyframe)
+                this.lastStreamPaintAt = performance.now()
                 try {
                   this.handlers.onFrame?.(frame, buffer.byteLength, [picture])
                 } finally {
@@ -1562,6 +1661,13 @@ export class MolinkClient {
         // picture: the AV1 stream sends everything as a refresh, and without
         // this the page would refuse every frame of a fresh stream and stay
         // frozen while asking for a keyframe that also arrives as a refresh.
+        // While a stream was just on screen, a refresh is the host filling in
+        // for a gap; painting it turned a seamless stream into a tile flash.
+        if (this.preferredCodec !== 'tiles' &&
+            performance.now() - this.lastStreamPaintAt < 15000) {
+          return
+        }
+        this.forgetStreamPicture()
         if ((frame.flags & FrameFlag.keyframe) !== 0) this.hasImage = true
         if (!this.hasImage) {
           this.requestKeyframeThrottled()
@@ -1583,6 +1689,21 @@ export class MolinkClient {
         }
         return
       }
+      // A capture-source swap (lock screen, UAC, or coming back from it)
+      // restarts the host's encoder, and it streams tiles until the new
+      // encoder is ready. Painting them made the picture flash to tiles and
+      // stutter for several seconds; keep the last stream picture instead and
+      // let the stream resume, unless the viewer actually asked for tiles.
+      if (this.preferredCodec !== 'tiles' &&
+          performance.now() - this.lastStreamPaintAt < 15000) {
+        return
+      }
+      // Any picture that is not a stream frame resets the stream chain: the
+      // next stream frame must be a keyframe, even when it is the same codec
+      // as the one used before the tiles. Without this the page decoded the
+      // first deltas on the old reference chain and smeared the picture until
+      // a keyframe happened to arrive.
+      this.forgetStreamPicture()
       const keyframe = (frame.flags & FrameFlag.keyframe) !== 0
       // A frame that spent more than a second in flight is worse than a
       // skipped one: showing it late causes visible lag. Drop it and ask for
@@ -1608,10 +1729,16 @@ export class MolinkClient {
       this.handlers.onWireFrame?.()
 
       if (isDeflatedCodec(frame.codec)) {
+        const epoch = this.tileEpoch
         this.frameQueue = this.frameQueue
-          .then(() =>
-            this.deliverCompressed(frame, buffer.byteLength, packet.tsUs),
-          )
+          .then(() => {
+            if (epoch !== this.tileEpoch) return
+            return this.deliverCompressed(
+              frame,
+              buffer.byteLength,
+              packet.tsUs,
+            )
+          })
           .catch((error: unknown) => {
             this.handlers.onError?.(
               error instanceof Error
@@ -1684,6 +1811,13 @@ export class MolinkClient {
 
   private deliver(frame: Frame, byteLength: number, tsUs: number,
                   refresh = false): void {
+    if (frame.codec !== this.lastPaintedCodec) {
+      this.lastPaintedCodec = frame.codec
+      this.sendJson({
+        type: 'client-log',
+        text: `paint codec=${frame.codec} refresh=${refresh ? 1 : 0}`,
+      })
+    }
     if (!refresh) {
       if ((frame.flags & FrameFlag.keyframe) !== 0) {
         this.hasImage = true
@@ -1939,15 +2073,25 @@ export class MolinkClient {
   /// order. The host rejects a codec it cannot encode.
   setStreamCodec(value: string): void {
     if (!this.isLive()) return
+    this.preferredCodec = value
+    // Drop the frames already queued: a backlog of full-screen tiles kept the
+    // decoder and the UI busy for seconds after the user asked for a
+    // different codec, so the switch looked like it was ignored. Bumping the
+    // epoch makes every queued entry a no-op.
+    this.tileEpoch += 1
+    this.pendingTiles.clear()
+    this.pendingFrame = false
     this.sendJson({ type: 'stream-codec', value })
   }
 
   /// Narrows the host's list to what this page can actually decode. AV1 is
-  /// decoded by the local core's proxy, so it is always allowed when the host
-  /// lists it.
+  /// decoded by the page itself through WebCodecs, so it needs the real
+  /// decode probe, not just the host's list.
   private emitCodecOptions(): void {
     const usable = this.hostStreamCodecs.filter((codec) => {
-      if (codec === 'av1') return true
+      // "tiles" is a host mode, not a decoder: it is always selectable.
+      if (codec === 'tiles') return true
+      if (codec === 'av1') return this.av1NativeCapable
       if (codec === 'h264') return this.h264Capable
       if (codec === 'vp9') return this.vp9Capable
       if (codec === 'vp8') return this.vp8Capable
@@ -1960,9 +2104,130 @@ export class MolinkClient {
     let decoder = this.vpxDecoders[codec]
     if (decoder === undefined) {
       decoder = new VpxStreamDecoder(codec)
+      // The WebView's console is not reachable; ride the control channel so
+      // the local core can print why a stream decoder failed.
+      decoder.onError = (message: string) => {
+        const failures = (this.streamDecodeFailures.get(codec) ?? 0) + 1
+        this.streamDecodeFailures.set(codec, failures)
+        const now = performance.now()
+        if (now - this.lastDecoderLog >= 1000) {
+          this.lastDecoderLog = now
+          this.sendJson({ type: 'client-log', text: message })
+        }
+        // A codec that fails every keyframe cannot be streamed here: stop
+        // claiming it, so the host's supervisor switches to one that works
+        // instead of the picture staying frozen.
+        if (failures >= 3) this.disableStreamCodec(codec)
+      }
       this.vpxDecoders[codec] = decoder
     }
     return decoder
+  }
+
+  /// This WebView cannot decode `codec` (see streamCodecDecodes): drop the
+  /// claim, tell the host again, and stop the decoder from asking for
+  /// keyframes that can never be shown.
+  private disableStreamCodec(codec: VpxCodec): void {
+    if (this.disabledStreamCodecs.has(codec)) return
+    this.disabledStreamCodecs.add(codec)
+    this.streamDecodeFailures.delete(codec)
+    if (codec === 'av1') this.av1NativeCapable = false
+    else if (codec === 'vp9') this.vp9Capable = false
+    else if (codec === 'vp8') this.vp8Capable = false
+    this.vpxDecoders[codec]?.close()
+    this.emitCodecOptions()
+    if (this.isLive() && this.helloPayload !== null) this.sendHello(false)
+    // A desktop switch (lock screen, UAC) hands the decoder a few frames it
+    // cannot use, and three of them used to disable the codec for the rest of
+    // the session -- the picture then stayed on the last tiles with no way
+    // back. Re-probe a little later instead of giving up for good.
+    window.setTimeout(() => {
+      if (!this.disabledStreamCodecs.has(codec)) return
+      void streamCodecDecodes(codec).then((ok) => {
+        if (!ok || !this.disabledStreamCodecs.has(codec)) return
+        this.disabledStreamCodecs.delete(codec)
+        this.streamDecodeFailures.delete(codec)
+        if (codec === 'av1') this.av1NativeCapable = true
+        else if (codec === 'vp9') this.vp9Capable = true
+        else if (codec === 'vp8') this.vp8Capable = true
+        this.emitCodecOptions()
+        if (this.isLive() && this.helloPayload !== null) this.sendHello(false)
+      })
+    }, 15000)
+  }
+
+  /// Diagnostic: a picture that suddenly turns (nearly) black. Reported once
+  /// per occurrence so "the screen flashed black" can be traced to the decoded
+  /// picture -- and therefore to the host or the decoder -- rather than to the
+  /// canvas that shows it.
+  private noteFrameLuma(
+    picture: VideoFrame,
+    codec: string,
+    keyframe: boolean,
+  ): void {
+    try {
+      const canvas =
+        this.lumaCanvas ?? (this.lumaCanvas = document.createElement('canvas'))
+      canvas.width = 16
+      canvas.height = 9
+      const context = canvas.getContext('2d', { willReadFrequently: true })
+      if (!context) return
+      context.drawImage(picture, 0, 0, 16, 9)
+      const data = context.getImageData(0, 0, 16, 9).data
+      let total = 0
+      for (let i = 0; i < data.length; i += 4) {
+        total += 0.2126 * data[i]! + 0.7152 * data[i + 1]! + 0.0722 * data[i + 2]!
+      }
+      const mean = total / (data.length / 4)
+      const previous = this.lastFrameLuma
+      this.lastFrameLuma = mean
+      if (mean < 8 && previous > 40) {
+        this.sendJson({
+          type: 'client-log',
+          text:
+            `black frame codec=${codec} key=${keyframe ? 1 : 0} ` +
+            `mean=${mean.toFixed(1)} before=${previous.toFixed(1)}`,
+        })
+      }
+    } catch {
+      // A frame that cannot be sampled must not break painting.
+    }
+  }
+
+  /// Why a stream frame was not painted (rate-limited, for diagnosis).
+  private rejectStream(reason: string, frame: Frame, tsUs = 0): void {
+    const now = performance.now()
+    if (now - this.lastStreamRejectLog < 1000) return
+    this.lastStreamRejectLog = now
+    this.sendJson({
+      type: 'client-log',
+      text:
+        `stream reject ${reason} codec=${frame.codec} key=` +
+        `${(frame.flags & FrameFlag.keyframe) !== 0 ? 1 : 0} ` +
+        `seq=${frame.frameSeq} age=${Math.round(this.frameAgeMs(tsUs))}`,
+    })
+  }
+
+  /// A non-stream picture was shown: the stream's reference chain no longer
+  /// matches what is on screen.
+  private forgetStreamPicture(): void {
+    this.streamHasImage = false
+    this.lastStreamSeq = -1
+    this.lastStreamCodecKey = ''
+  }
+
+  /// The decoder that handles a low-delay stream frame.
+  private streamDecoderFor(
+    frame: Frame,
+  ): VpxStreamDecoder | H264StreamDecoder {
+    if (frame.codec === Codec.h264Stream) return this.h264
+    return this.vpxDecoder(
+      frame.codec === Codec.vp9Stream
+        ? 'vp9'
+        : frame.codec === Codec.av1Stream
+          ? 'av1'
+          : 'vp8',
+    )
   }
 
   private requestKeyframeThrottled(): void {

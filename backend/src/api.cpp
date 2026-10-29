@@ -1334,6 +1334,7 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
     j["keyframe_interval_seconds"] = settings.keyframe_interval_seconds;
     j["codec_preference"] = settings.stream_codec;
     j["video_mode"] = settings.video_mode;
+    j["stream_enter_percent"] = settings.stream_enter_percent;
     j["devices"] = uvcpp_json::array();
     for (const av1_encoder_device& device : av1_encoder_devices()) {
       uvcpp_json item;
@@ -1446,6 +1447,8 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
              const int keyframe_interval = query_int(
                  "keyframe_interval_seconds",
                  before.keyframe_interval_seconds);
+             const int stream_enter = query_int(
+                 "stream_enter_percent", before.stream_enter_percent);
 
              if (speed != "auto" && speed != "fast" && speed != "balanced" &&
                  speed != "quality") {
@@ -1455,7 +1458,8 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
              }
              if (qp < 0 || qp > 63 || max_area < 0 || max_area > 100 ||
                  threads < 0 || threads > 64 || keyframe_interval < 0 ||
-                 keyframe_interval > 60) {
+                 keyframe_interval > 60 || stream_enter < 1 ||
+                 stream_enter > 100) {
                resp.status(400).json_str(R"({"code":"invalid_av1_params"})");
                resp.end();
                return;
@@ -1479,6 +1483,7 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
              deps.auth->set_av1_encoding(enabled, device, speed, qp,
                                          max_area, threads, full_frame);
              deps.auth->set_keyframe_interval_seconds(keyframe_interval);
+             deps.auth->set_stream_enter_percent(stream_enter);
              // Video path: stream / mixed / tiles.
              if (const std::string* mode = req.query("video_mode");
                  mode != nullptr && !deps.auth->set_video_mode(*mode)) {
@@ -1504,6 +1509,7 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
                deps.capture->set_av1_settings(applied);
                deps.capture->set_keyframe_interval_ms(
                    keyframe_interval > 0 ? keyframe_interval * 1000 : 120000);
+               deps.capture->set_stream_enter_percent(stream_enter);
              }
              resp.set_header("Cache-Control", "no-store").json(encoding_json());
              resp.end();

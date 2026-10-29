@@ -43,6 +43,11 @@ struct quality_profile {
   /// AV1 quantizer for this preset: 1 is near-lossless, 63 the worst. SVT's
   /// minimum accepted QP is 1 in 4.x.
   int av1_qp = 24;
+  /// Stream bitrate budget for this preset, in thousandths of a bit per pixel
+  /// per frame. 0 means constant quality with no ceiling (the top presets).
+  /// Every stream codec gets the same budget, so the codecs compete at equal
+  /// bandwidth instead of one being capped and another unlimited.
+  int stream_bits_per_pixel_x1000 = 45;
   /// The turbo preset is monochrome; AV1 must encode grayscale pixels.
   bool av1_grayscale = false;
   /// Upper bound on the AV1-encoded area per frame, as a percentage of the
@@ -71,6 +76,13 @@ quality_profile quality_profile_for(quality_mode mode);
 /// The payload is built on the capture thread so the event loop only has to
 /// prepend a packet header. `keyframe` means every tile is present; otherwise
 /// only tiles that changed since the previous frame are included.
+/// Process-wide frame sequence. Every capture backend draws from the same
+/// counter, so the sequence keeps increasing across a source swap (the secure
+/// desktop and back). A per-source counter restarted at zero, and sessions
+/// still remembered the old, higher number: the sender saw "nothing new" and
+/// answered with empty frames until the new source counted past it.
+uint32_t next_capture_seq();
+
 struct captured_frame {
   uint32_t seq = 0;
   uint64_t ts_us = 0;
@@ -265,6 +277,8 @@ class capture_source {
   /// Whether the AV1 low-delay stream may be used. Only set while every live
   /// session can decode it.
   virtual void set_av1_stream_allowed(bool allowed) { (void)allowed; }
+  /// Percentage of the screen that must move before the stream takes over.
+  virtual void set_stream_enter_percent(int percent) { (void)percent; }
 
   /// Whether a hardware H.264 stream may be used instead. This is the fallback
   /// for viewers that cannot decode AV1 (the browser decodes H.264 through
@@ -276,6 +290,10 @@ class capture_source {
   /// viewer explicitly picks a codec: waiting for the movement rule made the
   /// switch look like it took ten seconds.
   virtual void request_stream(uint64_t ms) { (void)ms; }
+  /// True while the capture is (or has just been asked to be) on the stream
+  /// path. A session that joins now must wait for a stream keyframe instead of
+  /// replaying the tile keyframe, which is the expensive full-screen one.
+  virtual bool stream_on() const { return false; }
   /// "Video encoding" mode: the stream is always the picture, no tiles.
   virtual void set_stream_always(bool always) { (void)always; }
   virtual void set_vp9_stream_allowed(bool allowed) { (void)allowed; }
@@ -527,12 +545,19 @@ class capture_base : public capture_source {
   void set_av1_stream_allowed(bool allowed) override {
     av1_stream_allowed_.store(allowed);
   }
+  void set_stream_enter_percent(int percent) override {
+    stream_enter_percent_.store(percent);
+  }
   void set_stream_always(bool always) override {
     stream_always_.store(always);
   }
   void request_stream(uint64_t ms) override {
     stream_nudge_until_.store(monotonic_ms() + ms);
     request_keyframe();
+  }
+  bool stream_on() const override {
+    if (stream_nudge_until_.load() > monotonic_ms()) return true;
+    return stream_live_.load();
   }
   void set_vp9_stream_allowed(bool allowed) override {
     vp9_stream_allowed_.store(allowed);
@@ -637,6 +662,16 @@ class capture_base : public capture_source {
   /// Tile <-> AV1 stream hand-over, fed once per frame.
   stream_policy stream_policy_;
   std::shared_ptr<av1_stream_encoder> stream_encoder_;
+  /// Make-before-break: while the new codec's encoder is being built, the
+  /// old one keeps producing frames. The swap happens on the next frame.
+  std::shared_ptr<av1_stream_encoder> stream_encoder_next_;
+  video_codec next_codec_ = video_codec::av1_stream;
+  bool switch_pending_ = false;
+  /// Bitrate ceiling the live encoder was built with, and the one the encoder
+  /// being prepared for the swap gets. A preset or fps change moves the
+  /// budget, and the encoder is rebuilt to honour it.
+  int applied_budget_kbps_ = -1;
+  int next_budget_kbps_ = -1;
   /// Codec the live stream encoder produces; a viewer set that changes which
   /// codec is decodable rebuilds the encoder.
   video_codec video_codec_ = video_codec::av1_stream;
@@ -644,6 +679,13 @@ class capture_base : public capture_source {
   /// (0 = no pending cooldown).
   uint64_t encoder_retry_at_ms_ = 0;
   std::atomic<bool> av1_stream_allowed_{false};
+  /// Host setting: how much of the screen must move before the stream takes
+  /// over (1..100, default 15). Applied on the capture thread.
+  std::atomic<int> stream_enter_percent_{15};
+  /// Threshold the policy currently holds, so the setting is applied once.
+  double applied_enter_fraction_ = 0.15;
+  /// The policy is producing stream frames (mirrored for other threads).
+  std::atomic<bool> stream_live_{false};
   std::atomic<bool> h264_stream_allowed_{false};
   std::atomic<bool> vp9_stream_allowed_{false};
   std::atomic<bool> vp8_stream_allowed_{false};

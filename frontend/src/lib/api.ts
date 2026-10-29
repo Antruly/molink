@@ -317,6 +317,8 @@ export interface Av1Settings {
   max_area_percent: number
   threads: number
   keyframe_interval_seconds: number
+  /// Percentage of the screen that must move before the stream takes over.
+  stream_enter_percent?: number
   /// "auto" keeps the hardware-first ladder; a pinned codec wins when every
   /// viewer can decode it.
   codec_preference?: string
@@ -336,6 +338,7 @@ export interface Av1SettingsUpdate {
   max_area_percent?: number
   threads?: number
   keyframe_interval_seconds?: number
+  stream_enter_percent?: number
   stream_codec?: string
   video_mode?: string
 }
@@ -369,6 +372,9 @@ export function postAv1Settings(
       'keyframe_interval_seconds',
       String(update.keyframe_interval_seconds),
     )
+  }
+  if (update.stream_enter_percent !== undefined) {
+    query.set('stream_enter_percent', String(update.stream_enter_percent))
   }
   if (update.stream_codec !== undefined) {
     query.set('stream_codec', update.stream_codec)

@@ -41,9 +41,20 @@ cp "$ROOT/shell/native/build/moLink" "$STAGE$PREFIX/bin/"
 cp "$ROOT/backend/build/molink-core" "$STAGE$PREFIX/bin/"
 cp -r "$ROOT/frontend/dist/." "$STAGE$PREFIX/web/"
 
-# Bundle non-system libraries from the libuvcpp installation.
-UVCPP_LIB_DIR=${UVCPP_LIB_DIR:-$(pkg-config --variable=libdir uvcpp 2>/dev/null || true)}
+# Bundle non-system libraries from the libuvcpp installation. Prefer the one
+# the core was actually linked against: pkg-config may resolve to a stale
+# prefix in PKG_CONFIG_PATH, and a mismatched libuvcpp.so makes the packaged
+# core die at startup with "undefined symbol" before it prints its ready line.
+UVCPP_LIB_DIR=${UVCPP_LIB_DIR:-}
+if [ -z "$UVCPP_LIB_DIR" ]; then
+  UVCPP_LINKED=$(ldd "$ROOT/backend/build/molink-core" 2>/dev/null \
+                 | awk '/libuvcpp\.so/ {print $3; exit}')
+  if [ -n "$UVCPP_LINKED" ]; then UVCPP_LIB_DIR=$(dirname "$UVCPP_LINKED"); fi
+fi
 if [ -z "$UVCPP_LIB_DIR" ] && [ -n "${UVCPP_ROOT:-}" ]; then UVCPP_LIB_DIR="$UVCPP_ROOT/lib"; fi
+if [ -z "$UVCPP_LIB_DIR" ]; then
+  UVCPP_LIB_DIR=$(pkg-config --variable=libdir uvcpp 2>/dev/null || true)
+fi
 if [ -n "$UVCPP_LIB_DIR" ] && [ -d "$UVCPP_LIB_DIR" ]; then
   for pattern in 'libuvcpp.so*' 'libllhttp.so*'; do
     cp -P "$UVCPP_LIB_DIR"/$pattern "$STAGE$PREFIX/lib/" 2>/dev/null || true

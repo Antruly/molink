@@ -12,21 +12,35 @@ namespace molink {
 /// frames and a stateful decoder, and it is pointless for a still screen where
 /// the patch path sends almost nothing. So the mode follows the content:
 ///
-///  * enter the stream after at least `kEnterFraction` of the screen has been
+///  * enter the stream after at least `enter_fraction` of the screen has been
 ///    moving for `kEnterDwellMs` (a video, a scroll, a drag);
 ///  * leave it once less than that has moved for `kExitDwellMs` (the picture
 ///    settled);
-///  * `kArmFraction` is the early warning: the caller can create the stream
+///  * `arm_fraction` is the early warning: the caller can create the stream
 ///    encoder before the threshold is crossed, so the switch does not pay the
 ///    encoder start-up.
 ///
 /// Fractions are 0..1 of the screen area that changed in one capture frame.
 struct stream_policy {
-  static constexpr double kEnterFraction = 0.10;
-  static constexpr double kExitFraction = 0.10;
-  static constexpr double kArmFraction = 0.08;
+  static constexpr double kDefaultEnterFraction = 0.15;
   static constexpr uint64_t kEnterDwellMs = 1000;
   static constexpr uint64_t kExitDwellMs = 10000;
+
+  /// How much of the screen must move before the stream takes over, and how
+  /// little may move before it hands back to tiles. Both come from the host
+  /// setting (default 15 %); the exit threshold follows the enter threshold.
+  double enter_fraction = kDefaultEnterFraction;
+  double exit_fraction = kDefaultEnterFraction;
+  /// Early warning so the encoder can be built before the threshold is hit.
+  double arm_fraction = kDefaultEnterFraction * 0.8;
+
+  /// Applies a new enter threshold (0..1). The latches are left alone: a
+  /// running stream keeps running until the exit dwell expires.
+  void set_enter_fraction(double fraction) {
+    enter_fraction = std::clamp(fraction, 0.01, 1.0);
+    exit_fraction = enter_fraction;
+    arm_fraction = (std::max)(0.01, enter_fraction * 0.8);
+  }
 
   bool streaming = false;
   /// True while the content is close to the enter threshold, so the caller can
@@ -40,9 +54,9 @@ struct stream_policy {
   /// Feeds one frame. Returns true on the frame the mode changed, so the caller
   /// requests a keyframe for the path it just switched to.
   bool note(double moving_fraction, uint64_t now_ms) {
-    armed = moving_fraction >= kArmFraction;
+    armed = moving_fraction >= arm_fraction;
     if (!streaming) {
-      if (moving_fraction < kEnterFraction) {
+      if (moving_fraction < enter_fraction) {
         entering = false;
         return false;
       }
@@ -57,7 +71,7 @@ struct stream_policy {
       exiting = false;
       return true;
     }
-    if (moving_fraction >= kExitFraction) {
+    if (moving_fraction >= exit_fraction) {
       exiting = false;
       return false;
     }
@@ -72,7 +86,12 @@ struct stream_policy {
     return true;
   }
 
-  void reset() { *this = stream_policy{}; }
+  void reset() {
+    // Keep the configured thresholds; only the latches restart.
+    const double enter = enter_fraction;
+    *this = stream_policy{};
+    set_enter_fraction(enter);
+  }
 };
 
 /// Which codec the low-delay stream should use for the current viewer set.
@@ -84,21 +103,22 @@ enum class stream_choice : uint8_t {
   vp8,
 };
 
-/// AV1 wins whenever every viewer can decode it and the host allows it: it
-/// compresses far better. H.264 is the fallback for a viewer set that cannot
-/// take AV1 (the browser decodes it through WebCodecs), and when any viewer
-/// can decode neither, the capture stays on tiles.
-/// The rungs a viewer set can all decode, best first, with the hardware codecs
-/// (AV1, H.264) ahead of the CPU ones (VP9, VP8). `av1_enabled` is the host
+/// The rungs a viewer set can all decode, best first: AV1 > VP9 > VP8 >
+/// H.264. Compression beats acceleration here -- VP9 is smaller than H.264
+/// even on the CPU -- and the capture stays on tiles when no rung is common to
+/// every viewer. `av1_enabled` is the host
 /// switch: disabling AV1 in the settings drops that rung even when everyone
 /// can decode it.
 inline stream_choice choose_video_codec(bool av1_enabled, bool all_av1,
                                          bool all_h264, bool all_vp9 = false,
                                          bool all_vp8 = false) {
+  // AV1 > VP9 > VP8 > H.264. Compression wins over hardware acceleration: a
+  // CPU VP9 stream is smaller than a hardware H.264 one. Tiles are the last
+  // resort, chosen by the caller when this returns none.
   if (av1_enabled && all_av1) return stream_choice::av1;
-  if (all_h264) return stream_choice::h264;
   if (all_vp9) return stream_choice::vp9;
   if (all_vp8) return stream_choice::vp8;
+  if (all_h264) return stream_choice::h264;
   return stream_choice::none;
 }
 

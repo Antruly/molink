@@ -21,8 +21,21 @@ namespace molink {
 
 namespace {
 
-/// BGRA to I420 with the same full-range BT.709 weights the AV1 paths use, so
-/// the two codecs produce the same colours for the same screen.
+/// Studio-range BT.709 helpers. The samples are limited-range because a WebView
+/// that ignores the bitstream's color_range (WebKitGTK's VP9 path does) then
+/// still shows the right picture; a decoder that honours the flag agrees.
+inline int luma_to_studio(int y_full) { return 16 + (y_full * 219 + 127) / 255; }
+
+inline int chroma_to_studio(int c_full) {
+  const int delta = c_full - 128;
+  const int scaled =
+      delta >= 0 ? (delta * 224 + 127) / 255 : -((-delta * 224 + 127) / 255);
+  return 128 + scaled;
+}
+
+/// BGRA to I420 with BT.601 weights, in the 16..235 / 16..240 studio range
+/// that libvpx signals by default. BT.601 is also what a decoder assumes when
+/// it ignores the colorimetry, which WebKitGTK's VP9 path does.
 void bgra_to_i420(const uint8_t* bgra, std::size_t stride, int width,
                   int height, int padded_w, int padded_h,
                   std::vector<uint8_t>& out) {
@@ -45,7 +58,8 @@ void bgra_to_i420(const uint8_t* bgra, std::size_t stride, int width,
       const int b = px[0];
       const int g = px[1];
       const int r = px[2];
-      y_row[x] = static_cast<uint8_t>((77 * r + 150 * g + 29 * b) >> 8);
+      const int y_full = (77 * r + 150 * g + 29 * b) >> 8;
+      y_row[x] = static_cast<uint8_t>(luma_to_studio(y_full));
     }
   }
   // Chroma: box-average each 2x2 block so edges do not shimmer.
@@ -70,10 +84,12 @@ void bgra_to_i420(const uint8_t* bgra, std::size_t stride, int width,
       const int r = sum_r / count;
       const int g = sum_g / count;
       const int b = sum_b / count;
-      const int luma = (77 * r + 150 * g + 29 * b) >> 8;
-      const int u = ((-13 * r - 25 * g + 38 * b) >> 8) + 128;
-      const int v = ((38 * r - 32 * g - 6 * b) >> 8) + 128;
-      (void)luma;
+      // BT.601 chroma, matching the BT.601 luma weights above:
+      // U = -0.1687R - 0.3313G + 0.5B, V = 0.5R - 0.4187G - 0.0813B.
+      const int u_full = ((-43 * r - 85 * g + 128 * b) >> 8) + 128;
+      const int v_full = ((128 * r - 107 * g - 21 * b) >> 8) + 128;
+      const int u = chroma_to_studio(std::clamp(u_full, 0, 255));
+      const int v = chroma_to_studio(std::clamp(v_full, 0, 255));
       u_plane[static_cast<std::size_t>(cy) * chroma_w + cx] =
           static_cast<uint8_t>(std::clamp(u, 0, 255));
       v_plane[static_cast<std::size_t>(cy) * chroma_w + cx] =
@@ -105,9 +121,10 @@ class vpx_stream_encoder final : public av1_stream_encoder {
     const int padded_w = (std::max)(2, (width + 1) & ~1);
     const int padded_h = (std::max)(2, (height + 1) & ~1);
     const int vpx_qp = std::clamp(qp, 1, 63);
+    const int wanted_kbps = (std::max)(0, config_.max_bitrate_kbps);
     if (!open_ || padded_w != width_ || padded_h != height_ ||
-        vpx_qp != qp_) {
-      if (!init(padded_w, padded_h, vpx_qp, error)) return false;
+        vpx_qp != qp_ || wanted_kbps != bitrate_kbps_) {
+      if (!init(padded_w, padded_h, vpx_qp, wanted_kbps, error)) return false;
       // A fresh encoder has no reference picture.
       keyframe = true;
     }
@@ -166,7 +183,8 @@ class vpx_stream_encoder final : public av1_stream_encoder {
   }
 
  private:
-  bool init(int width, int height, int qp, std::string& error) {
+  bool init(int width, int height, int qp, int max_kbps,
+            std::string& error) {
     destroy();
     const vpx_codec_iface_t* iface = codec_ == video_codec::vp9_stream
                                          ? vpx_codec_vp9_cx()
@@ -182,13 +200,17 @@ class vpx_stream_encoder final : public av1_stream_encoder {
     cfg.g_timebase.den = 30;
     cfg.g_pass = VPX_RC_ONE_PASS;
     cfg.g_lag_in_frames = 0;
-    cfg.rc_end_usage = VPX_CQ;
+    // The quality presets below "ultra" carry a bitrate budget; the top ones
+    // keep constant quality (VPX_Q) like the NVENC encoders. In CQ the target
+    // bitrate is the ceiling libvpx aims for, so every codec shares it.
+    cfg.rc_end_usage = max_kbps > 0 ? VPX_CQ : VPX_Q;
     // The constant-quality level is set through the codec control below; the
     // quantizer bounds stay wide because VP8 rejects a CQ level outside them
     // ("cq_level out of range").
     cfg.rc_min_quantizer = 0;
     cfg.rc_max_quantizer = 63;
-    cfg.rc_target_bitrate = 4000;
+    cfg.rc_target_bitrate =
+        max_kbps > 0 ? static_cast<unsigned int>(max_kbps) : 4000u;
     cfg.kf_mode = VPX_KF_DISABLED;
     cfg.kf_min_dist = 9999;
     cfg.kf_max_dist = 9999;
@@ -211,11 +233,16 @@ class vpx_stream_encoder final : public av1_stream_encoder {
     if (codec_ == video_codec::vp9_stream) {
       vpx_codec_control(&ctx_, VP9E_SET_TILE_COLUMNS, 2);
       vpx_codec_control(&ctx_, VP9E_SET_ROW_MT, 1);
-      vpx_codec_control(&ctx_, VP9E_SET_COLOR_SPACE, VPX_CS_BT_709);
+      vpx_codec_control(&ctx_, VP9E_SET_COLOR_SPACE, VPX_CS_BT_601);
+      // The conversion writes studio-range samples and libvpx signals exactly
+      // that by default; say it explicitly so the intent is not mistaken for
+      // an omission.
+      vpx_codec_control(&ctx_, VP9E_SET_COLOR_RANGE, VPX_CR_STUDIO_RANGE);
     }
     width_ = width;
     height_ = height;
     qp_ = qp;
+    bitrate_kbps_ = max_kbps;
     pts_ = 0;
     open_ = true;
     return true;
@@ -229,6 +256,7 @@ class vpx_stream_encoder final : public av1_stream_encoder {
     width_ = 0;
     height_ = 0;
     qp_ = 0;
+    bitrate_kbps_ = 0;
   }
 
   av1_encoder_config config_;
@@ -238,6 +266,7 @@ class vpx_stream_encoder final : public av1_stream_encoder {
   int width_ = 0;
   int height_ = 0;
   int qp_ = 0;
+  int bitrate_kbps_ = 0;
   int64_t pts_ = 0;
   std::vector<uint8_t> i420_;
 };

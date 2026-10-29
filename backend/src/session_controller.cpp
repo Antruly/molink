@@ -278,9 +278,13 @@ bool can_decode_stream(const std::shared_ptr<session_info>& session,
       return session->vp9_stream;
     case static_cast<uint8_t>(protocol::codec::vp8_stream):
       return session->vp8_stream;
+    case static_cast<uint8_t>(protocol::codec::av1_stream):
+      // The low-delay stream capability. `av1` is the retired single-frame
+      // path; gating the stream on it silently dropped every AV1 frame once
+      // the proxy stopped advertising the old flag.
+      return session->av1_stream;
     default:
-      // AV1 stream.
-      return session->av1;
+      return false;
   }
 }
 
@@ -571,10 +575,40 @@ void send_capture_frame(session_transport* transport,
       }
       return;
     }
+    // A session that joins while the capture is on the stream must not start
+    // from a tile keyframe: that full-screen tile frame is the expensive one
+    // and it made the first second of a session stutter before the stream
+    // took over. Wait for the stream's own keyframe instead, which follows
+    // within a frame.
+    if (opt.capture->stream_on()) {
+      const std::shared_ptr<const captured_frame> start =
+          opt.capture->find(static_cast<uint32_t>(start_seq));
+      if (!start || !start->av1_only) {
+        opt.capture->request_keyframe();
+        if (!push) {
+          send_empty_frame(transport, session, latest->width, latest->height,
+                           false);
+        }
+        return;
+      }
+    }
     session->last_capture_seq = start_seq - 1;
   }
 
   const int64_t last = session->last_capture_seq;
+  if (std::getenv("MOLINK_STREAM_LOG") != nullptr) {
+    static thread_local uint64_t last_idle_log = 0;
+    const uint64_t idle_now = now_ms();
+    if (idle_now - last_idle_log >= 1000) {
+      last_idle_log = idle_now;
+      std::fprintf(stderr,
+                   "host: send state viewer=%u last=%lld latest=%u has_image=%d "
+                   "target_fps=%d viewer_paint=%.0f dropped=%d\n",
+                   session->id, static_cast<long long>(last), latest->seq,
+                   session->has_image ? 1 : 0, opt.capture->target_fps(),
+                   session->viewer_paint_fps, session->viewer_dropped);
+    }
+  }
   if (last >= 0 && static_cast<uint32_t>(last) >= latest->seq) {
     // Nothing new since the last response. Answer anyway so the client's
     // request does not stay in flight -- unless the host owns the clock, in
@@ -595,11 +629,22 @@ void send_capture_frame(session_transport* transport,
 
   // Replay every frame the session has not seen. Capture keeps a bounded
   // history precisely so a poll that arrived late does not need a keyframe.
-  const uint32_t first = last < 0 ? static_cast<uint32_t>(start_seq)
-                                  : static_cast<uint32_t>(last) + 1;
+  uint32_t first = last < 0 ? static_cast<uint32_t>(start_seq)
+                            : static_cast<uint32_t>(last) + 1;
   if (first > latest->seq) {
     send_empty_frame(transport, session, latest->width, latest->height, false);
     return;
+  }
+  // Tiles are changed pixels, not prediction. Skipping ahead is only for a
+  // viewer that is actually behind (it reports drops, or the backlog is more
+  // than a fraction of a second): doing it all the time made a link with
+  // bandwidth to spare look choppy. A stream frame can never be skipped -- it
+  // references the previous picture.
+  const bool tiles = !opt.capture->stream_on();
+  const bool viewer_behind = session->viewer_dropped >= 3;
+  if (tiles && session->has_image && first + 1 <= latest->seq &&
+      (viewer_behind || latest->seq - first > 8)) {
+    first = latest->seq;
   }
   const uint32_t missing = latest->seq - first + 1;
 
@@ -614,6 +659,19 @@ void send_capture_frame(session_transport* transport,
           : 0;
   const replay_action action =
       choose_replay_action(missing, oldest_age_us, session->has_image);
+  if (std::getenv("MOLINK_STREAM_LOG") != nullptr) {
+    static thread_local uint64_t last_action_log = 0;
+    const uint64_t action_now = now_ms();
+    if (action_now - last_action_log >= 1000) {
+      last_action_log = action_now;
+      std::fprintf(stderr,
+                   "host: replay action=%d missing=%u oldest_age_us=%llu "
+                   "last=%lld latest=%u\n",
+                   static_cast<int>(action), missing,
+                   static_cast<unsigned long long>(oldest_age_us),
+                   static_cast<long long>(last), latest->seq);
+    }
+  }
   if (action == replay_action::skip_to_latest) {
     // Do not make a slow viewer replay a queue of obsolete deltas. Advance it
     // to the current capture sequence; the periodic tile clock repairs any
@@ -633,6 +691,9 @@ void send_capture_frame(session_transport* transport,
   for (uint32_t seq = first; seq <= latest->seq; ++seq) {
     const std::shared_ptr<const captured_frame> frame = opt.capture->find(seq);
     if (!frame) {
+      if (std::getenv("MOLINK_STREAM_LOG") != nullptr) {
+        std::fprintf(stderr, "host: replay missing frame seq=%u\n", seq);
+      }
       // The replay history has evicted this frame. A viewer with a valid base
       // can skip to the latest capture and repair stale cells from tile_clock;
       // a new viewer still needs a keyframe to establish its base image.
@@ -702,12 +763,50 @@ void send_capture_frame(session_transport* transport,
       send_empty_frame(transport, session, frame->width, frame->height, false);
       return;
     }
+    if (std::getenv("MOLINK_STREAM_LOG") != nullptr) {
+      static thread_local uint64_t last_send_log = 0;
+      static thread_local int stream_count = 0;
+      static thread_local int tile_count = 0;
+      static thread_local std::size_t last_size = 0;
+      if (frame->av1_only) {
+        ++stream_count;
+        last_size = frame->av1_payload.size();
+      } else {
+        ++tile_count;
+        last_size = frame->payload.size();
+      }
+      const uint64_t now_ms2 = now_ms();
+      if (now_ms2 - last_send_log >= 1000) {
+        last_send_log = now_ms2;
+        std::fprintf(stderr,
+                     "host: sent viewer=%u stream=%d tiles=%d last_bytes=%zu\n",
+                     session->id, stream_count, tile_count, last_size);
+        stream_count = 0;
+        tile_count = 0;
+      }
+    }
     if (!send_frame_with_av1(transport, session, *frame)) {
       // The transport refused the frame: its channel is full, or the session
       // is gone. Advancing anyway would tell the next tick that the viewer is
       // up to date when it is now one delta behind, and every later frame
       // would build on a picture it never applied. Start over from a keyframe
       // instead -- the sender's queue is part of the recovery loop.
+      if (std::getenv("MOLINK_STREAM_LOG") != nullptr) {
+        static uint64_t last_log_ms = 0;
+        static int refused = 0;
+        ++refused;
+        const uint64_t now = now_ms();
+        if (now - last_log_ms >= 1000) {
+          std::fprintf(stderr,
+                       "host: stream refused viewer=%u count=%d codec=%u "
+                       "key=%d size=%zu seq=%u\n",
+                       session->id, refused,
+                       static_cast<unsigned>(frame->codec),
+                       frame->keyframe ? 1 : 0, frame->av1_payload.size(), seq);
+          last_log_ms = now;
+          refused = 0;
+        }
+      }
       session->has_image = false;
       session->last_capture_seq = -1;
       opt.capture->request_keyframe();
@@ -835,11 +934,21 @@ void send_welcome(session_transport* transport, const session_info& session,
     // Only what this viewer can actually decode as well: the toolbar must not
     // offer a codec the host can encode but the viewer cannot take. (AV1 goes
     // through the local core's proxy, so `av1_stream` is the proxy's answer.)
+    // Toolbar order follows the preference order: AV1 > VP9 > VP8 > H.264.
+    //
+    // "tiles" is the explicit "never stream" choice. It is offered in the
+    // mixed mode (stream moving content, tiles a still screen) and is the only
+    // entry in the tiles-only mode; the stream mode never shows it.
+    const std::string video_mode =
+        opt.auth ? opt.auth->settings().video_mode : std::string("mixed");
     j["stream_codecs"] = uvcpp_json::array();
-    if (av1 && session.av1_stream) j["stream_codecs"].push_back("av1");
-    if (h264 && session.h264_stream) j["stream_codecs"].push_back("h264");
-    if (vp9 && session.vp9_stream) j["stream_codecs"].push_back("vp9");
-    if (vp8 && session.vp8_stream) j["stream_codecs"].push_back("vp8");
+    if (video_mode != "tiles") {
+      if (av1 && session.av1_stream) j["stream_codecs"].push_back("av1");
+      if (vp9 && session.vp9_stream) j["stream_codecs"].push_back("vp9");
+      if (vp8 && session.vp8_stream) j["stream_codecs"].push_back("vp8");
+      if (h264 && session.h264_stream) j["stream_codecs"].push_back("h264");
+    }
+    if (video_mode != "stream") j["stream_codecs"].push_back("tiles");
   }
   j["codec_preference"] =
       opt.auth ? opt.auth->settings().stream_codec : std::string("auto");
@@ -1065,6 +1174,10 @@ bool session_controller::start(const std::string* initial_token) {
 
   if (session->authenticated && options_.capture) {
     options_.capture->set_active(true);
+    // Start the new session on the stream: the first full-screen tile
+    // keyframe is the expensive one, and paying it made the first seconds
+    // stutter. Ten seconds later the movement rule decides again.
+    options_.capture->request_stream(10000);
   }
   if (session->authenticated) {
     send_welcome_message();
@@ -1387,7 +1500,10 @@ void session_controller::approve_access_request() {
   registry_->set_authenticated(session);
   registry_->touch(*session);
   issue_resume_token();
-  if (options_.capture) options_.capture->set_active(true);
+  if (options_.capture) {
+    options_.capture->set_active(true);
+    options_.capture->request_stream(10000);
+  }
   send_welcome_message();
 }
 
@@ -1434,10 +1550,42 @@ void session_controller::on_text(const std::string& text) {
     const std::string client_id = string_field(j, "device_id");
     if (!client_name.empty()) session->client_name = client_name.substr(0, 64);
     if (!client_id.empty()) session->client_id = client_id.substr(0, 64);
+    // What this viewer can decode. Re-read on every hello, not just the first:
+    // the page probes its decoders asynchronously and re-sends the hello when
+    // a probe finishes, and a session approved by the host user is already
+    // authenticated before its first hello arrives. Returning early without
+    // this left the session claiming only H.264 forever.
+    bool hello_av1_native = false;
+    const auto read_hello_capabilities = [&] {
+      session->av1 = bool_field(j, "av1", false);
+      // The page names its stateful AV1 decoder `av1_native`; the local core's
+      // proxy renames that to `av1_stream` while it sits in the path. The proxy
+      // no longer decodes AV1 itself, so both names mean the same thing: this
+      // viewer can take the low-delay AV1 stream.
+      hello_av1_native = bool_field(j, "av1_native", false);
+      session->av1_stream =
+          bool_field(j, "av1_stream", false) || hello_av1_native;
+      session->seq_clock = bool_field(j, "seq_clock", false);
+      session->video_push = bool_field(j, "video_push", false);
+      session->h264_stream = bool_field(j, "h264_stream", false);
+      session->vp9_stream = bool_field(j, "vp9_stream", false);
+      session->vp8_stream = bool_field(j, "vp8_stream", false);
+      session->webrtc = bool_field(j, "webrtc", false);
+    };
     // A repeat hello must not cost another use of a multi-use code: the relay
     // proxy replays one when its first datagram races the session setup, and
     // a reconnect replays the whole handshake.
     if (session->authenticated) {
+      read_hello_capabilities();
+      if (std::getenv("MOLINK_STREAM_LOG") != nullptr) {
+        std::fprintf(stderr,
+                     "host: hello (repeat) av1_stream=%d h264=%d vp9=%d "
+                     "vp8=%d\n",
+                     session->av1_stream ? 1 : 0,
+                     session->h264_stream ? 1 : 0,
+                     session->vp9_stream ? 1 : 0,
+                     session->vp8_stream ? 1 : 0);
+      }
       send_welcome_message();
       return;
     }
@@ -1476,6 +1624,16 @@ void session_controller::on_text(const std::string& text) {
       issue_resume_token();
     }
     if (!authenticated) {
+      if (std::getenv("MOLINK_STREAM_LOG") != nullptr) {
+        // Never the credential itself: only which one was presented, so a
+        // replay that lost its code can be told from a wrong code.
+        std::fprintf(stderr,
+                     "host: auth failed peer=%s resume_len=%zu token_len=%zu "
+                     "locked=%d\n",
+                     peer_ip.c_str(), resume.size(),
+                     string_field(j, "token").size(),
+                     locked_for_peer ? 1 : 0);
+      }
       if (options_.lock) {
         const int delay = options_.lock->record_failure(peer_ip);
         if (delay != 0) {
@@ -1493,16 +1651,7 @@ void session_controller::on_text(const std::string& text) {
       transport->close(transport_close::policy, "invalid token");
       return;
     }
-    session->av1 = bool_field(j, "av1", false);
-    session->av1_stream = bool_field(j, "av1_stream", false);
-    // Clients that understand the per-block sequence map get one with every
-    // frame response, so a lost frame is repaired immediately and precisely.
-    session->seq_clock = bool_field(j, "seq_clock", false);
-    session->video_push = bool_field(j, "video_push", false);
-    session->h264_stream = bool_field(j, "h264_stream", false);
-    session->vp9_stream = bool_field(j, "vp9_stream", false);
-    session->vp8_stream = bool_field(j, "vp8_stream", false);
-    session->webrtc = bool_field(j, "webrtc", false);
+    read_hello_capabilities();
     if (std::getenv("MOLINK_AV1_LOG") != nullptr) {
       std::fprintf(stderr, "host: session av1=%d\n", session->av1 ? 1 : 0);
     }
@@ -1510,11 +1659,12 @@ void session_controller::on_text(const std::string& text) {
     // tiles" can be told apart from "the page never asked for a stream".
     if (std::getenv("MOLINK_STREAM_LOG") != nullptr) {
       std::fprintf(stderr,
-                   "host: hello av1=%d av1_stream=%d h264_stream=%d webrtc=%d "
-                   "video_push=%d vp9=%d vp8=%d\n",
+                   "host: hello av1=%d av1_stream=%d av1_native=%d "
+                   "h264_stream=%d webrtc=%d video_push=%d vp9=%d vp8=%d\n",
                    session->av1 ? 1 : 0, session->av1_stream ? 1 : 0,
-                   session->h264_stream ? 1 : 0, session->webrtc ? 1 : 0,
-                   session->video_push ? 1 : 0, session->vp9_stream ? 1 : 0,
+                   hello_av1_native ? 1 : 0, session->h264_stream ? 1 : 0,
+                   session->webrtc ? 1 : 0, session->video_push ? 1 : 0,
+                   session->vp9_stream ? 1 : 0,
                    session->vp8_stream ? 1 : 0);
     }
     registry_->set_authenticated(session);
@@ -1523,7 +1673,11 @@ void session_controller::on_text(const std::string& text) {
     if (!session->av1 && options_.capture) options_.capture->set_av1_allowed(false);
     if (locked_for_peer) options_.lock->unlock();
     if (options_.lock) options_.lock->record_success(peer_ip);
-    if (options_.capture) options_.capture->set_active(true);
+    if (options_.capture) {
+      options_.capture->set_active(true);
+      // A viewer that just joined starts on the stream, not on tiles.
+      options_.capture->request_stream(10000);
+    }
     send_welcome_message();
     // The peer is built after the welcome so the browser already knows the
     // ICE servers and the host's capabilities when the offer arrives.
@@ -1969,8 +2123,9 @@ void session_controller::on_text(const std::string& text) {
   if (type == "stream-codec") {
     if (!require_auth()) return;
     const std::string value = string_field(j, "value");
-    // Only codecs this host can actually encode are accepted, plus "auto".
-    bool ok = value == "auto";
+    // Only codecs this host can actually encode are accepted, plus "auto"
+    // and the explicit "tiles" (never stream).
+    bool ok = value == "auto" || value == "tiles";
     if (!ok) {
       for (const video_encoder_backend& backend : video_encoder_backends()) {
         if (!backend.available) continue;
@@ -1989,11 +2144,20 @@ void session_controller::on_text(const std::string& text) {
       return;
     }
     if (options_.auth) options_.auth->set_stream_codec(value);
-    // A codec switch has to be visible at once: start the stream for a short
-    // window instead of waiting for the movement rule (or the 10 s exit dwell)
-    // to notice. The encoder is re-initialised on the new codec and the first
-    // frame is a keyframe.
-    if (options_.capture) options_.capture->request_stream(15000);
+    // A codec switch has to be visible at once. Apply the new codec to the
+    // capture here instead of waiting for the supervisor's one-second tick;
+    // the supervisor still re-evaluates the viewer set and corrects it if some
+    // other viewer cannot decode this codec. The encoder is re-initialised on
+    // the new codec and the first frame is a keyframe.
+    if (options_.capture) {
+      if (value != "auto") {
+        options_.capture->set_av1_stream_allowed(value == "av1");
+        options_.capture->set_h264_stream_allowed(value == "h264");
+        options_.capture->set_vp9_stream_allowed(value == "vp9");
+        options_.capture->set_vp8_stream_allowed(value == "vp8");
+      }
+      options_.capture->request_stream(15000);
+    }
     // The preference is host-global: every tab has to show the same value or
     // the last writer wins forever.
     uvcpp_json shared;
@@ -2397,6 +2561,8 @@ void session_supervisor::run_push_clock() {
         std::chrono::milliseconds(clock.interval_ms()));
     if (!running_.load()) break;
     if (!registry_->has_authenticated() || !options_.capture) continue;
+    // The requested rate, for tiles and the stream alike: a viewer that
+    // cannot keep up lowers it through note_viewer() below.
     clock.set_target_fps(options_.capture->target_fps());
     const uint64_t now_ms = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -2461,17 +2627,28 @@ void session_supervisor::run() {
     // frame. Re-evaluate once a second as sessions come and go.
     if (options_.capture) {
       bool live = false;
-      bool all_av1 = true;
       bool all_stream = true;
       bool all_h264_stream = true;
       bool all_vp9_stream = true;
       bool all_vp8_stream = true;
       int viewers = 0;
+      // A tab that is gone but left its socket half-open keeps its hello
+      // capabilities in the registry for minutes, and one such session with a
+      // stale codec list vetoed the codec every live viewer could take. A
+      // viewer that sent nothing (no pong, no frame request, no stats) for
+      // this long no longer counts.
+      constexpr uint64_t kViewerIdleMs = 30000;
+      const uint64_t seen_now = now_ms();
+      const auto still_watching = [seen_now](const session_info& peer) {
+        const uint64_t last = peer.last_seen_ms != 0 ? peer.last_seen_ms
+                                                     : peer.connected_ms;
+        return seen_now >= last && seen_now - last <= kViewerIdleMs;
+      };
       for (const session_info& peer : registry_->snapshot()) {
         if (!peer.authenticated) continue;
+        if (!still_watching(peer)) continue;
         live = true;
         ++viewers;
-        if (!peer.av1) all_av1 = false;
         if (!peer.av1_stream) all_stream = false;
         if (!peer.h264_stream) all_h264_stream = false;
         if (!peer.vp9_stream) all_vp9_stream = false;
@@ -2481,7 +2658,11 @@ void session_supervisor::run() {
       // runs when every watching client can decode it.
       const bool enabled =
           !options_.auth || options_.auth->settings().av1_enabled;
-      const bool allow = enabled && live && all_av1;
+      // Single-frame AV1 is retired, so the hello's `av1` flag is gone and the
+      // permission now follows the low-delay stream capability. Without this
+      // the pinned/laddered AV1 was always refused and silently fell back to
+      // H.264.
+      const bool allow = enabled && live && all_stream;
       if (std::getenv("MOLINK_AV1_LOG") != nullptr && allow != av1_allowed_) {
         std::fprintf(stderr, "host: av1 allowed=%d\n", allow ? 1 : 0);
         av1_allowed_ = allow;
@@ -2515,8 +2696,35 @@ void session_supervisor::run() {
           options_.auth ? options_.auth->settings().video_mode : "mixed";
       if (options_.capture) {
         options_.capture->set_stream_always(video_mode == "stream");
+        // How much of the screen must move before the stream takes over; the
+        // capture applies it on its own thread.
+        options_.capture->set_stream_enter_percent(
+            options_.auth ? options_.auth->settings().stream_enter_percent : 15);
       }
-      const bool stream_allowed = video_mode != "tiles";
+      // The secure desktop cannot use tiles: it is captured through the
+      // helper at a few frames per second, so a pinned "tiles" is ignored
+      // there and the stream is always allowed.
+      const bool secure_desktop =
+          options_.capture && options_.capture->is_secure_desktop();
+      const bool stream_allowed =
+          secure_desktop ||
+          (video_mode != "tiles" && preference != "tiles");
+      // While the secure desktop is in front, keep renewing the forced-stream
+      // window: a one-shot request expired after ten seconds and the static
+      // logon screen fell back to tiles in the middle of a login.
+      if (secure_desktop && options_.capture) {
+        options_.capture->request_stream(2500);
+      }
+      // A session that just joined starts on the stream, not on tiles: the
+      // first tile keyframe of a full screen is the expensive one and made
+      // the first seconds stutter. The movement rule takes over after this
+      // window, so a still screen still settles on tiles ten seconds in.
+      if (live && !had_viewers_ && stream_allowed && options_.capture) {
+        options_.capture->request_stream(kJoinStreamMs);
+        had_viewers_ = true;
+      } else if (!live) {
+        had_viewers_ = false;
+      }
       const stream_choice stream =
           live && viewers > 0 && stream_allowed
               ? (pinned != stream_choice::none
@@ -2531,10 +2739,36 @@ void session_supervisor::run() {
         if (static_cast<int>(stream) != last_stream) {
           last_stream = static_cast<int>(stream);
           std::fprintf(stderr,
-                       "host: stream choice=%d (all av1=%d h264=%d vp9=%d vp8=%d)\n",
+                       "host: stream choice=%d (all av1=%d h264=%d vp9=%d "
+                       "vp8=%d secure=%d)\n",
                        static_cast<int>(stream), all_stream ? 1 : 0,
                        all_h264_stream ? 1 : 0, all_vp9_stream ? 1 : 0,
-                       all_vp8_stream ? 1 : 0);
+                       all_vp8_stream ? 1 : 0, secure_desktop ? 1 : 0);
+          for (const session_info& peer : registry_->snapshot()) {
+            if (!peer.authenticated) continue;
+            std::fprintf(stderr,
+                         "host: viewer %u av1_stream=%d h264=%d vp9=%d vp8=%d "
+                         "push=%d image=%d transport=%d idle_ms=%llu\n",
+                         peer.id, peer.av1_stream ? 1 : 0,
+                         peer.h264_stream ? 1 : 0, peer.vp9_stream ? 1 : 0,
+                         peer.vp8_stream ? 1 : 0, peer.video_push ? 1 : 0,
+                         peer.has_image ? 1 : 0, peer.transport ? 1 : 0,
+                         static_cast<unsigned long long>(
+                             now_ms() - (peer.last_seen_ms != 0
+                                             ? peer.last_seen_ms
+                                             : peer.connected_ms)));
+          }
+        }
+        // What the viewer's own pipeline achieved, once a second: a page that
+        // paints far below the wire rate is the limit, not the encoder.
+        for (const session_info& peer : registry_->snapshot()) {
+          if (!peer.authenticated) continue;
+          std::fprintf(stderr,
+                       "host: stats viewer %u paint=%.1f dropped=%d rx=%.0f "
+                       "image=%d seq=%lld\n",
+                       peer.id, peer.viewer_paint_fps, peer.viewer_dropped,
+                       peer.viewer_rx_rate, peer.has_image ? 1 : 0,
+                       static_cast<long long>(peer.last_capture_seq));
         }
       }
       options_.capture->set_vp9_stream_allowed(stream == stream_choice::vp9);
