@@ -342,6 +342,17 @@ code_view auth_state::set_temp(const std::string& mode, int uses,
   return view_locked();
 }
 
+bool auth_state::set_stream_codec(const std::string& codec) {
+  if (codec != "auto" && codec != "av1" && codec != "h264" &&
+      codec != "vp9" && codec != "vp8") {
+    return false;
+  }
+  std::lock_guard<std::mutex> lock(mutex_);
+  settings_.stream_codec = codec;
+  persist_locked();
+  return true;
+}
+
 void auth_state::set_allow_access_requests(bool allow) {
   std::lock_guard<std::mutex> lock(mutex_);
   settings_.allow_access_requests = allow;

@@ -66,6 +66,10 @@ export interface Welcome {
   viewer_stats?: boolean
   /** The host resolves the "auto" quality preset itself. */
   auto_quality?: boolean
+  /** Stream codecs this host can encode right now. */
+  stream_codecs?: string[]
+  /** The host's global stream codec preference (auto/av1/h264/vp9/vp8). */
+  codec_preference?: string
   /** The host can offer a WebRTC video track (Phase 4). */
   webrtc?: boolean
   /** The host accepts a WebTransport session on its own port (Phase 5). */
@@ -201,6 +205,12 @@ export interface ClientHandlers {
   /// The host is sending its low-delay H.264 stream for this session. Fired
   /// once per connection so the UI can name the path instead of guessing.
   onStreamVideo?: (codec: string) => void
+  /// Stream codecs the host can encode *and* this page can decode: what the
+  /// session toolbar may offer.
+  onCodecOptions?: (options: string[]) => void
+  /// The host's global stream codec preference changed (another tab, or this
+  /// one echoing back).
+  onCodecPreference?: (value: string) => void
   /// Another viewer changed the host-global quality preset; this tab must
   /// follow it instead of asserting its own choice.
   onQualityShared?: (mode: string) => void
@@ -231,6 +241,7 @@ export interface ClientHandlers {
 
 interface ControlMessage {
   type?: string
+  value?: string
   id?: number
   code?: string
   message?: string
@@ -369,6 +380,7 @@ export class MolinkClient {
   private h264Capable = false
   /// The UI has already been told this session is on the H.264 stream.
   private streamCodecNotified = false
+  private hostStreamCodecs: string[] = []
   private vp8Capable = false
   private vp9Capable = false
   private vpxDecoders: Partial<Record<VpxCodec, VpxStreamDecoder>> = {}
@@ -471,6 +483,7 @@ export class MolinkClient {
       this.h264Capable = supported
       // A hello may already have gone out without the flag. Sending it again
       // makes the host re-evaluate which stream codec every viewer can take.
+      this.emitCodecOptions()
       if (supported && this.isLive() && this.helloPayload !== null) {
         this.sendHello()
       }
@@ -478,9 +491,15 @@ export class MolinkClient {
     // VP8/VP9 are decoded through WebCodecs too; the host only uses them when
     // every viewer says it can.
     const announce = (codec: VpxCodec, capable: boolean) => {
-      if (capable) return
-      if (codec === 'vp8') this.vp8Capable = true
-      else this.vp9Capable = true
+      if (!capable) return
+      if (codec === 'vp8') {
+        if (this.vp8Capable) return
+        this.vp8Capable = true
+      } else {
+        if (this.vp9Capable) return
+        this.vp9Capable = true
+      }
+      this.emitCodecOptions()
       if (this.isLive() && this.helloPayload !== null) this.sendHello()
     }
     void vpxStreamSupported('vp9').then((ok) => announce('vp9', ok))
@@ -1184,6 +1203,13 @@ export class MolinkClient {
           )
         }
         this.watchVisibility()
+        this.hostStreamCodecs = Array.isArray(welcome.stream_codecs)
+          ? welcome.stream_codecs
+          : []
+        this.emitCodecOptions()
+        if (typeof welcome.codec_preference === 'string') {
+          this.handlers.onCodecPreference?.(welcome.codec_preference)
+        }
         this.handlers.onWelcome?.(welcome)
         this.retryAttempts = 0
         this.stopRetryTimers()
@@ -1337,6 +1363,11 @@ export class MolinkClient {
             wireRate:
               typeof message.wire_rate === 'number' ? message.wire_rate : 0,
           })
+        }
+        break
+      case 'stream-codec':
+        if (typeof message.value === 'string') {
+          this.handlers.onCodecPreference?.(message.value)
         }
         break
       case 'transport':
@@ -1926,6 +1957,27 @@ export class MolinkClient {
   }
 
   /// Coalesces keyframe requests while stale frames are being dropped.
+  /// Picks the host-global stream codec; "auto" restores the hardware-first
+  /// order. The host rejects a codec it cannot encode.
+  setStreamCodec(value: string): void {
+    if (!this.isLive()) return
+    this.sendJson({ type: 'stream-codec', value })
+  }
+
+  /// Narrows the host's list to what this page can actually decode. AV1 is
+  /// decoded by the local core's proxy, so it is always allowed when the host
+  /// lists it.
+  private emitCodecOptions(): void {
+    const usable = this.hostStreamCodecs.filter((codec) => {
+      if (codec === 'av1') return true
+      if (codec === 'h264') return this.h264Capable
+      if (codec === 'vp9') return this.vp9Capable
+      if (codec === 'vp8') return this.vp8Capable
+      return false
+    })
+    this.handlers.onCodecOptions?.(usable)
+  }
+
   private vpxDecoder(codec: VpxCodec): VpxStreamDecoder {
     let decoder = this.vpxDecoders[codec]
     if (decoder === undefined) {

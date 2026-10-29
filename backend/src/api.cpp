@@ -1332,6 +1332,7 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
     j["max_area_percent"] = settings.av1_max_area_percent;
     j["threads"] = settings.av1_threads;
     j["keyframe_interval_seconds"] = settings.keyframe_interval_seconds;
+    j["codec_preference"] = settings.stream_codec;
     j["devices"] = uvcpp_json::array();
     for (const av1_encoder_device& device : av1_encoder_devices()) {
       uvcpp_json item;
@@ -1477,6 +1478,13 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
              deps.auth->set_av1_encoding(enabled, device, speed, qp,
                                          max_area, threads, full_frame);
              deps.auth->set_keyframe_interval_seconds(keyframe_interval);
+             // Pinned stream codec: auto keeps the hardware-first ladder.
+             if (const std::string* codec = req.query("stream_codec");
+                 codec != nullptr && !deps.auth->set_stream_codec(*codec)) {
+               resp.status(400).json_str(R"({"code":"invalid_codec"})");
+               resp.end();
+               return;
+             }
              if (deps.capture) {
                av1_encoding_settings applied;
                applied.device = device;

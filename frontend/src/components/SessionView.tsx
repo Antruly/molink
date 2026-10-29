@@ -6,6 +6,7 @@ import {
   ClipboardX,
   ExternalLink,
   FolderOpen,
+  Cpu,
   Gauge,
   GripHorizontal,
   ShieldCheck,
@@ -352,6 +353,10 @@ export function SessionView({
 
   const resolvedMode: ResolvedQuality =
     qualityMode === 'auto' ? autoTier : qualityMode
+  // Stream codecs the toolbar may offer: the host can encode them and this
+  // page can decode them. Empty for hosts that do not advertise the list.
+  const codecOptions = tab.codecOptions ?? []
+  const codecPreference = tab.codecPreference ?? 'auto'
   // Average frame rate: the user's choice (or the tier window in auto), then
   // lowered by the load controller while the host or the link is saturated.
   const [targetFps, setTargetFps] = useState(() =>
@@ -2199,6 +2204,29 @@ export function SessionView({
                   <option value="auto">{t('session.qualityAuto')}</option>
                 </select>
               </label>
+              {codecOptions.length > 0 ? (
+                <label
+                  className="flex shrink-0 items-center gap-1 rounded-md border border-line bg-panel px-1.5 text-muted"
+                  title={t('session.codec')}
+                >
+                  <Cpu size={12} />
+                  <select
+                    value={codecPreference}
+                    onChange={(event) =>
+                      connection()?.setStreamCodec(event.target.value)
+                    }
+                    aria-label={t('session.codec')}
+                    className="h-7 bg-transparent text-[11px] text-ink outline-none [&>option]:bg-surface [&>option]:text-ink"
+                  >
+                    <option value="auto">{t('session.codecAuto')}</option>
+                    {codecOptions.map((codec) => (
+                      <option key={codec} value={codec}>
+                        {codec === 'h264' ? 'H.264' : codec.toUpperCase()}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : null}
               <button
                 type="button"
                 onClick={() => setQualityWatermark(!qualityWatermark)}

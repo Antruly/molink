@@ -247,6 +247,7 @@ function Av1Controls({ token }: { token: string }) {
   const [maxArea, setMaxArea] = useState(35)
   const [threads, setThreads] = useState(4)
   const [keyframeInterval, setKeyframeInterval] = useState(0)
+  const [codecPreference, setCodecPreference] = useState('auto')
   const [busy, setBusy] = useState(false)
   const [note, setNote] = useState<'saved' | 'failed' | null>(null)
 
@@ -263,6 +264,7 @@ function Av1Controls({ token }: { token: string }) {
     setMaxArea(next.effective?.max_area_percent ?? 35)
     setThreads(next.effective?.threads ?? 4)
     setKeyframeInterval(next.keyframe_interval_seconds ?? 0)
+    setCodecPreference(next.codec_preference ?? 'auto')
   }
 
   useEffect(() => {
@@ -291,6 +293,7 @@ function Av1Controls({ token }: { token: string }) {
         max_area_percent: autoParams ? 0 : maxArea,
         threads: autoParams ? 0 : threads,
         keyframe_interval_seconds: keyframeInterval,
+        stream_codec: codecPreference,
       })
       apply(next)
       setNote('saved')
@@ -311,6 +314,27 @@ function Av1Controls({ token }: { token: string }) {
 
   return (
     <div className="space-y-3 border-t border-line-soft pt-4">
+      <div className="space-y-2">
+        <div className="flex items-center gap-2 text-[12px] font-medium text-ink">
+          <Cpu size={14} className="text-accent" />
+          {t('settings.codecPreference')}
+        </div>
+        <p className="text-[11px] leading-relaxed text-muted">
+          {t('settings.codecPreferenceHint')}
+        </p>
+        <select
+          value={codecPreference}
+          onChange={(event) => setCodecPreference(event.target.value)}
+          className="field"
+        >
+          <option value="auto">{t('settings.codecAuto')}</option>
+          <option value="av1">AV1</option>
+          <option value="h264">H.264</option>
+          <option value="vp9">VP9</option>
+          <option value="vp8">VP8</option>
+        </select>
+      </div>
+
       <div className="space-y-2">
         <div className="flex items-center gap-2 text-[12px] font-medium text-ink">
           <Timer size={14} className="text-accent" />

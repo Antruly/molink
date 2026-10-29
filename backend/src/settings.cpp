@@ -199,6 +199,11 @@ app_settings load_settings() {
       settings.server_ca = value;
     } else if (key == "stun_server") {
       settings.stun_server = value;
+    } else if (key == "stream_codec") {
+      if (value == "auto" || value == "av1" || value == "h264" ||
+          value == "vp9" || value == "vp8") {
+        settings.stream_codec = value;
+      }
     } else if (key == "long_term_code") {
       settings.long_term_code = value;
     } else if (key == "temp_mode") {
@@ -278,6 +283,7 @@ void save_settings(const app_settings& settings) {
   stream << "server_invite=" << settings.server_invite << "\n";
   stream << "server_ca=" << settings.server_ca << "\n";
   stream << "stun_server=" << settings.stun_server << "\n";
+  stream << "stream_codec=" << settings.stream_codec << "\n";
   stream << "long_term_code=" << settings.long_term_code << "\n";
   stream << "temp_mode=" << settings.temp_mode << "\n";
   stream << "temp_code=" << settings.temp_code << "\n";

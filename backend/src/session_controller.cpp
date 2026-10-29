@@ -817,6 +817,29 @@ void send_welcome(session_transport* transport, const session_info& session,
   // that advertises `h264_stream` in hello gets one when not every viewer can
   // decode AV1; clients that do not ask never see it.
   j["h264_stream"] = true;
+  // Which low-delay stream codecs this host can actually encode right now.
+  // The page offers only these in the session toolbar (intersected with what
+  // it can decode); "auto" keeps the hardware-first order.
+  {
+    bool av1 = false;
+    bool h264 = false;
+    bool vp9 = false;
+    bool vp8 = false;
+    for (const video_encoder_backend& backend : video_encoder_backends()) {
+      if (!backend.available) continue;
+      av1 = av1 || backend.av1_stream;
+      h264 = h264 || backend.h264_stream;
+      vp9 = vp9 || backend.vp9_stream;
+      vp8 = vp8 || backend.vp8_stream;
+    }
+    j["stream_codecs"] = uvcpp_json::array();
+    if (av1) j["stream_codecs"].push_back("av1");
+    if (h264) j["stream_codecs"].push_back("h264");
+    if (vp9) j["stream_codecs"].push_back("vp9");
+    if (vp8) j["stream_codecs"].push_back("vp8");
+  }
+  j["codec_preference"] =
+      opt.auth ? opt.auth->settings().stream_codec : std::string("auto");
   // WebRTC (Phase 4): the host can offer an H.264 video track the browser
   // decodes natively. Only advertised by builds that carry the media stack.
   j["webrtc"] = MOLINK_HAVE_WEBRTC ? true : false;
@@ -1940,6 +1963,42 @@ void session_controller::on_text(const std::string& text) {
     return;
   }
 
+  if (type == "stream-codec") {
+    if (!require_auth()) return;
+    const std::string value = string_field(j, "value");
+    // Only codecs this host can actually encode are accepted, plus "auto".
+    bool ok = value == "auto";
+    if (!ok) {
+      for (const video_encoder_backend& backend : video_encoder_backends()) {
+        if (!backend.available) continue;
+        if ((value == "av1" && backend.av1_stream) ||
+            (value == "h264" && backend.h264_stream) ||
+            (value == "vp9" && backend.vp9_stream) ||
+            (value == "vp8" && backend.vp8_stream)) {
+          ok = true;
+          break;
+        }
+      }
+    }
+    if (!ok) {
+      send_error(transport.get(), "bad_codec",
+                 "this host cannot encode that codec");
+      return;
+    }
+    if (options_.auth) options_.auth->set_stream_codec(value);
+    // The preference is host-global: every tab has to show the same value or
+    // the last writer wins forever.
+    uvcpp_json shared;
+    shared["type"] = "stream-codec";
+    shared["value"] = value;
+    shared["scope"] = "global";
+    for (const session_info& peer : registry_->snapshot()) {
+      if (!peer.authenticated || !peer.transport) continue;
+      send_json(peer.transport.get(), shared);
+    }
+    return;
+  }
+
   if (type == "request-keyframe") {
     // MOLINK_STREAM_LOG=1: a viewer whose decoder works asks for a keyframe a
     // few times per session; one that cannot decode asks every throttle tick
@@ -2424,10 +2483,27 @@ void session_supervisor::run() {
       // single session without one keeps the host on tiles and patches.
       // AV1 is preferred; when it is not decodable by everyone but H.264 is,
       // the stream switches codec instead of dropping back to tiles.
+      // A pinned codec wins when every viewer can decode it; the automatic
+      // hardware-first order applies otherwise. The capture falls back to
+      // tiles when this host cannot actually encode the pinned one.
+      const std::string preference =
+          options_.auth ? options_.auth->settings().stream_codec : "auto";
+      stream_choice pinned = stream_choice::none;
+      if (preference == "av1" && allow && all_stream) {
+        pinned = stream_choice::av1;
+      } else if (preference == "h264" && all_h264_stream) {
+        pinned = stream_choice::h264;
+      } else if (preference == "vp9" && all_vp9_stream) {
+        pinned = stream_choice::vp9;
+      } else if (preference == "vp8" && all_vp8_stream) {
+        pinned = stream_choice::vp8;
+      }
       const stream_choice stream =
           live && viewers > 0
-              ? choose_video_codec(allow, all_stream, all_h264_stream,
-                                   all_vp9_stream, all_vp8_stream)
+              ? (pinned != stream_choice::none
+                     ? pinned
+                     : choose_video_codec(allow, all_stream, all_h264_stream,
+                                          all_vp9_stream, all_vp8_stream))
               : stream_choice::none;
       options_.capture->set_av1_stream_allowed(stream == stream_choice::av1);
       options_.capture->set_h264_stream_allowed(stream == stream_choice::h264);

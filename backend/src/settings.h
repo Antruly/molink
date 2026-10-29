@@ -69,6 +69,10 @@ struct app_settings {
 
   /// Long-term code: at least 8 characters and must mix letters and digits.
   std::string long_term_code;
+  /// Preferred low-delay stream codec: "auto" keeps the hardware-first
+  /// ladder; anything else pins that codec when every viewer can decode it
+  /// and this host can encode it.
+  std::string stream_codec = "auto";
 
   /// Temporary code shown on the home page.
   std::string temp_mode = "single";  // "single" | "multi"

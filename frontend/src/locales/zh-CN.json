@@ -263,7 +263,10 @@
     "singleCodeEnabled": "允许单次验证码",
     "singleCodeNeedsLongTerm": "只有设置了长期验证码才能禁用单次验证码，否则会把所有人锁在外面。",
     "multiCodeEnabled": "允许多次验证码",
-    "multiCodeRotationHint": "多次验证码每天自动轮换一次；达到设定的使用次数（默认 20）时也会立即轮换。单次验证码每次启动都会换新的。"
+    "multiCodeRotationHint": "多次验证码每天自动轮换一次；达到设定的使用次数（默认 20）时也会立即轮换。单次验证码每次启动都会换新的。",
+    "codecPreference": "流编码偏好",
+    "codecPreferenceHint": "自动按硬件优先协商：AV1 → H.264 → VP9 → VP8 → 瓦片。手动指定后，只有在所有观看端都能解码、且本机能编码时才使用，否则回到自动。",
+    "codecAuto": "自动（硬件优先）"
   },
   "session": {
     "connecting": "连接中…",
@@ -346,7 +349,9 @@
     "watermarkTiles": "瓦片",
     "watermarkAv1": "AV1",
     "watermarkAv1Tiles": "AV1 + 瓦片",
-    "watermarkLink": "传输"
+    "watermarkLink": "传输",
+    "codec": "编码",
+    "codecAuto": "自动"
   },
   "stats": {
     "fps": "帧率",

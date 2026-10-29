@@ -668,6 +668,19 @@ std::vector<video_encoder_backend> video_encoder_backends() {
     if (gpu.available) backends.push_back(std::move(gpu));
   }
 #endif
+#if MOLINK_HAVE_VPX
+  // libvpx covers VP9/VP8 when no hardware encoder is present.
+  if (vpx_stream_available()) {
+    video_encoder_backend vpx;
+    vpx.id = "cpu-vpx";
+    vpx.name = "CPU · libvpx";
+    vpx.hardware = false;
+    vpx.vp9_stream = true;
+    vpx.vp8_stream = true;
+    vpx.available = true;
+    backends.push_back(std::move(vpx));
+  }
+#endif
   {
     video_encoder_backend cpu;
     cpu.id = "cpu-svt";
@@ -846,6 +859,19 @@ std::vector<video_encoder_backend> video_encoder_backends() {
   gpu.h264_stream = nvenc_h264_available();
   gpu.available = gpu.av1_patches || gpu.h264_stream;
   if (gpu.available) backends.push_back(std::move(gpu));
+#endif
+#if MOLINK_HAVE_VPX
+  // libvpx covers VP9/VP8 when no hardware encoder is present.
+  if (vpx_stream_available()) {
+    video_encoder_backend vpx;
+    vpx.id = "cpu-vpx";
+    vpx.name = "CPU · libvpx";
+    vpx.hardware = false;
+    vpx.vp9_stream = true;
+    vpx.vp8_stream = true;
+    vpx.available = true;
+    backends.push_back(std::move(vpx));
+  }
 #endif
   return backends;
 }

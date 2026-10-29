@@ -101,6 +101,10 @@ export interface SessionTab {
   av1Active?: boolean
   /// Host is streaming H.264 for this tab (the low-delay stream).
   streamCodec?: string
+  /// Stream codecs the session toolbar may offer (host can encode + page can
+  /// decode), and the host's current global preference.
+  codecOptions?: string[]
+  codecPreference?: string
   /// The stream is AV1-only (no tile image underneath).
   av1Full?: boolean
   av1WireBytes?: number

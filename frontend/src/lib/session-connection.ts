@@ -51,6 +51,10 @@ export interface TabPatch {
   av1Active?: boolean
   /// Host is sending its low-delay H.264 stream (no tile image underneath).
   streamCodec?: string
+  /// Stream codecs the host can encode and this page can decode.
+  codecOptions?: string[]
+  /// The host's global stream codec preference.
+  codecPreference?: string
   /// True when the wire carries AV1 only, not AV1 patches over a tile image.
   av1Full?: boolean
   av1WireBytes?: number
@@ -291,6 +295,9 @@ export class SessionConnection {
         }, 10000)
       },
       onStreamVideo: (codec) => this.sink.onPatch({ streamCodec: codec }),
+      onCodecOptions: (options) => this.sink.onPatch({ codecOptions: options }),
+      onCodecPreference: (value) =>
+        this.sink.onPatch({ codecPreference: value }),
       onQualityShared: (mode) =>
         this.sink.onPatch({ sharedQuality: { mode } }),
       onCursor: (cursorShape) => this.sink.onPatch({ cursorShape }),
@@ -596,6 +603,11 @@ export class SessionConnection {
 
   setQuality(mode: string, fps?: number): void {
     this.client.setQuality(mode, fps)
+  }
+
+  /// Pins the host-global stream codec ("auto" restores the ladder).
+  setStreamCodec(value: string): void {
+    this.client.setStreamCodec(value)
   }
 
   setDisplay(index: number): void {

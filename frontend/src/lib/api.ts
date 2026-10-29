@@ -317,6 +317,9 @@ export interface Av1Settings {
   max_area_percent: number
   threads: number
   keyframe_interval_seconds: number
+  /// "auto" keeps the hardware-first ladder; a pinned codec wins when every
+  /// viewer can decode it.
+  codec_preference?: string
   devices: Av1Device[]
   active_quality?: string
   effective?: Av1Effective
@@ -331,6 +334,7 @@ export interface Av1SettingsUpdate {
   max_area_percent?: number
   threads?: number
   keyframe_interval_seconds?: number
+  stream_codec?: string
 }
 
 export function fetchAv1Settings(token: string): Promise<Av1Settings> {
@@ -362,6 +366,9 @@ export function postAv1Settings(
       'keyframe_interval_seconds',
       String(update.keyframe_interval_seconds),
     )
+  }
+  if (update.stream_codec !== undefined) {
+    query.set('stream_codec', update.stream_codec)
   }
   return request<Av1Settings>(
     `/api/encoding?${query.toString()}`,
