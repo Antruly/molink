@@ -1469,6 +1469,16 @@ void session_controller::on_text(const std::string& text) {
     if (std::getenv("MOLINK_AV1_LOG") != nullptr) {
       std::fprintf(stderr, "host: session av1=%d\n", session->av1 ? 1 : 0);
     }
+    // MOLINK_STREAM_LOG=1: what this viewer can decode, so "the host sends
+    // tiles" can be told apart from "the page never asked for a stream".
+    if (std::getenv("MOLINK_STREAM_LOG") != nullptr) {
+      std::fprintf(stderr,
+                   "host: hello av1=%d av1_stream=%d h264_stream=%d webrtc=%d "
+                   "video_push=%d\n",
+                   session->av1 ? 1 : 0, session->av1_stream ? 1 : 0,
+                   session->h264_stream ? 1 : 0, session->webrtc ? 1 : 0,
+                   session->video_push ? 1 : 0);
+    }
     registry_->set_authenticated(session);
     // A session without AV1 must stop patches immediately; the supervisor
     // turns them back on once every session can decode them again.
@@ -1919,6 +1929,12 @@ void session_controller::on_text(const std::string& text) {
   }
 
   if (type == "request-keyframe") {
+    // MOLINK_STREAM_LOG=1: a viewer whose decoder works asks for a keyframe a
+    // few times per session; one that cannot decode asks every throttle tick
+    // (300 ms), which is a very different rate.
+    if (std::getenv("MOLINK_STREAM_LOG") != nullptr) {
+      std::fprintf(stderr, "host: request-keyframe\n");
+    }
     if (options_.capture) options_.capture->request_keyframe();
     return;
   }

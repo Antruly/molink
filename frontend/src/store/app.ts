@@ -98,6 +98,8 @@ export interface SessionTab {
   protocol?: string
   /// The client core is decoding AV1 patches for this session.
   av1Active?: boolean
+  /// Host is streaming H.264 for this tab (the low-delay stream).
+  streamCodec?: string
   /// The stream is AV1-only (no tile image underneath).
   av1Full?: boolean
   av1WireBytes?: number

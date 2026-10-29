@@ -191,6 +191,9 @@ export interface ClientHandlers {
     fullFrame: boolean
     wireRate: number
   }) => void
+  /// The host is sending its low-delay H.264 stream for this session. Fired
+  /// once per connection so the UI can name the path instead of guessing.
+  onStreamVideo?: (codec: string) => void
   /// Another viewer changed the host-global quality preset; this tab must
   /// follow it instead of asserting its own choice.
   onQualityShared?: (mode: string) => void
@@ -357,6 +360,8 @@ export class MolinkClient {
   private h264 = new H264StreamDecoder()
   /** This browser can decode the H.264 stream (probed once, before hello). */
   private h264Capable = false
+  /// The UI has already been told this session is on the H.264 stream.
+  private streamCodecNotified = false
   /** ICE servers the host advertised for the WebRTC track. */
   private iceServers: string[] = []
   /** The host offered to drive the frame clock for this session. */
@@ -647,6 +652,7 @@ export class MolinkClient {
       this.pushSupported = false
       this.pushVideo = false
       this.h264.close()
+      this.streamCodecNotified = false
       this.closeRtc()
       this.pendingFrame = false
       this.ws = null
@@ -1467,24 +1473,38 @@ export class MolinkClient {
           this.latestFrameSeq = frame.frameSeq
         }
         this.noteApplied(frame, packet.tsUs)
+        if (!this.streamCodecNotified) {
+          this.streamCodecNotified = true
+          this.handlers.onStreamVideo?.('h264')
+        }
         const keyframe = (frame.flags & FrameFlag.keyframe) !== 0
         // A copy: WebCodecs keeps the buffer until the chunk is consumed, and
         // the packet's view belongs to the caller.
         const accessUnit = new Uint8Array(frame.tiles[0]!.data)
+        // Feed the decoder without waiting for the previous picture. WebKit's
+        // decoder only emits a picture once the next chunk (or a flush)
+        // arrives, so awaiting each output before submitting the next chunk
+        // deadlocks after the first frame: one chunk goes in, nothing comes
+        // out, and the queue never moves again. Output order follows input
+        // order, so painting as promises resolve keeps the picture ordered.
         this.frameQueue = this.frameQueue
-          .then(async () => {
-            const picture = await this.h264.decode(accessUnit, keyframe)
-            if (picture === null) {
-              // Behind, broken, or a delta with no reference: only a keyframe
-              // brings the stream back.
-              this.requestKeyframeThrottled()
-              return
-            }
-            try {
-              this.handlers.onFrame?.(frame, buffer.byteLength, [picture])
-            } finally {
-              picture.close()
-            }
+          .then(() => {
+            void this.h264
+              .decode(accessUnit, keyframe)
+              .then((picture) => {
+                if (picture === null) {
+                  // Behind, broken, or a delta with no reference: only a
+                  // keyframe brings the stream back.
+                  this.requestKeyframeThrottled()
+                  return
+                }
+                try {
+                  this.handlers.onFrame?.(frame, buffer.byteLength, [picture])
+                } finally {
+                  picture.close()
+                }
+              })
+              .catch(() => undefined)
           })
           .catch(() => undefined)
         return

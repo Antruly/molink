@@ -334,6 +334,7 @@
     "secureE2eShort": "E2E",
     "secureRelayShort": "Relay TLS",
     "insecureShort": "Unencrypted",
+    "watermarkH264": "H.264",
     "watermarkTiles": "TILES",
     "watermarkAv1": "AV1",
     "watermarkAv1Tiles": "AV1 + TILES",

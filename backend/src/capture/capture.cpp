@@ -274,13 +274,27 @@ av1_stream_encoder* capture_base::stream_for_frame(
   // Field diagnosis: MOLINK_STREAM_FORCE=1 pins the stream path on so a host
   // can be checked without making the screen move.
   const bool forced = std::getenv("MOLINK_STREAM_FORCE") != nullptr;
+  bool mode_changed = false;
   if (forced) {
     stream_policy_.armed = true;
+    mode_changed = !stream_policy_.streaming;
     stream_policy_.streaming = true;
-  } else if (stream_policy_.note(moving, monotonic_ms()) &&
-      stream_policy_.streaming) {
-    // The viewer's decoder has no reference frame for this stream yet.
-    stream_keyframe_pending_.store(true);
+  } else {
+    mode_changed = stream_policy_.note(moving, monotonic_ms());
+    if (mode_changed && stream_policy_.streaming) {
+      // The viewer's decoder has no reference frame for this stream yet.
+      stream_keyframe_pending_.store(true);
+    }
+  }
+  // MOLINK_STREAM_LOG=1: one line per mode change, with the movement that
+  // caused it. Without this a session that stays on tiles looks identical to
+  // one the policy never armed.
+  if (mode_changed && std::getenv("MOLINK_STREAM_LOG") != nullptr) {
+    std::fprintf(stderr, "host: stream %s (moving=%.1f%%, viewers av1_stream=%d "
+                         "h264_stream=%d)\n",
+                 stream_policy_.streaming ? "on" : "off", moving * 100.0,
+                 av1_stream_allowed_.load() ? 1 : 0,
+                 h264_stream_allowed_.load() ? 1 : 0);
   }
   // Walk the ladder the viewers can decode, best first, and take the first
   // codec this host can actually encode: AV1 stream, then H.264 stream. A

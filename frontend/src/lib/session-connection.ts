@@ -49,6 +49,8 @@ export interface TabPatch {
   path?: string
   /// The client core decoded an AV1 patch within the last few seconds.
   av1Active?: boolean
+  /// Host is sending its low-delay H.264 stream (no tile image underneath).
+  streamCodec?: string
   /// True when the wire carries AV1 only, not AV1 patches over a tile image.
   av1Full?: boolean
   av1WireBytes?: number
@@ -288,6 +290,7 @@ export class SessionConnection {
           this.sink.onPatch({ av1Active: false })
         }, 10000)
       },
+      onStreamVideo: (codec) => this.sink.onPatch({ streamCodec: codec }),
       onQualityShared: (mode) =>
         this.sink.onPatch({ sharedQuality: { mode } }),
       onCursor: (cursorShape) => this.sink.onPatch({ cursorShape }),

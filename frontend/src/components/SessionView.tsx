@@ -1745,7 +1745,9 @@ export function SessionView({
     ? tab.av1Full
       ? t('session.watermarkAv1')
       : t('session.watermarkAv1Tiles')
-    : t('session.watermarkTiles')
+    : tab.streamCodec === 'h264'
+      ? t('session.watermarkH264')
+      : t('session.watermarkTiles')
 
   return (
     <div ref={sessionRootRef} className="flex min-h-0 flex-1 flex-col">

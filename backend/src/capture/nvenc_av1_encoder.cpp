@@ -653,7 +653,14 @@ class nvenc_stream_encoder final : public av1_stream_encoder {
     // column and the receiver draws the picture at the real size.
     const int padded_w = (std::max)(2, (width + 1) & ~1);
     const int padded_h = (std::max)(2, (height + 1) & ~1);
-    const int nv_qp = std::clamp(qp, 1, 63) * 4;
+    // The caller's qp is on the AV1 0..63 scale. AV1 constant QP spans 0..255,
+    // so it is scaled by four; H.264 constant QP stops at 51, and using the
+    // AV1-scaled value there put every preset on the ceiling (51 = worst),
+    // which is why the stream looked blurry whatever the quality preset said.
+    const int nv_qp =
+        codec_ == video_codec::h264_stream
+            ? (std::min)(51, (std::max)(1, qp) * 51 / 63)
+            : (std::clamp)(qp, 1, 63) * 4;
     if (padded_w != width_ || padded_h != height_ || nv_qp != qp_) {
       if (!init(padded_w, padded_h, nv_qp, error)) return false;
       // A new session has no reference picture; the first frame must be a
@@ -830,7 +837,14 @@ class nvenc_stream_encoder final : public av1_stream_encoder {
     init.encodeHeight = static_cast<uint32_t>(height);
     init.frameRateNum = 30;
     init.frameRateDen = 1;
-    init.enablePTD = 0;
+    // H.264 needs the encoder's own picture-type decision: with PTD off the
+    // driver ignores NV_ENC_PIC_TYPE_P and turns every picture into an IDR
+    // (measured on the 4060: 300 of 300 slices were IDR), which is an all-intra
+    // stream -- no inter prediction, several times the bitrate, and exactly the
+    // blocky "tiles" look the stream exists to replace. Forced keyframes still
+    // ride NV_ENC_PIC_FLAG_FORCEIDR. AV1 takes its picture types from the
+    // client and rejects PTD, so it stays off there.
+    init.enablePTD = codec_ == video_codec::h264_stream ? 1 : 0;
     init.enableEncodeAsync = 0;
     // Ultra low latency is what makes the encoder emit each picture without
     // waiting for look-ahead it does not need.

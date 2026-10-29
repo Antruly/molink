@@ -334,6 +334,7 @@
     "secureE2eShort": "E2E",
     "secureRelayShort": "中继 TLS",
     "insecureShort": "未加密",
+    "watermarkH264": "H.264",
     "watermarkTiles": "瓦片",
     "watermarkAv1": "AV1",
     "watermarkAv1Tiles": "AV1 + 瓦片",

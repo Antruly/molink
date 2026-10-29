@@ -18,6 +18,71 @@ export function h264StreamSupported(): Promise<boolean> {
     .catch(() => false)
 }
 
+/// Splits an Annex-B access unit into NAL units with the start codes removed.
+function splitNalUnits(bytes: Uint8Array): Uint8Array[] {
+  const nals: Uint8Array[] = []
+  let start = -1
+  let i = 0
+  while (i + 2 < bytes.length) {
+    if (bytes[i] === 0 && bytes[i + 1] === 0 && bytes[i + 2] === 1) {
+      if (start >= 0) nals.push(bytes.subarray(start, i))
+      i += 3
+      start = i
+      continue
+    }
+    i += 1
+  }
+  if (start >= 0 && start < bytes.length) nals.push(bytes.subarray(start))
+  return nals.filter((nal) => nal.length > 0)
+}
+
+const kNalSps = 7
+const kNalPps = 8
+
+/// `AVCDecoderConfigurationRecord` (ISO/IEC 14496-15 §5.2.4.1) built from one
+/// SPS and one PPS.
+///
+/// WebCodecs hands the decoder AVCC (length-prefixed NAL units) unless the
+/// config carries `description`. Chrome has a private `avc: {format:'annexb'}`
+/// extension for start codes; WebKit does not implement it and silently ignores
+/// the unknown member, so an Annex-B feed to WebKit decodes garbage and the
+/// picture freezes on the last tile frame. Building the record works in both.
+function avcDescription(sps: Uint8Array, pps: Uint8Array): Uint8Array {
+  const out = new Uint8Array(11 + sps.length + pps.length)
+  out[0] = 1                     // configurationVersion
+  out[1] = sps[1] ?? 0x42        // AVCProfileIndication
+  out[2] = sps[2] ?? 0xe0        // profile_compatibility
+  out[3] = sps[3] ?? 0x1e        // AVCLevelIndication
+  out[4] = 0xff                  // 4-byte NAL lengths
+  out[5] = 0xe1                  // one SPS
+  out[6] = (sps.length >> 8) & 0xff
+  out[7] = sps.length & 0xff
+  out.set(sps, 8)
+  const ppsAt = 8 + sps.length
+  out[ppsAt] = 1                 // one PPS
+  out[ppsAt + 1] = (pps.length >> 8) & 0xff
+  out[ppsAt + 2] = pps.length & 0xff
+  out.set(pps, ppsAt + 3)
+  return out
+}
+
+/// AVCC access unit: every NAL prefixed with its 4-byte big-endian length.
+function toAvcc(nals: Uint8Array[]): Uint8Array {
+  let size = 0
+  for (const nal of nals) size += 4 + nal.length
+  const out = new Uint8Array(size)
+  let at = 0
+  for (const nal of nals) {
+    out[at] = (nal.length >>> 24) & 0xff
+    out[at + 1] = (nal.length >>> 16) & 0xff
+    out[at + 2] = (nal.length >>> 8) & 0xff
+    out[at + 3] = nal.length & 0xff
+    out.set(nal, at + 4)
+    at += 4 + nal.length
+  }
+  return out
+}
+
 /// Builds the WebCodecs codec string from the SPS in an Annex-B access unit:
 /// `avc1.PPCCLL` is profile_idc, constraint flags and level_idc, all read from
 /// the bitstream so the decoder is configured for what actually arrives.
@@ -69,10 +134,17 @@ export class H264StreamDecoder {
   /// the decoder failed.
   async decode(bytes: Uint8Array, keyframe: boolean): Promise<VideoFrame | null> {
     if (this.broken) return null
+    const nals = splitNalUnits(bytes)
+    if (nals.length === 0) return null
     if (this.decoder === null) {
       if (!keyframe) return null   // a delta has nothing to reference yet
       const codec = h264CodecString(bytes)
       if (codec === null) return null
+      const sps = nals.find((nal) => (nal[0]! & 0x1f) === kNalSps)
+      const pps = nals.find((nal) => (nal[0]! & 0x1f) === kNalPps)
+      // A keyframe that does not carry the parameter sets cannot configure a
+      // decoder; ask for another one instead of feeding it blind.
+      if (sps === undefined || pps === undefined) return null
       const decoder = new VideoDecoder({
         output: (frame) => {
           const resolve = this.pending.shift()
@@ -80,19 +152,20 @@ export class H264StreamDecoder {
           else frame.close()
         },
         error: () => {
-          this.broken = true
-          this.settleAll(null)
+          // Drop this decoder and let the next keyframe build a fresh one.
+          // Marking the stream broken for the rest of the session turned one
+          // bad picture into a permanently frozen canvas.
+          this.close()
         },
       })
       try {
-        // `avc.format` is the AVC extension of VideoDecoderConfig: Annex-B
-        // input with the parameter sets inline (Chrome supports it; the DOM
-        // typings in this project predate the extension).
+        // `description` makes the decoder read AVCC (length-prefixed) chunks,
+        // which is what every browser implements.
         decoder.configure({
           codec,
+          description: avcDescription(sps, pps),
           optimizeForLatency: true,
-          avc: { format: 'annexb' },
-        } as VideoDecoderConfig)
+        })
       } catch {
         this.broken = true
         return null
@@ -115,7 +188,7 @@ export class H264StreamDecoder {
         new EncodedVideoChunk({
           type: keyframe ? 'key' : 'delta',
           timestamp: this.timestamp,
-          data: bytes,
+          data: toAvcc(nals),
         }),
       )
       this.timestamp += 1000
