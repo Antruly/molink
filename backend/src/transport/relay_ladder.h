@@ -56,6 +56,8 @@ class relay_ladder final : public relay_session {
   void start_timer();
   void stop_timer();
   void deliver_close(int code, const std::string& reason);
+  /// Parks an abandoned transport until the next loop tick.
+  void retire(std::shared_ptr<relay_session> transport);
 
   uvcpp::uvcpp_loop* loop_;
   std::vector<factory> factories_;
@@ -63,12 +65,24 @@ class relay_ladder final : public relay_session {
   int attempt_timeout_ms_;
   std::string active_protocol_ = "relay";
   std::shared_ptr<relay_session> active_;
+  /// An abandoned transport is usually reported dead **from inside its own data
+  /// callback** (a `relay-error` text frame). Dropping the last reference there
+  /// frees it -- and its WebSocket parser -- while that parser is still on the
+  /// stack; the next frame in the same read then runs on freed memory
+  /// (`trampoline_frame` with a null argument, 2026-10-29). Park it here and
+  /// release it on the next tick, outside every callback.
+  std::vector<std::shared_ptr<relay_session>> retired_;
   std::unique_ptr<uvcpp::uvcpp_timer> timer_;
+  /// Declared after `retired_` so it is destroyed before it: a pending retire
+  /// can never outlive the vector it clears.
+  std::unique_ptr<uvcpp::uvcpp_timer> retire_timer_;
 
   bool started_ = false;
   bool ready_ = false;
   bool closed_ = false;
   bool close_delivered_ = false;
+  /// The destructor is running: park transports, never arm the retire timer.
+  bool destroying_ = false;
 
   text_handler text_;
   binary_handler binary_;
