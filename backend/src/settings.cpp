@@ -199,6 +199,10 @@ app_settings load_settings() {
       settings.server_ca = value;
     } else if (key == "stun_server") {
       settings.stun_server = value;
+    } else if (key == "video_mode") {
+      if (value == "stream" || value == "mixed" || value == "tiles") {
+        settings.video_mode = value;
+      }
     } else if (key == "stream_codec") {
       if (value == "auto" || value == "av1" || value == "h264" ||
           value == "vp9" || value == "vp8") {
@@ -283,6 +287,7 @@ void save_settings(const app_settings& settings) {
   stream << "server_invite=" << settings.server_invite << "\n";
   stream << "server_ca=" << settings.server_ca << "\n";
   stream << "stun_server=" << settings.stun_server << "\n";
+  stream << "video_mode=" << settings.video_mode << "\n";
   stream << "stream_codec=" << settings.stream_codec << "\n";
   stream << "long_term_code=" << settings.long_term_code << "\n";
   stream << "temp_mode=" << settings.temp_mode << "\n";

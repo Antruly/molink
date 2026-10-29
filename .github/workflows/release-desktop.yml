@@ -56,7 +56,7 @@ jobs:
           mkdir -p openssl-src
           tar xzf openssl.tar.gz -C openssl-src --strip-components=1
           cd openssl-src
-          ./Configure --prefix="$RUNNER_TEMP/openssl-quic" --libdir=lib shared no-tests
+          ./Configure --prefix="$RUNNER_TEMP/openssl-quic" --libdir=lib no-shared no-tests
           make -j"$(nproc)"
           make install_sw
           nm -D "$RUNNER_TEMP/openssl-quic/lib/libssl.so" | grep -qE ' [TW] SSL_set_quic_tls_cbs($|@)' || {
@@ -76,7 +76,7 @@ jobs:
             -DUVCPP_BUILD_SHARED=ON -DUVCPP_BUILD_STATIC=OFF -DUVCPP_BUILD_TESTS=OFF \
             -DUVCPP_BUILD_NET=ON -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
             -DUVCPP_ENABLE_OPENSSL=ON -DUVCPP_ENABLE_QUIC=ON -DUVCPP_ENABLE_HTTP3=ON \
-            -DOPENSSL_ROOT_DIR="$RUNNER_TEMP/openssl-quic"
+            -DOPENSSL_USE_STATIC_LIBS=ON -DOPENSSL_ROOT_DIR="$RUNNER_TEMP/openssl-quic"
           cmake --build "$RUNNER_TEMP/libuvcpp/build" --parallel
           cmake --install "$RUNNER_TEMP/libuvcpp/build"
           test -f "$RUNNER_TEMP/uvcpp/include/http3/uvcpp_h3_wt_session.h" || {
@@ -104,7 +104,7 @@ jobs:
           VERSION: ${{ github.ref_name }}
         run: |
           export VERSION="${VERSION#v}"
-          export MOLINK_EXTRA_CMAKE_ARGS="-DMOLINK_UVCPP_PREFIX=$RUNNER_TEMP/uvcpp -DMOLINK_ENABLE_WEBRTC=ON"
+          export MOLINK_EXTRA_CMAKE_ARGS="-DMOLINK_UVCPP_PREFIX=$RUNNER_TEMP/uvcpp -DMOLINK_ENABLE_WEBRTC=ON -DOPENSSL_ROOT_DIR=$RUNNER_TEMP/openssl-quic -DOPENSSL_USE_STATIC_LIBS=ON"
           ./packaging/linux/build-deb.sh
           ./packaging/linux/build-appimage.sh
           ./packaging/linux/build-rpm.sh

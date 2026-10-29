@@ -320,6 +320,8 @@ export interface Av1Settings {
   /// "auto" keeps the hardware-first ladder; a pinned codec wins when every
   /// viewer can decode it.
   codec_preference?: string
+  /// Video path: stream / mixed / tiles.
+  video_mode?: string
   devices: Av1Device[]
   active_quality?: string
   effective?: Av1Effective
@@ -335,6 +337,7 @@ export interface Av1SettingsUpdate {
   threads?: number
   keyframe_interval_seconds?: number
   stream_codec?: string
+  video_mode?: string
 }
 
 export function fetchAv1Settings(token: string): Promise<Av1Settings> {
@@ -369,6 +372,9 @@ export function postAv1Settings(
   }
   if (update.stream_codec !== undefined) {
     query.set('stream_codec', update.stream_codec)
+  }
+  if (update.video_mode !== undefined) {
+    query.set('video_mode', update.video_mode)
   }
   return request<Av1Settings>(
     `/api/encoding?${query.toString()}`,

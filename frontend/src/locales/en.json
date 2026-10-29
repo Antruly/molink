@@ -266,7 +266,12 @@
     "multiCodeRotationHint": "The multi-use code rotates once a day and immediately after its use budget (20 by default). The single-use code rotates on every start.",
     "codecPreference": "Stream codec",
     "codecPreferenceHint": "Auto negotiates hardware first: AV1 → H.264 → VP9 → VP8 → tiles. A pinned codec is used only when every viewer can decode it and this host can encode it; otherwise auto applies.",
-    "codecAuto": "Auto (hardware first)"
+    "codecAuto": "Auto (hardware first)",
+    "videoMode": "Video path",
+    "videoModeHint": "Whether the picture uses the video stream or tiles. The default, \"video + tiles\", streams moving content and tiles a still screen to save bandwidth.",
+    "videoModeStream": "Video only (always the stream)",
+    "videoModeMixed": "Video + tiles (still screen)",
+    "videoModeTiles": "Tiles only (LAN recommended)"
   },
   "session": {
     "connecting": "Connecting…",

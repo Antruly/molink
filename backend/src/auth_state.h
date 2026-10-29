@@ -83,6 +83,8 @@ class auth_state {
   void set_service_desired_running(bool enabled);
   /// Pinned stream codec: auto / av1 / h264 / vp9 / vp8.
   bool set_stream_codec(const std::string& codec);
+  /// Video path: stream / mixed / tiles.
+  bool set_video_mode(const std::string& mode);
   /// Host AV1 encoder preference. Values are validated by the caller.
   void set_av1_encoding(bool enabled, std::string device, std::string speed,
                         int qp, int max_area_percent, int threads,

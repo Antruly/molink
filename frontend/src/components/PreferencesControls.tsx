@@ -238,8 +238,7 @@ const AV1_SPEEDS: { value: Av1Settings['speed']; label: string }[] = [
 function Av1Controls({ token }: { token: string }) {
   const { t } = useTranslation()
   const [data, setData] = useState<Av1Settings | null>(null)
-  const [enabled, setEnabled] = useState(true)
-  const [fullFrame, setFullFrame] = useState(true)
+  const [videoMode, setVideoMode] = useState('mixed')
   const [device, setDevice] = useState('auto')
   const [speed, setSpeed] = useState<Av1Settings['speed']>('auto')
   const [autoParams, setAutoParams] = useState(true)
@@ -253,8 +252,7 @@ function Av1Controls({ token }: { token: string }) {
 
   const apply = (next: Av1Settings) => {
     setData(next)
-    setEnabled(next.enabled)
-    setFullFrame(next.full_frame ?? true)
+    setVideoMode(next.video_mode ?? 'mixed')
     setDevice(next.device)
     setSpeed(next.speed)
     const automatic =
@@ -285,8 +283,7 @@ function Av1Controls({ token }: { token: string }) {
     setNote(null)
     try {
       const next = await postAv1Settings(token, {
-        enabled,
-        full_frame: fullFrame,
+        video_mode: videoMode,
         device,
         speed,
         qp: autoParams ? 0 : qp,
@@ -380,37 +377,23 @@ function Av1Controls({ token }: { token: string }) {
         {t('settings.av1Hint')}
       </p>
 
-      <div className="flex items-center justify-between gap-4">
-        <div>
-          <div className="text-[12px] font-medium text-ink">
-            {t('settings.av1Enable')}
-          </div>
-          <div className="mt-1 text-[11px] leading-relaxed text-muted">
-            {t('settings.av1EnableHint')}
-          </div>
-        </div>
-        <Toggle
-          checked={enabled}
-          onChange={setEnabled}
-          label={t('settings.av1Enable')}
-        />
-      </div>
-
-      <div className="flex items-center justify-between gap-4">
-        <div>
-          <div className="text-[12px] font-medium text-ink">
-            {t('settings.av1FullFrame')}
-          </div>
-          <div className="mt-1 text-[11px] leading-relaxed text-muted">
-            {t('settings.av1FullFrameHint')}
-          </div>
-        </div>
-        <Toggle
-          checked={fullFrame}
-          onChange={setFullFrame}
-          label={t('settings.av1FullFrame')}
-        />
-      </div>
+      <label className="block">
+        <span className="mb-1 block text-[12px] font-medium text-ink">
+          {t('settings.videoMode')}
+        </span>
+        <p className="mb-1 text-[11px] leading-relaxed text-muted">
+          {t('settings.videoModeHint')}
+        </p>
+        <select
+          value={videoMode}
+          onChange={(event) => setVideoMode(event.target.value)}
+          className="field"
+        >
+          <option value="stream">{t('settings.videoModeStream')}</option>
+          <option value="mixed">{t('settings.videoModeMixed')}</option>
+          <option value="tiles">{t('settings.videoModeTiles')}</option>
+        </select>
+      </label>
 
       <label className="block">
         <span className="mb-1 block text-[10px] uppercase tracking-[0.14em] text-muted">
@@ -501,7 +484,7 @@ function Av1Controls({ token }: { token: string }) {
               {t('settings.av1QpHint')}
             </span>
           </label>
-          <label className={fullFrame ? 'hidden' : 'block'}>
+          <label className="hidden">
             <span className="flex items-center justify-between text-[11px] text-ink">
               <span>{t('settings.av1MaxArea')}</span>
               <span className="font-mono text-accent">{maxArea}%</span>

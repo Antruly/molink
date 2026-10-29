@@ -276,6 +276,8 @@ class capture_source {
   /// viewer explicitly picks a codec: waiting for the movement rule made the
   /// switch look like it took ten seconds.
   virtual void request_stream(uint64_t ms) { (void)ms; }
+  /// "Video encoding" mode: the stream is always the picture, no tiles.
+  virtual void set_stream_always(bool always) { (void)always; }
   virtual void set_vp9_stream_allowed(bool allowed) { (void)allowed; }
   virtual void set_vp8_stream_allowed(bool allowed) { (void)allowed; }
 
@@ -525,6 +527,9 @@ class capture_base : public capture_source {
   void set_av1_stream_allowed(bool allowed) override {
     av1_stream_allowed_.store(allowed);
   }
+  void set_stream_always(bool always) override {
+    stream_always_.store(always);
+  }
   void request_stream(uint64_t ms) override {
     stream_nudge_until_.store(monotonic_ms() + ms);
     request_keyframe();
@@ -644,6 +649,7 @@ class capture_base : public capture_source {
   std::atomic<bool> vp8_stream_allowed_{false};
   /// Streaming is forced until this monotonic deadline (codec switch).
   std::atomic<uint64_t> stream_nudge_until_{0};
+  std::atomic<bool> stream_always_{false};
   std::atomic<bool> stream_keyframe_pending_{true};
   /// A viewer is behind; box-average large tiles and stop lifting the AV1
   /// downscale while it lasts.

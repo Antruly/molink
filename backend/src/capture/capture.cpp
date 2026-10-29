@@ -361,7 +361,7 @@ av1_stream_encoder* capture_base::stream_for_frame(
     stream_policy_.streaming = true;
   } else {
     mode_changed = stream_policy_.note(moving, monotonic_ms());
-    if (rate_starved_.load() ||
+    if (stream_always_.load() || rate_starved_.load() ||
         monotonic_ms() < stream_nudge_until_.load()) {
       // The tile path is stalling while content is changing: the link cannot
       // carry the tiles, and the stream is the cheaper encoding. Switch even

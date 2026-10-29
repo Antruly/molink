@@ -266,7 +266,12 @@
     "multiCodeRotationHint": "多次验证码每天自动轮换一次；达到设定的使用次数（默认 20）时也会立即轮换。单次验证码每次启动都会换新的。",
     "codecPreference": "流编码偏好",
     "codecPreferenceHint": "自动按硬件优先协商：AV1 → H.264 → VP9 → VP8 → 瓦片。手动指定后，只有在所有观看端都能解码、且本机能编码时才使用，否则回到自动。",
-    "codecAuto": "自动（硬件优先）"
+    "codecAuto": "自动（硬件优先）",
+    "videoMode": "视频编码模式",
+    "videoModeHint": "决定画面走视频编码还是瓦片。默认“视频编码 + 瓦片压缩”：画面动起来用视频流，静止时用瓦片，省带宽。",
+    "videoModeStream": "视频编码（全部走视频流）",
+    "videoModeMixed": "视频编码 + 瓦片压缩（静态画面）",
+    "videoModeTiles": "瓦片压缩（建议仅局域网）"
   },
   "session": {
     "connecting": "连接中…",

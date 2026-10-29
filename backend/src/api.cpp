@@ -1333,6 +1333,7 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
     j["threads"] = settings.av1_threads;
     j["keyframe_interval_seconds"] = settings.keyframe_interval_seconds;
     j["codec_preference"] = settings.stream_codec;
+    j["video_mode"] = settings.video_mode;
     j["devices"] = uvcpp_json::array();
     for (const av1_encoder_device& device : av1_encoder_devices()) {
       uvcpp_json item;
@@ -1478,6 +1479,13 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
              deps.auth->set_av1_encoding(enabled, device, speed, qp,
                                          max_area, threads, full_frame);
              deps.auth->set_keyframe_interval_seconds(keyframe_interval);
+             // Video path: stream / mixed / tiles.
+             if (const std::string* mode = req.query("video_mode");
+                 mode != nullptr && !deps.auth->set_video_mode(*mode)) {
+               resp.status(400).json_str(R"({"code":"invalid_video_mode"})");
+               resp.end();
+               return;
+             }
              // Pinned stream codec: auto keeps the hardware-first ladder.
              if (const std::string* codec = req.query("stream_codec");
                  codec != nullptr && !deps.auth->set_stream_codec(*codec)) {

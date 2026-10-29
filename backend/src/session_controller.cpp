@@ -2511,8 +2511,14 @@ void session_supervisor::run() {
       } else if (preference == "vp8" && all_vp8_stream) {
         pinned = stream_choice::vp8;
       }
+      const std::string video_mode =
+          options_.auth ? options_.auth->settings().video_mode : "mixed";
+      if (options_.capture) {
+        options_.capture->set_stream_always(video_mode == "stream");
+      }
+      const bool stream_allowed = video_mode != "tiles";
       const stream_choice stream =
-          live && viewers > 0
+          live && viewers > 0 && stream_allowed
               ? (pinned != stream_choice::none
                      ? pinned
                      : choose_video_codec(allow, all_stream, all_h264_stream,

@@ -342,6 +342,14 @@ code_view auth_state::set_temp(const std::string& mode, int uses,
   return view_locked();
 }
 
+bool auth_state::set_video_mode(const std::string& mode) {
+  if (mode != "stream" && mode != "mixed" && mode != "tiles") return false;
+  std::lock_guard<std::mutex> lock(mutex_);
+  settings_.video_mode = mode;
+  persist_locked();
+  return true;
+}
+
 bool auth_state::set_stream_codec(const std::string& codec) {
   if (codec != "auto" && codec != "av1" && codec != "h264" &&
       codec != "vp9" && codec != "vp8") {

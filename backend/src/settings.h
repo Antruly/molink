@@ -73,6 +73,10 @@ struct app_settings {
   /// ladder; anything else pins that codec when every viewer can decode it
   /// and this host can encode it.
   std::string stream_codec = "auto";
+  /// Video path preference: "stream" always uses the low-delay stream,
+  /// "mixed" streams moving content and tiles a still screen, "tiles" never
+  /// streams (a LAN-only, lossless-but-heavy option).
+  std::string video_mode = "mixed";
 
   /// Temporary code shown on the home page.
   std::string temp_mode = "single";  // "single" | "multi"
