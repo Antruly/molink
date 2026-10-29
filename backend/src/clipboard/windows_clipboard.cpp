@@ -76,13 +76,37 @@ class windows_clipboard final : public clipboard_service {
         }
         std::string text;
         request_text([&text](std::string value) { text = std::move(value); });
-        if (text.empty()) continue;
+        if (!text.empty()) {
+          std::lock_guard<std::mutex> lock(watch_mutex_);
+          if (text == last_text_) continue;
+          last_text_ = text;
+          last_files_.clear();
+          if (watch_callback_) watch_callback_(text);
+          continue;
+        }
+        // No text: the clipboard may hold files (Explorer Ctrl+C).
+        std::vector<clipboard_file> files;
+        request_files([&files](std::vector<clipboard_file> value) {
+          files = std::move(value);
+        });
+        if (files.empty()) continue;
+        std::string signature;
+        for (const clipboard_file& file : files) {
+          signature += file.path;
+          signature += '\n';
+        }
         std::lock_guard<std::mutex> lock(watch_mutex_);
-        if (text == last_text_) continue;
-        last_text_ = text;
-        if (watch_callback_) watch_callback_(text);
+        if (signature == last_files_) continue;
+        last_files_ = signature;
+        last_text_.clear();
+        if (files_callback_) files_callback_(files);
       }
     });
+  }
+
+  void watch_files(files_watcher callback) override {
+    std::lock_guard<std::mutex> lock(watch_mutex_);
+    files_callback_ = std::move(callback);
   }
 
   void stop_watch() {
@@ -240,7 +264,9 @@ class windows_clipboard final : public clipboard_service {
  private:
   std::mutex watch_mutex_;
   text_watcher watch_callback_;
+  files_watcher files_callback_;
   std::string last_text_;
+  std::string last_files_;
   DWORD sequence_ = 0;
   std::atomic<bool> running_{false};
   std::thread watcher_;

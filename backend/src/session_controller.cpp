@@ -2575,6 +2575,35 @@ void session_supervisor::start() {
         deliver();
       }
     });
+    // Files copied on the host (Explorer Ctrl+C) appear in every viewer's
+    // transfer drawer without pressing anything, like RDP's file clipboard.
+    options_.clipboard->watch_files(
+        [registry, post](std::vector<clipboard_file> files) {
+          if (files.empty()) return;
+          auto deliver = [registry, files = std::move(files)] {
+            uvcpp_json list = uvcpp_json::array();
+            for (const clipboard_file& file : files) {
+              uvcpp_json item;
+              item["name"] = file.name;
+              item["path"] = file.path;
+              item["size"] = file.size;
+              list.push_back(std::move(item));
+            }
+            for (const session_info& peer : registry->snapshot()) {
+              if (!peer.authenticated || !peer.transport) continue;
+              uvcpp_json out;
+              out["type"] = "clipboard";
+              out["action"] = "files";
+              out["files"] = list;
+              send_json(peer.transport.get(), out);
+            }
+          };
+          if (post) {
+            post(deliver);
+          } else {
+            deliver();
+          }
+        });
   }
   thread_ = std::thread([this] { run(); });
   if (options_.post && options_.capture) {

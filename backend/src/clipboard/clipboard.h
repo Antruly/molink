@@ -46,6 +46,11 @@ class clipboard_service {
   using text_watcher = std::function<void(std::string)>;
   virtual void watch(text_watcher callback) { (void)callback; }
 
+  /// Called when the local clipboard's *file list* changes (Explorer Ctrl+C).
+  /// Viewers show the files the host user copied without a button press.
+  using files_watcher = std::function<void(std::vector<clipboard_file>)>;
+  virtual void watch_files(files_watcher callback) { (void)callback; }
+
   using files_callback = std::function<void(std::vector<clipboard_file>)>;
   virtual void request_files(files_callback callback) {
     if (callback) callback({});
