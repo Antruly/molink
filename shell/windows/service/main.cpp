@@ -35,6 +35,9 @@ SERVICE_STATUS_HANDLE g_status = nullptr;
 SERVICE_STATUS g_service_status{};
 HANDLE g_stop_event = nullptr;
 PROCESS_INFORMATION g_helper{};
+/// Console session the helper was started in; the console moves when the user
+/// picks "switch user" or logs back in.
+DWORD g_helper_session = 0xFFFFFFFF;
 std::atomic<bool> g_running{true};
 constexpr wchar_t kServiceName[] = L"moLinkSession";
 constexpr wchar_t kLogPath[] = L"C:\\ProgramData\\moLink\\service\\service.log";
@@ -209,7 +212,19 @@ bool launch_helper(std::string& err) {
     err = "CreateProcessAsUser failed";
     return false;
   }
+  g_helper_session = session;
   return true;
+}
+
+/// Stops the helper so it can be started in another session.
+void stop_helper() {
+  if (g_helper.hProcess == nullptr) return;
+  TerminateProcess(g_helper.hProcess, 0);
+  WaitForSingleObject(g_helper.hProcess, 3000);
+  CloseHandle(g_helper.hThread);
+  CloseHandle(g_helper.hProcess);
+  g_helper = PROCESS_INFORMATION{};
+  g_helper_session = 0xFFFFFFFF;
 }
 
 std::string handle_command(HANDLE pipe, const std::string& line) {
@@ -263,11 +278,7 @@ std::string handle_command(HANDLE pipe, const std::string& line) {
     return reply;
   }
   if (command == "secure-stop") {
-    if (g_helper.hProcess == nullptr) return R"({"ok":true})";
-    TerminateProcess(g_helper.hProcess, 0);
-    CloseHandle(g_helper.hThread);
-    CloseHandle(g_helper.hProcess);
-    g_helper = PROCESS_INFORMATION{};
+    stop_helper();
     return R"({"ok":true})";
   }
   if (command == "switch") {
@@ -392,7 +403,38 @@ void WINAPI service_main(DWORD, wchar_t**) {
     log_line("helper launch failed: " + helper_error);
   }
   std::thread pipe_thread(pipe_server);
-  WaitForSingleObject(g_stop_event, INFINITE);
+  // Follow the console session: "switch user", the logon screen of another
+  // user, and the way back all move the console to a different session, and a
+  // helper left behind in the old one cannot capture or inject anything (the
+  // picture is black while audio keeps playing).
+  uint64_t next_launch_attempt = 0;
+  for (;;) {
+    if (WaitForSingleObject(g_stop_event, 1000) == WAIT_OBJECT_0) break;
+    if (!g_running.load()) break;
+    const DWORD active = WTSGetActiveConsoleSessionId();
+    if (active == 0xFFFFFFFF) continue;
+    const bool helper_gone =
+        g_helper.hProcess != nullptr &&
+        WaitForSingleObject(g_helper.hProcess, 0) == WAIT_OBJECT_0;
+    if (g_helper.hProcess != nullptr && !helper_gone &&
+        active == g_helper_session) {
+      continue;
+    }
+    const uint64_t now = GetTickCount64();
+    if (now < next_launch_attempt) continue;
+    next_launch_attempt = now + 5000;
+    if (g_helper.hProcess != nullptr) {
+      log_line("helper session " + std::to_string(g_helper_session) +
+               " -> " + std::to_string(active) + ", restarting");
+      stop_helper();
+    }
+    std::string relaunch_error;
+    if (launch_helper(relaunch_error)) {
+      log_line("helper running in session " + std::to_string(active));
+    } else {
+      log_line("helper relaunch failed: " + relaunch_error);
+    }
+  }
   g_running.store(false);
   // ConnectNamedPipe blocks indefinitely; poke both servers so their loops
   // can observe running=false and the service can leave StopPending.

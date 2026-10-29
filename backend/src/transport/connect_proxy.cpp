@@ -322,6 +322,11 @@ class connect_proxy final
     }
     last_frame_log_ = now;
     if (frame_count_ == 0) return;
+    if (std::getenv("MOLINK_STREAM_LOG") == nullptr) {
+      frame_codec_counts_.clear();
+      frame_count_ = 0;
+      return;
+    }
     std::string line = "proxy: frames received";
     for (const auto& [codec, count] : frame_codec_counts_) {
       line += " codec" + std::to_string(codec) + "=" + std::to_string(count);

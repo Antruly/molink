@@ -2404,6 +2404,17 @@ void session_controller::on_text(const std::string& text) {
     return;
   }
 
+  if (type == "client-log") {
+    // The page has no console of its own; the local core's proxy prints what
+    // it tunnels here. Accept it quietly -- it used to come back to the client
+    // as "unsupported control type".
+    if (std::getenv("MOLINK_STREAM_LOG") != nullptr) {
+      std::fprintf(stderr, "host: client-log %s\n",
+                   string_field(j, "text").c_str());
+    }
+    return;
+  }
+
   send_error(transport.get(), "unknown_type",
              "unsupported control type: " + type);
 }

@@ -428,8 +428,6 @@ export class MolinkClient {
   private lastStreamRejectLog = 0
   /// The host's codec preference ("auto", a codec name, or "tiles").
   private preferredCodec = 'auto'
-  /// Codec of the last picture painted, for the paint diagnostic.
-  private lastPaintedCodec = -1
   /// When a stream picture was last painted. A capture-source swap (lock
   /// screen, UAC) restarts the host's encoder and it falls back to tiles for a
   /// few seconds; those tiles are ignored so the picture holds the last frame
@@ -1811,13 +1809,6 @@ export class MolinkClient {
 
   private deliver(frame: Frame, byteLength: number, tsUs: number,
                   refresh = false): void {
-    if (frame.codec !== this.lastPaintedCodec) {
-      this.lastPaintedCodec = frame.codec
-      this.sendJson({
-        type: 'client-log',
-        text: `paint codec=${frame.codec} refresh=${refresh ? 1 : 0}`,
-      })
-    }
     if (!refresh) {
       if ((frame.flags & FrameFlag.keyframe) !== 0) {
         this.hasImage = true
