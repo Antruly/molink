@@ -49,6 +49,85 @@ inline int adapt_av1_qp_offset(int offset, uint64_t build_us,
   return offset;
 }
 
+/// Moves the picture quality so the viewer's frame rate stays near the target.
+///
+/// The preset says where the picture starts; this controller walks away from
+/// that start only while the viewer's *painted* rate says it must. It is only
+/// fed when the host actually produced frames in the window: a static screen
+/// sends almost nothing, and "the viewer received no packets because nothing
+/// changed" is not a stall (the user's rule: a low rate *in transit* counts, an
+/// idle screen does not).
+///
+/// Two knobs, one policy: a fixed preset moves its own stream QP (coarse steps
+/// up when behind, one step back down when healthy); "auto" walks a level
+/// ladder instead and never enters the monochrome level.
+struct rate_quality_policy {
+  static constexpr double kBehindFraction = 0.60;
+  static constexpr double kHealthyFraction = 0.90;
+  static constexpr uint64_t kBehindDwellMs = 1500;
+  static constexpr uint64_t kHealthyDwellMs = 4000;
+  /// Steps away from the preset's own QP. Coarsening is cheap and bounded;
+  /// going sharper than the preset is allowed a little, because the preset is
+  /// the user's choice, not a ceiling.
+  static constexpr int kMaxCoarserSteps = 12;
+  static constexpr int kMaxSharperSteps = 6;
+  static constexpr int kCoarserStep = 2;
+
+  int qp_offset = 0;
+  int auto_level = 1;
+  uint64_t behind_since_ms = 0;
+  uint64_t healthy_since_ms = 0;
+
+  /// `auto_mode` picks the ladder instead of the QP offset. Returns true when
+  /// the caller has to apply a changed quality.
+  bool note(double fps, int target_fps, bool demand, bool auto_mode,
+            int auto_levels, uint64_t now_ms) {
+    if (!demand || target_fps <= 0 || fps <= 0.0) {
+      behind_since_ms = 0;
+      healthy_since_ms = 0;
+      return false;
+    }
+    const double target = static_cast<double>(target_fps);
+    if (fps < target * kBehindFraction) {
+      healthy_since_ms = 0;
+      if (behind_since_ms == 0) {
+        behind_since_ms = now_ms;
+        return false;
+      }
+      if (now_ms - behind_since_ms < kBehindDwellMs) return false;
+      behind_since_ms = now_ms;
+      if (auto_mode) {
+        if (auto_level <= 0) return false;
+        --auto_level;
+        return true;
+      }
+      if (qp_offset >= kMaxCoarserSteps) return false;
+      qp_offset = (std::min)(kMaxCoarserSteps, qp_offset + kCoarserStep);
+      return true;
+    }
+    if (fps > target * kHealthyFraction) {
+      behind_since_ms = 0;
+      if (healthy_since_ms == 0) {
+        healthy_since_ms = now_ms;
+        return false;
+      }
+      if (now_ms - healthy_since_ms < kHealthyDwellMs) return false;
+      healthy_since_ms = now_ms;
+      if (auto_mode) {
+        if (auto_level >= auto_levels - 1) return false;
+        ++auto_level;
+        return true;
+      }
+      if (qp_offset <= -kMaxSharperSteps) return false;
+      --qp_offset;
+      return true;
+    }
+    behind_since_ms = 0;
+    healthy_since_ms = 0;
+    return false;
+  }
+};
+
 /// Decides when AV1 has to be abandoned for a while.
 ///
 /// Raising the QP is not always enough: a CPU-only host encoding 1080p intra

@@ -45,6 +45,12 @@ const char* quality_mode_name(quality_mode mode) {
       return "turbo";
     case quality_mode::raw:
       return "raw";
+    case quality_mode::ultra:
+      return "ultra";
+    case quality_mode::lossless:
+      return "lossless";
+    case quality_mode::automatic:
+      return "auto";
     case quality_mode::balanced:
     default:
       return "balanced";
@@ -77,8 +83,16 @@ bool quality_mode_from_name(const std::string& name, quality_mode& out) {
     out = quality_mode::raw;
     return true;
   }
-  if (name == "ultra" || name == "lossless") {
-    out = quality_mode::quality;
+  if (name == "ultra") {
+    out = quality_mode::ultra;
+    return true;
+  }
+  if (name == "lossless") {
+    out = quality_mode::lossless;
+    return true;
+  }
+  if (name == "auto") {
+    out = quality_mode::automatic;
     return true;
   }
   if (name == "game") {
@@ -139,6 +153,29 @@ quality_profile quality_profile_for(quality_mode mode) {
       profile.av1_grayscale = true;
       profile.av1_max_area_percent = 60;
       break;
+    case quality_mode::ultra:
+      // Above "quality": a sharper starting QP for the stream, still within
+      // what a GPU encoder can run in real time.
+      profile.format = tile_format::bgra;
+      profile.effort = compression_effort::best;
+      profile.lossless = true;
+      profile.av1_qp = 8;
+      profile.av1_max_area_percent = 15;
+      profile.maximum_change_threshold = 1;
+      break;
+    case quality_mode::lossless:
+      // The top of the ladder: near-lossless, lowest practical QP.
+      profile.format = tile_format::bgra;
+      profile.effort = compression_effort::best;
+      profile.lossless = true;
+      profile.av1_qp = 3;
+      profile.av1_max_area_percent = 12;
+      profile.maximum_change_threshold = 1;
+      break;
+    case quality_mode::automatic:
+      // Resolved at runtime by effective_quality(); a direct lookup only
+      // happens for the raw preset name, so answer with the middle level.
+      return quality_profile_for(quality_mode::balanced);
     case quality_mode::raw:
       // Original BGRA pixels, deliberately not deflated. Useful on a fast
       // local link and for the "lossless" presets where the client trades
@@ -165,8 +202,51 @@ quality_profile quality_profile_for(quality_mode mode) {
   return profile;
 }
 
+quality_mode capture_base::auto_ladder_mode(int level) {
+  static const quality_mode kLadder[kAutoLevels] = {
+      quality_mode::smooth, quality_mode::balanced, quality_mode::quality,
+      quality_mode::ultra, quality_mode::lossless};
+  if (level < 0) level = 0;
+  if (level >= kAutoLevels) level = kAutoLevels - 1;
+  return kLadder[level];
+}
+
+void capture_base::note_viewer_rate(double fps, int target_fps, bool demand,
+                                    uint64_t now_ms) {
+  const bool auto_mode = quality_.load() == quality_mode::automatic;
+  std::lock_guard<std::mutex> lock(rate_mutex_);
+  const int level_before = rate_policy_.auto_level;
+  // Track a *demand-aware* stall: the viewer paints far below the target while
+  // the host is producing frames. A static screen sends nothing and is not a
+  // stall, so it never counts here.
+  if (demand && fps > 0.0 && target_fps > 0 &&
+      fps < static_cast<double>(target_fps) *
+                rate_quality_policy::kBehindFraction) {
+    if (starved_streak_ < 1000) ++starved_streak_;
+  } else {
+    starved_streak_ = 0;
+  }
+  rate_starved_.store(starved_streak_ >= 2);
+  if (!rate_policy_.note(fps, target_fps, demand, auto_mode, kAutoLevels,
+                         now_ms)) {
+    return;
+  }
+  rate_qp_offset_.store(rate_policy_.qp_offset);
+  auto_level_.store(rate_policy_.auto_level);
+  if (auto_mode && rate_policy_.auto_level != level_before) {
+    // The whole preset moved (tile format, effort, thresholds), so the viewer
+    // needs a full picture in the new look, not just a new stream keyframe.
+    request_keyframe();
+  } else {
+    // A changed stream QP re-initialises the encoder, which forces a keyframe;
+    // that is why the policy moves in steps with a dwell instead of tracking
+    // every sample.
+    stream_keyframe_pending_.store(true);
+  }
+}
+
 int capture_base::quality_change_threshold(int configured) const {
-  const quality_profile profile = quality_profile_for(quality_.load());
+  const quality_profile profile = quality_profile_for(effective_quality());
   int value = configured;
   if (profile.minimum_change_threshold > 0) {
     value = std::max(value, profile.minimum_change_threshold);
@@ -281,9 +361,25 @@ av1_stream_encoder* capture_base::stream_for_frame(
     stream_policy_.streaming = true;
   } else {
     mode_changed = stream_policy_.note(moving, monotonic_ms());
+    if (rate_starved_.load()) {
+      // The tile path is stalling while content is changing: the link cannot
+      // carry the tiles, and the stream is the cheaper encoding. Switch even
+      // though the movement rule alone would not have.
+      stream_policy_.exiting = false;
+      if (!stream_policy_.streaming) {
+        stream_policy_.streaming = true;
+        stream_policy_.entering = false;
+        mode_changed = true;
+      }
+    }
     if (mode_changed && stream_policy_.streaming) {
       // The viewer's decoder has no reference frame for this stream yet.
       stream_keyframe_pending_.store(true);
+    } else if (mode_changed) {
+      // Leaving the stream: the viewer's tile base is as old as the stream it
+      // was painted over, so the first tile frame back has to be a full one.
+      // Without this the picture stays half stale until the periodic refresh.
+      request_keyframe();
     }
   }
   // MOLINK_STREAM_LOG=1: one line per mode change, with the movement that
@@ -404,7 +500,7 @@ void capture_base::note_build_time(uint64_t us) {
   // and the step that keeps a video moving without the tile path's bytes), and
   // only when that is not enough does it hand the picture to the tiles.
   if (!av1_allowed_.load() ||
-      !quality_profile_for(quality_.load()).av1_fallback_to_tiles) {
+      !quality_profile_for(effective_quality()).av1_fallback_to_tiles) {
     return;
   }
   // A viewer that reports dropped frames, or a painted rate far below the

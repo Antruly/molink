@@ -87,7 +87,8 @@
     "ipDisabledHint": "IP 连接未开启，其他人暂时无法通过 IP 访问这台电脑。",
     "enableIp": "去开启",
     "idNotRegistered": "尚未注册到服务端",
-    "ipUnavailable": "未检测到局域网 IP"
+    "ipUnavailable": "未检测到局域网 IP",
+    "codeDisabled": "已禁用"
   },
   "settings": {
     "tabGeneral": "常规",
@@ -255,7 +256,14 @@
     "encryptLanHint": "默认关闭，修改后需要重启 moLink 才能切换监听模式。开启后局域网连接使用自签 HTTPS/WSS，对端需要接受证书。",
     "keyframeInterval": "关键帧间隔",
     "keyframeOff": "关闭（默认，保留 120 秒安全刷新）",
-    "keyframeIntervalHint": "设为 1 秒会每秒强制发送整屏关键帧，丢帧后立刻恢复，实时性最好但带宽最高；2–5 秒是较均衡的调试值。默认关闭。"
+    "keyframeIntervalHint": "设为 1 秒会每秒强制发送整屏关键帧，丢帧后立刻恢复，实时性最好但带宽最高；2–5 秒是较均衡的调试值。默认关闭。",
+    "autoAudio": "连接后自动播放声音",
+    "autoAudioHint": "连上就以设置的音量播放对方的声音；手动关闭只对本次连接生效。",
+    "codePolicy": "验证码开关",
+    "singleCodeEnabled": "允许单次验证码",
+    "singleCodeNeedsLongTerm": "只有设置了长期验证码才能禁用单次验证码，否则会把所有人锁在外面。",
+    "multiCodeEnabled": "允许多次验证码",
+    "multiCodeRotationHint": "多次验证码每天自动轮换一次；达到设定的使用次数（默认 20）时也会立即轮换。单次验证码每次启动都会换新的。"
   },
   "session": {
     "connecting": "连接中…",
@@ -445,7 +453,13 @@
     "minimize": "最小化",
     "fullscreen": "全屏（整个应用）",
     "exitFullscreen": "退出全屏",
-    "close": "关闭"
+    "close": "关闭",
+    "closePromptTitle": "关闭窗口",
+    "closePromptBody": "当前有 {{count}} 个远程画面标签页。要关闭会话标签页，还是把窗口最小化到托盘（会话继续）？",
+    "closeTab": "关闭标签页",
+    "minimizeToTray": "最小化到托盘",
+    "rememberChoice": "记住我的选择，下次不再提示",
+    "cancel": "取消"
   },
   "chat": {
     "title": "会话聊天",

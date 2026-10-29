@@ -47,6 +47,14 @@ export function dismissUpdate(version: string): void {
   }
 }
 
+/// The shell tells the page which build it is (see shell/windows/main.cpp):
+/// `arch=x64|x86` and `portable=1` when the app is not an installed copy. The
+/// release ships four Windows artifacts, so guessing from the file name alone
+/// picked the Win7 x86 setup for an x64 install.
+function shellParam(name: string): string {
+  return new URLSearchParams(window.location.search).get(name) ?? ''
+}
+
 function chooseAsset(assets: { name: string; browser_download_url: string }[]):
   | string
   | null {
@@ -54,7 +62,25 @@ function chooseAsset(assets: { name: string; browser_download_url: string }[]):
     assets.find((asset) => pattern.test(asset.name))?.browser_download_url ??
     null
   if (shellInfo.platform === 'windows') {
-    return matches(/setup.*\.exe$/i) ?? matches(/\.exe$/i)
+    const arch = shellParam('arch') || 'x64'
+    if (arch === 'x86') {
+      // The 32-bit build is the Windows 7 kit; it only ever takes its own
+      // artifacts.
+      return (
+        matches(/win7-x86-setup\.exe$/i) ??
+        matches(/win7-x86\.zip$/i) ??
+        matches(/win7.*\.(exe|zip)$/i)
+      )
+    }
+    // Never hand an x64 install the Win7 x86 artifacts.
+    const x64 = (pattern: RegExp) =>
+      assets.find(
+        (asset) => pattern.test(asset.name) && !/win7|x86/i.test(asset.name),
+      )?.browser_download_url ?? null
+    const portable = shellParam('portable') === '1'
+    return portable
+      ? (x64(/portable.*\.exe$/i) ?? x64(/-x64\.exe$/i) ?? x64(/\.exe$/i))
+      : (x64(/setup.*\.exe$/i) ?? x64(/-x64\.exe$/i) ?? x64(/\.exe$/i))
   }
   if (shellInfo.platform === 'macos') {
     return matches(/arm64\.dmg$/i) ?? matches(/\.dmg$/i)

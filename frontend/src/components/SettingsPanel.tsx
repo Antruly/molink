@@ -65,6 +65,8 @@ function SecurityControls({
   onSave,
   onLongTerm,
   onCustomCode,
+  code,
+  onCodePolicy,
 }: {
   settings: SecuritySettings
   onSave: (values: {
@@ -79,6 +81,8 @@ function SecurityControls({
   }) => Promise<boolean>
   onLongTerm: (value: string) => Promise<boolean>
   onCustomCode: (uses: number, value: string) => Promise<AuthCode | null>
+  code: AuthCode | null
+  onCodePolicy: (single: boolean, multi: boolean) => Promise<AuthCode | null>
 }) {
   const { t } = useTranslation()
   const [allowRemote, setAllowRemote] = useState(settings.allow_remote_access)
@@ -98,6 +102,22 @@ function SecurityControls({
   const [longTerm, setLongTerm] = useState('')
   const [showLongTerm, setShowLongTerm] = useState(false)
   const [customUses, setCustomUses] = useState('1')
+  const [singleEnabled, setSingleEnabled] = useState(
+    code?.single_enabled !== false,
+  )
+  const [multiEnabled, setMultiEnabled] = useState(
+    code?.multi_enabled !== false,
+  )
+  const applyPolicy = async (single: boolean, multi: boolean) => {
+    const result = await onCodePolicy(single, multi)
+    if (result) {
+      setSingleEnabled(result.single_enabled !== false)
+      setMultiEnabled(result.multi_enabled !== false)
+      setNote(t('settings.saved'))
+    } else {
+      setNote(t('error.settings_failed'))
+    }
+  }
   const [customValue, setCustomValue] = useState('')
   const [note, setNote] = useState<string | null>(null)
 
@@ -353,6 +373,42 @@ function SecurityControls({
           >
             {t('settings.apply')}
           </button>
+        </div>
+      </div>
+
+      <div className="space-y-2 rounded-lg border border-line bg-panel/60 p-3">
+        <div className="text-[12px] text-ink">{t('settings.codePolicy')}</div>
+        <label
+          className={
+            'flex items-center gap-2 text-[11px] ' +
+            (settings.long_term_code ? 'text-muted' : 'text-muted opacity-50')
+          }
+        >
+          <input
+            type="checkbox"
+            checked={singleEnabled}
+            disabled={!settings.long_term_code}
+            onChange={(event) =>
+              void applyPolicy(event.target.checked, multiEnabled)
+            }
+          />
+          {t('settings.singleCodeEnabled')}
+        </label>
+        <div className="text-[10px] leading-relaxed text-muted">
+          {t('settings.singleCodeNeedsLongTerm')}
+        </div>
+        <label className="flex items-center gap-2 text-[11px] text-muted">
+          <input
+            type="checkbox"
+            checked={multiEnabled}
+            onChange={(event) =>
+              void applyPolicy(singleEnabled, event.target.checked)
+            }
+          />
+          {t('settings.multiCodeEnabled')}
+        </label>
+        <div className="text-[10px] leading-relaxed text-muted">
+          {t('settings.multiCodeRotationHint')}
         </div>
       </div>
 
@@ -765,6 +821,8 @@ export function SettingsPanel() {
   const saveSecurity = useAppStore((state) => state.saveSecurity)
   const setLongTermCode = useAppStore((state) => state.setLongTermCode)
   const setAuthCode = useAppStore((state) => state.setAuthCode)
+  const device = useAppStore((state) => state.device)
+  const setCodePolicy = useAppStore((state) => state.setCodePolicy)
   const [section, setSection] = useState<SettingsSection>('general')
 
   useEffect(() => {
@@ -842,6 +900,8 @@ export function SettingsPanel() {
                   onCustomCode={(uses, value) =>
                     setAuthCode('multi', uses, value)
                   }
+                  code={device?.code ?? null}
+                  onCodePolicy={setCodePolicy}
                 />
               ) : (
                 <p className="text-[12px] leading-relaxed text-muted">

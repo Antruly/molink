@@ -26,6 +26,9 @@ enum class quality_mode : uint8_t {
   quality,   ///< lossless BGRA, best zlib effort
   turbo,     ///< 8-bit grayscale, coarse changes, low frame rate
   raw,       ///< lossless BGRA without zlib (the client picks the frame rate)
+  ultra,     ///< above quality: sharper initial QP, still real-time
+  lossless,  ///< near-lossless stream, the top of the ladder
+  automatic, ///< the host walks smooth..lossless from the viewer's frame rate
 };
 
 struct quality_profile {
@@ -248,6 +251,17 @@ class capture_source {
   /// of waiting for the viewer's own frame-rate controller to give up.
   virtual void set_viewer_pressure(bool pressure) { (void)pressure; }
 
+  /// One viewer-rate sample for the quality ladder (about once a second).
+  /// `demand` is false when the host produced no frames in the window -- a
+  /// static screen is not a stall and must not change the quality.
+  virtual void note_viewer_rate(double fps, int target_fps, bool demand,
+                                uint64_t now_ms) {
+    (void)fps;
+    (void)target_fps;
+    (void)demand;
+    (void)now_ms;
+  }
+
   /// Whether the AV1 low-delay stream may be used. Only set while every live
   /// session can decode it.
   virtual void set_av1_stream_allowed(bool allowed) { (void)allowed; }
@@ -340,6 +354,14 @@ class capture_base : public capture_source {
     // otherwise it never gathers a streak. Only a real change resets it.
     if (quality_.exchange(mode) == mode) return;
     av1_qp_offset_.store(0);
+    {
+      // A new preset starts at its own initial quality: the controller's
+      // offset and auto level from the previous preset do not carry over.
+      std::lock_guard<std::mutex> lock(rate_mutex_);
+      rate_policy_ = rate_quality_policy{};
+      rate_qp_offset_.store(0);
+      auto_level_.store(rate_policy_.auto_level);
+    }
     av1_downscale_.store(false);
     av1_budget_reset_.store(true);
     // Frames in the replay history were encoded with the previous preset
@@ -353,20 +375,43 @@ class capture_base : public capture_source {
   }
   quality_mode quality() const override { return quality_.load(); }
 
+  /// The preset the capture actually encodes with: "auto" resolves to one of
+  /// the ladder levels the viewer's frame rate has settled on.
+  quality_mode effective_quality() const {
+    const quality_mode mode = quality_.load();
+    if (mode != quality_mode::automatic) return mode;
+    return auto_ladder_mode(auto_level_.load());
+  }
+  /// Levels "auto" walks, coarsest first. The monochrome turbo level is
+  /// deliberately absent: automatic adjustment must never hand the viewer a
+  /// black-and-white picture.
+  static quality_mode auto_ladder_mode(int level);
+  static constexpr int kAutoLevels = 5;
+  int auto_level() const { return auto_level_.load(); }
+  /// QP steps the rate controller has moved away from the preset (negative is
+  /// sharper). Tests and diagnostics read it.
+  int rate_qp_offset() const { return rate_qp_offset_.load(); }
+
+  /// Feeds one viewer-rate sample (about once a second). `demand` says the
+  /// host produced frames in the window -- a static screen with no packets is
+  /// not a stall and must not change the quality.
+  void note_viewer_rate(double fps, int target_fps, bool demand,
+                        uint64_t now_ms) override;
+
   /// Encoding knobs for the active preset. Backends read these on the capture
   /// thread, which is why the preset is an atomic.
   tile_format quality_format() const {
-    return quality_profile_for(quality_.load()).format;
+    return quality_profile_for(effective_quality()).format;
   }
   /// Recovery paths that build tiles by hand (a tile refresh after a dropped
   /// frame) must use the preset's format, or a monochrome session gets colour
   /// patches painted over it.
   tile_format frame_format() const override { return quality_format(); }
   compression_effort quality_effort() const {
-    return quality_profile_for(quality_.load()).effort;
+    return quality_profile_for(effective_quality()).effort;
   }
   bool quality_compress() const {
-    return quality_profile_for(quality_.load()).compress;
+    return quality_profile_for(effective_quality()).compress;
   }
   /// Apply the preset's bounds to the configured change threshold.
   int quality_change_threshold(int configured) const;
@@ -431,7 +476,7 @@ class capture_base : public capture_source {
     }
     // An explicit QP is the host owner's choice, so it is taken literally.
     if (settings.qp >= 1 && settings.qp <= 63) return settings.qp;
-    const int base = quality_profile_for(quality_.load()).av1_qp;
+    const int base = quality_profile_for(effective_quality()).av1_qp;
     // The near-lossless presets keep their QP: that quality is the point of
     // choosing them, and the frame rate controller already reacts to a slow
     // encoder by lowering the rate.
@@ -451,10 +496,10 @@ class capture_base : public capture_source {
       settings = av1_settings_;
     }
     if (settings.qp >= 1 && settings.qp <= 63) return settings.qp;
-    return quality_profile_for(quality_.load()).av1_qp;
+    return quality_profile_for(effective_quality()).av1_qp;
   }
   bool quality_av1_grayscale() const {
-    return quality_profile_for(quality_.load()).av1_grayscale;
+    return quality_profile_for(effective_quality()).av1_grayscale;
   }
   /// True when screen-sized AV1 rectangles should be encoded at half
   /// resolution. The policy turns this on only after raising the QP was not
@@ -505,7 +550,7 @@ class capture_base : public capture_source {
         settings.max_area_percent <= 100) {
       return settings.max_area_percent;
     }
-    return quality_profile_for(quality_.load()).av1_max_area_percent;
+    return quality_profile_for(effective_quality()).av1_max_area_percent;
   }
 
   bool running() const override { return running_.load(); }
@@ -544,6 +589,18 @@ class capture_base : public capture_source {
   std::atomic<bool> running_{false};
   std::atomic<int> target_fps_{15};
   std::atomic<quality_mode> quality_{quality_mode::balanced};
+  /// Rate-driven quality controller (see rate_quality_policy). Written by the
+  /// supervisor thread, read by the capture thread through the atomics.
+  std::mutex rate_mutex_;
+  rate_quality_policy rate_policy_;
+  std::atomic<int> rate_qp_offset_{0};
+  std::atomic<int> auto_level_{1};
+  /// The viewer cannot keep up while frames are actually being produced.
+  /// The stream policy switches to the video stream on it, because a
+  /// stalling tile path is usually a bandwidth limit and the stream is
+  /// the cheaper encoding.
+  std::atomic<bool> rate_starved_{false};
+  int starved_streak_ = 0;
   std::atomic<bool> av1_allowed_{false};
   /// EMA of the build+encode time, read by the session layer.
   std::atomic<uint64_t> build_time_us_{0};

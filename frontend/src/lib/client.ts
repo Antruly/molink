@@ -59,6 +59,8 @@ export interface Welcome {
   session_token?: string
   /** The host accepts per-second viewer health reports. */
   viewer_stats?: boolean
+  /** The host resolves the "auto" quality preset itself. */
+  auto_quality?: boolean
   /** The host can offer a WebRTC video track (Phase 4). */
   webrtc?: boolean
   /** The host accepts a WebTransport session on its own port (Phase 5). */

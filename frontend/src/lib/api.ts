@@ -12,6 +12,9 @@ export interface AuthCode {
   remaining: number
   uses: number
   long_term_set: boolean
+  /// Whether each temporary mode may be used at all.
+  single_enabled?: boolean
+  multi_enabled?: boolean
 }
 
 export interface DeviceInfo {
@@ -534,6 +537,22 @@ export function postAuthCode(
   const query = new URLSearchParams({ mode, uses: String(uses), value })
   return request<AuthCode>(
     `/api/auth/code?${query.toString()}`,
+    { method: 'POST' },
+    token,
+  )
+}
+
+export function postCodePolicy(
+  token: string,
+  single: boolean,
+  multi: boolean,
+): Promise<AuthCode> {
+  const query = new URLSearchParams({
+    single: single ? '1' : '0',
+    multi: multi ? '1' : '0',
+  })
+  return request<AuthCode>(
+    `/api/auth/code-policy?${query.toString()}`,
     { method: 'POST' },
     token,
   )

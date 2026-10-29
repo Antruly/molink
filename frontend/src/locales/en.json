@@ -87,7 +87,8 @@
     "ipDisabledHint": "IP connection is off. Enable it so others can reach this computer by IP.",
     "enableIp": "Enable",
     "idNotRegistered": "Not registered with a server",
-    "ipUnavailable": "No LAN address detected"
+    "ipUnavailable": "No LAN address detected",
+    "codeDisabled": "Disabled"
   },
   "settings": {
     "tabGeneral": "General",
@@ -255,7 +256,14 @@
     "encryptLanHint": "Off by default; restart moLink after changing it. When on, LAN connections use a self-signed HTTPS/WSS certificate the peer must accept.",
     "keyframeInterval": "Keyframe interval",
     "keyframeOff": "Off (default; 120 s safety refresh stays)",
-    "keyframeIntervalHint": "1 s forces a full keyframe every second: the fastest recovery after loss, at the highest bandwidth. 2–5 s is a balanced debugging value. Off by default."
+    "keyframeIntervalHint": "1 s forces a full keyframe every second: the fastest recovery after loss, at the highest bandwidth. 2–5 s is a balanced debugging value. Off by default.",
+    "autoAudio": "Play remote sound on connect",
+    "autoAudioHint": "Start the remote audio at the chosen volume as soon as a session is live. Muting it by hand lasts for that connection.",
+    "codePolicy": "Verification codes",
+    "singleCodeEnabled": "Allow the single-use code",
+    "singleCodeNeedsLongTerm": "The single-use code can only be disabled while a long-term code is set, otherwise everyone would be locked out.",
+    "multiCodeEnabled": "Allow the multi-use code",
+    "multiCodeRotationHint": "The multi-use code rotates once a day and immediately after its use budget (20 by default). The single-use code rotates on every start."
   },
   "session": {
     "connecting": "Connecting…",
@@ -445,7 +453,13 @@
     "minimize": "Minimize",
     "fullscreen": "Fullscreen (whole app)",
     "exitFullscreen": "Exit fullscreen",
-    "close": "Close"
+    "close": "Close",
+    "closePromptTitle": "Close window",
+    "closePromptBody": "{{count}} remote session tab(s) are open. Close the session tab, or minimize to the tray and keep it running?",
+    "closeTab": "Close tab",
+    "minimizeToTray": "Minimize to tray",
+    "rememberChoice": "Remember my choice, do not ask again",
+    "cancel": "Cancel"
   },
   "chat": {
     "title": "Session chat",

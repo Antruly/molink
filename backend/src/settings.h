@@ -75,6 +75,12 @@ struct app_settings {
   std::string temp_code;
   int temp_uses = 1;
   int temp_remaining = 1;
+  /// Each temporary mode can be switched off. The single-use mode may only be
+  /// off while a long-term code exists, so a host cannot lock itself out.
+  bool single_code_enabled = true;
+  bool multi_code_enabled = true;
+  /// Epoch day the temporary code was last rotated on (daily rotation).
+  long long temp_rotated_day = 0;
 };
 
 app_settings load_settings();

@@ -215,6 +215,7 @@ export function SessionView({
   const { t } = useTranslation()
   const localMode = useAppStore((state) => state.localMode)
   const qualityWatermark = useAppStore((state) => state.qualityWatermark)
+  const autoAudio = useAppStore((state) => state.autoAudio)
   const setQualityWatermark = useAppStore((state) => state.setQualityWatermark)
   const qualityMode = useAppStore((state) => state.qualityMode)
   const setQualityMode = useAppStore((state) => state.setQualityMode)
@@ -235,6 +236,8 @@ export function SessionView({
   const synthetic = welcome?.tiles.synthetic === true
   const inputAvailable = welcome?.input === true && !synthetic
   const clipboardAvailable = welcome?.clipboard === true
+  // The host walks the quality ladder itself when the preset is "auto".
+  const hostAutoQuality = welcome?.auto_quality === true
 
   const surfaceRef = useRef<HTMLDivElement>(null)
   const pendingMove = useRef<{ x: number; y: number } | null>(null)
@@ -265,6 +268,13 @@ export function SessionView({
     () => sessionConnection(tab.id)?.getAudioVolume() ?? 0.8,
   )
   const audioAvailable = welcome?.audio === true && welcome.audio_format != null
+  // A manual mute sticks for this connection; the preference only decides
+  // what happens when a session comes up.
+  const audioMutedRef = useRef(false)
+  const audioVolumeRef = useRef(audioVolume)
+  audioVolumeRef.current = audioVolume
+  const autoAvailableRef = useRef(audioAvailable)
+  autoAvailableRef.current = audioAvailable
   const [callPhase, setCallPhase] = useState<'idle' | 'ringing' | 'active'>(
     'idle',
   )
@@ -359,6 +369,39 @@ export function SessionView({
     () => sessionConnection(tab.id),
     [tab.id],
   )
+
+  useEffect(() => {
+    if (tab.phase !== 'live') {
+      audioMutedRef.current = false
+      return
+    }
+    if (!autoAudio || !autoAvailableRef.current) return
+    if (audioMutedRef.current || audioOn) return
+    const conn = connection()
+    if (!conn) return
+    const start = () => {
+      conn.setAudioVolume(audioVolumeRef.current)
+      conn.startAudio()
+      setAudioOn(conn.audioActive())
+    }
+    start()
+    if (conn.audioActive()) return
+    // The browser's autoplay policy can refuse an AudioContext that was not
+    // created inside a gesture. The connect click happened a while ago, so
+    // retry on the first interaction the user makes with the page instead of
+    // making them find the speaker button.
+    const kick = () => {
+      if (audioMutedRef.current) return
+      start()
+    }
+    window.addEventListener('pointerdown', kick, { once: true })
+    window.addEventListener('keydown', kick, { once: true })
+    return () => {
+      window.removeEventListener('pointerdown', kick)
+      window.removeEventListener('keydown', kick)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab.phase, autoAudio, audioOn, connection])
 
   // The host has 60 s to approve an access request; show the remaining time
   // and let the requester cancel instead of waiting forever.
@@ -747,7 +790,10 @@ export function SessionView({
     const timer = window.setTimeout(() => {
       const conn = connection()
       if (!conn) return
-      conn.setQuality(resolvedMode, targetFps)
+      conn.setQuality(
+        hostAutoQuality && qualityMode === 'auto' ? 'auto' : resolvedMode,
+        targetFps,
+      )
       // A preset change can change the tile format (turbo is gray8); without
       // a full frame the host only repaints tiles that happen to change, so
       // the rest of the picture stays in the previous format.
@@ -758,13 +804,13 @@ export function SessionView({
       }
     }, 400)
     return () => window.clearTimeout(timer)
-  }, [tab.phase, tab.id, connection, resolvedMode, targetFps])
+  }, [tab.phase, tab.id, connection, resolvedMode, targetFps, hostAutoQuality, qualityMode])
 
   // Auto quality: the link only picks the image tier now; the frame rate has
   // its own controller below. A tier is lowered only once the rate is already
   // at the tier's floor, and raised when the link is healthy with headroom.
   useEffect(() => {
-    if (tab.phase !== 'live' || qualityMode !== 'auto') {
+    if (tab.phase !== 'live' || qualityMode !== 'auto' || hostAutoQuality) {
       // Remember the preset we left so re-entering auto starts fresh.
       autoModeRef.current = qualityMode
       return
@@ -1085,11 +1131,13 @@ export function SessionView({
     const conn = connection()
     if (!conn) return
     if (audioOn) {
+      audioMutedRef.current = true
       conn.stopAudio()
       setAudioOn(false)
       return
     }
     if (!welcome?.audio_format) return
+    audioMutedRef.current = false
     conn.setAudioVolume(audioVolume)
     conn.startAudio()
     setAudioOn(conn.audioActive())

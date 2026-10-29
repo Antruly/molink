@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <ctime>
 #include <filesystem>
 #ifndef _WIN32
 #include <sys/stat.h>
@@ -103,6 +104,11 @@ bool valid_temp_code(const std::string& value, std::string& err) {
   return true;
 }
 
+/// Calendar day in the local time zone, used for the daily code rotation.
+long long epoch_day_now() {
+  return static_cast<long long>(std::time(nullptr) / 86400);
+}
+
 }  // namespace
 
 auth_state::auth_state(app_settings settings)
@@ -118,10 +124,17 @@ auth_state::auth_state(app_settings settings)
   if (!valid_long_term(settings_.long_term_code, err)) {
     settings_.long_term_code = generate_long_term();
   }
-  if (settings_.temp_code.empty() || settings_.temp_remaining <= 0 ||
+  const long long today = epoch_day_now();
+  // The temporary code rotates when the day changes, and the single-use code
+  // also rotates on every start: a host that showed yesterday's code must not
+  // keep accepting it.
+  if (settings_.temp_rotated_day != today ||
+      settings_.temp_mode == "single" || settings_.temp_code.empty() ||
+      settings_.temp_remaining <= 0 ||
       !valid_temp_code(settings_.temp_code, err)) {
     settings_.temp_remaining = settings_.temp_uses;
     settings_.temp_code = generate_numeric(6);
+    settings_.temp_rotated_day = today;
   }
   save_settings(settings_);
   load_sessions_locked();
@@ -232,13 +245,55 @@ std::string auth_state::create_session() {
 
 code_view auth_state::view() const {
   std::lock_guard<std::mutex> lock(mutex_);
+  return view_locked();
+}
+
+code_view auth_state::view_locked() const {
   code_view out;
   out.mode = settings_.temp_mode;
   out.value = settings_.temp_code;
   out.remaining = settings_.temp_remaining;
   out.uses = settings_.temp_uses;
   out.long_term_set = !settings_.long_term_code.empty();
+  out.single_enabled = settings_.single_code_enabled;
+  out.multi_enabled = settings_.multi_code_enabled;
   return out;
+}
+
+bool auth_state::temp_code_enabled_locked() const {
+  return settings_.temp_mode == "multi" ? settings_.multi_code_enabled
+                                        : settings_.single_code_enabled;
+}
+
+void auth_state::maybe_rotate_daily_locked() {
+  const long long today = epoch_day_now();
+  if (settings_.temp_rotated_day == today) return;
+  settings_.temp_rotated_day = today;
+  settings_.temp_remaining = settings_.temp_uses;
+  settings_.temp_code = generate_numeric(6);
+  persist_locked();
+}
+
+void auth_state::refresh_daily() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  maybe_rotate_daily_locked();
+}
+
+code_view auth_state::set_code_policy(bool single_enabled,
+                                      bool multi_enabled, std::string& err) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  err.clear();
+  if (!single_enabled) {
+    std::string long_term_error;
+    if (!valid_long_term(settings_.long_term_code, long_term_error)) {
+      err = "set a long-term code before disabling the single-use code";
+      return view_locked();
+    }
+  }
+  settings_.single_code_enabled = single_enabled;
+  settings_.multi_code_enabled = multi_enabled;
+  persist_locked();
+  return view_locked();
 }
 
 app_settings auth_state::settings() const {
@@ -266,6 +321,11 @@ code_view auth_state::set_temp(const std::string& mode, int uses,
     err = "mode must be single or multi";
     return code_view{};
   }
+  if ((mode == "single" && !settings_.single_code_enabled) ||
+      (mode == "multi" && !settings_.multi_code_enabled)) {
+    err = "that verification mode is disabled";
+    return view_locked();
+  }
   int budget = mode == "single" ? 1 : uses;
   if (budget < 1) budget = 20;
   if (budget > 10000) budget = 10000;
@@ -279,13 +339,7 @@ code_view auth_state::set_temp(const std::string& mode, int uses,
   settings_.temp_code = next;
   persist_locked();
 
-  code_view out;
-  out.mode = settings_.temp_mode;
-  out.value = settings_.temp_code;
-  out.remaining = settings_.temp_remaining;
-  out.uses = settings_.temp_uses;
-  out.long_term_set = !settings_.long_term_code.empty();
-  return out;
+  return view_locked();
 }
 
 void auth_state::set_allow_access_requests(bool allow) {
@@ -460,7 +514,10 @@ void auth_state::update_access(bool allow_remote_access, bool allow_web_client,
 
 bool auth_state::verify_code_locked(const std::string& supplied, bool consume) {
   if (supplied.empty()) return false;
+  maybe_rotate_daily_locked();
   if (constant_time_equals(supplied, settings_.long_term_code)) return true;
+  // A disabled mode's code is not accepted even if the digits still match.
+  if (!temp_code_enabled_locked()) return false;
   if (!constant_time_equals(supplied, settings_.temp_code) ||
       settings_.temp_remaining <= 0) {
     return false;
@@ -478,6 +535,7 @@ void auth_state::rotate_temp_locked() {
   if (settings_.temp_uses < 1) settings_.temp_uses = 1;
   settings_.temp_remaining = settings_.temp_uses;
   settings_.temp_code = generate_numeric(6);
+  settings_.temp_rotated_day = epoch_day_now();
 }
 
 void auth_state::invalidate_remote_sessions_locked() {

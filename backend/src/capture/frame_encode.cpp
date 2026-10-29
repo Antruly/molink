@@ -355,8 +355,34 @@ bool encode_capture_frame(protocol::frame_header& header,
     std::vector<uint8_t> picture;
     bool picture_keyframe = false;
     std::string stream_error;
+    // The monochrome preset (turbo) has to reach the stream too: the stream
+    // replaces the gray8 tiles entirely while it runs, and without this the
+    // picture came back in colour as soon as the stream engaged.
+    std::vector<uint8_t> gray;
+    const uint8_t* stream_pixels = pixels;
+    std::size_t stream_stride = stride;
+    if (options.av1_grayscale) {
+      const int width = header.screen_w;
+      const int height = header.screen_h;
+      gray.resize(static_cast<std::size_t>(width) * height * 4);
+      for (int row = 0; row < height; ++row) {
+        const uint8_t* in = pixels + static_cast<std::size_t>(row) * stride;
+        uint8_t* out = gray.data() + static_cast<std::size_t>(row) * width * 4;
+        for (int col = 0; col < width; ++col) {
+          const uint8_t luma = static_cast<uint8_t>(
+              (in[col * 4 + 2] * 77 + in[col * 4 + 1] * 150 +
+               in[col * 4] * 29) >> 8);
+          out[col * 4] = luma;
+          out[col * 4 + 1] = luma;
+          out[col * 4 + 2] = luma;
+          out[col * 4 + 3] = 255;
+        }
+      }
+      stream_pixels = gray.data();
+      stream_stride = static_cast<std::size_t>(width) * 4;
+    }
     if (options.av1_stream->encode_stream(
-            pixels, stride, header.screen_w, header.screen_h,
+            stream_pixels, stream_stride, header.screen_w, header.screen_h,
             options.av1_stream_qp > 0 ? options.av1_stream_qp
                                       : options.av1_qp,
             options.av1_stream_keyframe, picture, picture_keyframe,

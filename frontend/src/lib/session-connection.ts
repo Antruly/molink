@@ -631,8 +631,10 @@ export class SessionConnection {
       const player = new PcmPlayer(format.sampleRate, format.channels,
                                    this.audioVolume)
       this.player = player
-      void player.start()
     }
+    // Always call start(): on an existing player it retries the resume, which
+    // is what a click after a policy-suspended context needs.
+    void this.player.start()
     this.client.startAudio()
   }
 
@@ -645,7 +647,7 @@ export class SessionConnection {
   }
 
   audioActive(): boolean {
-    return this.player !== null
+    return this.player?.running ?? false
   }
 
   getAudioVolume(): number {

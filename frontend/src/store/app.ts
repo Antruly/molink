@@ -17,6 +17,7 @@ import {
   postAccessDecision,
   postActivity,
   postAuthCode,
+  postCodePolicy,
   postLockTimeout,
   postLongTermCode,
   postNetworkPorts,
@@ -159,6 +160,11 @@ export interface ConnectDraft {
 interface AppState {
   theme: Theme
   qualityWatermark: boolean
+  /// Play the remote machine's sound as soon as a session is live.
+  autoAudio: boolean
+  /// What the window's close button does while a session tab is open:
+  /// ask once, hide to the tray, or close the session tab.
+  windowCloseBehavior: 'ask' | 'tray' | 'tab'
   qualityMode: QualityMode
   /// Average frame rate: a fixed 5/10/15/25/45/60 or 'auto' (quality-tier
   /// window adapted to the actual load). Independent from the quality preset.
@@ -197,6 +203,8 @@ interface AppState {
   setTheme: (theme: Theme) => void
   toggleTheme: () => void
   setQualityWatermark: (enabled: boolean) => void
+  setAutoAudio: (enabled: boolean) => void
+  setWindowCloseBehavior: (behavior: 'ask' | 'tray' | 'tab') => void
   setQualityMode: (mode: QualityMode) => void
   setFrameRate: (fps: FpsSetting) => void
   setSettingsOpen: (open: boolean) => void
@@ -223,6 +231,10 @@ interface AppState {
   authenticate: (code: string) => Promise<boolean>
   setLockTimeout: (seconds: number) => Promise<void>
   setNetworkPorts: (tcp: number, udp: number) => Promise<boolean>
+  setCodePolicy: (
+    single: boolean,
+    multi: boolean,
+  ) => Promise<AuthCode | null>
   setAuthCode: (
     mode: 'single' | 'multi',
     uses: number,
@@ -275,6 +287,8 @@ interface AppState {
 
 const THEME_KEY = 'molink.theme'
 const QUALITY_KEY = 'molink.quality'
+const AUTO_AUDIO_KEY = 'molink.autoAudio'
+const CLOSE_BEHAVIOR_KEY = 'molink.closeBehavior'
 const QUALITY_MODE_KEY = 'molink.qualityMode'
 const FRAME_RATE_KEY = 'molink.frameRate'
 const RECENT_KEY = 'molink.recents'
@@ -546,9 +560,13 @@ export const useAppStore = create<AppState>((set, get) => {
         ? { avatar: meta.avatar }
         : {}),
     }
-    const previous = get().recents.find(
-      (item) => item.host === host && item.port === port,
-    )
+    // One row per device: a session opened by device ID and later by address
+    // is the same machine, and the list used to show it two or three times
+    // (a, b, a). The newest entry wins and replaces the older ones.
+    const sameDevice = (item: RecentConnection) =>
+      (meta?.id !== undefined && item.id === meta.id) ||
+      (item.host === host && item.port === port)
+    const previous = get().recents.find(sameDevice)
     if (saveToken && token.trim() !== '') {
       recent.token = token.trim()
     } else if (!saveToken && previous?.token) {
@@ -557,9 +575,7 @@ export const useAppStore = create<AppState>((set, get) => {
     }
     const recents = [
       recent,
-      ...get().recents.filter(
-        (item) => !(item.host === host && item.port === port),
-      ),
+      ...get().recents.filter((item) => !sameDevice(item)),
     ].slice(0, 8)
     writeStorage(RECENT_KEY, JSON.stringify(recents))
     set({ recents })
@@ -569,6 +585,11 @@ export const useAppStore = create<AppState>((set, get) => {
   return {
     theme: initialTheme(),
     qualityWatermark: readStorage(QUALITY_KEY) === '1',
+    autoAudio: readStorage(AUTO_AUDIO_KEY) !== '0',
+    windowCloseBehavior: (() => {
+      const saved = readStorage(CLOSE_BEHAVIOR_KEY)
+      return saved === 'tray' || saved === 'tab' ? saved : 'ask'
+    })(),
     qualityMode: initialQualityMode(),
     frameRate: parseFpsSetting(readStorage(FRAME_RATE_KEY)),
     settingsOpen: false,
@@ -611,6 +632,16 @@ export const useAppStore = create<AppState>((set, get) => {
     setQualityWatermark: (enabled) => {
       writeStorage(QUALITY_KEY, enabled ? '1' : '0')
       set({ qualityWatermark: enabled })
+    },
+
+    setAutoAudio: (enabled) => {
+      writeStorage(AUTO_AUDIO_KEY, enabled ? '1' : '0')
+      set({ autoAudio: enabled })
+    },
+
+    setWindowCloseBehavior: (behavior) => {
+      writeStorage(CLOSE_BEHAVIOR_KEY, behavior)
+      set({ windowCloseBehavior: behavior })
     },
 
     setQualityMode: (mode) => {
@@ -1034,6 +1065,21 @@ export const useAppStore = create<AppState>((set, get) => {
       }
     },
 
+    setCodePolicy: async (single, multi) => {
+      const token = get().token
+      if (!token) return null
+      try {
+        const code = await postCodePolicy(token, single, multi)
+        const device = get().device
+        if (device) set({ device: { ...device, code } })
+        set({ stateError: null })
+        return code
+      } catch {
+        set({ stateError: 'settings_failed' })
+        return null
+      }
+    },
+
     refreshSecurity: async () => {
       const token = get().token
       if (!token) return
@@ -1266,8 +1312,18 @@ export const useAppStore = create<AppState>((set, get) => {
     },
 
     forgetRecent: (at) => {
-      // The list is persisted below via schedulePersist.
-      const recents = get().recents.filter((item) => item.at !== at)
+      // Removing a device clears every row that refers to it, not just the one
+      // that was clicked: the same machine can have older rows under another
+      // address.
+      const target = get().recents.find((item) => item.at === at)
+      const recents = get().recents.filter((item) =>
+        target === undefined
+          ? item.at !== at
+          : !(
+              (target.id !== undefined && item.id === target.id) ||
+              (item.host === target.host && item.port === target.port)
+            ),
+      )
       writeStorage(RECENT_KEY, JSON.stringify(recents))
       set({ recents })
       schedulePersist()

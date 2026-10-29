@@ -395,6 +395,22 @@ if(MOLINK_ENABLE_WEBRTC)
       "MOLINK_ENABLE_WEBRTC=ON but libdatachannel was not found; point "
       "CMAKE_PREFIX_PATH at its install tree")
   endif()
+  # The H.264 video track needs libdatachannel's media half
+  # (`rtc::H264RtpPacketizer` lives behind RTC_ENABLE_MEDIA). A media-less
+  # build fails deep inside rtc_session.cpp with a wall of "is not a member of
+  # rtc" errors, so say what is actually wrong here instead. vcpkg's port turns
+  # media off unless its `srtp` feature is enabled (INVERTED_FEATURES srtp
+  # NO_MEDIA), i.e. `libdatachannel[srtp]`.
+  get_target_property(_molink_rtc_defs LibDataChannel::LibDataChannel
+                      INTERFACE_COMPILE_DEFINITIONS)
+  if(NOT _molink_rtc_defs OR
+     NOT ("RTC_ENABLE_MEDIA=1" IN_LIST _molink_rtc_defs OR
+          "RTC_ENABLE_MEDIA" IN_LIST _molink_rtc_defs))
+    message(FATAL_ERROR
+      "MOLINK_ENABLE_WEBRTC=ON but this libdatachannel was built without "
+      "media support (no H.264 RTP packetizer). Rebuild it with media on; "
+      "with vcpkg that means the `srtp` feature: libdatachannel[srtp].")
+  endif()
   list(APPEND MOLINK_CORE_SOURCES src/webrtc/rtc_session.cpp)
   set(MOLINK_HAVE_WEBRTC 1)
   message(STATUS "molink: WebRTC video track + data channel enabled")
@@ -650,6 +666,15 @@ target_include_directories(molink-core-stream-policy-test PRIVATE src)
 set_target_properties(molink-core-stream-policy-test PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 add_test(NAME stream_policy COMMAND molink-core-stream-policy-test)
+
+# The rate-driven quality controller: preset in, viewer frame rate out.
+add_executable(molink-core-rate-quality-test
+  tests/rate_quality_test.cpp
+)
+target_include_directories(molink-core-rate-quality-test PRIVATE src)
+set_target_properties(molink-core-rate-quality-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME rate_quality COMMAND molink-core-rate-quality-test)
 
 # WebTransport loopback: a real session over loopback QUIC, both halves of the
 # transport (reliable stream + fragmented datagrams). Skips without HTTP/3.

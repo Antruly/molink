@@ -209,6 +209,12 @@ app_settings load_settings() {
       settings.temp_uses = parse_int(value, 1);
     } else if (key == "temp_remaining") {
       settings.temp_remaining = parse_int(value, -1);
+    } else if (key == "single_code_enabled") {
+      settings.single_code_enabled = parse_bool(value, true);
+    } else if (key == "multi_code_enabled") {
+      settings.multi_code_enabled = parse_bool(value, true);
+    } else if (key == "temp_rotated_day") {
+      settings.temp_rotated_day = parse_int(value, 0);
     }
   }
   if (settings.temp_uses < 1) settings.temp_uses = 1;
@@ -277,6 +283,11 @@ void save_settings(const app_settings& settings) {
   stream << "temp_code=" << settings.temp_code << "\n";
   stream << "temp_uses=" << settings.temp_uses << "\n";
   stream << "temp_remaining=" << settings.temp_remaining << "\n";
+  stream << "single_code_enabled=" << (settings.single_code_enabled ? 1 : 0)
+         << "\n";
+  stream << "multi_code_enabled=" << (settings.multi_code_enabled ? 1 : 0)
+         << "\n";
+  stream << "temp_rotated_day=" << settings.temp_rotated_day << "\n";
   stream.close();
 
 #if !defined(_WIN32)

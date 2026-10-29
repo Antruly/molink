@@ -16,6 +16,9 @@ struct code_view {
   int remaining = 0;
   int uses = 1;
   bool long_term_set = false;
+  /// Whether each temporary mode may be used at all.
+  bool single_enabled = true;
+  bool multi_enabled = true;
 };
 
 /// Owns the verification codes and the short-lived session tokens issued after
@@ -62,6 +65,13 @@ class auth_state {
   std::string set_long_term(const std::string& value, std::string& err);
   code_view set_temp(const std::string& mode, int uses,
                      const std::string& value, std::string& err);
+  /// Switches the temporary modes on or off. Turning the single-use mode off
+  /// requires a long-term code (otherwise the host could lock everyone out).
+  code_view set_code_policy(bool single_enabled, bool multi_enabled,
+                            std::string& err);
+  /// Rotates the temporary code when the calendar day changed. Cheap; safe to
+  /// call from request handlers.
+  void refresh_daily();
   void update_access(bool allow_remote_access, bool allow_web_client,
                      bool discovery_enabled, const std::string& device_name);
   /// Toggle the no-code approval flow without touching the other access
@@ -93,6 +103,9 @@ class auth_state {
   bool valid_session_locked(const std::string& token) const;
   bool verify_code_locked(const std::string& supplied, bool consume);
   void rotate_temp_locked();
+  void maybe_rotate_daily_locked();
+  bool temp_code_enabled_locked() const;
+  code_view view_locked() const;
   void invalidate_remote_sessions_locked();
   void persist_locked();
   /// Session tokens survive a core restart (an update, a service restart):

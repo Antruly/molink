@@ -8,6 +8,7 @@ import {
   Network,
   Sun,
   Timer,
+  Volume2,
   Waves,
 } from 'lucide-react'
 import { useEffect, useState, type ReactNode } from 'react'
@@ -573,6 +574,8 @@ export function PreferencesControls({
   const setTheme = useAppStore((state) => state.setTheme)
   const quality = useAppStore((state) => state.qualityWatermark)
   const setQuality = useAppStore((state) => state.setQualityWatermark)
+  const autoAudio = useAppStore((state) => state.autoAudio)
+  const setAutoAudio = useAppStore((state) => state.setAutoAudio)
   const qualityMode = useAppStore((state) => state.qualityMode)
   const setQualityMode = useAppStore((state) => state.setQualityMode)
   const frameRate = useAppStore((state) => state.frameRate)
@@ -681,6 +684,23 @@ export function PreferencesControls({
               checked={quality}
               onChange={setQuality}
               label={t('settings.watermark')}
+            />
+          </div>
+
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <div className="flex items-center gap-2 text-[12px] font-medium text-ink">
+                <Volume2 size={14} className="text-accent" />
+                {t('settings.autoAudio')}
+              </div>
+              <div className="mt-1 text-[11px] leading-relaxed text-muted">
+                {t('settings.autoAudioHint')}
+              </div>
+            </div>
+            <Toggle
+              checked={autoAudio}
+              onChange={setAutoAudio}
+              label={t('settings.autoAudio')}
             />
           </div>
 

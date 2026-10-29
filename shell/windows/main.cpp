@@ -749,6 +749,27 @@ class EnvironmentHandler final
 // Window
 // ---------------------------------------------------------------------------
 
+/// True when this copy came from the Inno installer. The installer writes an
+/// uninstall entry with the app id; a portable extraction has none. The page
+/// uses it to pick the setup or the portable artifact when updating.
+bool installed_copy() {
+  static const wchar_t* kKey =
+      L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\"
+      L"{B2D9F7D4-6C38-4E7A-9A4B-0B5E8C3F1A72}_is1";
+  HKEY key = nullptr;
+  if (RegOpenKeyExW(HKEY_CURRENT_USER, kKey, 0, KEY_READ, &key) ==
+      ERROR_SUCCESS) {
+    RegCloseKey(key);
+    return true;
+  }
+  if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, kKey, 0, KEY_READ, &key) ==
+      ERROR_SUCCESS) {
+    RegCloseKey(key);
+    return true;
+  }
+  return false;
+}
+
 void toggle_fullscreen(HWND window) {
   if (!g_fullscreen) {
     GetWindowRect(window, &g_restore_rect);
@@ -1059,6 +1080,12 @@ int run(HINSTANCE instance) {
   g_url = scheme + authority + L":" + std::to_wstring(port) +
           L"/?host=" + host + L"&port=" + std::to_wstring(port) +
           L"&shell=1&platform=windows";
+#ifdef _WIN64
+  g_url += L"&arch=x64";
+#else
+  g_url += L"&arch=x86";
+#endif
+  if (!installed_copy()) g_url += L"&portable=1";
   if (!client_token.empty()) {
     g_url += L"&client=" + widen(client_token);
   }

@@ -1093,6 +1093,7 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
                                    : std::string();
             const code_view code =
                 deps.auth ? deps.auth->view() : code_view{};
+            if (deps.auth) deps.auth->refresh_daily();
             j["device_name"] =
                 deps.auth ? deps.auth->settings().device_name : std::string();
             j["avatar"] =
@@ -1107,6 +1108,8 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
             j["code"]["remaining"] = code.remaining;
             j["code"]["uses"] = code.uses;
             j["code"]["long_term_set"] = code.long_term_set;
+            j["code"]["single_enabled"] = code.single_enabled;
+            j["code"]["multi_enabled"] = code.multi_enabled;
             j["host"] = deps.config.host;
             j["port"] = effective_port(deps);
             j["capabilities"]["screen_capture"] =
@@ -1807,6 +1810,41 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
              j["remaining"] = code.remaining;
              j["uses"] = code.uses;
              j["long_term_set"] = code.long_term_set;
+             resp.set_header("Cache-Control", "no-store").json(j);
+             resp.end();
+           });
+
+  app.post("/api/auth/code-policy",
+           [deps](uvcpp_web_request& req, uvcpp_web_response& resp,
+                  uvcpp_web_next) {
+             if (!is_loopback_peer(req.peer_ip()) || !deps.auth) {
+               resp.status(403).json_str(R"({"code":"loopback_only"})");
+               resp.end();
+               return;
+             }
+             const std::string* single = req.query("single");
+             const std::string* multi = req.query("multi");
+             const bool single_on = single == nullptr || *single != "0";
+             const bool multi_on = multi == nullptr || *multi != "0";
+             std::string error;
+             const code_view code =
+                 deps.auth->set_code_policy(single_on, multi_on, error);
+             if (!error.empty()) {
+               uvcpp_json body;
+               body["code"] = "invalid_code";
+               body["message"] = error;
+               resp.status(400).json(body);
+               resp.end();
+               return;
+             }
+             uvcpp_json j;
+             j["mode"] = code.mode;
+             j["value"] = code.value;
+             j["remaining"] = code.remaining;
+             j["uses"] = code.uses;
+             j["long_term_set"] = code.long_term_set;
+             j["single_enabled"] = code.single_enabled;
+             j["multi_enabled"] = code.multi_enabled;
              resp.set_header("Cache-Control", "no-store").json(j);
              resp.end();
            });

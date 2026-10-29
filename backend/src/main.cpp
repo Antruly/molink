@@ -1038,6 +1038,14 @@ int main(int argc, char** argv) {
 #endif
   p2p->stop();
   server_client_state->stop();
+  // Stop the HTTP/3 listeners while their loop is still alive: the listener's
+  // destructor stops a QUIC server, which calls back into that loop. When they
+  // were released from the web app's captured route handlers -- after the loop
+  // was gone -- every exit dumped core (SIGSEGV in uvcpp_loop::stop).
+  http3_sessions->stop();
+#if MOLINK_HAVE_WEBTRANSPORT
+  webtransport_sessions->stop();
+#endif
   app.stop();
   app.join();
   return 0;

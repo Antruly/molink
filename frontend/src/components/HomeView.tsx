@@ -493,11 +493,15 @@ export function HomeView() {
                     </div>
                     <div className="mt-1.5 flex items-center gap-2">
                       <div className="flex-1 rounded-lg border border-line bg-surface px-3 py-2 font-mono text-sm tracking-[0.3em] text-ink">
-                        {showDeviceCode
-                          ? device.code.value
-                          : '•'.repeat(
-                              Math.min(12, device.code.value.length),
-                            )}
+                        {device.code.mode === 'single'
+                          ? device.code.single_enabled === false
+                          : device.code.multi_enabled === false
+                          ? t('home.codeDisabled')
+                          : showDeviceCode
+                            ? device.code.value
+                            : '•'.repeat(
+                                Math.min(12, device.code.value.length),
+                              )}
                       </div>
                       <button
                         type="button"

@@ -799,6 +799,9 @@ void send_welcome(session_transport* transport, const session_info& session,
   j["version"] = opt.version;
   // The viewer may report its own paint health; the host uses it to send less
   // detail when the client, not the encoder, is the limit.
+  // The host resolves "auto" from the viewers' painted rate; an older
+  // core needs the client to pick a concrete tier instead.
+  j["auto_quality"] = true;
   j["viewer_stats"] = true;
   // The host can drive the frame clock itself. A client that advertises
   // `video_push` in hello stops polling `request-frame`; clients that never
@@ -2427,6 +2430,7 @@ void session_supervisor::run() {
               .count());
       const int target = options_.capture->target_fps();
       bool behind = false;
+      double slowest_fps = 0.0;
       for (const session_info& peer : registry_->snapshot()) {
         if (!peer.authenticated || !peer.has_image) continue;
         if (peer.viewer_stats_ms == 0 ||
@@ -2434,9 +2438,11 @@ void session_supervisor::run() {
           continue;
         }
         if (peer.viewer_dropped >= 3) behind = true;
-        if (target > 0 && peer.viewer_paint_fps > 0 &&
-            peer.viewer_paint_fps < target * 0.6) {
-          behind = true;
+        if (target > 0 && peer.viewer_paint_fps > 0) {
+          if (peer.viewer_paint_fps < target * 0.6) behind = true;
+          slowest_fps = slowest_fps <= 0.0
+                            ? peer.viewer_paint_fps
+                            : (std::min)(slowest_fps, peer.viewer_paint_fps);
         }
       }
       if (behind) {
@@ -2445,6 +2451,13 @@ void session_supervisor::run() {
         viewer_behind_streak_ = 0;
       }
       options_.capture->set_viewer_pressure(viewer_behind_streak_ >= 2);
+      // The quality ladder moves on the same feedback, but only while the
+      // host actually produced frames: a static screen sends almost nothing,
+      // and "no packets because nothing changed" is not a stall.
+      const capture_stats rate_stats = options_.capture->stats();
+      const bool demand = last_capture_at_.time_since_epoch().count() != 0 &&
+                          rate_stats.frames > last_capture_frames_ + 2;
+      options_.capture->note_viewer_rate(slowest_fps, target, demand, now_ms);
     }
 
     // Once a second, report the rate the capture thread achieved and how long

@@ -17,8 +17,22 @@ export class PcmPlayer {
     this.volume = Math.min(1, Math.max(0, volume))
   }
 
+  /// True when the context is actually running. A suspended context (the
+  /// autoplay policy holds one created outside a user gesture) still exists,
+  /// so "the player exists" is not the same as "sound comes out".
+  get running(): boolean {
+    return this.context !== null && this.context.state === 'running'
+  }
+
   async start(): Promise<void> {
-    if (this.context) return
+    if (this.context) {
+      // An earlier start created the context under the autoplay policy and got
+      // a suspended one. Retry the resume here so a start triggered by a real
+      // click can bring it up; without this the player looked "on" and stayed
+      // silent until the toggle was closed and reopened.
+      await this.resume()
+      return
+    }
     const context = new AudioContext({ sampleRate: this.sampleRate })
     this.context = context
     this.gain = context.createGain()
@@ -27,6 +41,20 @@ export class PcmPlayer {
     this.nextTime = context.currentTime + 0.08
     if (context.state === 'suspended') {
       await context.resume().catch(() => undefined)
+    }
+  }
+
+  /// Resumes a suspended context (call from a user gesture to satisfy the
+  /// autoplay policy). Scheduling restarts from now so the buffered silence
+  /// of a suspended clock is not played as a burst.
+  async resume(): Promise<void> {
+    const context = this.context
+    if (!context) return
+    if (context.state === 'suspended') {
+      await context.resume().catch(() => undefined)
+    }
+    if (context.state === 'running') {
+      this.nextTime = context.currentTime + 0.08
     }
   }
 

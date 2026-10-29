@@ -184,11 +184,15 @@ jobs:
           # so headers and import library agree (a static zlib built here used
           # to collide with vcpkg's headers: unresolved __imp_compress2).
           # libdatachannel carries the WebRTC video track and data channels.
+          # The `srtp` feature is not optional here: the port maps it through
+          # INVERTED_FEATURES to NO_MEDIA, so a plain `libdatachannel` is built
+          # without media support -- no rtc::H264RtpPacketizer for the video
+          # track, and the core does not even compile.
           # WebTransport is not on Windows yet: it needs libuvcpp's 1.9 line,
           # and this job still links the 1.8 prebuilt archive.
           "$VCPKG_INSTALLATION_ROOT/vcpkg.exe" install \
             svt-av1:x64-windows dav1d:x64-windows libjpeg-turbo:x64-windows \
-            libdatachannel:x64-windows
+            "libdatachannel[srtp]:x64-windows"
 
       - name: Build core
         shell: bash
