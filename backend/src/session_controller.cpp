@@ -832,11 +832,14 @@ void send_welcome(session_transport* transport, const session_info& session,
       vp9 = vp9 || backend.vp9_stream;
       vp8 = vp8 || backend.vp8_stream;
     }
+    // Only what this viewer can actually decode as well: the toolbar must not
+    // offer a codec the host can encode but the viewer cannot take. (AV1 goes
+    // through the local core's proxy, so `av1_stream` is the proxy's answer.)
     j["stream_codecs"] = uvcpp_json::array();
-    if (av1) j["stream_codecs"].push_back("av1");
-    if (h264) j["stream_codecs"].push_back("h264");
-    if (vp9) j["stream_codecs"].push_back("vp9");
-    if (vp8) j["stream_codecs"].push_back("vp8");
+    if (av1 && session.av1_stream) j["stream_codecs"].push_back("av1");
+    if (h264 && session.h264_stream) j["stream_codecs"].push_back("h264");
+    if (vp9 && session.vp9_stream) j["stream_codecs"].push_back("vp9");
+    if (vp8 && session.vp8_stream) j["stream_codecs"].push_back("vp8");
   }
   j["codec_preference"] =
       opt.auth ? opt.auth->settings().stream_codec : std::string("auto");
@@ -1986,6 +1989,11 @@ void session_controller::on_text(const std::string& text) {
       return;
     }
     if (options_.auth) options_.auth->set_stream_codec(value);
+    // A codec switch has to be visible at once: start the stream for a short
+    // window instead of waiting for the movement rule (or the 10 s exit dwell)
+    // to notice. The encoder is re-initialised on the new codec and the first
+    // frame is a keyframe.
+    if (options_.capture) options_.capture->request_stream(15000);
     // The preference is host-global: every tab has to show the same value or
     // the last writer wins forever.
     uvcpp_json shared;
@@ -2478,7 +2486,12 @@ void session_supervisor::run() {
         std::fprintf(stderr, "host: av1 allowed=%d\n", allow ? 1 : 0);
         av1_allowed_ = allow;
       }
-      options_.capture->set_av1_allowed(allow);
+      // Single-frame AV1 (per-rectangle patches and full-screen intra) is
+      // retired: on this hardware it re-initialises the encoder per rectangle
+      // and falls back to tiles under movement, which is exactly the "AV1 is
+      // slower and larger" behaviour that was reported. AV1 now means the
+      // low-delay stream only; the stream encoder below is the sole AV1 path.
+      options_.capture->set_av1_allowed(false);
       // The low-delay stream needs a stateful decoder on every viewer; a
       // single session without one keeps the host on tiles and patches.
       // AV1 is preferred; when it is not decodable by everyone but H.264 is,

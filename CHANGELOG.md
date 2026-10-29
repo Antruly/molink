@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.9.72] — 2026-10-29
+
+### Changed
+
+- **AV1 改为页面原生解码**：页面在 WebCodecs 支持时声明 `av1_native`，代理只转发
+  AV1 流字节；旧的"core 解码 AV1 再转成 JPEG 给页面"整条移除（它还有 20 fps 转发
+  节流，所以 AV1 一直比 H.264 卡）。页面解不了 AV1 时不再向主机要 AV1，主机按
+  等级链回退到 H.264 / VP9 / 瓦片。
+- **单帧 AV1（patch / 全屏 intra）停用**：AV1 只剩低延迟视频流。210 的 NVENC 在
+  逐矩形 intra 编码上反复 `initialize failed` 并逐帧回退瓦片，那正是"AV1 更卡、
+  带宽更大、画面还是瓦片"的来源。
+- **JPEG 移除**：代理不再把画面转成 JPEG，页面也删掉了 JPEG 解码分支。
+  随之删除 `MOLINK_ENABLE_JPEG` 的使用点（编译选项保留但不再开启）。
+- **切换编码立即生效**：选择编码后主机强制开启流 15 秒并请求关键帧，不再等
+  10 秒的退出驻留或运动阈值。
+
+### Build
+
+- Linux CI 安装 `libvpx-dev`、Windows/macOS CI 安装 `libvpx` 并随包分发
+  `vpx*.dll` / 链接 libvpx，三个平台都能编码 VP9/VP8。
+- `UVCPP_REF` 改为 `v1.9.0`（带 WebTransport 的 1.9 批次）。
+
 ## [0.9.70] — 2026-10-29
 
 ### Added

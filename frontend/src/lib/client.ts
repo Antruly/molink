@@ -383,6 +383,8 @@ export class MolinkClient {
   private hostStreamCodecs: string[] = []
   private vp8Capable = false
   private vp9Capable = false
+  /// The page decodes AV1 itself through WebCodecs (the proxy forwards it).
+  private av1NativeCapable = false
   private vpxDecoders: Partial<Record<VpxCodec, VpxStreamDecoder>> = {}
   /** ICE servers the host advertised for the WebRTC track. */
   private iceServers: string[] = []
@@ -495,15 +497,21 @@ export class MolinkClient {
       if (codec === 'vp8') {
         if (this.vp8Capable) return
         this.vp8Capable = true
-      } else {
+      } else if (codec === 'vp9') {
         if (this.vp9Capable) return
         this.vp9Capable = true
+      } else {
+        if (this.av1NativeCapable) return
+        this.av1NativeCapable = true
       }
       this.emitCodecOptions()
       if (this.isLive() && this.helloPayload !== null) this.sendHello()
     }
     void vpxStreamSupported('vp9').then((ok) => announce('vp9', ok))
     void vpxStreamSupported('vp8').then((ok) => announce('vp8', ok))
+    // The proxy forwards AV1 only to a page that decodes it itself; without
+    // this flag the host falls back to H.264/VP9/tiles.
+    void vpxStreamSupported('av1').then((ok) => announce('av1', ok))
   }
 
   setHandlers(handlers: Partial<ClientHandlers>): void {
@@ -657,6 +665,7 @@ export class MolinkClient {
           h264_stream: this.h264Capable,
           vp9_stream: this.vp9Capable,
           vp8_stream: this.vp8Capable,
+          av1_native: this.av1NativeCapable,
           // A browser with WebRTC lets the host send H.264 as a real video
           // track instead of MOLK frames.
           webrtc: typeof RTCPeerConnection !== 'undefined',
@@ -1468,51 +1477,12 @@ export class MolinkClient {
       this.noteFrameClock(packet.tsUs)
       this.noteReceived(frame, (packet.flags & PacketFlag.tileRefresh) !== 0)
       this.reconcileQualityPreset(frame)
-      if (frame.codec === Codec.jpeg) {
-        // Stream frames: one whole screen per packet, decoded natively by the
-        // browser and blitted. They arrive as tile refreshes, so they carry
-        // their own base image and never depend on the delta chain.
-        if ((frame.flags & FrameFlag.keyframe) !== 0) this.hasImage = true
-        if (frame.tiles.length === 0) return
-        if (!this.hasImage) {
-          this.requestKeyframeThrottled()
-          return
-        }
-        if (this.frameAgeMs(packet.tsUs) > 1000) {
-          this.handlers.onFrameDropped?.()
-          return
-        }
-        this.handlers.onWireFrame?.()
-        if (frame.frameSeq > this.latestFrameSeq) {
-          this.latestFrameSeq = frame.frameSeq
-        }
-        // The one-second timestamp clock compares against what was painted;
-        // without this every cell would look stale after a JPEG frame and the
-        // page would ask for tile refreshes it already has.
-        this.noteApplied(frame, packet.tsUs)
-        const tiles = frame.tiles
-        this.frameQueue = this.frameQueue
-          .then(async () => {
-            const bitmaps = await Promise.all(
-              tiles.map(async (tile) => {
-                // A copy gives the Blob a plain ArrayBuffer (no shared one).
-                const bytes = new Uint8Array(tile.data)
-                return createImageBitmap(new Blob([bytes], { type: 'image/jpeg' }))
-              }),
-            )
-            try {
-              this.handlers.onFrame?.(frame, buffer.byteLength, bitmaps)
-            } finally {
-              for (const bitmap of bitmaps) bitmap.close()
-            }
-          })
-          .catch(() => undefined)
-        return
-      }
+
       if (
         frame.codec === Codec.h264Stream ||
         frame.codec === Codec.vp8Stream ||
-        frame.codec === Codec.vp9Stream
+        frame.codec === Codec.vp9Stream ||
+        frame.codec === Codec.av1Stream
       ) {
         // Low-delay stream: one whole screen per packet, decoded by WebCodecs
         // (H.264 as Annex-B, VP8/VP9 as raw codec frames). Like the AV1 stream
@@ -1540,7 +1510,9 @@ export class MolinkClient {
               ? 'h264'
               : frame.codec === Codec.vp9Stream
                 ? 'vp9'
-                : 'vp8',
+                : frame.codec === Codec.av1Stream
+                  ? 'av1'
+                  : 'vp8',
           )
         }
         const keyframe = (frame.flags & FrameFlag.keyframe) !== 0
@@ -1556,7 +1528,13 @@ export class MolinkClient {
         const decoder =
           frame.codec === Codec.h264Stream
             ? this.h264
-            : this.vpxDecoder(frame.codec === Codec.vp9Stream ? 'vp9' : 'vp8')
+            : this.vpxDecoder(
+                frame.codec === Codec.vp9Stream
+                  ? 'vp9'
+                  : frame.codec === Codec.av1Stream
+                    ? 'av1'
+                    : 'vp8',
+              )
         this.frameQueue = this.frameQueue
           .then(() => {
             void decoder
@@ -2081,6 +2059,9 @@ export class MolinkClient {
       seq_clock: true,
       video_push: true,
       h264_stream: this.h264Capable,
+      vp9_stream: this.vp9Capable,
+      vp8_stream: this.vp8Capable,
+      av1_native: this.av1NativeCapable,
       client: 'molink-web',
       protocol: 1,
     }

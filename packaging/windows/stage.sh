@@ -63,7 +63,8 @@ done
 if [ -n "${VCPKG_INSTALLATION_ROOT:-}" ]; then
   for dll in "$VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin/SvtAv1Enc.dll" \
              "$VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin/dav1d.dll" \
-             "$VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin/fastfeat.dll"; do
+             "$VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin/fastfeat.dll" \
+             "$VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin"/vpx*.dll; do
     [ -f "$dll" ] && cp "$dll" "$PKG/"
   done
   # JPEG and zlib: libjpeg-turbo ships its runtime as jpeg62.dll (ABI 62) and

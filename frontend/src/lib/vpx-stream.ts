@@ -8,11 +8,14 @@
 
 const kMaxQueuedDeltas = 2
 
-export type VpxCodec = 'vp8' | 'vp9'
+export type VpxCodec = 'vp8' | 'vp9' | 'av1'
 
 function codecString(codec: VpxCodec): string {
+  if (codec === 'vp8') return 'vp8'
   // VP9 profile 0, level 1.0, 8-bit: what libvpx emits for our stream.
-  return codec === 'vp8' ? 'vp8' : 'vp09.00.10.08'
+  if (codec === 'vp9') return 'vp09.00.10.08'
+  // AV1 main profile, level 3.1: what NVENC/libaom emit for the AV1 stream.
+  return 'av01.0.05M.08'
 }
 
 export function vpxStreamSupported(codec: VpxCodec): Promise<boolean> {

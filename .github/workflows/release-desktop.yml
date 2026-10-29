@@ -193,7 +193,7 @@ jobs:
           # and this job still links the 1.8 prebuilt archive.
           "$VCPKG_INSTALLATION_ROOT/vcpkg.exe" install \
             svt-av1:x64-windows dav1d:x64-windows libjpeg-turbo:x64-windows \
-            "libdatachannel[srtp]:x64-windows"
+            libvpx:x64-windows "libdatachannel[srtp]:x64-windows"
 
       - name: Build core
         shell: bash
@@ -331,7 +331,7 @@ jobs:
           cache-dependency-path: frontend/pnpm-lock.yaml
 
       - name: Install OpenSSL and AV1
-        run: brew install openssl@3 svt-av1 dav1d jpeg
+        run: brew install openssl@3 svt-av1 dav1d jpeg libvpx
 
       - name: Build libuvcpp
         shell: bash

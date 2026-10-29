@@ -708,17 +708,32 @@ class direct_proxy final : public std::enable_shared_from_this<direct_proxy> {
   }
 
   std::string inject_av1(const std::string& text) {
-    if (!av1_decode_available() || !post_) return text;
+    // AV1 is decoded by the page (WebCodecs), so the host may only stream AV1
+    // when the page says it can. The proxy no longer decodes AV1 itself and
+    // has no fallback for a page without the codec: such a viewer simply is
+    // not offered AV1 and the host picks H.264/VP9/tiles instead. Single-frame
+    // AV1 (patches) is retired on the host, so `av1` is cleared either way.
     try {
       nlohmann::json hello = nlohmann::json::parse(text);
       if (!hello.is_object()) return text;
-      hello["av1"] = true;
-      hello["av1_stream"] = true;
+      bool native = false;
+      const auto it = hello.find("av1_native");
+      if (it != hello.end() && it->is_boolean()) native = it->get<bool>();
+      hello.erase("av1");
+      if (native) {
+        hello["av1_stream"] = true;
+        if (std::getenv("MOLINK_AV1_LOG") != nullptr) {
+          std::fprintf(stderr, "proxy: injected av1_stream into hello\n");
+        }
+      } else {
+        hello.erase("av1_stream");
+      }
       return hello.dump();
     } catch (...) {
       return text;
     }
   }
+
 
   // ---- AV1 transcoding (same contract as the device-ID proxy) ----------
 
@@ -843,234 +858,12 @@ class direct_proxy final : public std::enable_shared_from_this<direct_proxy> {
   }
 
   std::vector<uint8_t> transcode(std::vector<uint8_t> bytes) {
-    protocol::packet packet;
-    std::string error;
-    if (!protocol::decode_packet(bytes.data(), bytes.size(), packet, error)) {
-      return bytes;
-    }
-    if (packet.type != static_cast<uint8_t>(protocol::packet_type::frame) ||
-        packet.payload.size() < protocol::kFrameHeaderSize) {
-      return bytes;
-    }
-    const uint8_t codec = packet.payload[6];
-    if (codec == static_cast<uint8_t>(protocol::codec::av1_stream)) {
-      // One full-screen picture of a low-delay stream: decode it with the
-      // session's decoder, then hand the page a full-screen tile refresh, so
-      // it sees no difference between a stream frame and a tile repair.
-      protocol::parsed_frame frame;
-      if (!protocol::parse_frame_payload(packet.payload.data(),
-                                         packet.payload.size(), frame, error)) {
-        return {};
-      }
-      if (frame.tiles.empty()) return {};
-      const protocol::tile_view& view = frame.tiles[0];
-      const bool keyframe =
-          (packet.payload[7] & protocol::kFrameFlagKeyframe) != 0;
-      std::vector<uint8_t> bgra;
-      int width = 0;
-      int height = 0;
-      const auto decode_start = std::chrono::steady_clock::now();
-      if (!stream_decoder_.decode(view.data, view.size, keyframe, bgra, width,
-                                  height, error)) {
-        std::fprintf(stderr, "direct proxy: av1 stream decode failed: %s\n",
-                     error.c_str());
-        // The reference chain is broken; ask the host for a keyframe. The
-        // transport owns QUIC state and is only safe on the loop thread,
-        // so the request is posted there: writing it from this decoder
-        // thread crashed ngtcp2. One a second is enough; a burst of failed
-        // frames must not restart the stream in a loop.
-        const auto request_now = std::chrono::steady_clock::now();
-        if (last_stream_keyframe_request_.time_since_epoch().count() == 0 ||
-            request_now - last_stream_keyframe_request_ >=
-                std::chrono::seconds(1)) {
-          last_stream_keyframe_request_ = request_now;
-          std::weak_ptr<direct_proxy> weak_self = weak_from_this();
-          const auto post = post_;
-          if (post) {
-            post([weak_self] {
-              auto self = weak_self.lock();
-              if (!self || !self->transport_) return;
-              static const char kRequest[] =
-                  "{\"type\":\"request-keyframe\"}";
-              self->transport_->send_text(kRequest);
-            });
-          }
-        }
-        return {};
-      }
-      // Hand the decoded picture to the desktop shell's native renderer. The
-      // page still gets its JPEG; a shell that maps the surface draws the
-      // picture itself and can ignore the JPEG path later.
-      frame_surface::instance().publish(bgra.data(), width, height,
-                                        static_cast<int>(width) * 4,
-                                        frame_surface::format::bgra);
-      // The page paints full-screen frames; forwarding more than ten a
-      // second only adds latency and inflate work. Every frame is still
-      // decoded so the reference chain stays valid.
-      const auto now = std::chrono::steady_clock::now();
-      // The page paints a full-screen frame in ~17 ms (measured in the real
-      // WebKit shell), so fifteen a second is what the viewer can take.
-      if (last_stream_forward_.time_since_epoch().count() != 0 &&
-          now - last_stream_forward_ < std::chrono::milliseconds(50)) {
-        return {};
-      }
-      last_stream_forward_ = now;
-      protocol::frame_header header;
-      header.frame_seq = frame.header.frame_seq;
-      header.codec = static_cast<uint8_t>(protocol::codec::rgb565);
-      header.flags = static_cast<uint8_t>(
-          keyframe ? (protocol::kFrameFlagKeyframe | protocol::kFrameFlagPartial)
-                   : protocol::kFrameFlagPartial);
-      header.screen_w = frame.header.screen_w;
-      header.screen_h = frame.header.screen_h;
-      header.tile_w = frame.header.tile_w;
-      header.tile_h = frame.header.tile_h;
-      protocol::tile_blob tile;
-      tile.x = 0;
-      tile.y = 0;
-      tile.w = static_cast<uint16_t>(
-          std::min<int>(width, header.screen_w > 0 ? header.screen_w : width));
-      tile.h = static_cast<uint16_t>(
-          std::min<int>(height, header.screen_h > 0 ? header.screen_h : height));
-      tile.flags = protocol::kTileFlagChanged;
-      // JPEG: a 1080p desktop frame is a few hundred kilobytes and the page
-      // decodes it with the browser's native image decoder. Raw RGB565 (four
-      // megabytes per frame here) hit the WebSocket's throughput ceiling.
-      const int quality = stream_quality_;
-      bool packed_jpeg = false;
-      if (jpeg_encode_available()) {
-        std::string jpeg_error;
-        std::vector<uint8_t> jpeg;
-        if (jpeg_encode_bgra(bgra.data(), static_cast<std::size_t>(width) * 4,
-                             width, height, quality, jpeg, jpeg_error)) {
-          tile.data = std::move(jpeg);
-          header.codec = static_cast<uint8_t>(protocol::codec::jpeg);
-          packed_jpeg = true;
-        } else if (std::getenv("MOLINK_STREAM_LOG") != nullptr) {
-          std::fprintf(stderr, "%s: jpeg encode failed: %s\n", "direct proxy",
-                       jpeg_error.c_str());
-        }
-      }
-      if (!packed_jpeg) {
-        // Fallback: raw RGB565, half the bytes of BGRA.
-        tile.data.resize(static_cast<std::size_t>(tile.w) * tile.h * 2);
-        for (int row = 0; row < tile.h; ++row) {
-          const uint8_t* src =
-              bgra.data() + static_cast<std::size_t>(row) * width * 4;
-          uint8_t* dst =
-              tile.data.data() + static_cast<std::size_t>(row) * tile.w * 2;
-          for (int x = 0; x < tile.w; ++x) {
-            const uint8_t* px = src + static_cast<std::size_t>(x) * 4;
-            const uint16_t value = static_cast<uint16_t>(
-                (static_cast<uint16_t>(px[2] >> 3) << 11) |
-                (static_cast<uint16_t>(px[1] >> 2) << 5) |
-                static_cast<uint16_t>(px[0] >> 3));
-            dst[x * 2] = static_cast<uint8_t>(value & 0xff);
-            dst[x * 2 + 1] = static_cast<uint8_t>(value >> 8);
-          }
-        }
-      }
-      std::vector<protocol::tile_blob> tiles;
-      tiles.push_back(std::move(tile));
-      // No deflate: a full-screen frame compresses to ~1.5 MB, which costs
-      // ~43 ms on the core and ~15 ms to inflate in the page, while the raw
-      // RGB565 is 4.1 MB that loops back in a couple of milliseconds. The
-      // page's paint path measured ~17 ms per frame, so the wire is the cheap
-      // part here and zlib was the bottleneck.
-      const auto deflate_start = std::chrono::steady_clock::now();
-      std::vector<uint8_t> payload;
-      if (!protocol::build_frame_payload(header, tiles, payload, error)) {
-        return {};
-      }
-      if (std::getenv("MOLINK_STREAM_LOG") != nullptr) {
-        const double decode_ms = std::chrono::duration<double, std::milli>(
-                                     deflate_start - decode_start)
-                                     .count();
-        const double deflate_ms = std::chrono::duration<double, std::milli>(
-                                      std::chrono::steady_clock::now() -
-                                      deflate_start)
-                                      .count();
-        std::fprintf(stderr,
-                     "stream frame: decode %.1f ms deflate %.1f ms wire %zu B\n",
-                     decode_ms, deflate_ms, payload.size());
-      }
-      std::vector<uint8_t> out;
-      if (!protocol::encode_packet_into(
-              out, packet.type,
-              static_cast<uint16_t>(protocol::kPacketFlagTileRefresh),
-              packet.session, packet.seq, packet.ts_us, payload.data(),
-              payload.size(), error)) {
-        return {};
-      }
-      return out;
-    }
-    if (codec != static_cast<uint8_t>(protocol::codec::av1)) {
-      return bytes;
-    }
-    std::vector<protocol::tile_blob> tiles;
-    if (!decode_av1_frame_payload(packet.payload.data(), packet.payload.size(),
-                                  tiles, error)) {
-      std::fprintf(stderr, "direct proxy: av1 decode failed: %s\n",
-                   error.c_str());
-      return {};
-    }
-    protocol::frame_header header;
-    header.frame_seq = static_cast<uint32_t>(packet.payload[0]) |
-                       (static_cast<uint32_t>(packet.payload[1]) << 8) |
-                       (static_cast<uint32_t>(packet.payload[2]) << 16) |
-                       (static_cast<uint32_t>(packet.payload[3]) << 24);
-    header.codec = static_cast<uint8_t>(protocol::codec::bgra);
-    // A decoded AV1 keyframe is full-screen BGRA (tens of megabytes on a 4K
-    // desktop). Sending it raw over the local WebSocket blocks the app loop
-    // and forces the page to handle a huge message; deflate it on the worker
-    // instead. The page already inflates deflate_bgra asynchronously.
-    // Tiny patches are cheaper to send raw: deflating a few kilobytes costs
-    // more than it saves, and the page paints either form the same way.
-    std::size_t raw_total = 0;
-    for (const auto& tile : tiles) raw_total += tile.data.size();
-    constexpr std::size_t kMinDeflateBytes = 96 * 1024;
-    if (compression_available() && !tiles.empty() &&
-        raw_total >= kMinDeflateBytes) {
-      std::vector<std::vector<uint8_t>> packed(tiles.size());
-      bool compressed = true;
-      std::string deflate_error;
-      for (std::size_t i = 0; i < tiles.size(); ++i) {
-        if (tiles[i].data.empty() ||
-            !deflate_buffer(tiles[i].data.data(), tiles[i].data.size(), 1,
-                            packed[i], deflate_error) ||
-            packed[i].size() >= tiles[i].data.size()) {
-          compressed = false;
-          break;
-        }
-      }
-      if (compressed) {
-        for (std::size_t i = 0; i < tiles.size(); ++i) {
-          tiles[i].data = std::move(packed[i]);
-        }
-        header.codec = static_cast<uint8_t>(protocol::codec::deflate_bgra);
-      }
-    }
-    header.flags = packet.payload[7];
-    header.screen_w = static_cast<uint16_t>(
-        packet.payload[8] | (packet.payload[9] << 8));
-    header.screen_h = static_cast<uint16_t>(
-        packet.payload[10] | (packet.payload[11] << 8));
-    header.tile_w = static_cast<uint16_t>(
-        packet.payload[12] | (packet.payload[13] << 8));
-    header.tile_h = static_cast<uint16_t>(
-        packet.payload[14] | (packet.payload[15] << 8));
-    std::vector<uint8_t> payload;
-    if (!protocol::build_frame_payload(header, tiles, payload, error)) {
-      return {};
-    }
-    std::vector<uint8_t> out;
-    if (!protocol::encode_packet_into(out, packet.type, packet.flags,
-                                      packet.session, packet.seq,
-                                      packet.ts_us, payload.data(),
-                                      payload.size(), error)) {
-      return {};
-    }
-    return out;
+    // AV1 is decoded by the page itself through WebCodecs; the proxy forwards
+    // every packet unchanged. The old path decoded AV1 in the core and
+    // re-encoded each picture as JPEG for the page, which capped the stream at
+    // 20 fps and made AV1 feel slower than H.264. No decode, no JPEG, no
+    // repaint throttle.
+    return bytes;
   }
 
   uvcpp::uvcpp_ws_connection* browser_ = nullptr;
