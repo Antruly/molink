@@ -513,7 +513,9 @@
     "copied": "Copied {{count}} file(s) to the remote clipboard",
     "copyFailed": "Could not set the remote clipboard",
     "destination": "Destination",
-    "destinationHint": "Defaults to ~/moLink (created when missing). Any folder the host user can write is accepted; dropped folders keep their structure."
+    "destinationHint": "Defaults to ~/moLink (created when missing). Any folder the host user can write is accepted; dropped folders keep their structure.",
+    "home": "Home folder",
+    "path": "Path (double-click to edit)"
   },
   "update": {
     "available": "Update",

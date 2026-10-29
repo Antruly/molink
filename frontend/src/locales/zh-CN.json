@@ -513,7 +513,9 @@
     "copied": "已复制 {{count}} 个文件到远程剪贴板",
     "copyFailed": "复制到远程剪贴板失败",
     "destination": "接收目录",
-    "destinationHint": "默认 ~/moLink（不存在会自动创建）；可以填任何主机用户有权限写入的目录，文件夹会按原结构创建。"
+    "destinationHint": "默认 ~/moLink（不存在会自动创建）；可以填任何主机用户有权限写入的目录，文件夹会按原结构创建。",
+    "home": "回到主目录",
+    "path": "路径（双击编辑）"
   },
   "update": {
     "available": "可更新",

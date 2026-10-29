@@ -53,6 +53,7 @@ import {
   parseFpsSetting,
 } from '../lib/frame-rate'
 import { Codec, codecName } from '../lib/protocol'
+import { collectDropEntries, stageDroppedFiles } from '../lib/file-drop'
 import { shellInfo, windowAction } from '../lib/shell'
 import { openSessionWindow } from '../lib/windows'
 import {
@@ -841,6 +842,33 @@ export function SessionView({
     measure()
     return () => observer.disconnect()
   }, [compactBar, quickOpen])
+
+  // While the transfer drawer is open the whole window accepts a file drop:
+  // the WebView's own drag destination only reaches the page when the page says
+  // it wants the drop, and a drop that lands a few pixels off the drawer zone
+  // used to be swallowed by the shell.
+  useEffect(() => {
+    if (!filesOpen) return
+    const onDragOver = (event: globalThis.DragEvent) => {
+      if (Array.from(event.dataTransfer?.types ?? []).includes('Files')) {
+        event.preventDefault()
+        if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
+      }
+    }
+    const onDrop = (event: globalThis.DragEvent) => {
+      if (!event.dataTransfer) return
+      event.preventDefault()
+      void collectDropEntries(event.dataTransfer).then((entries) =>
+        stageDroppedFiles(entries),
+      )
+    }
+    document.addEventListener('dragover', onDragOver)
+    document.addEventListener('drop', onDrop)
+    return () => {
+      document.removeEventListener('dragover', onDragOver)
+      document.removeEventListener('drop', onDrop)
+    }
+  }, [filesOpen])
 
   // The expanded quick bar collapses when focus or the pointer moves outside.
   useEffect(() => {

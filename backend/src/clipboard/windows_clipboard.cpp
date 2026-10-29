@@ -12,9 +12,12 @@
 #include <shellapi.h>
 #include <shlobj.h>
 
+#include <atomic>
 #include <cstring>
 #include <filesystem>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace molink {
@@ -43,8 +46,51 @@ std::string to_utf8(const wchar_t* text) {
 
 class windows_clipboard final : public clipboard_service {
  public:
+  ~windows_clipboard() override { stop_watch(); }
+
   bool available() const override { return true; }
   std::string backend() const override { return "win32-clipboard"; }
+
+  /// Polls GetClipboardSequenceNumber (cheap; no window needed) and reports
+  /// the new text. This is what pushes what the host user copied to every
+  /// viewer, so the clipboard behaves like RDP redirection in both
+  /// directions.
+  void watch(text_watcher callback) override {
+    if (callback == nullptr) {
+      stop_watch();
+      return;
+    }
+    std::lock_guard<std::mutex> lock(watch_mutex_);
+    watch_callback_ = std::move(callback);
+    if (running_.exchange(true)) return;
+    // Already holding watch_mutex_ here: locking it again is undefined.
+    sequence_ = GetClipboardSequenceNumber();
+    watcher_ = std::thread([this] {
+      while (running_.load()) {
+        Sleep(400);
+        const DWORD sequence = GetClipboardSequenceNumber();
+        {
+          std::lock_guard<std::mutex> lock(watch_mutex_);
+          if (sequence == sequence_) continue;
+          sequence_ = sequence;
+        }
+        std::string text;
+        request_text([&text](std::string value) { text = std::move(value); });
+        if (text.empty()) continue;
+        std::lock_guard<std::mutex> lock(watch_mutex_);
+        if (text == last_text_) continue;
+        last_text_ = text;
+        if (watch_callback_) watch_callback_(text);
+      }
+    });
+  }
+
+  void stop_watch() {
+    if (!running_.exchange(false)) return;
+    if (watcher_.joinable()) watcher_.join();
+    std::lock_guard<std::mutex> lock(watch_mutex_);
+    watch_callback_ = nullptr;
+  }
 
   void set_text(std::string text) override {
     constexpr std::size_t kMaxText = 192 * 1024;
@@ -190,6 +236,14 @@ class windows_clipboard final : public clipboard_service {
     }
     return applied;
   }
+
+ private:
+  std::mutex watch_mutex_;
+  text_watcher watch_callback_;
+  std::string last_text_;
+  DWORD sequence_ = 0;
+  std::atomic<bool> running_{false};
+  std::thread watcher_;
 };
 
 }  // namespace

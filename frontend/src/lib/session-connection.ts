@@ -742,4 +742,8 @@ export class SessionConnection {
   sendFileChunk(id: number, offset: number, data: Uint8Array): void {
     this.client.sendFileChunk(id, offset, data)
   }
+
+  sendClientLog(text: string): void {
+    this.client.sendClientLog(text)
+  }
 }

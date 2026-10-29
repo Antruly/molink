@@ -2545,6 +2545,37 @@ session_supervisor::~session_supervisor() { stop(); }
 
 void session_supervisor::start() {
   if (running_.exchange(true)) return;
+  // Push what the host user copies to every viewer, the way RDP redirects the
+  // clipboard in both directions. The page already pushes its own clipboard
+  // here (clipboard-sync), so this closes the return path: text copied inside
+  // the remote desktop -- by an application, or by an RDP client with its own
+  // clipboard redirection -- reaches the viewer's clipboard without a click.
+  if (options_.clipboard) {
+    const std::shared_ptr<session_registry> registry = registry_;
+    const auto post = options_.post;
+    const std::string device = options_.device_id;
+    options_.clipboard->watch([registry, post, device](std::string text) {
+      if (text.empty() || text.size() > 192 * 1024) return;
+      const std::string hash = clipboard_hash(text);
+      if (!clipboard_take_hash(hash)) return;
+      auto deliver = [registry, text = std::move(text), hash, device] {
+        for (const session_info& peer : registry->snapshot()) {
+          if (!peer.authenticated || !peer.transport) continue;
+          uvcpp_json out;
+          out["type"] = "clipboard-sync";
+          out["text"] = text;
+          out["hash"] = hash;
+          out["chain"] = device;
+          send_json(peer.transport.get(), out);
+        }
+      };
+      if (post) {
+        post(deliver);
+      } else {
+        deliver();
+      }
+    });
+  }
   thread_ = std::thread([this] { run(); });
   if (options_.post && options_.capture) {
     push_thread_ = std::thread([this] { run_push_clock(); });

@@ -1,11 +1,13 @@
 import {
   ArrowDownToLine,
   ChevronLeft,
+  ChevronRight,
   ClipboardCopy,
   ClipboardPaste,
   File as FileIcon,
   Folder,
   FolderOpen,
+  Home,
   RefreshCw,
   Upload,
   X,
@@ -13,6 +15,7 @@ import {
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type DragEvent,
@@ -79,6 +82,33 @@ function parentPath(path: string, root: string): string {
   return parent.length < root.length ? root : parent
 }
 
+/// One breadcrumb per path component, starting at the listing root (the remote
+/// home), so any level can be clicked and the whole bar can be typed into.
+function pathCrumbs(
+  path: string,
+  root: string,
+): Array<{ label: string; path: string }> {
+  if (!path) return []
+  const separator = path.includes('\\') ? '\\' : '/'
+  const base = root.replace(/[\\/]+$/, '')
+  const crumbs: Array<{ label: string; path: string }> = [
+    { label: '~', path: base.length > 0 ? base : separator },
+  ]
+  if (base.length > 0 && path.startsWith(base) && path.length > base.length) {
+    let accumulated = base
+    for (const part of path.slice(base.length).split(separator)) {
+      if (part.length === 0) continue
+      accumulated = accumulated.endsWith(separator)
+          ? accumulated + part
+          : accumulated + separator + part
+      crumbs.push({ label: part, path: accumulated })
+    }
+    return crumbs
+  }
+  if (!path.startsWith(base)) crumbs.push({ label: path, path })
+  return crumbs
+}
+
 /// File transfer drawer: uploads land in the remote user's Downloads/moLink,
 /// downloads browse the remote home folder one pull-sized chunk at a time.
 export function FileTransferPanel({
@@ -103,6 +133,15 @@ export function FileTransferPanel({
   const [loading, setLoading] = useState(false)
   const [clipboardFiles, setClipboardFiles] = useState<ClipboardFileEntry[]>([])
   const [clipboardNote, setClipboardNote] = useState<string | null>(null)
+  /// The breadcrumb turned into a text field (double click); a path that does
+  /// not exist leaves the previous listing untouched and shows the error.
+  const [editingPath, setEditingPath] = useState(false)
+  const [pathDraft, setPathDraft] = useState('')
+  const pathFieldRef = useRef<HTMLInputElement>(null)
+  const crumbs = useMemo(
+    () => pathCrumbs(listing?.path ?? '', listing?.root ?? ''),
+    [listing?.path, listing?.root],
+  )
 
   const queueRef = useRef<{ key: number; file: File; path: string }[]>([])
   const activeRef = useRef<{ key: number; file: File; path: string } | null>(
@@ -182,6 +221,9 @@ export function FileTransferPanel({
         await new Promise((resolve) => window.setTimeout(resolve, 0))
       }
       paintUpload(key, offset, true)
+      connectionRef.current?.sendClientLog(
+        `upload chunks done id=${id} sent=${offset} size=${file.size}`,
+      )
       connectionRef.current?.sendFileAction('complete', { id })
     },
     [paintUpload],
@@ -196,6 +238,9 @@ export function FileTransferPanel({
       previous.map((item) =>
         item.key === next.key ? { ...item, status: 'sending' } : item,
       ),
+    )
+    connectionRef.current?.sendClientLog(
+      `upload offer name=${next.path} size=${next.file.size} dest=${destRef.current}`,
     )
     connectionRef.current?.sendFileAction('offer', {
       name: next.path,
@@ -226,6 +271,10 @@ export function FileTransferPanel({
       switch (message.action) {
         case 'accept': {
           const active = activeRef.current
+          connectionRef.current?.sendClientLog(
+            `upload accept id=${message.id ?? 0} chunk=${message.chunk ?? 0} ` +
+              `active=${active ? 1 : 0}`,
+          )
           if (!active || !message.id) return
           void sendChunks(
             active.key,
@@ -409,9 +458,10 @@ export function FileTransferPanel({
 
   if (!open) return null
 
-  const busy = uploads.some(
-    (item) => item.status === 'queued' || item.status === 'sending',
-  )
+  // Only an upload that is actually running blocks the button: counting the
+  // queued items here disabled the button exactly when there was something to
+  // send, so a transfer never started (it sat at 0 %).
+  const busy = uploads.some((item) => item.status === 'sending')
 
   return (
     <div
@@ -629,22 +679,85 @@ export function FileTransferPanel({
               onClick={() => {
                 if (listing) browse(parentPath(listing.path, listing.root))
               }}
-              className="grid h-7 w-7 place-items-center rounded-md text-muted transition hover:bg-panel hover:text-ink"
+              className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-muted transition hover:bg-panel hover:text-ink"
               aria-label={t('files.up')}
               title={t('files.up')}
             >
               <ChevronLeft size={14} />
             </button>
-            <div
-              className="min-w-0 flex-1 truncate font-mono text-[10px] text-muted"
-              title={listing?.path}
-            >
-              {listing?.path ?? t('files.loading')}
-            </div>
+            {listing ? (
+              <button
+                type="button"
+                onClick={() => browse(listing.root)}
+                className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-muted transition hover:bg-panel hover:text-ink"
+                aria-label={t('files.home')}
+                title={t('files.home')}
+              >
+                <Home size={13} />
+              </button>
+            ) : null}
+            {editingPath ? (
+              <input
+                ref={pathFieldRef}
+                autoFocus
+                value={pathDraft}
+                spellCheck={false}
+                onChange={(event) => setPathDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.currentTarget.blur()
+                  } else if (event.key === 'Escape') {
+                    setEditingPath(false)
+                  }
+                }}
+                onBlur={() => {
+                  const draft = pathDraft.trim()
+                  setEditingPath(false)
+                  // An unknown path makes the host answer with an error and
+                  // the listing stays where it was: the drawer simply returns
+                  // to the previous folder.
+                  if (draft !== '') browse(draft)
+                }}
+                className="field min-w-0 flex-1 font-mono text-[10px]"
+                aria-label={t('files.path')}
+              />
+            ) : (
+              <div
+                className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto whitespace-nowrap font-mono text-[10px]"
+                title={listing?.path ?? t('files.loading')}
+                onDoubleClick={() => {
+                  if (!listing) return
+                  setPathDraft(listing.path)
+                  setEditingPath(true)
+                }}
+              >
+                {crumbs.map((crumb, index, all) => (
+                    <span key={crumb.path} className="flex items-center gap-0.5">
+                      {index > 0 ? (
+                        <ChevronRight size={10} className="text-muted/60" />
+                      ) : null}
+                      <button
+                        type="button"
+                        onClick={() => browse(crumb.path)}
+                        className={
+                          'shrink-0 rounded px-0.5 transition hover:bg-panel ' +
+                          (index === all.length - 1
+                            ? 'text-ink'
+                            : 'text-muted hover:text-accent')
+                        }
+                      >
+                        {crumb.label}
+                      </button>
+                    </span>
+                  ),
+                )}
+                {!listing ? t('files.loading') : null}
+              </div>
+            )}
             <button
               type="button"
               onClick={() => browse(listing?.path ?? '')}
-              className="grid h-7 w-7 place-items-center rounded-md text-muted transition hover:bg-panel hover:text-ink"
+              className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-muted transition hover:bg-panel hover:text-ink"
               aria-label={t('files.refresh')}
               title={t('files.refresh')}
             >

@@ -1181,6 +1181,12 @@ export class MolinkClient {
     this.sendJson({ type: 'file', action, ...extra })
   }
 
+  /// Diagnostic line to the core's log (the page has no console).
+  sendClientLog(text: string): void {
+    if (!this.isLive()) return
+    this.sendJson({ type: 'client-log', text })
+  }
+
   sendFileChunk(id: number, offset: number, data: Uint8Array): void {
     // No socket guard here: the session may be on WebTransport, where `ws` is
     // null and the chunk rides the dedicated file stream. sendRawPacket picks

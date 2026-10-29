@@ -39,6 +39,13 @@ class clipboard_service {
 
   /// File clipboard (Explorer Ctrl+C). Backends without it return an empty
   /// list and refuse set_files.
+  /// Called on the backend's own thread whenever the local clipboard text
+  /// changes. Used to push what the host user copied to every viewer, which is
+  /// what makes the clipboard behave like RDP's redirection in both
+  /// directions. Implementations poll their platform's change counter.
+  using text_watcher = std::function<void(std::string)>;
+  virtual void watch(text_watcher callback) { (void)callback; }
+
   using files_callback = std::function<void(std::vector<clipboard_file>)>;
   virtual void request_files(files_callback callback) {
     if (callback) callback({});

@@ -14,6 +14,7 @@
 #include <cstring>
 #include <deque>
 #include <filesystem>
+#include <future>
 #include <mutex>
 #include <sstream>
 #include <system_error>
@@ -120,7 +121,11 @@ class x11_clipboard final : public clipboard_service {
     return service;
   }
 
-  ~x11_clipboard() override { stop(); }
+  ~x11_clipboard() override {
+    watch_running_.store(false);
+    if (watch_thread_.joinable()) watch_thread_.join();
+    stop();
+  }
 
   bool available() const override { return available_.load(); }
   std::string backend() const override { return "x11-selection"; }
@@ -139,6 +144,43 @@ class x11_clipboard final : public clipboard_service {
   void request_files(files_callback callback) override {
     std::lock_guard<std::mutex> lock(queue_mutex_);
     pending_file_gets_.push_back(std::move(callback));
+  }
+
+  /// X11 has no change counter that is portable enough, so the owner is asked
+  /// for the text now and then. The round trip runs on this thread with a
+  /// short timeout; the callback fires only when the text actually changed.
+  void watch(text_watcher callback) override {
+    if (callback == nullptr) return;
+    {
+      std::lock_guard<std::mutex> lock(watch_mutex_);
+      watch_callback_ = std::move(callback);
+    }
+    if (watch_running_.exchange(true)) return;
+    watch_thread_ = std::thread([this] {
+      while (watch_running_.load()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(800));
+        if (!watch_running_.load()) break;
+        auto promise = std::make_shared<std::promise<std::string>>();
+        std::future<std::string> future = promise->get_future();
+        request_text([promise](std::string value) {
+          try {
+            promise->set_value(std::move(value));
+          } catch (...) {
+            // Already satisfied or abandoned; nothing to do.
+          }
+        });
+        if (future.wait_for(std::chrono::milliseconds(400)) !=
+            std::future_status::ready) {
+          continue;
+        }
+        std::string text = future.get();
+        if (text.empty()) continue;
+        std::lock_guard<std::mutex> lock(watch_mutex_);
+        if (text == last_text_) continue;
+        last_text_ = text;
+        if (watch_callback_) watch_callback_(text);
+      }
+    });
   }
 
   bool set_files(const std::vector<std::string>& paths) override {
@@ -532,6 +574,11 @@ class x11_clipboard final : public clipboard_service {
   Atom gnome_copied_ = None;
 
   std::thread thread_;
+  std::mutex watch_mutex_;
+  text_watcher watch_callback_;
+  std::string last_text_;
+  std::atomic<bool> watch_running_{false};
+  std::thread watch_thread_;
   std::atomic<bool> running_{false};
   std::atomic<bool> available_{false};
 
