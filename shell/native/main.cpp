@@ -893,18 +893,16 @@ void on_script_message(WebKitUserContentManager*, WebKitJavascriptResult* result
   }
 }
 
-/// A download the page starts with an <a download> (a file from the remote
-/// desktop saved through the transfer drawer) goes to the user's Downloads
-/// folder. WebKitGTK cancels a download nobody handles, which is why clicking
-/// a file in the drawer did nothing.
-void on_download_started(WebKitWebView*, WebKitDownload* download, gpointer) {
-  WebKitURIResponse* response = webkit_download_get_response(download);
-  const gchar* suggested =
-      response != nullptr
-          ? webkit_uri_response_get_suggested_filename(response)
-          : nullptr;
+/// Decides where a started download lands: the user's Downloads folder, with
+/// the name the page asked for. WebKit emits this per download after the
+/// context's download-started, and its suggested_filename is the only place
+/// the <a download> name survives for the drawer's blob: URLs (their URI
+/// response carries no filename). Without a handler WebKit silently
+/// overwrites an existing file of the same name.
+void on_download_decide_destination(WebKitDownload* download,
+                                    const gchar* suggested, gpointer) {
   // The name comes from the remote machine, so keep only its last component:
-  // a suggested name like "../../x" must not escape the Downloads folder.
+  // a name like "../../x" must not escape the Downloads folder.
   gchar* base = g_path_get_basename(suggested != nullptr && *suggested != '\0'
                                         ? suggested
                                         : "molink-download");
@@ -916,19 +914,37 @@ void on_download_started(WebKitWebView*, WebKitDownload* download, gpointer) {
     downloads = g_get_home_dir();
   }
   gchar* dir = g_strdup(downloads != nullptr ? downloads : "/tmp");
+  // Number collisions before the extension ("notes (1).txt"), like a browser.
+  gchar* stem = g_strdup(base);
+  gchar* extension = nullptr;
+  gchar* dot = g_strrstr(stem, ".");
+  if (dot != nullptr && dot != stem && dot[1] != '\0') {
+    *dot = '\0';
+    extension = dot + 1;
+  }
   gchar* dest = g_build_filename(dir, base, nullptr);
   for (int suffix = 1; suffix < 1000 && g_file_test(dest, G_FILE_TEST_EXISTS);
        ++suffix) {
     g_free(dest);
-    gchar* numbered = g_strdup_printf("%s (%d)", base, suffix);
+    gchar* numbered = extension != nullptr
+                          ? g_strdup_printf("%s (%d).%s", stem, suffix, extension)
+                          : g_strdup_printf("%s (%d)", stem, suffix);
     dest = g_build_filename(dir, numbered, nullptr);
     g_free(numbered);
   }
+  g_free(stem);
   webkit_download_set_destination(download, dest);
   std::fprintf(stderr, "download -> %s\n", dest);
   g_free(dest);
   g_free(base);
   g_free(dir);
+}
+
+/// The context reports every download here; hook the per-download signal that
+/// carries the suggested filename.
+void on_download_started(WebKitWebContext*, WebKitDownload* download, gpointer) {
+  g_signal_connect(download, "decide-destination",
+                   G_CALLBACK(on_download_decide_destination), nullptr);
 }
 
 int main(int argc, char** argv) {
@@ -1035,8 +1051,11 @@ int main(int argc, char** argv) {
   // newer WebKitGTK releases.
   webkit_settings_set_enable_media_stream(settings, TRUE);
   webkit_settings_set_enable_webrtc(settings, TRUE);
-  g_signal_connect(view, "download-started",
-                   G_CALLBACK(on_download_started), nullptr);
+  // In the GTK3 (4.1) API the download signal lives on the context, not the
+  // view; a view connection is silently invalid and leaves WebKit's default
+  // handler in charge.
+  g_signal_connect(webkit_web_view_get_context(WEBKIT_WEB_VIEW(view)),
+                   "download-started", G_CALLBACK(on_download_started), nullptr);
   gtk_container_add(GTK_CONTAINER(window), view);
 
   static const std::string origin =
