@@ -42,3 +42,18 @@ grid) so the Direct2D UI matches the React UI position for position.
 
 The home is two columns: the device card on the left (x 16-395) and the
 connect/chat column on the right (x 413-1127).
+
+## Session toolbar (measured, expanded; row y=122, height 30)
+| element | x | w | h | font | radius |
+|---|---|---|---|---|---|
+| icon buttons (start) | 75 / 105 / 135 | 28 | 28 | 13 | 9.6 |
+| 适应 / 1:1 / 拉伸 | 172 / 214 / 249 | 40 / 33 / 40 | 28 | 11 | 9.6 |
+| frame-rate select | 291 | 83 | 30 | 11 | 6 |
+| quality select (自适应) | 376 | 61 | 28 | 13 | 9.6 |
+| codec select (自动/VP9/VP8) | 438 | 72 | 30 | 11 | 6 |
+| icon button | 512 | 28 | 28 | 13 | 9.6 |
+| resolution select (1920x1080) | 542 | 106 | 30 | 11 | 6 |
+| icon buttons (end) | 657 / 687 / 717 / 747 | 28 | 28 | 13 | 9.6 |
+
+The bar floats at y=122 with 28 px controls and 9.6 px radii for pills; selects
+use a 6 px radius and 30 px height. When collapsed it becomes a 40x40 ball.
