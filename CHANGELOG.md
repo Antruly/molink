@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.9.78] — 2026-10-31
+
+### Fixed
+
+- **Windows x64 包没有 VP8/VP9**：Linux 与 macOS 的打包脚本都传了
+  `-DMOLINK_ENABLE_VPX=ON`，Windows 的 CI 一直漏了这一个，vcpkg 装了 libvpx 却没
+  链接进 core，主机 welcome 里没有 vp9/vp8，工具栏就只剩 H.264 和 AV1。现在补上。
+- Windows 包的 AV1 只有 SVT-AV1 纯 CPU 编码（没有 NVENC），弱机上一帧几百毫秒，
+  看起来像卡死；VP9 可用后建议改用 VP9。
+
 ## [0.9.77] — 2026-10-30
 
 ### Fixed
