@@ -35,6 +35,25 @@ bool session_client::find_number(const std::string& json, const char* key,
   return true;
 }
 
+bool session_client::find_u64(const std::string& json, const char* key,
+                              uint64_t* out) {
+  const std::string needle = std::string("\"") + key + "\":";
+  const size_t at = json.find(needle);
+  if (at == std::string::npos) return false;
+  size_t i = at + needle.size();
+  while (i < json.size() && (json[i] == ' ' || json[i] == '"')) ++i;
+  uint64_t value = 0;
+  bool any = false;
+  while (i < json.size() && json[i] >= '0' && json[i] <= '9') {
+    value = value * 10 + static_cast<uint64_t>(json[i] - '0');
+    ++i;
+    any = true;
+  }
+  if (!any) return false;
+  *out = value;
+  return true;
+}
+
 bool session_client::find_string(const std::string& json, const char* key,
                                  std::string* out) {
   const std::string needle = std::string("\"") + key + "\":\"";
@@ -90,10 +109,13 @@ void session_client::handle_text(const std::string& text) {
       last_ping_ = now;
     }
   } else if (type == "pong") {
-    if (ping_sent_at_ != 0) {
-      stats_->note_latency(static_cast<int>(GetTickCount64() - ping_sent_at_));
-      ping_sent_at_ = 0;
+    // The host echoes the ping's `t`, so the RTT needs no shared state.
+    uint64_t sent = 0;
+    const uint64_t now = GetTickCount64();
+    if (find_u64(text, "t", &sent) && sent > 0 && now >= sent) {
+      stats_->note_latency(static_cast<int>(now - sent));
     }
+    ping_sent_at_.store(0);
   } else if (type == "quality") {
     std::string mode;
     if (find_string(text, "mode", &mode) && !mode.empty()) {

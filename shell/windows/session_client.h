@@ -2,6 +2,7 @@
 // core, sends hello, and feeds the toolbar's session_stats from the traffic.
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <string>
 
@@ -37,13 +38,15 @@ class session_client {
  private:
   void handle_text(const std::string& text);
   static bool find_number(const std::string& json, const char* key, int* out);
+  static bool find_u64(const std::string& json, const char* key,
+                       uint64_t* out);
   static bool find_string(const std::string& json, const char* key,
                           std::string* out);
 
   ws_client ws_;
   ui::session_stats* stats_ = nullptr;
   uint64_t last_ping_ = 0;
-  uint64_t ping_sent_at_ = 0;
+  std::atomic<uint64_t> ping_sent_at_{0};
 };
 
 }  // namespace molink::net
