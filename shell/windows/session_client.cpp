@@ -106,7 +106,9 @@ void session_client::handle_text(const std::string& text) {
 void session_client::tick(uint64_t now_ms) {
   if (!ws_.is_open()) return;
   if (now_ms - last_ping_ >= 1000 && ping_sent_at_ == 0) {
-    if (ws_.send_text("{\"type\":\"ping\"}")) ping_sent_at_ = now_ms;
+    const std::string ping =
+        "{\"type\":\"ping\",\"t\":" + std::to_string(now_ms) + "}";
+    if (ws_.send_text(ping)) ping_sent_at_ = now_ms;
   }
 }
 
