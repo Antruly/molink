@@ -157,6 +157,25 @@ void slider(ID2D1RenderTarget* t, const palette& theme,
             IDWriteTextFormat* small_left, const D2D1_RECT_F& row,
             const std::wstring& label, const std::wstring& value,
             float fraction);
+/// Live session numbers shown in the toolbar. The shell fills these from the
+/// session (codec preference, wire rate, ping RTT, screen size); the smoothing
+/// keeps the chip from flickering while bytes arrive in bursts.
+struct session_stats {
+  std::wstring codec = L"-";
+  std::wstring resolution;
+  int kbps = 0;
+  int latency_ms = 0;
+
+  void note_bitrate(double kbps_now, double alpha = 0.3) {
+    if (kbps == 0) {
+      kbps = static_cast<int>(kbps_now);
+      return;
+    }
+    kbps = static_cast<int>(kbps * (1.0 - alpha) + kbps_now * alpha);
+  }
+  void note_latency(int ms) { latency_ms = ms < 0 ? 0 : ms; }
+};
+
 /// Stateful dropdown: `open` and the selected index travel with the caller.
 struct dropdown_state {
   bool open = false;

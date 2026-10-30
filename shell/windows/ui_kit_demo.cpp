@@ -53,10 +53,7 @@ struct app_state {
   bool more_open = false;
   bool connect_pressed = false;
   // Live values the shell will feed from the session.
-  std::wstring stat_codec = L"VP9";
-  int stat_kbps = 1200;
-  int stat_latency_ms = 12;
-  std::wstring stat_resolution = L"1920x1080";
+  session_stats stats = {L"VP9", L"1920x1080", 1200, 12};
   ID2D1Bitmap* avatar_bitmap = nullptr;
   // Shared-memory picture from the local core (--surface <path>).
   std::wstring surface_path;
@@ -538,9 +535,9 @@ void paint(HWND window) {
       x -= width + 8;
       return r;
     };
-    chip(std::to_wstring(g.stat_kbps) + L" kbps", false, 78);
-    chip(std::to_wstring(g.stat_latency_ms) + L" ms", false, 56);
-    chip(g.stat_codec, true, 42);
+    chip(std::to_wstring(g.stats.kbps) + L" kbps", false, 78);
+    chip(std::to_wstring(g.stats.latency_ms) + L" ms", false, 56);
+    chip(g.stats.codec, true, 42);
     const D2D1_RECT_F quality_chip = chip(kPresets[g.preset], true, 61);
     if (inside(quality_chip, g.hover_x, g.hover_y)) {
       // handled on click below
