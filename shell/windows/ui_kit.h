@@ -150,6 +150,15 @@ void pill(ID2D1RenderTarget* t, const palette& theme, IDWriteTextFormat* small,
           IDWriteTextFormat* small_left, const D2D1_RECT_F& r,
           const std::wstring& label, bool accent, bool hovered,
           icon glyph = icon::none);
+/// A labelled slider row: label on the left, track, value on the right.
+void slider(ID2D1RenderTarget* t, const palette& theme,
+            IDWriteTextFormat* small_left, const D2D1_RECT_F& row,
+            const std::wstring& label, const std::wstring& value,
+            float fraction);
+/// A small on/off switch.
+void toggle(ID2D1RenderTarget* t, const palette& theme, const D2D1_RECT_F& r,
+            bool on);
+
 /// A borderless icon-only button that only shows a surface when hovered.
 void icon_button(ID2D1RenderTarget* t, const palette& theme,
                  const D2D1_RECT_F& r, icon glyph, bool hovered);

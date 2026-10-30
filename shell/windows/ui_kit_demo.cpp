@@ -141,12 +141,7 @@ void paint(HWND window) {
       // Toggle.
       const D2D1_RECT_F track = D2D1::RectF(sheet.right - 78, y, sheet.right - 34,
                                             y + 22);
-      fill_round(g.target, track, 11,
-                 i < 3 ? g.theme->accent : g.theme->panel_strong);
-      const float knob_x = i < 3 ? track.right - 11 : track.left + 11;
-      fill_round(g.target,
-                 D2D1::RectF(knob_x - 8, y + 3, knob_x + 8, y + 19), 8,
-                 i < 3 ? g.theme->on_accent : g.theme->muted);
+      toggle(g.target, *g.theme, track, i < 3);
     }
     g.target->EndDraw();
     return;
@@ -236,7 +231,7 @@ void paint(HWND window) {
   }
   y += 26 + 18;
 
-  // Sliders.
+  // Sliders (ui_kit widgets).
   {
     const wchar_t* labels[3] = {L"质量", L"码率", L"帧率"};
     const float fractions[3] = {0.72f, 0.35f, 0.5f};
@@ -245,20 +240,9 @@ void paint(HWND window) {
     swprintf(values[1], 32, L"4200 kbps");
     swprintf(values[2], 32, L"30 fps");
     for (int i = 0; i < 3; ++i) {
-      const float row = y + i * 30;
-      text(g.target, g.small_left, labels[i],
-           D2D1::RectF(32, row, 96, row + 20), g.theme->muted);
-      const float left = 96, right = 420, mid = row + 10;
-      fill_round(g.target, D2D1::RectF(left, mid - 2, right, mid + 2), 2,
-                 g.theme->line_soft);
-      const float knob = left + (right - left) * fractions[i];
-      fill_round(g.target, D2D1::RectF(left, mid - 2, knob, mid + 2), 2,
-                 g.theme->accent_strong);
-      fill_round(g.target,
-                 D2D1::RectF(knob - 6, mid - 6, knob + 6, mid + 6), 6,
-                 g.theme->ink);
-      text(g.target, g.small_left, values[i],
-           D2D1::RectF(right + 10, row, 512, row + 20), g.theme->ink);
+      slider(g.target, *g.theme, g.small_left,
+                 D2D1::RectF(32, y + i * 30, 512, y + i * 30 + 20), labels[i],
+                 values[i], fractions[i]);
     }
   }
   y += 3 * 30 + 12;

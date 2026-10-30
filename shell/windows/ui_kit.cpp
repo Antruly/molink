@@ -2,6 +2,8 @@
 
 #include <dwrite.h>
 
+#include <algorithm>
+
 namespace molink::ui {
 
 void fill_round(ID2D1RenderTarget* t, const D2D1_RECT_F& r, float radius,
@@ -57,6 +59,39 @@ void pill(ID2D1RenderTarget* t, const palette& theme, IDWriteTextFormat* small,
   } else {
     text(t, small, label, r, accent ? theme.accent : theme.muted);
   }
+}
+
+void slider(ID2D1RenderTarget* t, const palette& theme,
+            IDWriteTextFormat* small_left, const D2D1_RECT_F& row,
+            const std::wstring& label, const std::wstring& value,
+            float fraction) {
+  text(t, small_left, label, D2D1::RectF(row.left, row.top, row.left + 64,
+                                         row.bottom),
+       theme.muted);
+  const float left = row.left + 64;
+  const float right = row.right - 92;
+  const float mid = (row.top + row.bottom) / 2;
+  fill_round(t, D2D1::RectF(left, mid - 2, right, mid + 2), 2, theme.line_soft);
+  const float f = (std::max)(0.0f, (std::min)(1.0f, fraction));
+  const float knob = left + (right - left) * f;
+  fill_round(t, D2D1::RectF(left, mid - 2, knob, mid + 2), 2,
+             theme.accent_strong);
+  fill_round(t, D2D1::RectF(knob - 6, mid - 6, knob + 6, mid + 6), 6, theme.ink);
+  text(t, small_left, value, D2D1::RectF(right + 10, row.top, row.right,
+                                         row.bottom),
+       theme.ink);
+}
+
+void toggle(ID2D1RenderTarget* t, const palette& theme, const D2D1_RECT_F& r,
+            bool on) {
+  fill_round(t, r, (r.bottom - r.top) / 2,
+             on ? theme.accent : theme.panel_strong);
+  const float half = (r.bottom - r.top) / 2;
+  const float cx = on ? r.right - half : r.left + half;
+  const float cy = (r.top + r.bottom) / 2;
+  fill_round(t, D2D1::RectF(cx - half + 3, cy - half + 3, cx + half - 3,
+                            cy + half - 3),
+             half - 3, on ? theme.on_accent : theme.muted);
 }
 
 void icon_button(ID2D1RenderTarget* t, const palette& theme,
