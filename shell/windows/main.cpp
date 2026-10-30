@@ -276,6 +276,10 @@ std::wstring ui_host_w() {
 }
 
 std::string g_surface_path;
+/// The test build runs beside an installed instance: skip the single-instance
+/// focus and let the core bind a dedicated port.
+bool g_standalone = false;
+int g_core_port = 0;
 
 bool start_core(const std::wstring& core, const std::wstring& web_root, int& port,
                 std::string& token, std::string& client_token, bool& tls,
@@ -304,6 +308,9 @@ bool start_core(const std::wstring& core, const std::wstring& web_root, int& por
   if (!web_root.empty()) command += L" --web-root \"" + web_root + L"\"";
   if (!g_core_host.empty()) {
     command += L" --host \"" + g_core_host + L"\"";
+  }
+  if (g_core_port > 0) {
+    command += L" --port " + std::to_wstring(g_core_port);
   }
 
   PROCESS_INFORMATION process{};
@@ -1050,7 +1057,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
 int run(HINSTANCE instance) {
   CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
-  if (!g_url_mode && !g_smoke && focus_running_instance()) {
+  if (!g_url_mode && !g_smoke && !g_standalone && focus_running_instance()) {
     CoUninitialize();
     return 0;
   }
@@ -1245,6 +1252,10 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int) {
         g_url_override = argv[++i];
       } else if (wcscmp(argv[i], L"--host") == 0 && i + 1 < argc) {
         g_core_host = argv[++i];
+      } else if (wcscmp(argv[i], L"--standalone") == 0) {
+        g_standalone = true;
+      } else if (wcscmp(argv[i], L"--core-port") == 0 && i + 1 < argc) {
+        g_core_port = _wtoi(argv[++i]);
       } else if (wcscmp(argv[i], L"--surface") == 0 && i + 1 < argc) {
         const std::wstring surface_path = argv[++i];
         LocalFree(argv);
