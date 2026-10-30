@@ -5,6 +5,7 @@
 #include <d2d1.h>
 
 #include <cmath>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -184,6 +185,28 @@ void dropdown_draw(ID2D1RenderTarget* t, const palette& theme,
 /// only opening/closing, and -2 when the click was outside.
 int dropdown_click(dropdown_state& s, const D2D1_RECT_F& field,
                    const std::vector<std::wstring>& items, float x, float y);
+
+/// Floating tooltip next to (x, y); keep it inside the client area.
+void tooltip(ID2D1RenderTarget* t, const palette& theme,
+             IDWriteTextFormat* small, float x, float y,
+             const std::wstring& label, const D2D1_SIZE_F& size);
+/// Bottom-centre toast; fades out in the last 400 ms before `until_ms`.
+struct toast_state {
+  std::wstring text;
+  uint64_t until_ms = 0;
+};
+void toast(ID2D1RenderTarget* t, const palette& theme,
+           IDWriteTextFormat* small, const D2D1_SIZE_F& size,
+           const toast_state& state, uint64_t now_ms);
+/// Dims the content behind a modal.
+void modal_scrim(ID2D1RenderTarget* t, const D2D1_SIZE_F& size);
+/// Draws a modal frame centred in `size`; returns the inner content rect and
+/// the close-button rect.
+D2D1_RECT_F modal_panel(ID2D1RenderTarget* t, const palette& theme,
+                        IDWriteTextFormat* title, const D2D1_SIZE_F& size,
+                        float width, float height,
+                        const std::wstring& heading,
+                        D2D1_RECT_F* close_rect);
 
 /// A small on/off switch.
 void toggle(ID2D1RenderTarget* t, const palette& theme, const D2D1_RECT_F& r,

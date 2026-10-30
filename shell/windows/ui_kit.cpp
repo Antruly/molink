@@ -171,6 +171,65 @@ int dropdown_click(dropdown_state& s, const D2D1_RECT_F& field,
   return -2;
 }
 
+void tooltip(ID2D1RenderTarget* t, const palette& theme,
+             IDWriteTextFormat* small, float x, float y,
+             const std::wstring& label, const D2D1_SIZE_F& size) {
+  const float w = 16 + 7.0f * static_cast<float>(label.size());
+  const float h = 24;
+  float left = x + 12;
+  if (left + w > size.width - 8) left = size.width - 8 - w;
+  float top = y + 14;
+  if (top + h > size.height - 8) top = y - h - 8;
+  const D2D1_RECT_F r = D2D1::RectF(left, top, left + w, top + h);
+  shadow(t, r, 6);
+  fill_round(t, r, 6, theme.panel_strong);
+  stroke_round(t, r, 6, theme.line);
+  text(t, small, label, r, theme.ink);
+}
+
+void toast(ID2D1RenderTarget* t, const palette& theme,
+           IDWriteTextFormat* small, const D2D1_SIZE_F& size,
+           const toast_state& state, uint64_t now_ms) {
+  if (state.text.empty() || now_ms >= state.until_ms) return;
+  const float w = 28 + 7.0f * static_cast<float>(state.text.size());
+  const float h = 32;
+  const float left = (size.width - w) / 2;
+  const float top = size.height - h - 24;
+  const D2D1_RECT_F r = D2D1::RectF(left, top, left + w, top + h);
+  shadow(t, r, 8);
+  fill_round(t, r, 8, theme.panel_strong);
+  stroke_round(t, r, 8, theme.line);
+  text(t, small, state.text, r, theme.ink);
+}
+
+void modal_scrim(ID2D1RenderTarget* t, const D2D1_SIZE_F& size) {
+  fill_round(t, D2D1::RectF(0, 0, size.width, size.height), 0,
+             D2D1::ColorF(0, 0, 0, 0.45f));
+}
+
+D2D1_RECT_F modal_panel(ID2D1RenderTarget* t, const palette& theme,
+                        IDWriteTextFormat* title, const D2D1_SIZE_F& size,
+                        float width, float height,
+                        const std::wstring& heading,
+                        D2D1_RECT_F* close_rect) {
+  const D2D1_RECT_F panel =
+      D2D1::RectF((size.width - width) / 2, (size.height - height) / 2,
+                  (size.width + width) / 2, (size.height + height) / 2);
+  shadow(t, panel, 14);
+  fill_round(t, panel, 14, theme.surface);
+  stroke_round(t, panel, 14, theme.line);
+  text(t, title, heading,
+       D2D1::RectF(panel.left + 20, panel.top + 14, panel.right - 60,
+                   panel.top + 40),
+       theme.ink);
+  if (close_rect != nullptr) {
+    *close_rect = D2D1::RectF(panel.right - 44, panel.top + 14,
+                              panel.right - 18, panel.top + 40);
+  }
+  return D2D1::RectF(panel.left + 20, panel.top + 48, panel.right - 20,
+                     panel.bottom - 16);
+}
+
 void toggle(ID2D1RenderTarget* t, const palette& theme, const D2D1_RECT_F& r,
             bool on) {
   fill_round(t, r, (r.bottom - r.top) / 2,
