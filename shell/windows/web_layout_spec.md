@@ -57,3 +57,22 @@ connect/chat column on the right (x 413-1127).
 
 The bar floats at y=122 with 28 px controls and 9.6 px radii for pills; selects
 use a 6 px radius and 30 px height. When collapsed it becomes a 40x40 ball.
+
+## Structural finding (measured home, viewport 1164x745, 96 DPI)
+
+The web home is **two rows**, not one strip:
+
+1. **Title bar** `y=0..40`, full width, background `oklab(0.278 -0.008 -0.031 / 0.85)`
+   over `#151d2b`; window buttons 32x28 at y=6, x=1052/1088/1124, radius 6.
+2. **App header** starts at `y≈49`: logo "moLink" at x=16..102 (15-16px text),
+   then the tab strip at x=127 with a 68x30, radius-8 tab (首页, accent-soft
+   when active), and the actions cluster on the right.
+
+My native shell currently merges the window buttons, logo, tabs and theme
+switch into one 52 px strip - that is why it reads as a different product.
+The rebuild must split it into the two rows above before anything else.
+
+Measured rows so far: title bar 40, header row ~30 tabs at y=49, device card
+avatar 58 at (37,113), connect button 714x36 at y=301, filter chips y=402,
+session toolbar controls at y=122 (28 high, radius 9.6, selects 30 high
+radius 6).
