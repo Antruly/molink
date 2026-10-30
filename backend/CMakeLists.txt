@@ -681,6 +681,15 @@ set_target_properties(molink-core-stream-policy-test PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 add_test(NAME stream_policy COMMAND molink-core-stream-policy-test)
 
+# The weight-based QoS controller: viewer feedback in, budget scale out.
+add_executable(molink-core-stream-qos-test
+  tests/stream_qos_test.cpp
+)
+target_include_directories(molink-core-stream-qos-test PRIVATE src)
+set_target_properties(molink-core-stream-qos-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME stream_qos COMMAND molink-core-stream-qos-test)
+
 # The rate-driven quality controller: preset in, viewer frame rate out.
 add_executable(molink-core-rate-quality-test
   tests/rate_quality_test.cpp

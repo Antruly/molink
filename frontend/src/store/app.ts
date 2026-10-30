@@ -116,6 +116,13 @@ export interface SessionTab {
   hostBuildMs?: number
   /// Preset another viewer selected on the shared host; this tab follows it.
   sharedQuality?: { mode: string }
+  /// Another viewer moved the toolbar's encoding sliders.
+  sharedKnobs?: {
+    qp?: number
+    bitrateKbps?: number
+    rateMode?: string
+    format?: string
+  }
   notice: string | null
   /// When the host must approve this session: epoch ms of the 60 s deadline.
   approvalDeadline: number | null

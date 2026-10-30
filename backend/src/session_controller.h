@@ -14,6 +14,7 @@
 #include "auth_state.h"
 #include "call_hub.h"
 #include "capture/capture.h"
+#include "capture/stream_qos.h"
 #include "chat_hub.h"
 #include "clipboard/clipboard.h"
 #include "file_transfer.h"
@@ -170,6 +171,9 @@ class session_supervisor {
   std::atomic<bool> running_{false};
   /// Last AV1 policy value announced to the capture source (diagnostics).
   bool av1_allowed_ = false;
+  /// Weight-based stream controller: stretches or squeezes the user's
+  /// anchors from the viewers' paint rate, drops and RTT.
+  stream_qos qos_;
   /// A viewer joined: the picture starts on the stream instead of tiles so the
   /// first seconds do not pay the full-screen tile keyframe.
   bool had_viewers_ = false;

@@ -66,6 +66,15 @@ export interface Welcome {
   viewer_stats?: boolean
   /** The host resolves the "auto" quality preset itself. */
   auto_quality?: boolean
+  /** Current toolbar slider values (qp 0 = preset, bitrate_kbps 0 = preset). */
+  stream?: {
+    qp?: number
+    bitrate_kbps?: number
+    rate_mode?: string
+    format?: string
+    format_custom?: boolean
+    fps?: number
+  }
   /** Stream codecs this host can encode right now. */
   stream_codecs?: string[]
   /** The host's global stream codec preference (auto/av1/h264/vp9/vp8). */
@@ -214,6 +223,13 @@ export interface ClientHandlers {
   /// Another viewer changed the host-global quality preset; this tab must
   /// follow it instead of asserting its own choice.
   onQualityShared?: (mode: string) => void
+  /** Another viewer (or the host) changed the encoding sliders. */
+  onQualityKnobs?: (knobs: {
+    qp?: number
+    bitrateKbps?: number
+    rateMode?: string
+    format?: string
+  }) => void
   onCursor: (shape: CursorShape) => void
   onCursorPosition: (position: CursorPosition) => void
   onClipboard: (text: string) => void
@@ -257,6 +273,12 @@ interface ControlMessage {
   visible?: boolean
   text?: string
   mode?: string
+  /// Toolbar slider values on a `quality` message: QP (0 = preset), bitrate
+  /// ceiling (0 = preset), rate mode (auto | cq | cbr) and pixel format.
+  qp?: number
+  bitrate_kbps?: number
+  rate_mode?: string
+  format?: string
   /// Wire protocol in a `transport` message (websocket | quic | udp | tcp).
   protocol?: string
   index?: number
@@ -403,6 +425,8 @@ export class MolinkClient {
   private cellReceivedSeq = new Map<string, number>()
   private lastSeqRequest = 0
   private lastKeyframeRequest = 0
+  /// Latest measured round-trip, reported with the viewer stats.
+  private lastRttMs = 0
   /// Preset this tab pushed; used to notice a host-global preset changed by
   /// another viewer while we keep asking for a colour format.
   private pushedQuality: { mode: string; fps?: number } | null = null
@@ -1085,6 +1109,9 @@ export class MolinkClient {
       fps: Math.max(0, Math.round(fps)),
       dropped: Math.max(0, Math.round(dropped)),
       rx: Math.max(0, Math.round(rxRate)),
+      // The host's QoS uses this together with the paint rate to decide how
+      // hard it may squeeze the bitrate.
+      rtt: Math.max(0, Math.round(this.lastRttMs)),
     })
   }
 
@@ -1098,11 +1125,25 @@ export class MolinkClient {
    * Applies an encoding preset. "auto" is resolved client-side, so only the
    * three concrete modes are ever sent.
    */
-  setQuality(mode: string, fps?: number): void {
+  setQuality(
+    mode: string,
+    fps?: number,
+    knobs?: {
+      qp?: number
+      bitrateKbps?: number
+      rateMode?: string
+      format?: string
+    },
+  ): void {
     this.pushedQuality = { mode, fps }
     this.lastQualityAssertAt = 0
     if (!this.isLive()) return
-    this.sendJson({ type: 'quality', mode, ...(fps ? { fps } : {}) })
+    const extra: Record<string, unknown> = {}
+    if (knobs?.qp !== undefined) extra.qp = knobs.qp
+    if (knobs?.bitrateKbps !== undefined) extra.bitrate_kbps = knobs.bitrateKbps
+    if (knobs?.rateMode !== undefined) extra.rate_mode = knobs.rateMode
+    if (knobs?.format !== undefined) extra.format = knobs.format
+    this.sendJson({ type: 'quality', mode, ...(fps ? { fps } : {}), ...extra })
   }
 
   /** Switches the remote capture to another monitor. */
@@ -1316,7 +1357,8 @@ export class MolinkClient {
         this.missedPongs = 0
         const sent = (message as { t?: number }).t
         if (typeof sent === 'number') {
-          this.handlers.onLatency?.(Math.max(0, performance.now() - sent))
+          this.lastRttMs = Math.max(0, performance.now() - sent)
+          this.handlers.onLatency?.(this.lastRttMs)
         }
         break
       }
@@ -1413,6 +1455,16 @@ export class MolinkClient {
         if (typeof message.mode === 'string') {
           this.handlers.onQualityShared?.(message.mode)
         }
+        this.handlers.onQualityKnobs?.({
+          qp: typeof message.qp === 'number' ? message.qp : undefined,
+          bitrateKbps:
+            typeof message.bitrate_kbps === 'number'
+              ? message.bitrate_kbps
+              : undefined,
+          rateMode:
+            typeof message.rate_mode === 'string' ? message.rate_mode : undefined,
+          format: typeof message.format === 'string' ? message.format : undefined,
+        })
         break
       case 'codec':
         if (message.av1 === true) {

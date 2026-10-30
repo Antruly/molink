@@ -526,7 +526,11 @@ class svt_stream_encoder final : public av1_stream_encoder {
     if constexpr (!kModernApi) {
       config.intra_refresh_type = SVT_AV1_KF_REFRESH;
     }
-    const bool rate_controlled = bitrate_kbps > 0;
+    // Constant quality when the toolbar pins it, otherwise spend the budget
+    // (CBR, the only rate control low-delay prediction supports).
+    const bool rate_controlled =
+        bitrate_kbps > 0 &&
+        config_.rate_mode != stream_rate_mode::constant_quality;
     if (rate_controlled) {
       // Low-delay prediction has no look-ahead, so SVT rejects VBR and forces
       // CBR; ask for CBR directly. Rate control needs adaptive quantization,

@@ -102,6 +102,26 @@ bool quality_mode_from_name(const std::string& name, quality_mode& out) {
   return false;
 }
 
+bool tile_format_from_name(const std::string& name, tile_format& out) {
+  if (name == "bgra" || name == "truecolor") {
+    out = tile_format::bgra;
+    return true;
+  }
+  if (name == "rgb24") {
+    out = tile_format::rgb24;
+    return true;
+  }
+  if (name == "rgb565") {
+    out = tile_format::rgb565;
+    return true;
+  }
+  if (name == "gray8" || name == "mono") {
+    out = tile_format::gray8;
+    return true;
+  }
+  return false;
+}
+
 const char* tile_format_name(tile_format format) {
   switch (format) {
     case tile_format::rgb24:
@@ -430,13 +450,24 @@ av1_stream_encoder* capture_base::stream_for_frame(
   const quality_profile budget_profile =
       quality_profile_for(effective_quality());
   int budget_kbps = 0;
-  if (budget_profile.stream_bits_per_pixel_x1000 > 0) {
+  // An explicit toolbar bitrate wins over the preset's bits-per-pixel budget.
+  const int explicit_kbps = stream_bitrate_kbps_.load();
+  if (explicit_kbps > 0) {
+    budget_kbps = explicit_kbps;
+  } else if (budget_profile.stream_bits_per_pixel_x1000 > 0) {
     const double pixels = static_cast<double>(screen_w) * screen_h;
     const int fps = (std::max)(1, target_fps_.load());
     budget_kbps = static_cast<int>(pixels *
                                   budget_profile.stream_bits_per_pixel_x1000 *
                                   fps / 1000000.0);
     budget_kbps = std::clamp(budget_kbps, 400, 60000);
+  }
+  // The QoS weights scale whatever the user or the preset asked for; they
+  // never replace the anchor itself, so the budget springs back when the link
+  // recovers.
+  if (budget_kbps > 0) {
+    budget_kbps = std::clamp(
+        static_cast<int>(budget_kbps * qos_scale_.load()), 200, 60000);
   }
   std::vector<video_codec> ladder =
       video_ladder(av1_stream_allowed_.load(), h264_stream_allowed_.load(),
@@ -488,6 +519,7 @@ av1_stream_encoder* capture_base::stream_for_frame(
       config.speed = settings.speed;
       config.threads = settings.threads;
       config.max_bitrate_kbps = budget_kbps;
+      config.rate_mode = effective_rate_mode(budget_kbps);
       for (const video_codec codec : ladder) {
         std::string error;
         if (auto encoder = make_stream_encoder(config, codec, &error)) {
@@ -533,6 +565,7 @@ av1_stream_encoder* capture_base::stream_for_frame(
     config.speed = settings.speed;
     config.threads = settings.threads;
     config.max_bitrate_kbps = budget_kbps;
+    config.rate_mode = effective_rate_mode(budget_kbps);
     video_codec chosen = ladder.front();
     for (const video_codec codec : ladder) {
       std::string error;

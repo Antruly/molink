@@ -362,6 +362,24 @@ bool auth_state::set_stream_codec(const std::string& codec) {
   return true;
 }
 
+void auth_state::set_stream_overrides(int qp, int bitrate_kbps, int fps,
+                                      const std::string& rate_mode,
+                                      const std::string& format) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (qp >= 1 && qp <= 63) settings_.stream_qp = qp;
+  else if (qp == 0) settings_.stream_qp = 0;
+  if (bitrate_kbps >= 0) settings_.stream_bitrate_kbps = bitrate_kbps;
+  if (fps >= 0 && fps <= 60) settings_.stream_fps = fps;
+  if (rate_mode == "auto" || rate_mode == "cq" || rate_mode == "cbr") {
+    settings_.stream_rate_mode = rate_mode;
+  }
+  if (format.empty() || format == "gray8" || format == "rgb565" ||
+      format == "rgb24" || format == "bgra") {
+    settings_.stream_format = format;
+  }
+  persist_locked();
+}
+
 void auth_state::set_allow_access_requests(bool allow) {
   std::lock_guard<std::mutex> lock(mutex_);
   settings_.allow_access_requests = allow;

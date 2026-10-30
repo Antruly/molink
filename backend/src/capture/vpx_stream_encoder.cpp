@@ -203,7 +203,14 @@ class vpx_stream_encoder final : public av1_stream_encoder {
     // The quality presets below "ultra" carry a bitrate budget; the top ones
     // keep constant quality (VPX_Q) like the NVENC encoders. In CQ the target
     // bitrate is the ceiling libvpx aims for, so every codec shares it.
-    cfg.rc_end_usage = max_kbps > 0 ? VPX_CQ : VPX_Q;
+    const stream_rate_mode rate_mode = config_.rate_mode;
+    const bool cbr = max_kbps > 0 && rate_mode == stream_rate_mode::constant_bitrate;
+    const bool cq = max_kbps > 0 && rate_mode != stream_rate_mode::constant_quality;
+    cfg.rc_end_usage = cbr ? VPX_CBR : (cq ? VPX_CQ : VPX_Q);
+    // Drop frames instead of growing the encoder's queue when the link cannot
+    // take the current size; this is what keeps a TCP session from turning
+    // into hundreds of milliseconds of buffered video.
+    cfg.rc_dropframe_thresh = 25;
     // The constant-quality level is set through the codec control below; the
     // quantizer bounds stay wide because VP8 rejects a CQ level outside them
     // ("cq_level out of range").

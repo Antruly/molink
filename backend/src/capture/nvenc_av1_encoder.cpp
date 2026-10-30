@@ -799,11 +799,19 @@ class nvenc_stream_encoder final : public av1_stream_encoder {
     // previous-picture chain whose length the capture controls.
     config.gopLength = NVENC_INFINITE_GOPLENGTH;
     config.frameIntervalP = 1;
-    if (max_kbps > 0) {
+    const stream_rate_mode rate_mode = config_.rate_mode;
+    const bool constant_bitrate =
+        max_kbps > 0 && rate_mode == stream_rate_mode::constant_bitrate;
+    // Constant quality when the caller asked for it (or there is no budget at
+    // all); otherwise spend the budget, CBR or VBR.
+    if (max_kbps > 0 && rate_mode != stream_rate_mode::constant_quality) {
       // A bitrate ceiling from the quality preset. VBR lets a keyframe spend
       // more than the average and a still screen spend almost nothing, while
-      // the whole stream stays inside the budget every codec shares.
-      config.rcParams.rateControlMode = NV_ENC_PARAMS_RC_VBR;
+      // the whole stream stays inside the budget every codec shares. The
+      // toolbar's constant-bitrate mode pins the average instead.
+      config.rcParams.rateControlMode = constant_bitrate
+                                            ? NV_ENC_PARAMS_RC_CBR
+                                            : NV_ENC_PARAMS_RC_VBR;
       config.rcParams.averageBitRate = static_cast<uint32_t>(max_kbps) * 1000u;
       config.rcParams.maxBitRate =
           static_cast<uint32_t>(max_kbps) * 1000u * 4u / 3u;

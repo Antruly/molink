@@ -85,6 +85,12 @@ class auth_state {
   bool set_stream_codec(const std::string& codec);
   /// Video path: stream / mixed / tiles.
   bool set_video_mode(const std::string& mode);
+  /// Toolbar sliders: QP (0 = preset), bitrate (0 = preset), fps (0 = the
+  /// separate FPS setting), rate mode ("auto"/"cq"/"cbr") and format
+  /// ("" = preset, otherwise gray8/rgb565/rgb24/bgra).
+  void set_stream_overrides(int qp, int bitrate_kbps, int fps,
+                            const std::string& rate_mode,
+                            const std::string& format);
   /// Host AV1 encoder preference. Values are validated by the caller.
   void set_av1_encoding(bool enabled, std::string device, std::string speed,
                         int qp, int max_area_percent, int threads,

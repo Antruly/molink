@@ -1030,6 +1030,18 @@ void send_welcome(session_transport* transport, const session_info& session,
   j["tiles"]["codec"] = frame ? codec_name(frame->codec) : "bgra";
   j["tiles"]["quality"] =
       opt.capture ? quality_mode_name(opt.capture->quality()) : "balanced";
+  // The toolbar sliders: their current values, so the page opens with what the
+  // host is actually encoding instead of guessing from the preset.
+  if (opt.capture) {
+    const int rate_mode = opt.capture->stream_rate_mode_value();
+    j["stream"]["qp"] = opt.capture->stream_qp();
+    j["stream"]["bitrate_kbps"] = opt.capture->stream_bitrate_kbps();
+    j["stream"]["rate_mode"] =
+        rate_mode == 1 ? "cq" : (rate_mode == 2 ? "cbr" : "auto");
+    j["stream"]["format"] = tile_format_name(opt.capture->quality_format());
+    j["stream"]["format_custom"] = opt.capture->stream_format_override() >= 0;
+    j["stream"]["fps"] = opt.capture->target_fps();
+  }
   j["tiles"]["screen_w"] = frame ? frame->width : 0;
   j["tiles"]["screen_h"] = frame ? frame->height : 0;
   j["tiles"]["tile_w"] = frame ? frame->tile_w : 0;
@@ -1778,12 +1790,15 @@ void session_controller::on_text(const std::string& text) {
     double fps = 0;
     double dropped = 0;
     double rx = 0;
+    double rtt = 0;
     number_field(j, "fps", fps);
     number_field(j, "dropped", dropped);
     number_field(j, "rx", rx);
+    number_field(j, "rtt", rtt);
     session->viewer_paint_fps = fps < 0 ? 0 : fps;
     session->viewer_dropped = dropped < 0 ? 0 : static_cast<int>(dropped);
     session->viewer_rx_rate = rx < 0 ? 0 : rx;
+    session->viewer_rtt_ms = rtt < 0 ? 0 : rtt;
     session->viewer_stats_ms = now_ms();
     return;
   }
@@ -1857,13 +1872,97 @@ void session_controller::on_text(const std::string& text) {
     if (fps_it != j.end()) {
       fps = apply_fps(static_cast<int>(fps_it->get<double>()));
     }
-    uvcpp_json ack;
-    ack["type"] = "quality";
-    ack["mode"] = quality_mode_name(options_.capture->quality());
-    ack["format"] = tile_format_name(
-        quality_profile_for(options_.capture->quality()).format);
+
+    // Toolbar sliders. A field that is absent keeps the host's current value;
+    // 0 (or "preset") means "follow the quality preset again".
+    int qp = options_.capture->stream_qp();
+    int bitrate_kbps = options_.capture->stream_bitrate_kbps();
+    int rate_mode = options_.capture->stream_rate_mode_value();
+    int format = options_.capture->stream_format_override();
+    const auto qp_it = j.find("qp");
+    if (qp_it != j.end()) {
+      if (!qp_it->is_number() || qp_it->get<double>() < 0 ||
+          qp_it->get<double>() > 63) {
+        send_error(transport.get(), "bad_qp", "qp must be 0..63");
+        return;
+      }
+      qp = static_cast<int>(qp_it->get<double>());
+    }
+    const auto bitrate_it = j.find("bitrate_kbps");
+    if (bitrate_it != j.end()) {
+      if (!bitrate_it->is_number() || bitrate_it->get<double>() < 0 ||
+          bitrate_it->get<double>() > 60000) {
+        send_error(transport.get(), "bad_bitrate",
+                   "bitrate_kbps must be 0..60000");
+        return;
+      }
+      bitrate_kbps = static_cast<int>(bitrate_it->get<double>());
+    }
+    std::string rate_name = string_field(j, "rate_mode");
+    if (!rate_name.empty()) {
+      if (rate_name == "auto") {
+        rate_mode = 0;
+      } else if (rate_name == "cq") {
+        rate_mode = 1;
+      } else if (rate_name == "cbr") {
+        rate_mode = 2;
+      } else {
+        send_error(transport.get(), "bad_rate_mode",
+                   "rate_mode must be auto, cq or cbr");
+        return;
+      }
+    }
+    std::string format_name = string_field(j, "format");
+    if (!format_name.empty()) {
+      if (format_name == "preset") {
+        format = -1;
+      } else {
+        tile_format parsed;
+        if (!tile_format_from_name(format_name, parsed)) {
+          send_error(transport.get(), "bad_format",
+                     "format must be gray8, rgb565, rgb24, bgra or preset");
+          return;
+        }
+        format = static_cast<int>(parsed);
+      }
+    }
+    const bool knobs_changed =
+        qp != options_.capture->stream_qp() ||
+        bitrate_kbps != options_.capture->stream_bitrate_kbps() ||
+        rate_mode != options_.capture->stream_rate_mode_value() ||
+        format != options_.capture->stream_format_override();
+    options_.capture->set_stream_overrides(qp, bitrate_kbps, rate_mode, format);
+    if (options_.auth) {
+      options_.auth->set_stream_overrides(
+          qp, bitrate_kbps, fps, rate_name.empty() ? "auto" : rate_name,
+          format_name.empty() ? std::string() : format_name);
+    }
+    if (knobs_changed || options_.capture->quality() != previous) {
+      // A new format or rate mode re-initialises the encoder and the client
+      // must paint from a keyframe.
+      options_.capture->request_keyframe();
+    }
+    const tile_format effective_format = options_.capture->quality_format();
+    uvcpp_json shared;
+    shared["type"] = "quality";
+    shared["mode"] = quality_mode_name(options_.capture->quality());
+    shared["format"] = tile_format_name(effective_format);
+    shared["qp"] = options_.capture->stream_qp();
+    shared["bitrate_kbps"] = options_.capture->stream_bitrate_kbps();
+    shared["rate_mode"] = options_.capture->stream_rate_mode_value() == 1
+                              ? "cq"
+                              : (options_.capture->stream_rate_mode_value() == 2
+                                     ? "cbr"
+                                     : "auto");
+    shared["scope"] = "global";
+    for (const session_info& peer : registry_->snapshot()) {
+      if (peer.id == session->id || !peer.authenticated || !peer.transport) {
+        continue;
+      }
+      send_json(peer.transport.get(), shared);
+    }
+    uvcpp_json ack = shared;
     if (fps != 0) ack["fps"] = fps;
-    ack["scope"] = "global";
     send_json(transport.get(), ack);
     return;
   }
@@ -2724,6 +2823,40 @@ void session_supervisor::run() {
         if (!peer.h264_stream) all_h264_stream = false;
         if (!peer.vp9_stream) all_vp9_stream = false;
         if (!peer.vp8_stream) all_vp8_stream = false;
+      }
+      // Weight-based QoS: the slowest live viewer decides. Its painted frame
+      // rate, dropped frames and measured RTT move the encoder around the
+      // toolbar's anchors; a still screen (no viewers producing frames) never
+      // moves anything.
+      {
+        double slowest_fps = 0.0;
+        int worst_dropped = 0;
+        double worst_rtt = 0.0;
+        for (const session_info& peer : registry_->snapshot()) {
+          if (!peer.authenticated || !still_watching(peer)) continue;
+          if (peer.viewer_stats_ms == 0 ||
+              now_ms() - peer.viewer_stats_ms > 3000) {
+            continue;
+          }
+          if (peer.viewer_paint_fps > 0) {
+            slowest_fps = slowest_fps <= 0.0
+                              ? peer.viewer_paint_fps
+                              : (std::min)(slowest_fps, peer.viewer_paint_fps);
+          }
+          worst_dropped = (std::max)(worst_dropped, peer.viewer_dropped);
+          worst_rtt = (std::max)(worst_rtt, peer.viewer_rtt_ms);
+        }
+        stream_qos::input qin;
+        qin.paint_fps = slowest_fps;
+        qin.target_fps = options_.capture->target_fps();
+        qin.dropped = worst_dropped;
+        qin.rtt_ms = worst_rtt;
+        qin.demand = viewers > 0;
+        if (qos_.note(qin, seen_now)) {
+          const stream_qos::output q = qos_.state();
+          options_.capture->set_stream_qos(q.bitrate_scale, q.qp_offset,
+                                           q.force_cbr);
+        }
       }
       // The host settings page can switch AV1 off entirely; it still only
       // runs when every watching client can decode it.

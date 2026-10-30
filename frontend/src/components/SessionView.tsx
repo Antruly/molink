@@ -8,7 +8,6 @@ import {
   ExternalLink,
   FolderOpen,
   Cpu,
-  Gauge,
   GripHorizontal,
   ShieldCheck,
   ShieldOff,
@@ -56,6 +55,11 @@ import { Codec, codecName } from '../lib/protocol'
 import { collectDropEntries, stageDroppedFiles } from '../lib/file-drop'
 import { shellInfo, windowAction } from '../lib/shell'
 import { openSessionWindow } from '../lib/windows'
+import {
+  QualityPanel,
+  defaultKnobs,
+  type EncodingKnobs,
+} from './QualityPanel'
 import {
   sessionConnection,
   useAppStore,
@@ -502,9 +506,30 @@ export function SessionView({
   const [targetFps, setTargetFps] = useState(() =>
     fpsPlan(frameRate, resolvedMode).start,
   )
+  // Toolbar sliders. They are preferences the host's QoS keeps re-tuning
+  // around, not fixed values; "custom" only says the user moved one.
+  const [knobs, setKnobs] = useState<EncodingKnobs>(defaultKnobs)
+  const [customKnobs, setCustomKnobs] = useState(false)
   const targetFpsRef = useRef(targetFps)
   const frameRateRef = useRef(frameRate)
   const qualityModeRef = useRef(qualityMode)
+  useEffect(() => {
+    const stream = welcome?.stream
+    if (!stream) return
+    // The welcome carries the host's current slider values; adopting them is
+    // the point of the effect, and they change only when the host re-announces
+    // them (reconnect, another viewer), not on every render.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setKnobs({
+      qp: stream.qp ?? 0,
+      bitrateKbps: stream.bitrate_kbps ?? 0,
+      rateMode:
+        stream.rate_mode === 'cq' || stream.rate_mode === 'cbr'
+          ? stream.rate_mode
+          : 'auto',
+      format: stream.format_custom ? (stream.format ?? 'preset') : 'preset',
+    })
+  }, [welcome?.stream])
   const planRef = useRef(fpsPlan(frameRate, resolvedMode))
   const fpsState = useRef({
     target: targetFps,
@@ -976,6 +1001,23 @@ export function SessionView({
   // stale value and immediately reverted, which left the preset pinned to
   // whatever the last broadcast said.
   const lastSharedQuality = useRef<string | null>(null)
+  useEffect(() => {
+    const shared = tab.sharedKnobs
+    if (!shared) return
+    // Mirrors the host-global sliders another viewer just moved (same pattern
+    // as sharedQuality above).
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setKnobs((previous) => ({
+      qp: shared.qp ?? previous.qp,
+      bitrateKbps: shared.bitrateKbps ?? previous.bitrateKbps,
+      rateMode:
+        shared.rateMode === 'cq' || shared.rateMode === 'cbr'
+          ? shared.rateMode
+          : 'auto',
+      format: shared.format ?? previous.format,
+    }))
+  }, [tab.sharedKnobs])
+
   useEffect(() => {
     const shared = tab.sharedQuality?.mode
     if (!shared || shared === 'auto') return
@@ -2407,29 +2449,29 @@ export function SessionView({
                   ))}
                 </select>
               </label>
-              <label
-                className="flex shrink-0 items-center gap-1 rounded-md border border-line bg-panel px-1.5 text-muted"
-                title={t('session.quality')}
-              >
-                <Gauge size={12} />
-                <select
-                  value={qualityMode}
-                  onChange={(event) =>
-                    setQualityMode(event.target.value as QualityMode)
-                  }
-                  aria-label={t('session.quality')}
-                  className="h-7 bg-transparent text-[11px] text-ink outline-none [&>option]:bg-surface [&>option]:text-ink"
-                >
-                  <option value="turbo">{t('session.qualityTurbo')}</option>
-                  <option value="smooth">{t('session.qualitySmooth')}</option>
-                  <option value="balanced">{t('session.qualityBalanced')}</option>
-                  <option value="quality">{t('session.qualityHigh')}</option>
-                  <option value="ultra">{t('session.qualityUltra')}</option>
-                  <option value="lossless">{t('session.qualityLossless')}</option>
-                  <option value="game">{t('session.qualityGame')}</option>
-                  <option value="auto">{t('session.qualityAuto')}</option>
-                </select>
-              </label>
+              <QualityPanel
+                mode={qualityMode}
+                custom={customKnobs}
+                knobs={knobs}
+                fps={targetFps}
+                onMode={(mode) => {
+                  setQualityMode(mode as QualityMode)
+                  setCustomKnobs(false)
+                }}
+                onKnobs={(next) => {
+                  setKnobs(next)
+                  setCustomKnobs(
+                    next.qp !== 0 ||
+                      next.bitrateKbps !== 0 ||
+                      next.rateMode !== 'auto' ||
+                      next.format !== 'preset',
+                  )
+                  connection()?.setQuality(qualityMode, undefined, next)
+                }}
+                onFps={(value) =>
+                  connection()?.setQuality(qualityMode, value, knobs)
+                }
+              />
               {codecOptions.length > 0 ? (
                 <label
                   className="flex shrink-0 items-center gap-1 rounded-md border border-line bg-panel px-1.5 text-muted"

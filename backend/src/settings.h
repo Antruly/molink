@@ -82,6 +82,23 @@ struct app_settings {
   /// threshold follows it, so a still screen drops back after the dwell.
   int stream_enter_percent = 15;
 
+  /// Explicit stream knobs. 0 means "take the value from the quality preset",
+  /// so the presets keep working exactly as before and only a slider the user
+  /// actually moved deviates from them.
+  /// Quality: AV1/VP9/H.264 quantizer 1..63 (lower is sharper).
+  int stream_qp = 0;
+  /// Bitrate ceiling in kbit/s; 0 follows the preset.
+  int stream_bitrate_kbps = 0;
+  /// Capture rate 1..60; 0 follows the FPS setting the toolbar already sends.
+  int stream_fps = 0;
+  /// "auto" switches between constant quality and constant bitrate from the
+  /// viewer feedback, "cq" always keeps constant quality, "cbr" always caps
+  /// the bitrate.
+  std::string stream_rate_mode = "auto";
+  /// Pixel/colour format override: "" follows the preset, otherwise one of
+  /// gray8 (black and white), rgb565 (16-bit), rgb24 or bgra (true colour).
+  std::string stream_format;
+
   /// Temporary code shown on the home page.
   std::string temp_mode = "single";  // "single" | "multi"
   std::string temp_code;

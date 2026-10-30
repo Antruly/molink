@@ -364,7 +364,22 @@
     "tools": "工具",
     "appearance": "外观",
     "codecTiles": "瓦片",
-    "codecAuto": "自动"
+    "codecAuto": "自动",
+    "qualityCustom": "自定义",
+    "qualityReset": "恢复档位默认值",
+    "rateMode": "速率模式",
+    "rateModeAuto": "自适应",
+    "rateModeCq": "恒定质量",
+    "rateModeCbr": "恒定码率",
+    "knobQuality": "质量",
+    "knobBitrate": "码率",
+    "knobFps": "帧率",
+    "knobFollowPreset": "跟随档位",
+    "imageFormat": "图像",
+    "formatPreset": "跟随档位",
+    "formatMono": "黑白（8 位）",
+    "format16": "16 位色（RGB565）",
+    "formatTrue": "真彩（BGRA）"
   },
   "stats": {
     "fps": "帧率",

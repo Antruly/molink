@@ -364,7 +364,22 @@
     "tools": "Tools",
     "appearance": "Appearance",
     "codecTiles": "Tiles",
-    "codecAuto": "Auto"
+    "codecAuto": "Auto",
+    "qualityCustom": "Custom",
+    "qualityReset": "Reset to preset",
+    "rateMode": "Rate mode",
+    "rateModeAuto": "Auto",
+    "rateModeCq": "Constant quality",
+    "rateModeCbr": "Constant bitrate",
+    "knobQuality": "Quality",
+    "knobBitrate": "Bitrate",
+    "knobFps": "Frame rate",
+    "knobFollowPreset": "Follow preset",
+    "imageFormat": "Image",
+    "formatPreset": "Follow preset",
+    "formatMono": "Monochrome (8-bit)",
+    "format16": "16-bit colour (RGB565)",
+    "formatTrue": "True colour (BGRA)"
   },
   "stats": {
     "fps": "FPS",

@@ -64,6 +64,13 @@ export interface TabPatch {
   hostBuildMs?: number
   /// Preset another viewer selected on the shared host.
   sharedQuality?: { mode: string }
+  /// Another viewer moved the encoding sliders.
+  sharedKnobs?: {
+    qp?: number
+    bitrateKbps?: number
+    rateMode?: string
+    format?: string
+  }
   notice?: string | null
   approvalDeadline?: number | null
   retryAt?: number | null
@@ -303,6 +310,7 @@ export class SessionConnection {
         this.sink.onPatch({ codecPreference: value }),
       onQualityShared: (mode) =>
         this.sink.onPatch({ sharedQuality: { mode } }),
+      onQualityKnobs: (knobs) => this.sink.onPatch({ sharedKnobs: knobs }),
       onCursor: (cursorShape) => this.sink.onPatch({ cursorShape }),
       onCursorPosition: (cursorPosition) =>
         this.sink.onPatch({ cursorPosition }),
@@ -607,8 +615,17 @@ export class SessionConnection {
     this.client.sendInput(payload)
   }
 
-  setQuality(mode: string, fps?: number): void {
-    this.client.setQuality(mode, fps)
+  setQuality(
+    mode: string,
+    fps?: number,
+    knobs?: {
+      qp?: number
+      bitrateKbps?: number
+      rateMode?: string
+      format?: string
+    },
+  ): void {
+    this.client.setQuality(mode, fps, knobs)
   }
 
   /// Pins the host-global stream codec ("auto" restores the ladder).

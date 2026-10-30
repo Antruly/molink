@@ -20,6 +20,15 @@ struct av1_encoder_device {
   std::string detail;
 };
 
+/// How the stream encoder spends its budget. `automatic` keeps the historical
+/// behaviour (constant quality with no budget, constant bitrate with one);
+/// the toolbar's rate-mode switch pins either side explicitly.
+enum class stream_rate_mode : uint8_t {
+  automatic,
+  constant_quality,
+  constant_bitrate,
+};
+
 /// Per-encoder configuration. `speed` is "auto" | "fast" | "balanced" |
 /// "quality"; `threads` 0 means "derive from the CPU".
 struct av1_encoder_config {
@@ -29,6 +38,9 @@ struct av1_encoder_config {
   /// Stream bitrate ceiling in kbit/s; 0 keeps constant quality with no cap
   /// (the top quality presets). Every stream codec honours the same value.
   int max_bitrate_kbps = 0;
+  /// Constant bitrate, constant quality, or "spend the budget, start from the
+  /// preset's QP".
+  stream_rate_mode rate_mode = stream_rate_mode::automatic;
 };
 
 /// Encodes one screen rectangle as a standalone AV1 keyframe (intra-only), so

@@ -51,6 +51,8 @@ struct session_info {
   double viewer_paint_fps = 0;
   int viewer_dropped = 0;
   double viewer_rx_rate = 0;
+  /// Last round-trip time the viewer measured (ms); 0 = not reported yet.
+  double viewer_rtt_ms = 0;
   uint64_t viewer_stats_ms = 0;
   /// Identity the client reported in hello; lets a shared chat label who sent
   /// each message when several viewers are connected.

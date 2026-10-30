@@ -205,6 +205,21 @@ app_settings load_settings() {
       if (value == "stream" || value == "mixed" || value == "tiles") {
         settings.video_mode = value;
       }
+    } else if (key == "stream_qp") {
+      settings.stream_qp = parse_int(value, 0);
+    } else if (key == "stream_bitrate_kbps") {
+      settings.stream_bitrate_kbps = parse_int(value, 0);
+    } else if (key == "stream_fps") {
+      settings.stream_fps = parse_int(value, 0);
+    } else if (key == "stream_rate_mode") {
+      if (value == "auto" || value == "cq" || value == "cbr") {
+        settings.stream_rate_mode = value;
+      }
+    } else if (key == "stream_format") {
+      if (value == "gray8" || value == "rgb565" || value == "rgb24" ||
+          value == "bgra" || value == "raw") {
+        settings.stream_format = value;
+      }
     } else if (key == "stream_codec") {
       if (value == "auto" || value == "av1" || value == "h264" ||
           value == "vp9" || value == "vp8") {
@@ -296,6 +311,11 @@ void save_settings(const app_settings& settings) {
   stream << "video_mode=" << settings.video_mode << "\n";
   stream << "stream_enter_percent=" << settings.stream_enter_percent << "\n";
   stream << "stream_codec=" << settings.stream_codec << "\n";
+  stream << "stream_qp=" << settings.stream_qp << "\n";
+  stream << "stream_bitrate_kbps=" << settings.stream_bitrate_kbps << "\n";
+  stream << "stream_fps=" << settings.stream_fps << "\n";
+  stream << "stream_rate_mode=" << settings.stream_rate_mode << "\n";
+  stream << "stream_format=" << settings.stream_format << "\n";
   stream << "long_term_code=" << settings.long_term_code << "\n";
   stream << "temp_mode=" << settings.temp_mode << "\n";
   stream << "temp_code=" << settings.temp_code << "\n";

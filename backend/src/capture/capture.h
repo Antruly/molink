@@ -69,6 +69,7 @@ struct quality_profile {
 const char* quality_mode_name(quality_mode mode);
 bool quality_mode_from_name(const std::string& name, quality_mode& out);
 const char* tile_format_name(tile_format format);
+bool tile_format_from_name(const std::string& name, tile_format& out);
 quality_profile quality_profile_for(quality_mode mode);
 
 /// One captured screen update, already encoded as a FRAME payload.
@@ -225,7 +226,33 @@ class capture_source {
   /// the next frame for every session uses it. Sources that build their own
   /// payloads (the synthetic pattern) may ignore this.
   virtual void set_quality(quality_mode mode) { (void)mode; }
+  /// Toolbar sliders: explicit QP, bitrate ceiling, rate mode (0 automatic,
+  /// 1 constant quality, 2 constant bitrate) and pixel format (0 gray8,
+  /// 1 rgb565, 2 bgra, 3 rgb24; negative keeps the preset).
+  virtual void set_stream_overrides(int qp, int bitrate_kbps, int rate_mode,
+                                    int format) {
+    (void)qp;
+    (void)bitrate_kbps;
+    (void)rate_mode;
+    (void)format;
+  }
+  /// Weights the QoS controller applies on top of the user's anchors: a
+  /// multiplicative bitrate scale, a small QP offset, and its verdict that a
+  /// hard bitrate ceiling is needed now.
+  virtual void set_stream_qos(double bitrate_scale, int qp_offset,
+                              bool force_cbr) {
+    (void)bitrate_scale;
+    (void)qp_offset;
+    (void)force_cbr;
+  }
   virtual quality_mode quality() const { return quality_mode::balanced; }
+  /// Current toolbar slider values; sources without sliders report the
+  /// preset's own values through quality_format().
+  virtual int stream_qp() const { return 0; }
+  virtual int stream_bitrate_kbps() const { return 0; }
+  virtual int stream_rate_mode_value() const { return 0; }
+  virtual int stream_format_override() const { return -1; }
+  virtual tile_format quality_format() const { return tile_format::bgra; }
 
   /// Allow AV1 patches for the current session set. The session layer turns
   /// this on only when every watching session can decode AV1; the preset must
@@ -428,7 +455,13 @@ class capture_base : public capture_source {
 
   /// Encoding knobs for the active preset. Backends read these on the capture
   /// thread, which is why the preset is an atomic.
-  tile_format quality_format() const {
+  tile_format quality_format() const override {
+    // A format the user picked in the toolbar's 图像 slider wins over the
+    // preset; 0xff keeps the preset's own choice.
+    const unsigned value = stream_format_.load();
+    if (value <= static_cast<unsigned>(tile_format::gray8)) {
+      return static_cast<tile_format>(value);
+    }
     return quality_profile_for(effective_quality()).format;
   }
   /// Recovery paths that build tiles by hand (a tile refresh after a dropped
@@ -523,8 +556,59 @@ class capture_base : public capture_source {
       std::lock_guard<std::mutex> lock(av1_settings_mutex_);
       settings = av1_settings_;
     }
-    if (settings.qp >= 1 && settings.qp <= 63) return settings.qp;
-    return quality_profile_for(effective_quality()).av1_qp;
+    const int explicit_qp = stream_qp_.load();
+    const int offset = qos_qp_offset_.load();
+    if (explicit_qp >= 1 && explicit_qp <= 63) {
+      return (std::min)(63, (std::max)(1, explicit_qp + offset));
+    }
+    if (settings.qp >= 1 && settings.qp <= 63) {
+      return (std::min)(63, (std::max)(1, settings.qp + offset));
+    }
+    return (std::min)(63, quality_profile_for(effective_quality()).av1_qp +
+                              offset);
+  }
+
+  /// Toolbar overrides. 0/automatic keeps the quality preset's own value, so
+  /// the presets behave exactly as before until a slider is moved.
+  int stream_qp() const override { return stream_qp_.load(); }
+  int stream_bitrate_kbps() const override {
+    return stream_bitrate_kbps_.load();
+  }
+  int stream_rate_mode_value() const override {
+    return stream_rate_mode_.load();
+  }
+  /// The format override as a tile_format value, or -1 when the preset's own
+  /// format applies.
+  int stream_format_override() const override {
+    const unsigned value = stream_format_.load();
+    return value <= static_cast<unsigned>(tile_format::gray8)
+               ? static_cast<int>(value)
+               : -1;
+  }
+  void set_stream_qos(double bitrate_scale, int qp_offset,
+                      bool force_cbr) override {
+    qos_scale_.store((std::min)(2.0, (std::max)(0.25, bitrate_scale)));
+    qos_qp_offset_.store((std::min)(12, (std::max)(-4, qp_offset)));
+    qos_force_cbr_.store(force_cbr);
+  }
+  /// The encoder's rate mode for this frame: the user's choice unless the QoS
+  /// controller had to pin a hard ceiling.
+  stream_rate_mode effective_rate_mode(int budget_kbps) const {
+    if (budget_kbps > 0 && qos_force_cbr_.load()) {
+      return stream_rate_mode::constant_bitrate;
+    }
+    return static_cast<stream_rate_mode>(stream_rate_mode_.load());
+  }
+  double qos_bitrate_scale() const { return qos_scale_.load(); }
+  int qos_qp_offset() const { return qos_qp_offset_.load(); }
+  bool qos_force_cbr() const { return qos_force_cbr_.load(); }
+
+  void set_stream_overrides(int qp, int bitrate_kbps, int rate_mode,
+                            int format) override {
+    stream_qp_.store(qp < 0 ? 0 : (qp > 63 ? 63 : qp));
+    stream_bitrate_kbps_.store(bitrate_kbps < 0 ? 0 : bitrate_kbps);
+    stream_rate_mode_.store(rate_mode < 0 || rate_mode > 2 ? 0 : rate_mode);
+    stream_format_.store(format < 0 ? 0xffu : static_cast<unsigned>(format));
   }
   bool quality_av1_grayscale() const {
     return quality_profile_for(effective_quality()).av1_grayscale;
@@ -637,6 +721,15 @@ class capture_base : public capture_source {
   std::atomic<bool> running_{false};
   std::atomic<int> target_fps_{15};
   std::atomic<quality_mode> quality_{quality_mode::balanced};
+  std::atomic<int> stream_qp_{0};
+  std::atomic<int> stream_bitrate_kbps_{0};
+  std::atomic<int> stream_rate_mode_{0};
+  /// 0xff = follow the preset.
+  std::atomic<unsigned> stream_format_{0xffu};
+  /// QoS weights layered on top of the user's anchors.
+  std::atomic<double> qos_scale_{1.0};
+  std::atomic<int> qos_qp_offset_{0};
+  std::atomic<bool> qos_force_cbr_{false};
   /// Rate-driven quality controller (see rate_quality_policy). Written by the
   /// supervisor thread, read by the capture thread through the atomics.
   std::mutex rate_mutex_;
