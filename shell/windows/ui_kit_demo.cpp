@@ -49,6 +49,11 @@ struct app_state {
   int focus_field = 0;  // 0 none, 1 address, 2 code
   bool more_open = false;
   bool connect_pressed = false;
+  // Live values the shell will feed from the session.
+  std::wstring stat_codec = L"VP9";
+  int stat_kbps = 1200;
+  int stat_latency_ms = 12;
+  std::wstring stat_resolution = L"1920x1080";
   ID2D1Bitmap* avatar_bitmap = nullptr;
   std::wstring avatar_path;
   std::wstring address_text = L"127.0.0.1:28428";
@@ -452,9 +457,9 @@ void paint(HWND window) {
       x -= width + 8;
       return r;
     };
-    chip(L"1.2 Mbps", false, 74);
-    chip(L"12 ms", false, 52);
-    chip(L"VP9", true, 42);
+    chip(std::to_wstring(stat_kbps) + L" kbps", false, 78);
+    chip(std::to_wstring(stat_latency_ms) + L" ms", false, 56);
+    chip(stat_codec, true, 42);
     const D2D1_RECT_F quality_chip = chip(kPresets[g.preset], true, 61);
     if (inside(quality_chip, g.hover_x, g.hover_y)) {
       // handled on click below
