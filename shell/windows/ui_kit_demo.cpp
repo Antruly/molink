@@ -44,6 +44,7 @@ struct app_state {
   float collapse_anim = 0.0f;  // 0 expanded, 1 collapsed
   dropdown_state dropdown;
   int format_index = 2;
+  int focus_field = 0;  // 0 none, 1 address, 2 code
   int preset = 2;
   float hover_x = -1, hover_y = -1;
 
@@ -125,6 +126,12 @@ void paint(HWND window) {
     fill_round(g.target, D2D1::RectF(37, 113, 95, 171), 16,
                g.theme->accent_soft);
     draw_icon(g.target, icon::monitor, 66, 142, g.theme->accent);
+    // Platform badge at the avatar's bottom-right, like the web card.
+    fill_round(g.target, D2D1::RectF(77, 149, 103, 175), 6,
+               g.theme->surface);
+    stroke_round(g.target, D2D1::RectF(77, 149, 103, 175), 6, g.theme->line);
+    text(g.target, g.small, L"win", D2D1::RectF(77, 149, 103, 175),
+         g.theme->muted);
     text(g.target, g.title, L"INTERNET-REMOTE",
          D2D1::RectF(107, 113, 300, 137), g.theme->ink);
     pill(g.target, *g.theme, g.small, g.small_left,
@@ -155,12 +162,14 @@ void paint(HWND window) {
          D2D1::RectF(433, 112, 700, 136), g.theme->ink);
     const D2D1_RECT_F address = D2D1::RectF(433, 160, 900, 196);
     fill_round(g.target, address, 9.6f, g.theme->panel);
-    stroke_round(g.target, address, 9.6f, g.theme->line_soft);
+    stroke_round(g.target, address, 9.6f,
+                 g.focus_field == 1 ? g.theme->accent : g.theme->line_soft);
     text(g.target, g.body, L"设备 ID 或 IP[:端口]",
          D2D1::RectF(445, 160, 890, 196), g.theme->muted);
     const D2D1_RECT_F code = D2D1::RectF(910, 160, w - 36, 196);
     fill_round(g.target, code, 9.6f, g.theme->panel);
-    stroke_round(g.target, code, 9.6f, g.theme->line_soft);
+    stroke_round(g.target, code, 9.6f,
+                 g.focus_field == 2 ? g.theme->accent : g.theme->line_soft);
     text(g.target, g.body, L"验证码",
          D2D1::RectF(922, 160, w - 48, 196), g.theme->muted);
     // Measured: 连接 button spans the panel width, 36 high, radius 9.6.
@@ -537,6 +546,20 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
             D2D1::RectF(bar.right - 50 - 61, 115, bar.right - 50, 143);
         if (inside(quality_chip, x, y)) {
           g.panel_open_quality = !g.panel_open_quality;
+          return 0;
+        }
+      }
+      {
+        const D2D1_RECT_F address = D2D1::RectF(433, 160, 900, 196);
+        const D2D1_RECT_F code = D2D1::RectF(910, 160, 1100, 196);
+        if (inside(address, x, y)) {
+          g.focus_field = 1;
+          InvalidateRect(window, nullptr, FALSE);
+          return 0;
+        }
+        if (inside(code, x, y)) {
+          g.focus_field = 2;
+          InvalidateRect(window, nullptr, FALSE);
           return 0;
         }
       }
