@@ -10,6 +10,7 @@
 #endif
 #include <windows.h>
 
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <string>
@@ -81,13 +82,14 @@ void paint(HWND window) {
     EndPaint(window, &ps);
     return;
   }
-  const auto* header = reinterpret_cast<const surface_header*>(g_state.base);
+  auto* header = reinterpret_cast<surface_header*>(g_state.base);
   if (header->magic != kMagic || header->slot_bytes == 0) {
     EndPaint(window, &ps);
     return;
   }
   const uint64_t sequence =
-      __atomic_load_n(&header->sequence, __ATOMIC_ACQUIRE);
+      std::atomic_ref<uint64_t>(header->sequence).load(
+          std::memory_order_acquire);
   const uint8_t* pixels =
       g_state.base + kHeaderBytes +
       static_cast<std::size_t>(sequence & 1) * header->slot_bytes;
@@ -115,10 +117,10 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
       return 0;
     case WM_TIMER: {
       if (g_state.base != nullptr) {
-        const auto* header =
-            reinterpret_cast<const surface_header*>(g_state.base);
+        auto* header = reinterpret_cast<surface_header*>(g_state.base);
         const uint64_t sequence =
-            __atomic_load_n(&header->sequence, __ATOMIC_ACQUIRE);
+            std::atomic_ref<uint64_t>(header->sequence).load(
+                std::memory_order_acquire);
         if (sequence != g_state.seen) {
           g_state.seen = sequence;
           InvalidateRect(window, nullptr, FALSE);

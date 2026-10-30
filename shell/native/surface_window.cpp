@@ -11,6 +11,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -49,7 +50,8 @@ surface_window g_window;
 gboolean on_tick(gpointer) {
   auto* header = reinterpret_cast<surface_header*>(g_window.mapping);
   const uint64_t sequence =
-      __atomic_load_n(&header->sequence, __ATOMIC_ACQUIRE);
+      std::atomic_ref<uint64_t>(header->sequence).load(
+          std::memory_order_acquire);
   if (sequence != g_window.seen) {
     g_window.seen = sequence;
     gtk_widget_queue_draw(g_window.area);
@@ -72,7 +74,8 @@ gboolean on_tick(gpointer) {
 gboolean on_draw(GtkWidget* widget, cairo_t* cr, gpointer) {
   auto* header = reinterpret_cast<surface_header*>(g_window.mapping);
   const uint64_t sequence =
-      __atomic_load_n(&header->sequence, __ATOMIC_ACQUIRE);
+      std::atomic_ref<uint64_t>(header->sequence).load(
+          std::memory_order_acquire);
   if (sequence == 0 || header->width == 0 || header->height == 0) {
     return FALSE;
   }
