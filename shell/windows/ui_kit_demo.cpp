@@ -32,6 +32,7 @@ struct app_state {
   IDWriteTextFormat* small_left = nullptr;
   IDWriteTextFormat* body = nullptr;
   IDWriteTextFormat* title = nullptr;
+  IDWriteTextFormat* body_center = nullptr;
 
   enum class theme_mode { automatic, light, dark };
   theme_mode mode = theme_mode::automatic;
@@ -166,12 +167,12 @@ void paint(HWND window) {
     const D2D1_RECT_F connect =
         D2D1::RectF(433, 301, w - 36, 337);
     fill_round(g.target, connect, 9.6f, g.theme->accent_strong);
-    text(g.target, g.body, L"连接", connect, g.theme->on_accent);
+    text(g.target, g.body_center, L"连接", connect, g.theme->on_accent);
 
     // Recent-session filter chips (measured row at y=402).
     const wchar_t* filters[] = {L"最近", L"已保存", L"局域网", L"联网"};
     const float widths[] = {51, 53, 53, 42};
-    float fx = 433;
+    float fx = 317;
     for (int i = 0; i < 4; ++i) {
       const D2D1_RECT_F r =
           D2D1::RectF(fx, 402, fx + widths[i], 426);
@@ -401,6 +402,7 @@ bool create_resources(HWND window) {
   make(11.0f, DWRITE_FONT_WEIGHT_NORMAL, false, &g.small_left);
   make(13.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, false, &g.body);
   make(14.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, false, &g.title);
+  make(13.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, true, &g.body_center);
   RECT client{};
   GetClientRect(window, &client);
   g.factory->CreateHwndRenderTarget(
