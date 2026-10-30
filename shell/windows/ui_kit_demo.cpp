@@ -259,12 +259,12 @@ void paint(HWND window) {
     } else {
       draw_icon(g.target, icon::monitor, 66, 142, g.theme->accent);
     }
-    // Platform badge at the avatar's bottom-right, like the web card.
-    fill_round(g.target, D2D1::RectF(77, 149, 103, 175), 6,
-               g.theme->surface);
-    stroke_round(g.target, D2D1::RectF(77, 149, 103, 175), 6, g.theme->line);
-    text(g.target, g.small, L"win", D2D1::RectF(77, 149, 103, 175),
-         g.theme->muted);
+    // Platform badge pinned to the avatar's bottom-right corner, slightly
+    // outside the picture so it never covers the glyph.
+    const D2D1_RECT_F badge = D2D1::RectF(83, 157, 111, 181);
+    fill_round(g.target, badge, 7, g.theme->surface);
+    stroke_round(g.target, badge, 7, g.theme->line);
+    text(g.target, g.small, L"win", badge, g.theme->muted);
     text(g.target, g.title, L"INTERNET-REMOTE",
          D2D1::RectF(107, 113, 300, 137), g.theme->ink);
     pill(g.target, *g.theme, g.small, g.small_left,
