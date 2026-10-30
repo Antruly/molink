@@ -282,6 +282,9 @@ class connect_proxy final
 
   void deliver_binary(const uint8_t* data, std::size_t len) {
     if (closed_ || browser_ == nullptr || data == nullptr) return;
+    // The native surface mirrors the picture the page receives (tile codecs
+    // only for now; the streams wait for the core-side decoder).
+    surface_ingest_packet(compositor_, data, len);
     // Every packet here crossed the network to the host, whether or not the
     // page will see its bytes: an AV1 patch is transcoded, so the page's own
     // byte counter would show the decoded (several times larger) size.
@@ -491,9 +494,6 @@ class connect_proxy final
 
   void send_to_browser(const uint8_t* data, std::size_t len) {
     if (closed_ || browser_ == nullptr) return;
-    // The native surface mirrors the picture the page receives (tile codecs
-    // only for now; the streams wait for the core-side decoder).
-    surface_ingest_packet(compositor_, data, len);
     browser_->send_binary(reinterpret_cast<const char*>(data), len);
   }
 
