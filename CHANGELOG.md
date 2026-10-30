@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.9.76] — 2026-10-30
+
+### Fixed
+
+- **Windows x64 包缺 `datachannel.dll`**：打包脚本按 `libdatachannel.dll` 找文件，
+  而 vcpkg 产出的名字是 `datachannel.dll`，它还依赖 `juice.dll`，于是包里的
+  `molink-core.exe` 无法加载，发布前的运行时依赖检查因此中止（编译、链接、
+  安装包本身都是好的）。现在三个名字都会尝试复制，依赖检查也改成遍历包内所有
+  exe/dll，传递依赖缺失同样会拦下。
+
 ## [0.9.75] — 2026-10-30
 
 ### Fixed
@@ -12,9 +22,10 @@
   WebKit 的默认保存，同名文件直接覆盖。现在通过每个下载的 `decide-destination`
   决定落点：存到系统"下载"目录、保留页面给的文件名、同名自动编号；远端给的
   文件名只取最后一段，`../` 之类的路径不会逃出该目录。
-- **Windows / Win7 x86 发布包恢复产出**：MSVC 包因 vcpkg 的 nlohmann 3.12 抢在
-  libuvcpp 自带的 3.11 之前而链接失败（json 符号 ABI 标记不同）；Win7 的 helper
-  则是因为 mingw-w64 11 没有声明 `WTSINFOEXW`。两处都已修好。
+- **Windows 构建修复**：MSVC 包因 vcpkg 的 nlohmann 3.12 抢在 libuvcpp 自带的
+  3.11 之前而链接失败（json 符号 ABI 标记不同）；Win7 的 helper 则是因为
+  mingw-w64 11 没有声明 `WTSINFOEXW`。两处都已修好（x64 包还差一个运行时 DLL，
+  见 0.9.76）。
 
 ### Added
 

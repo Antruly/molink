@@ -41,7 +41,11 @@ cp "$ROOT/shell/assets/icons/icon.ico" "$PKG/molink.ico"
 cp -r "$WEB/." "$PKG/web/"
 
 # WebRTC: libdatachannel comes from vcpkg when the core was built with it.
-for _dll in libdatachannel.dll; do
+# The DLL is named after the CMake target (datachannel.dll), and on the
+# dynamic triplets it imports libjuice, which has to travel with it. Earlier
+# packages looked for libdatachannel.dll, found nothing, and shipped a core
+# that could not load.
+for _dll in datachannel.dll juice.dll libdatachannel.dll; do
   for _dir in "${VCPKG_INSTALLATION_ROOT:+$VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin}"; do
     [ -n "$_dir" ] && [ -f "$_dir/$_dll" ] && cp "$_dir/$_dll" "$PKG/"
   done
