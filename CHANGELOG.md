@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.9.82] — 2026-10-31
+
+### Added
+
+- **原生画面（第 1 步）**：观看端 core 把收到的 tiles（BGRA / RGB24 / RGB565 /
+  gray8 及 deflate 变体）合成成一张 BGRA 画布，经共享内存发布；壳在
+  `MOLINK_SURFACE=1` 时自动打开原生画面窗（Linux 复用 GTK/cairo 窗口，Windows
+  新增 GDI 窗口）。AV1/VP9/H.264/JPEG 流仍由页面解码，等第 2 步把解码搬进 core。
+- 壳新增 `--standalone`（跳过单实例聚焦）和 `--core-port <n>`（测试实例避开
+  已占用端口）。
+
 ## [0.9.81] — 2026-10-31
 
 ### Added
