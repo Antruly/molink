@@ -1,15 +1,20 @@
 # Changelog
 
-## [Unreleased]
+## [0.9.75] — 2026-10-30
 
 ### Fixed
 
 - **文件上传一直是 0%**：面板把"排队中"也算作忙碌，发送按钮在一有文件排队时
   就是禁用的，传输永远启动不了。现在只有真正在传输时才禁用按钮。
 - 调试日志 `client-log` 不再被主机当作未知消息回复 `unsupported control type`。
-- **原生壳里点下载没反应**：WebKitGTK 会直接取消没有处理者的下载，而壳从未
-  处理 `download-started`。下载现在存到系统的"下载"目录，同名文件自动加序号；
-  远端给的文件名只取最后一段，`../` 之类的路径不会逃出该目录。
+- **原生壳下载同名文件被静默覆盖**：壳的下载处理挂错了对象（GTK3 的 4.1 API 中
+  `download-started` 属于 `WebKitWebContext`，连到 WebView 上无效），实际走的是
+  WebKit 的默认保存，同名文件直接覆盖。现在通过每个下载的 `decide-destination`
+  决定落点：存到系统"下载"目录、保留页面给的文件名、同名自动编号；远端给的
+  文件名只取最后一段，`../` 之类的路径不会逃出该目录。
+- **Windows / Win7 x86 发布包恢复产出**：MSVC 包因 vcpkg 的 nlohmann 3.12 抢在
+  libuvcpp 自带的 3.11 之前而链接失败（json 符号 ABI 标记不同）；Win7 的 helper
+  则是因为 mingw-w64 11 没有声明 `WTSINFOEXW`。两处都已修好。
 
 ### Added
 
