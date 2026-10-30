@@ -50,6 +50,11 @@ struct app_state {
   float panel_anim = 1.0f;     // 0 collapsed .. 1 expanded
   bool collapsed = false;      // floating toolbar collapsed
   float collapse_anim = 0.0f;  // 0 expanded, 1 collapsed
+  float bar_x = 16, bar_y = 107;
+  bool dragging_bar = false;
+  float drag_dx = 0, drag_dy = 0;
+  bool pinned = false;
+  D2D1_RECT_F hit_pin{};
   dropdown_state dropdown;
   int format_index = 2;
   int focus_field = 0;  // 0 none, 1 address, 2 code
@@ -544,8 +549,14 @@ void paint(HWND window) {
          D2D1::RectF(160, 115, 280, 143), g.theme->muted);
   }
   // Collapse chevron.
+  g.hit_pin = D2D1::RectF(bar.right - 78, bar.top + 14, bar.right - 50,
+                          bar.top + 42);
+  if (collapse <= 0.5f) {
+    icon_button(g.target, *g.theme, g.hit_pin, icon::settings,
+                g.pinned || inside(g.hit_pin, g.hover_x, g.hover_y));
+  }
   const D2D1_RECT_F collapse_button =
-      D2D1::RectF(bar.right - 42, bar.top + 8, bar.right - 14, bar.top + 36);
+      D2D1::RectF(bar.right - 42, bar.top + 14, bar.right - 14, bar.top + 42);
   g.hit_collapse = collapse_button;
   icon_button(g.target, *g.theme, collapse_button,
               g.collapsed ? icon::chevron_down : icon::close,
@@ -762,6 +773,14 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
       return 0;
     }
     case WM_MOUSEMOVE: {
+      if (g.dragging_bar) {
+        g.bar_x = static_cast<float>(LOWORD(lparam)) * 96.0f / g_dpi - g.drag_dx;
+        g.bar_y = static_cast<float>(HIWORD(lparam)) * 96.0f / g_dpi - g.drag_dy;
+        if (g.bar_x < 0) g.bar_x = 0;
+        if (g.bar_y < 80) g.bar_y = 80;
+        InvalidateRect(window, nullptr, FALSE);
+        return 0;
+      }
       g.hover_x = static_cast<float>(LOWORD(lparam)) * 96.0f / g_dpi;
       g.hover_y = static_cast<float>(HIWORD(lparam)) * 96.0f / g_dpi;
       InvalidateRect(window, nullptr, FALSE);
@@ -774,6 +793,18 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
     case WM_LBUTTONDOWN: {
       const float x = static_cast<float>(LOWORD(lparam)) * 96.0f / g_dpi;
       const float y = static_cast<float>(HIWORD(lparam)) * 96.0f / g_dpi;
+      // Dragging the floating bar itself moves it.
+      {
+        const D2D1_RECT_F bar = D2D1::RectF(g.bar_x, g.bar_y, g.bar_x + 260,
+                                            g.bar_y + 56);
+        if (inside(bar, x, y)) {
+          g.dragging_bar = true;
+          g.drag_dx = x - g.bar_x;
+          g.drag_dy = y - g.bar_y;
+          return 0;
+        }
+        if (!g.pinned) g.collapsed = true;
+      }
       if (inside(g.hit_modal_close, x, y)) {
         PostMessageW(window, WM_CLOSE, 0, 0);
         return 0;
@@ -921,6 +952,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
       return 0;
     }
     case WM_LBUTTONUP:
+      g.dragging_bar = false;
       if (g.connect_pressed) {
         g.connect_pressed = false;
         InvalidateRect(window, nullptr, FALSE);
