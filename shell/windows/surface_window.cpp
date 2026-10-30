@@ -33,6 +33,15 @@ struct surface_header {
   uint32_t reserved[5];
 };
 
+/// Reads the published sequence with acquire ordering without needing
+/// std::atomic_ref (C++20): the Win7 x86 shell is built as C++17, and an
+/// aligned 64-bit load is atomic on every target we support.
+inline uint64_t read_sequence(surface_header* header) {
+  const uint64_t sequence = header->sequence;
+  std::atomic_thread_fence(std::memory_order_acquire);
+  return sequence;
+}
+
 const wchar_t* kClassName = L"moLinkSurfaceNative";
 
 struct surface_state {
@@ -88,8 +97,7 @@ void paint(HWND window) {
     return;
   }
   const uint64_t sequence =
-      std::atomic_ref<uint64_t>(header->sequence).load(
-          std::memory_order_acquire);
+      read_sequence(header);
   const uint8_t* pixels =
       g_state.base + kHeaderBytes +
       static_cast<std::size_t>(sequence & 1) * header->slot_bytes;
@@ -119,8 +127,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
       if (g_state.base != nullptr) {
         auto* header = reinterpret_cast<surface_header*>(g_state.base);
         const uint64_t sequence =
-            std::atomic_ref<uint64_t>(header->sequence).load(
-                std::memory_order_acquire);
+            read_sequence(header);
         if (sequence != g_state.seen) {
           g_state.seen = sequence;
           InvalidateRect(window, nullptr, FALSE);

@@ -35,6 +35,15 @@ struct surface_header {
   uint32_t reserved[5];
 };
 
+/// Reads the published sequence with acquire ordering without needing
+/// std::atomic_ref (C++20): the Win7 x86 shell is built as C++17, and an
+/// aligned 64-bit load is atomic on every target we support.
+inline uint64_t read_sequence(surface_header* header) {
+  const uint64_t sequence = header->sequence;
+  std::atomic_thread_fence(std::memory_order_acquire);
+  return sequence;
+}
+
 struct surface_window {
   uint8_t* mapping = nullptr;
   std::size_t bytes = 0;
@@ -50,8 +59,7 @@ surface_window g_window;
 gboolean on_tick(gpointer) {
   auto* header = reinterpret_cast<surface_header*>(g_window.mapping);
   const uint64_t sequence =
-      std::atomic_ref<uint64_t>(header->sequence).load(
-          std::memory_order_acquire);
+      read_sequence(header);
   if (sequence != g_window.seen) {
     g_window.seen = sequence;
     gtk_widget_queue_draw(g_window.area);
@@ -74,8 +82,7 @@ gboolean on_tick(gpointer) {
 gboolean on_draw(GtkWidget* widget, cairo_t* cr, gpointer) {
   auto* header = reinterpret_cast<surface_header*>(g_window.mapping);
   const uint64_t sequence =
-      std::atomic_ref<uint64_t>(header->sequence).load(
-          std::memory_order_acquire);
+      read_sequence(header);
   if (sequence == 0 || header->width == 0 || header->height == 0) {
     return FALSE;
   }
