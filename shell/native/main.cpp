@@ -908,10 +908,14 @@ void on_download_started(WebKitWebView*, WebKitDownload* download, gpointer) {
   gchar* base = g_path_get_basename(suggested != nullptr && *suggested != '\0'
                                         ? suggested
                                         : "molink-download");
+  // XDG may name a Downloads folder that does not exist; WebKit refuses a
+  // destination whose parent is missing, so fall back to the home directory.
   const gchar* downloads = g_get_user_special_dir(G_USER_DIRECTORY_DOWNLOAD);
-  gchar* dir = g_strdup(downloads != nullptr && *downloads != '\0'
-                            ? downloads
-                            : g_get_home_dir());
+  if (downloads == nullptr || *downloads == '\0' ||
+      !g_file_test(downloads, G_FILE_TEST_IS_DIR)) {
+    downloads = g_get_home_dir();
+  }
+  gchar* dir = g_strdup(downloads != nullptr ? downloads : "/tmp");
   gchar* dest = g_build_filename(dir, base, nullptr);
   for (int suffix = 1; suffix < 1000 && g_file_test(dest, G_FILE_TEST_EXISTS);
        ++suffix) {
