@@ -47,6 +47,7 @@ struct app_state {
   int focus_field = 0;  // 0 none, 1 address, 2 code
   std::wstring address_text = L"127.0.0.1:28428";
   std::wstring code_text;
+  size_t address_caret = 14, code_caret = 0;
   bool caret_on = true;
   ULONGLONG caret_tick = 0;
   int preset = 2;
@@ -173,7 +174,7 @@ void paint(HWND window) {
     text(g.target, g.body, address_shown, D2D1::RectF(445, 160, 890, 196),
          g.address_text.empty() ? g.theme->muted : g.theme->ink);
     if (g.focus_field == 1 && g.caret_on) {
-      const float caret_x = 445 + 7.5f * static_cast<float>(g.address_text.size());
+      const float caret_x = 445 + 7.5f * static_cast<float>(g.address_caret);
       line(g.target, caret_x, 166, caret_x, 190, g.theme->accent, 1.5f);
     }
     const D2D1_RECT_F code = D2D1::RectF(910, 160, w - 36, 196);
@@ -185,7 +186,7 @@ void paint(HWND window) {
     text(g.target, g.body, code_shown, D2D1::RectF(922, 160, w - 48, 196),
          g.code_text.empty() ? g.theme->muted : g.theme->ink);
     if (g.focus_field == 2 && g.caret_on) {
-      const float caret_x = 922 + 7.5f * static_cast<float>(g.code_text.size());
+      const float caret_x = 922 + 7.5f * static_cast<float>(g.code_caret);
       line(g.target, caret_x, 166, caret_x, 190, g.theme->accent, 1.5f);
     }
     // Measured: 连接 button spans the panel width, 36 high, radius 9.6.
@@ -605,30 +606,58 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
       if (g.focus_field != 0 && ch >= 32 && ch != 127) {
         std::wstring& target =
             g.focus_field == 1 ? g.address_text : g.code_text;
+        size_t& caret = g.focus_field == 1 ? g.address_caret : g.code_caret;
         if (target.size() < 64) {
-          target.push_back(ch);
+          target.insert(target.begin() + static_cast<long>(caret), ch);
+          ++caret;
           InvalidateRect(window, nullptr, FALSE);
         }
         return 0;
       }
       break;
     }
-    case WM_KEYDOWN:
-      if (wparam == VK_BACK && g.focus_field != 0) {
-        std::wstring& target =
-            g.focus_field == 1 ? g.address_text : g.code_text;
-        if (!target.empty()) {
-          target.pop_back();
-          InvalidateRect(window, nullptr, FALSE);
+    case WM_KEYDOWN: {
+      if (g.focus_field == 0) break;
+      std::wstring& target =
+          g.focus_field == 1 ? g.address_text : g.code_text;
+      size_t& caret = g.focus_field == 1 ? g.address_caret : g.code_caret;
+      if (wparam == VK_BACK) {
+        if (caret > 0) {
+          target.erase(target.begin() + static_cast<long>(caret - 1));
+          --caret;
         }
-        return 0;
-      }
-      if (wparam == VK_ESCAPE) {
+      } else if (wparam == VK_LEFT) {
+        if (caret > 0) --caret;
+      } else if (wparam == VK_RIGHT) {
+        if (caret < target.size()) ++caret;
+      } else if (wparam == VK_HOME) {
+        caret = 0;
+      } else if (wparam == VK_END) {
+        caret = target.size();
+      } else if (wparam == VK_ESCAPE) {
         g.focus_field = 0;
-        InvalidateRect(window, nullptr, FALSE);
-        return 0;
+      } else if ((GetKeyState(VK_CONTROL) & 0x8000) != 0 &&
+                 (wparam == 'V' || wparam == 'v')) {
+        if (OpenClipboard(window)) {
+          HANDLE data = GetClipboardData(CF_UNICODETEXT);
+          if (data != nullptr) {
+            const auto* text = static_cast<const wchar_t*>(GlobalLock(data));
+            if (text != nullptr) {
+              for (const wchar_t* c = text; *c != L'\0' && target.size() < 64; ++c) {
+                if (*c >= 32 && *c != 127) {
+                  target.insert(target.begin() + static_cast<long>(caret), *c);
+                  ++caret;
+                }
+              }
+              GlobalUnlock(data);
+            }
+          }
+          CloseClipboard();
+        }
       }
-      break;
+      InvalidateRect(window, nullptr, FALSE);
+      return 0;
+    }
     case WM_DESTROY:
       PostQuitMessage(0);
       return 0;
