@@ -1294,9 +1294,13 @@ int run(HINSTANCE instance) {
           L" --remote-allow-origins=*");
       env_options->AddRef();
     }
+    std::fprintf(stderr, "shell: debug port=%d env_options=%p\n",
+                 g_debug_port, static_cast<void*>(env_options));
     const HRESULT created = create_environment(
         browser_folder.empty() ? nullptr : browser_folder.c_str(),
         user_data.c_str(), env_options, new EnvironmentHandler());
+    std::fprintf(stderr, "shell: create_environment hr=0x%08lx\n",
+                 static_cast<unsigned long>(created));
     if (env_options != nullptr) env_options->Release();
     if (FAILED(created)) {
       if (g_smoke) {
