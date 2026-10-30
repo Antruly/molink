@@ -305,34 +305,57 @@ void paint(HWND window) {
     }
     g.hit_modal_close = buttons[2];
 
-    // App header: logo at x=16, tabs from x=127 (68x30, radius 8).
+    // App header: logo+name, the fixed 首页 tab, a new-session icon, the
+    // session tabs, then the theme and settings squares at the right edge.
     const float header_y = 49;
     fill_round(g.target, D2D1::RectF(16, header_y + 3, 28, header_y + 15), 5,
                g.theme->accent_strong);
     text(g.target, g.body, L"moLink",
          D2D1::RectF(36, header_y, 110, header_y + 30), g.theme->ink);
-    static const std::vector<std::wstring> tabs = {L"首页", L"远程桌面",
-                                                   L"文件", L"设置"};
-    const D2D1_RECT_F strip = D2D1::RectF(0, 42, w, 82);
-    for (int i = 0; i < 4; ++i) {
-      const D2D1_RECT_F r =
-          D2D1::RectF(127 + i * 74, header_y, 127 + i * 74 + 68,
-                      header_y + 30);
-      const bool active = g.tab == (i == 0 ? 0 : (i == 1 ? 1 : (i == 2 ? 2 : 3)));
-      pill(g.target, *g.theme, g.small, g.small_left, r, tabs[i], active,
-           inside(r, g.hover_x, g.hover_y), icon::none);
-    }
-    (void)strip;
-    // Theme switch at the header's right edge.
-    const wchar_t* labels[3] = {L"自动", L"亮色", L"暗色"};
-    float mx = w - 24 - 3 * 48 - 2 * 6;
-    for (int i = 0; i < 3; ++i) {
-      g.hit_theme[i] = D2D1::RectF(mx, header_y, mx + 48, header_y + 30);
-      pill(g.target, *g.theme, g.small, g.small_left, g.hit_theme[i], labels[i],
-           static_cast<int>(g.mode) == i,
-           inside(g.hit_theme[i], g.hover_x, g.hover_y), icon::none);
-      mx += 48 + 6;
-    }
+
+    const D2D1_RECT_F home_tab = D2D1::RectF(127, header_y, 195, header_y + 30);
+    pill(g.target, *g.theme, g.small, g.small_left, home_tab, L"首页",
+         g.tab == 0, inside(home_tab, g.hover_x, g.hover_y), icon::none);
+    g.hit_tab[0] = home_tab;
+
+    const D2D1_RECT_F plus = D2D1::RectF(201, header_y, 229, header_y + 30);
+    icon_button(g.target, *g.theme, plus, icon::plus,
+                inside(plus, g.hover_x, g.hover_y));
+    g.hit_tab[1] = plus;
+
+    // Session tab (one remote per tab; a session list arrives with the real
+    // shell). Status dot + name + close, 146x30 like the web.
+    const D2D1_RECT_F session_tab =
+        D2D1::RectF(237, header_y, 383, header_y + 30);
+    const bool session_active = g.tab == 1;
+    fill_round(g.target, session_tab, 8,
+               session_active ? g.theme->accent_soft : g.theme->panel);
+    stroke_round(g.target, session_tab, 8,
+                 session_active ? g.theme->accent : g.theme->line_soft);
+    fill_round(g.target, D2D1::RectF(247, header_y + 12, 253, header_y + 18), 3,
+               g.theme->accent_strong);
+    text(g.target, g.small_left, L"INTERNET-REMOTE",
+         D2D1::RectF(259, header_y, 355, header_y + 30),
+         session_active ? g.theme->accent : g.theme->muted);
+    draw_icon(g.target, icon::close, 370, header_y + 15, g.theme->muted);
+    g.hit_tab[2] = session_tab;
+
+    // Right edge: theme square and settings square (32x32, radius 6).
+    const D2D1_RECT_F theme_sq = D2D1::RectF(w - 76, header_y, w - 44,
+                                             header_y + 32);
+    const D2D1_RECT_F settings_sq = D2D1::RectF(w - 40, header_y, w - 8,
+                                                header_y + 32);
+    fill_round(g.target, theme_sq, 6, g.theme->panel);
+    stroke_round(g.target, theme_sq, 6, g.theme->line_soft);
+    draw_icon(g.target, g.mode == app_state::theme_mode::dark ? icon::moon
+                                                              : icon::sun,
+              theme_sq.left + 16, theme_sq.top + 16, g.theme->muted);
+    fill_round(g.target, settings_sq, 6, g.theme->panel);
+    stroke_round(g.target, settings_sq, 6, g.theme->line_soft);
+    draw_icon(g.target, icon::settings, settings_sq.left + 16,
+              settings_sq.top + 16, g.theme->muted);
+    g.hit_theme[0] = theme_sq;
+    g.hit_settings = settings_sq;
   }
 
   if (g.tab == 0) {
@@ -815,65 +838,29 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
         }
       }
       {
-        static const std::vector<std::wstring> tabs = {L"首页", L"远程桌面",
-                                                       L"文件", L"设置"};
-        RECT client{};
-        GetClientRect(window, &client);
-        const float cw = client.right * 96.0f / g_dpi;
-        const D2D1_RECT_F strip = D2D1::RectF(16, 12, cw - 16, 52);
-        const int tab = tabs_hit(strip, tabs, x, y);
-        if (tab >= 0) {
-          g.tab = tab;
+        if (inside(g.hit_tab[0], x, y)) {
+          g.tab = 0;
           InvalidateRect(window, nullptr, FALSE);
           return 0;
         }
-      }
-      {
-        RECT client{};
-        GetClientRect(window, &client);
-        const float cw = client.right * 96.0f / g_dpi;
-        const D2D1_RECT_F bar = D2D1::RectF(16, 107, cw - 16, 163);
-        const D2D1_RECT_F quality_chip =
-            D2D1::RectF(bar.right - 50 - 61, 115, bar.right - 50, 143);
-        if (inside(quality_chip, x, y)) {
-          g.panel_open_quality = !g.panel_open_quality;
-          return 0;
-        }
-      }
-      {
-        const D2D1_RECT_F address = D2D1::RectF(433, 160, 900, 196);
-        const D2D1_RECT_F code = D2D1::RectF(910, 160, 1100, 196);
-        if (inside(address, x, y)) {
-          g.focus_field = 1;
+        if (inside(g.hit_tab[2], x, y)) {
+          g.tab = 1;
           InvalidateRect(window, nullptr, FALSE);
           return 0;
         }
-        if (inside(code, x, y)) {
-          g.focus_field = 2;
+        if (inside(g.hit_theme[0], x, y)) {
+          // Cycle 自动 -> 亮色 -> 暗色.
+          g.mode = g.mode == app_state::theme_mode::automatic
+                       ? app_state::theme_mode::light
+                       : (g.mode == app_state::theme_mode::light
+                              ? app_state::theme_mode::dark
+                              : app_state::theme_mode::automatic);
           InvalidateRect(window, nullptr, FALSE);
           return 0;
         }
-      }
-      {
-        const D2D1_RECT_F connect = D2D1::RectF(433, 301, 1130, 337);
-        if (inside(connect, x, y)) {
-          g.connect_pressed = true;
+        if (inside(g.hit_settings, x, y)) {
+          g.tab = 3;
           InvalidateRect(window, nullptr, FALSE);
-          return 0;
-        }
-      }
-      {
-        const D2D1_RECT_F more = D2D1::RectF(37, 336, 375, 368);
-        if (inside(more, x, y)) {
-          g.more_open = !g.more_open;
-          InvalidateRect(window, nullptr, FALSE);
-          return 0;
-        }
-      }
-      {
-        const D2D1_RECT_F avatar = D2D1::RectF(37, 113, 95, 171);
-        if (inside(avatar, x, y)) {
-          if (pick_avatar(window)) InvalidateRect(window, nullptr, FALSE);
           return 0;
         }
       }
