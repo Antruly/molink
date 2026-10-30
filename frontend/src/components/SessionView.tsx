@@ -187,6 +187,16 @@ function touchPrimary(): boolean {
   }
 }
 
+/// The pinned-toolbar choice is a per-device UI preference. A blocked storage
+/// API just means the toolbar starts unpinned.
+function toolbarPinned(): boolean {
+  try {
+    return window.localStorage.getItem('molink.toolbarPinned') === '1'
+  } catch {
+    return false
+  }
+}
+
 
 type ResolvedQuality = Exclude<QualityMode, 'auto'>
 
@@ -395,9 +405,13 @@ export function SessionView({
   // what happens when a session comes up.
   const audioMutedRef = useRef(false)
   const audioVolumeRef = useRef(audioVolume)
-  audioVolumeRef.current = audioVolume
   const autoAvailableRef = useRef(audioAvailable)
-  autoAvailableRef.current = audioAvailable
+  useEffect(() => {
+    audioVolumeRef.current = audioVolume
+  }, [audioVolume])
+  useEffect(() => {
+    autoAvailableRef.current = audioAvailable
+  }, [audioAvailable])
   const [callPhase, setCallPhase] = useState<'idle' | 'ringing' | 'active'>(
     'idle',
   )
@@ -419,7 +433,7 @@ export function SessionView({
     moved: boolean
   } | null>(null)
   const [callPos, setCallPos] = useState<{ x: number; y: number } | null>(null)
-  const [quickOpen, setQuickOpen] = useState(false)
+  const [quickOpen, setQuickOpen] = useState(toolbarPinned)
   const [quickPos, setQuickPos] = useState<{ x: number; y: number } | null>(null)
   const quickBarRef = useRef<HTMLDivElement>(null)
   /// The toolbar would scroll at this width: collapse the button groups into
@@ -427,7 +441,7 @@ export function SessionView({
   const [compactBar, setCompactBar] = useState(false)
   /// Pinned toolbar: stays open instead of collapsing back into the floating
   /// ball. The choice is a per-device UI preference, kept in localStorage.
-  const [barPinned, setBarPinned] = useState(false)
+  const [barPinned, setBarPinned] = useState(toolbarPinned)
   /// Width the expanded toolbar needs, measured while it still fits.
   const expandedBarWidth = useRef(0)
   const quickDrag = useRef<{
@@ -805,18 +819,6 @@ export function SessionView({
     return () => window.clearTimeout(timer)
   }, [tab.phase, tab.id, tab.intent])
 
-
-  useEffect(() => {
-    try {
-      setBarPinned(window.localStorage.getItem('molink.toolbarPinned') === '1')
-    } catch {
-      // A blocked storage API just means the pin starts off.
-    }
-  }, [])
-
-  useEffect(() => {
-    if (barPinned) setQuickOpen(true)
-  }, [barPinned])
 
   // Collapse the toolbar into menus when its content would not fit. Expand
   // again only once there is room for the width it needed while expanded, so
@@ -2298,6 +2300,8 @@ export function SessionView({
                 onClick={() => {
                   const next = !barPinned
                   setBarPinned(next)
+                  // Pinning keeps the expanded toolbar on screen.
+                  if (next) setQuickOpen(true)
                   try {
                     window.localStorage.setItem(
                       'molink.toolbarPinned',

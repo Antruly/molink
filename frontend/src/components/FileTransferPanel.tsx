@@ -151,7 +151,9 @@ export function FileTransferPanel({
   // (~/moLink); any path the host user can write is accepted.
   const [dest, setDest] = useState('~/moLink')
   const destRef = useRef(dest)
-  destRef.current = dest
+  useEffect(() => {
+    destRef.current = dest
+  }, [dest])
   const connectionRef = useRef<SessionConnection | null>(connection)
   const downloadRef = useRef<{
     id: number
