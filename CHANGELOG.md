@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.9.80] — 2026-10-31
+
+### Changed
+
+- **libuvcpp 统一到 v1.9.1**：Linux / macOS 的源码构建（`UVCPP_REF`）和 Windows 的
+  预编译包都切到 v1.9.1。Windows 因此第一次具备 HTTP/3 与 **WebTransport**：1.9 的
+  归档带 `http3/uvcpp_h3_wt_session.h` 且 `UVCPP_HTTP3_ENABLE=1`，core 会自动编入
+  WT 传输（此前链的是 1.8.8，没有这一层）。Win7 x86 继续用 1.8.5 kit。
+- **JPEG 彻底移除**：0.9.72 已删掉代理与页面的 JPEG 转发，但编码器源码、
+  `MOLINK_ENABLE_JPEG` 开关和两个过期 `#include` 一直留着，Windows CI 还在打开它。
+  现在整条删除，core 不再链接 libjpeg。
+
 ## [0.9.79] — 2026-10-31
 
 ### Changed

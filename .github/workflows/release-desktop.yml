@@ -144,7 +144,7 @@ jobs:
         shell: bash
         env:
           UVCPP_VERSION: ${{ vars.UVCPP_VERSION }}
-        run: ./packaging/fetch-uvcpp.sh msvc-x64 "${UVCPP_VERSION:-1.8.8}" "$RUNNER_TEMP/uvcpp"
+        run: ./packaging/fetch-uvcpp.sh msvc-x64 "${UVCPP_VERSION:-1.9.1}" "$RUNNER_TEMP/uvcpp"
 
       # The archive ships zlib.h (libuvcpp's public headers include it) but no
       # zlib library, and molink compresses tiles itself. Build a static zlib
@@ -195,8 +195,9 @@ jobs:
           # INVERTED_FEATURES to NO_MEDIA, so a plain `libdatachannel` is built
           # without media support -- no rtc::H264RtpPacketizer for the video
           # track, and the core does not even compile.
-          # WebTransport is not on Windows yet: it needs libuvcpp's 1.9 line,
-          # and this job still links the 1.8 prebuilt archive.
+          # libuvcpp 1.9 supplies WebTransport/HTTP3 here: its archive ships
+          # http3/uvcpp_h3_wt_session.h with UVCPP_HTTP3_ENABLE=1, so the core
+          # enables its WebTransport transport on Windows too.
           "$VCPKG_INSTALLATION_ROOT/vcpkg.exe" install \
             svt-av1:x64-windows dav1d:x64-windows libjpeg-turbo:x64-windows \
             libvpx:x64-windows "libdatachannel[srtp]:x64-windows"
