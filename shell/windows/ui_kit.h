@@ -6,6 +6,7 @@
 
 #include <cmath>
 #include <string>
+#include <vector>
 
 namespace molink::ui {
 
@@ -155,6 +156,35 @@ void slider(ID2D1RenderTarget* t, const palette& theme,
             IDWriteTextFormat* small_left, const D2D1_RECT_F& row,
             const std::wstring& label, const std::wstring& value,
             float fraction);
+/// Stateful dropdown: `open` and the selected index travel with the caller.
+struct dropdown_state {
+  bool open = false;
+  int index = 0;
+};
+
+/// Width of a tab, derived from its label so draw and hit-testing agree.
+float tab_width(const std::wstring& label);
+D2D1_RECT_F tab_rect(const D2D1_RECT_F& strip, int index,
+                     const std::vector<std::wstring>& labels);
+/// Draws a tab strip; `active` is the selected tab.
+void tabs_draw(ID2D1RenderTarget* t, const palette& theme,
+               IDWriteTextFormat* small, const D2D1_RECT_F& strip,
+               const std::vector<std::wstring>& labels, int active,
+               float hover_x, float hover_y);
+/// Returns the tab under the point, or -1.
+int tabs_hit(const D2D1_RECT_F& strip,
+             const std::vector<std::wstring>& labels, float x, float y);
+
+/// Draws a select field and, when open, its list below it.
+void dropdown_draw(ID2D1RenderTarget* t, const palette& theme,
+                   IDWriteTextFormat* small_left, const D2D1_RECT_F& field,
+                   const std::vector<std::wstring>& items, dropdown_state& s,
+                   float hover_x, float hover_y);
+/// Handles a click. Returns the chosen index when one was picked, -1 while
+/// only opening/closing, and -2 when the click was outside.
+int dropdown_click(dropdown_state& s, const D2D1_RECT_F& field,
+                   const std::vector<std::wstring>& items, float x, float y);
+
 /// A small on/off switch.
 void toggle(ID2D1RenderTarget* t, const palette& theme, const D2D1_RECT_F& r,
             bool on);

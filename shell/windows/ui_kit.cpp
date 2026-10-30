@@ -82,6 +82,95 @@ void slider(ID2D1RenderTarget* t, const palette& theme,
        theme.ink);
 }
 
+float tab_width(const std::wstring& label) {
+  return 24.0f + 12.0f * static_cast<float>(label.size());
+}
+
+D2D1_RECT_F tab_rect(const D2D1_RECT_F& strip, int index,
+                     const std::vector<std::wstring>& labels) {
+  float x = strip.left + 10;
+  for (int i = 0; i < index && i < static_cast<int>(labels.size()); ++i) {
+    x += tab_width(labels[i]) + 6;
+  }
+  const float w = index < static_cast<int>(labels.size())
+                      ? tab_width(labels[index])
+                      : 0.0f;
+  return D2D1::RectF(x, strip.top + 7, x + w, strip.bottom - 7);
+}
+
+void tabs_draw(ID2D1RenderTarget* t, const palette& theme,
+               IDWriteTextFormat* small, const D2D1_RECT_F& strip,
+               const std::vector<std::wstring>& labels, int active,
+               float hover_x, float hover_y) {
+  for (int i = 0; i < static_cast<int>(labels.size()); ++i) {
+    const D2D1_RECT_F r = tab_rect(strip, i, labels);
+    const bool hovered = hover_x >= r.left && hover_x <= r.right &&
+                         hover_y >= r.top && hover_y <= r.bottom;
+    pill(t, theme, small, small, r, labels[i], i == active, hovered);
+  }
+}
+
+int tabs_hit(const D2D1_RECT_F& strip,
+             const std::vector<std::wstring>& labels, float x, float y) {
+  for (int i = 0; i < static_cast<int>(labels.size()); ++i) {
+    const D2D1_RECT_F r = tab_rect(strip, i, labels);
+    if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return i;
+  }
+  return -1;
+}
+
+void dropdown_draw(ID2D1RenderTarget* t, const palette& theme,
+                   IDWriteTextFormat* small_left, const D2D1_RECT_F& field,
+                   const std::vector<std::wstring>& items, dropdown_state& s,
+                   float hover_x, float hover_y) {
+  fill_round(t, field, 8, theme.panel);
+  stroke_round(t, field, 8, theme.line_soft);
+  text(t, small_left, items[s.index],
+       D2D1::RectF(field.left + 12, field.top, field.right - 28, field.bottom),
+       theme.ink);
+  draw_icon(t, icon::chevron_down, field.right - 16, (field.top + field.bottom) / 2,
+            theme.muted);
+  if (!s.open) return;
+  for (int i = 0; i < static_cast<int>(items.size()); ++i) {
+    const D2D1_RECT_F item = D2D1::RectF(
+        field.left, field.bottom + 6 + i * 30, field.right,
+        field.bottom + 32 + i * 30);
+    const bool hovered = hover_x >= item.left && hover_x <= item.right &&
+                         hover_y >= item.top && hover_y <= item.bottom;
+    fill_round(t, item, 8,
+               i == s.index ? theme.accent_soft
+                            : (hovered ? theme.panel_strong : theme.panel));
+    stroke_round(t, item, 8,
+                 i == s.index ? theme.accent : theme.line_soft);
+    text(t, small_left, items[i],
+         D2D1::RectF(item.left + 12, item.top, item.right, item.bottom),
+         i == s.index ? theme.accent : theme.ink);
+  }
+}
+
+int dropdown_click(dropdown_state& s, const D2D1_RECT_F& field,
+                   const std::vector<std::wstring>& items, float x, float y) {
+  const bool in_field = x >= field.left && x <= field.right && y >= field.top &&
+                        y <= field.bottom;
+  if (in_field) {
+    s.open = !s.open;
+    return -1;
+  }
+  if (!s.open) return -2;
+  for (int i = 0; i < static_cast<int>(items.size()); ++i) {
+    const D2D1_RECT_F item = D2D1::RectF(
+        field.left, field.bottom + 6 + i * 30, field.right,
+        field.bottom + 32 + i * 30);
+    if (x >= item.left && x <= item.right && y >= item.top && y <= item.bottom) {
+      s.index = i;
+      s.open = false;
+      return i;
+    }
+  }
+  s.open = false;
+  return -2;
+}
+
 void toggle(ID2D1RenderTarget* t, const palette& theme, const D2D1_RECT_F& r,
             bool on) {
   fill_round(t, r, (r.bottom - r.top) / 2,
