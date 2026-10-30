@@ -898,7 +898,11 @@ void on_script_message(WebKitUserContentManager*, WebKitJavascriptResult* result
 /// folder. WebKitGTK cancels a download nobody handles, which is why clicking
 /// a file in the drawer did nothing.
 void on_download_started(WebKitWebView*, WebKitDownload* download, gpointer) {
-  const gchar* suggested = webkit_download_get_suggested_filename(download);
+  WebKitURIResponse* response = webkit_download_get_response(download);
+  const gchar* suggested =
+      response != nullptr
+          ? webkit_uri_response_get_suggested_filename(response)
+          : nullptr;
   // The name comes from the remote machine, so keep only its last component:
   // a suggested name like "../../x" must not escape the Downloads folder.
   gchar* base = g_path_get_basename(suggested != nullptr && *suggested != '\0'
