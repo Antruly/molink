@@ -1067,13 +1067,11 @@ class environment_options final : public ICoreWebView2EnvironmentOptions {
   HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** out) override {
     if (out == nullptr) return E_POINTER;
     // MinGW has no __uuidof for the WebView2 interfaces (no __CRT_UUID_DECL),
-    // so compare the documented IIDs directly.
-    static const GUID kEnvironmentOptions = {
-        0x2e8e3bbb, 0xb6be, 0x4a4a,
-        {0xbb, 0xea, 0xd6, 0xae, 0x5d, 0x09, 0xa5, 0xed}};
+    // so compare the header's IID symbol against the documented IUnknown GUID.
     static const GUID kUnknown = {0, 0, 0,
                                   {0xc0, 0, 0, 0, 0, 0, 0, 0x46}};
-    if (IsEqualGUID(iid, kEnvironmentOptions) || IsEqualGUID(iid, kUnknown)) {
+    if (IsEqualGUID(iid, IID_ICoreWebView2EnvironmentOptions) ||
+        IsEqualGUID(iid, kUnknown)) {
       *out = this;
       AddRef();
       return S_OK;
