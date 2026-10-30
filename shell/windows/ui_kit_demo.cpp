@@ -45,6 +45,10 @@ struct app_state {
   dropdown_state dropdown;
   int format_index = 2;
   int focus_field = 0;  // 0 none, 1 address, 2 code
+  std::wstring address_text = L"127.0.0.1:28428";
+  std::wstring code_text;
+  bool caret_on = true;
+  ULONGLONG caret_tick = 0;
   int preset = 2;
   float hover_x = -1, hover_y = -1;
 
@@ -164,14 +168,26 @@ void paint(HWND window) {
     fill_round(g.target, address, 9.6f, g.theme->panel);
     stroke_round(g.target, address, 9.6f,
                  g.focus_field == 1 ? g.theme->accent : g.theme->line_soft);
-    text(g.target, g.body, L"设备 ID 或 IP[:端口]",
-         D2D1::RectF(445, 160, 890, 196), g.theme->muted);
+    const std::wstring address_shown =
+        g.address_text.empty() ? L"设备 ID 或 IP[:端口]" : g.address_text;
+    text(g.target, g.body, address_shown, D2D1::RectF(445, 160, 890, 196),
+         g.address_text.empty() ? g.theme->muted : g.theme->ink);
+    if (g.focus_field == 1 && g.caret_on) {
+      const float caret_x = 445 + 7.5f * static_cast<float>(g.address_text.size());
+      line(g.target, caret_x, 166, caret_x, 190, g.theme->accent, 1.5f);
+    }
     const D2D1_RECT_F code = D2D1::RectF(910, 160, w - 36, 196);
     fill_round(g.target, code, 9.6f, g.theme->panel);
     stroke_round(g.target, code, 9.6f,
                  g.focus_field == 2 ? g.theme->accent : g.theme->line_soft);
-    text(g.target, g.body, L"验证码",
-         D2D1::RectF(922, 160, w - 48, 196), g.theme->muted);
+    const std::wstring code_shown =
+        g.code_text.empty() ? L"验证码" : g.code_text;
+    text(g.target, g.body, code_shown, D2D1::RectF(922, 160, w - 48, 196),
+         g.code_text.empty() ? g.theme->muted : g.theme->ink);
+    if (g.focus_field == 2 && g.caret_on) {
+      const float caret_x = 922 + 7.5f * static_cast<float>(g.code_text.size());
+      line(g.target, caret_x, 166, caret_x, 190, g.theme->accent, 1.5f);
+    }
     // Measured: 连接 button spans the panel width, 36 high, radius 9.6.
     const D2D1_RECT_F connect =
         D2D1::RectF(433, 301, w - 36, 337);
@@ -461,6 +477,12 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
       return base;
     }
     case WM_TIMER: {
+      const ULONGLONG now = GetTickCount64();
+      if (now - g.caret_tick >= 500) {
+        g.caret_tick = now;
+        g.caret_on = !g.caret_on;
+        if (g.focus_field != 0) InvalidateRect(window, nullptr, FALSE);
+      }
       const float panel_target = g.panel_open_quality ? 1.0f : 0.0f;
       if (std::fabs(g.panel_anim - panel_target) > 0.001f) {
         const float step = 0.12f;
@@ -578,6 +600,35 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
       }
       return 0;
     }
+    case WM_CHAR: {
+      const wchar_t ch = static_cast<wchar_t>(wparam);
+      if (g.focus_field != 0 && ch >= 32 && ch != 127) {
+        std::wstring& target =
+            g.focus_field == 1 ? g.address_text : g.code_text;
+        if (target.size() < 64) {
+          target.push_back(ch);
+          InvalidateRect(window, nullptr, FALSE);
+        }
+        return 0;
+      }
+      break;
+    }
+    case WM_KEYDOWN:
+      if (wparam == VK_BACK && g.focus_field != 0) {
+        std::wstring& target =
+            g.focus_field == 1 ? g.address_text : g.code_text;
+        if (!target.empty()) {
+          target.pop_back();
+          InvalidateRect(window, nullptr, FALSE);
+        }
+        return 0;
+      }
+      if (wparam == VK_ESCAPE) {
+        g.focus_field = 0;
+        InvalidateRect(window, nullptr, FALSE);
+        return 0;
+      }
+      break;
     case WM_DESTROY:
       PostQuitMessage(0);
       return 0;
