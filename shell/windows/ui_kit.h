@@ -5,6 +5,7 @@
 #include <d2d1.h>
 
 #include <cmath>
+#include <string>
 
 namespace molink::ui {
 
@@ -131,6 +132,27 @@ inline void draw_icon(ID2D1RenderTarget* t, icon kind, float cx, float cy,
       break;
   }
 }
+
+// Widgets (implemented in ui_kit.cpp). They take the active palette and the
+// two text formats explicitly so the shell can own the state.
+void fill_round(ID2D1RenderTarget* t, const D2D1_RECT_F& r, float radius,
+                const D2D1_COLOR_F& color);
+void stroke_round(ID2D1RenderTarget* t, const D2D1_RECT_F& r, float radius,
+                  const D2D1_COLOR_F& color, float width = 1.0f);
+/// Approximates the web's shadow-md with layered translucent offsets.
+void shadow(ID2D1RenderTarget* t, const D2D1_RECT_F& r, float radius);
+void text(ID2D1RenderTarget* t, IDWriteTextFormat* format,
+          const std::wstring& s, const D2D1_RECT_F& r,
+          const D2D1_COLOR_F& color);
+/// A rounded pill with optional leading icon; `accent` paints the active
+/// style (accent-soft fill, accent border and text).
+void pill(ID2D1RenderTarget* t, const palette& theme, IDWriteTextFormat* small,
+          IDWriteTextFormat* small_left, const D2D1_RECT_F& r,
+          const std::wstring& label, bool accent, bool hovered,
+          icon glyph = icon::none);
+/// A borderless icon-only button that only shows a surface when hovered.
+void icon_button(ID2D1RenderTarget* t, const palette& theme,
+                 const D2D1_RECT_F& r, icon glyph, bool hovered);
 
 /// Ease-out cubic for collapse/expand and panel transitions.
 inline float ease_out(float t) {

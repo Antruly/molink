@@ -62,68 +62,6 @@ bool inside(const D2D1_RECT_F& r, float x, float y) {
   return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
 }
 
-void fill_round(ID2D1RenderTarget* t, const D2D1_RECT_F& r, float radius,
-                const D2D1_COLOR_F& color) {
-  ID2D1SolidColorBrush* b = nullptr;
-  if (FAILED(t->CreateSolidColorBrush(color, &b)) || b == nullptr) return;
-  t->FillRoundedRectangle(D2D1::RoundedRect(r, radius, radius), b);
-  b->Release();
-}
-
-void stroke_round(ID2D1RenderTarget* t, const D2D1_RECT_F& r, float radius,
-                  const D2D1_COLOR_F& color, float width = 1.0f) {
-  ID2D1SolidColorBrush* b = nullptr;
-  if (FAILED(t->CreateSolidColorBrush(color, &b)) || b == nullptr) return;
-  t->DrawRoundedRectangle(D2D1::RoundedRect(r, radius, radius), b, width);
-  b->Release();
-}
-
-void shadow(ID2D1RenderTarget* t, const D2D1_RECT_F& r, float radius) {
-  const float alphas[] = {0.20f, 0.12f, 0.06f};
-  for (int i = 0; i < 3; ++i) {
-    const float spread = 1.0f + i * 3.0f;
-    const float dy = 3.0f + i * 4.0f;
-    fill_round(t, D2D1::RectF(r.left - spread, r.top - spread + dy,
-                              r.right + spread, r.bottom + spread + dy),
-               radius + spread, D2D1::ColorF(0, 0, 0, alphas[i]));
-  }
-}
-
-void text(ID2D1RenderTarget* t, IDWriteTextFormat* f, const std::wstring& s,
-          const D2D1_RECT_F& r, const D2D1_COLOR_F& color) {
-  ID2D1SolidColorBrush* b = nullptr;
-  if (FAILED(t->CreateSolidColorBrush(color, &b)) || b == nullptr) return;
-  t->DrawTextW(s.c_str(), static_cast<UINT32>(s.size()), f, r, b,
-               D2D1_DRAW_TEXT_OPTIONS_CLIP);
-  b->Release();
-}
-
-
-void pill(ID2D1RenderTarget* t, const D2D1_RECT_F& r, const std::wstring& label,
-          bool accent, bool hovered, icon glyph, bool with_icon = false) {
-  fill_round(t, r, 8, accent ? g.theme->accent_soft : g.theme->panel);
-  stroke_round(t, r, 8, accent ? g.theme->accent : g.theme->line_soft);
-  if (hovered && !accent) stroke_round(t, r, 8, g.theme->line);
-  const float cy = (r.top + r.bottom) / 2;
-  if (with_icon) {
-    draw_icon(t, glyph, r.left + 14, cy,
-              accent ? g.theme->accent : g.theme->muted);
-    text(t, g.small_left, label,
-         D2D1::RectF(r.left + 26, r.top, r.right - 6, r.bottom),
-         accent ? g.theme->accent : g.theme->muted);
-  } else {
-    text(t, g.small, label, r, accent ? g.theme->accent : g.theme->muted);
-  }
-}
-
-void icon_button(ID2D1RenderTarget* t, const D2D1_RECT_F& r, icon glyph,
-                 bool hovered) {
-  fill_round(t, r, 8, hovered ? g.theme->panel : D2D1::ColorF(0, 0, 0, 0));
-  const float cx = (r.left + r.right) / 2;
-  const float cy = (r.top + r.bottom) / 2;
-  draw_icon(t, glyph, cx, cy, g.theme->muted);
-}
-
 /// Automatic follows the Windows app theme (Settings > Personalisation).
 const palette* resolve_theme() {
   if (g.mode == app_state::theme_mode::light) return &kLight;
@@ -156,10 +94,9 @@ void paint(HWND window) {
     for (int i = 0; i < 3; ++i) {
       const float width = (i == 0 ? 84.0f : 66.0f);
       g.hit_tab[i] = D2D1::RectF(tx, 19, tx + width, 45);
-      pill(g.target, g.hit_tab[i], kTabs[i], g.tab == i,
+      pill(g.target, *g.theme, g.small, g.small_left, g.hit_tab[i], kTabs[i], g.tab == i,
            inside(g.hit_tab[i], g.hover_x, g.hover_y),
-           i == 0 ? icon::monitor : (i == 1 ? icon::folder : icon::settings),
-           true);
+           i == 0 ? icon::monitor : (i == 1 ? icon::folder : icon::settings));
       tx += width + 6;
     }
     // Theme: 自动 / 亮色 / 暗色, then the close button.
@@ -168,13 +105,13 @@ void paint(HWND window) {
       float mx = w - 56 - 12 - (3 * 48 + 2 * 6);
       for (int i = 0; i < 3; ++i) {
         g.hit_theme[i] = D2D1::RectF(mx, 19, mx + 48, 45);
-        pill(g.target, g.hit_theme[i], labels[i],
+        pill(g.target, *g.theme, g.small, g.small_left, g.hit_theme[i], labels[i],
              static_cast<int>(g.mode) == i,
              inside(g.hit_theme[i], g.hover_x, g.hover_y), icon::none);
         mx += 48 + 6;
       }
       const D2D1_RECT_F close = D2D1::RectF(w - 56, 19, w - 30, 45);
-      icon_button(g.target, close, icon::close,
+      icon_button(g.target, *g.theme, close, icon::close,
                   inside(close, g.hover_x, g.hover_y));
       g.hit_modal_close = close;
     }
@@ -192,7 +129,7 @@ void paint(HWND window) {
          g.theme->ink);
     g.hit_modal_close = D2D1::RectF(sheet.right - 44, sheet.top + 14,
                                     sheet.right - 18, sheet.top + 40);
-    icon_button(g.target, g.hit_modal_close, icon::close,
+    icon_button(g.target, *g.theme, g.hit_modal_close, icon::close,
                 inside(g.hit_modal_close, g.hover_x, g.hover_y));
     const wchar_t* rows[] = {L"开机自启", L"剪贴板同步", L"文件传输",
                              L"声音转发", L"硬件加速"};
@@ -243,14 +180,14 @@ void paint(HWND window) {
   const D2D1_RECT_F collapse_button =
       D2D1::RectF(bar.right - 34, bar.top + 8, bar.right - 10, bar.bottom - 8);
   g.hit_collapse = collapse_button;
-  icon_button(g.target, collapse_button,
+  icon_button(g.target, *g.theme, collapse_button,
               g.collapsed ? icon::chevron_down : icon::close,
               inside(collapse_button, g.hover_x, g.hover_y));
   if (collapse < 0.99f) {
     float x = bar.right - 44;
     auto chip = [&](const std::wstring& label, bool accent, float width) {
       const D2D1_RECT_F r = D2D1::RectF(x - width, 73, x, 99);
-      pill(g.target, r, label, accent, inside(r, g.hover_x, g.hover_y),
+      pill(g.target, *g.theme, g.small, g.small_left, r, label, accent, inside(r, g.hover_x, g.hover_y),
            icon::none);
       x -= width + 8;
     };
@@ -277,7 +214,7 @@ void paint(HWND window) {
     const float cx = 32 + (i % 4) * (116 + 8);
     const float cy = y + (i / 4) * (28 + 8);
     const D2D1_RECT_F r = D2D1::RectF(cx, cy, cx + 116, cy + 28);
-    pill(g.target, r, kPresets[i], g.preset == i,
+    pill(g.target, *g.theme, g.small, g.small_left, r, kPresets[i], g.preset == i,
          inside(r, g.hover_x, g.hover_y), icon::none);
   }
   y += 2 * 28 + 8;
@@ -292,7 +229,7 @@ void paint(HWND window) {
     float mx = 104;
     for (int i = 0; i < 3; ++i) {
       const D2D1_RECT_F r = D2D1::RectF(mx, y, mx + widths[i], y + 26);
-      pill(g.target, r, modes[i], g.preset >= 0 && i == 0,
+      pill(g.target, *g.theme, g.small, g.small_left, r, modes[i], g.preset >= 0 && i == 0,
            inside(r, g.hover_x, g.hover_y), icon::none);
       mx += widths[i] + 6;
     }
