@@ -226,12 +226,22 @@ bool surface_ingest_packet(surface_compositor& compositor,
   }
   protocol::parsed_frame parsed;
   std::string error;
-  if (!protocol::parse_frame_payload(data + protocol::kPacketHeaderSize,
-                                     len - protocol::kPacketHeaderSize, parsed,
-                                     error)) {
-    return false;
+  const bool parsed_ok = protocol::parse_frame_payload(
+      data + protocol::kPacketHeaderSize, len - protocol::kPacketHeaderSize,
+      parsed, error);
+  const bool published = parsed_ok && compositor.ingest(parsed);
+  if (std::getenv("MOLINK_SURFACE_LOG") != nullptr && surface_log_due()) {
+    std::fprintf(stderr,
+                 "surface: packet=%zu codec=%u tiles=%u %ux%u parsed=%d "
+                 "published=%d%s%s\n",
+                 len, parsed_ok ? parsed.header.codec : 0,
+                 parsed_ok ? parsed.header.tile_count : 0,
+                 parsed_ok ? parsed.header.screen_w : 0,
+                 parsed_ok ? parsed.header.screen_h : 0, parsed_ok ? 1 : 0,
+                 published ? 1 : 0, parsed_ok ? "" : " err=",
+                 parsed_ok ? "" : error.c_str());
   }
-  return compositor.ingest(parsed);
+  return published;
 }
 
 }  // namespace molink
