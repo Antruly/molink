@@ -197,6 +197,12 @@ void print_ready(const molink::core_config& cfg, int port,
   j["change_threshold"] = change_threshold;
   j["input"] = input_backend;
   j["synthetic_frames"] = capture_backend == "synthetic";
+  // The native picture surface, when MOLINK_SURFACE enabled it: the shell
+  // opens a window on this path and draws the picture without the WebView.
+  {
+    const std::string surface_path = molink::frame_surface::instance().path();
+    if (!surface_path.empty()) j["surface"] = surface_path;
+  }
   std::cout << uvcpp::uvcpp_json_dump(j) << std::endl;
 }
 

@@ -1,3 +1,4 @@
+#include "surface/surface_compositor.h"
 #include "transport/direct_proxy.h"
 
 #include <nlohmann/json.hpp>
@@ -918,6 +919,9 @@ class direct_proxy final : public std::enable_shared_from_this<direct_proxy> {
 
   void send_to_browser(const uint8_t* data, std::size_t len) {
     if (closed_ || browser_ == nullptr) return;
+    // The native surface mirrors the picture the page receives (tile codecs
+    // only for now; the streams wait for the core-side decoder).
+    surface_ingest_packet(compositor_, data, len);
     browser_->send_binary(reinterpret_cast<const char*>(data), len);
   }
 
@@ -986,6 +990,7 @@ class direct_proxy final : public std::enable_shared_from_this<direct_proxy> {
   /// The low-delay stream keeps reference frames, so one decoder lives for the
   /// whole session.
   av1_stream_decoder stream_decoder_;
+  surface_compositor compositor_;
   /// JPEG quality for stream frames, following the viewer's preset.
   int stream_quality_ = 80;
   /// Last keyframe request for a broken stream (one a second).

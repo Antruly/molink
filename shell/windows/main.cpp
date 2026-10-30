@@ -40,6 +40,10 @@
 
 namespace fs = std::filesystem;
 
+/// Native picture window over the core's shared-memory frame surface
+/// (surface_window.cpp), defined outside the anonymous namespace.
+int run_surface_window(const std::wstring& path);
+
 namespace {
 
 HINSTANCE g_instance = nullptr;
@@ -271,6 +275,8 @@ std::wstring ui_host_w() {
   return g_core_host;
 }
 
+std::string g_surface_path;
+
 bool start_core(const std::wstring& core, const std::wstring& web_root, int& port,
                 std::string& token, std::string& client_token, bool& tls,
                 std::wstring& error) {
@@ -344,6 +350,8 @@ bool start_core(const std::wstring& core, const std::wstring& web_root, int& por
   }
   port = static_cast<int>(parsed_port);
   tls = line.find("\"tls\":true") != std::string::npos;
+  // Set only when MOLINK_SURFACE asked the core to publish a native picture.
+  json_string(line, "surface", g_surface_path);
   return true;
 }
 
@@ -1073,6 +1081,21 @@ int run(HINSTANCE instance) {
     return 1;
   }
 
+  // The core publishes to a native surface: open the window that draws it, as
+  // a sibling process so the WebView keeps owning the UI.
+  if (!g_surface_path.empty()) {
+    std::wstring child_command = L"\"" + exe_path() + L"\" --surface \"" +
+                                 widen(g_surface_path) + L"\"";
+    STARTUPINFOW child_startup{};
+    child_startup.cb = sizeof(child_startup);
+    PROCESS_INFORMATION child{};
+    if (CreateProcessW(nullptr, child_command.data(), nullptr, nullptr, FALSE, 0,
+                       nullptr, nullptr, &child_startup, &child)) {
+      CloseHandle(child.hThread);
+      CloseHandle(child.hProcess);
+    }
+  }
+
   g_core_tls = tls;
   const std::wstring host = ui_host_w();
   const std::wstring authority = url_host_w(host);
@@ -1222,6 +1245,10 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int) {
         g_url_override = argv[++i];
       } else if (wcscmp(argv[i], L"--host") == 0 && i + 1 < argc) {
         g_core_host = argv[++i];
+      } else if (wcscmp(argv[i], L"--surface") == 0 && i + 1 < argc) {
+        const std::wstring surface_path = argv[++i];
+        LocalFree(argv);
+        return run_surface_window(surface_path);
       }
     }
     LocalFree(argv);

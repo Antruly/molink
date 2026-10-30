@@ -78,9 +78,11 @@ bool frame_surface::map(int max_width, int max_height) {
       ("molink-surface-" + std::to_string(GetCurrentProcessId()) + ".bin");
   if (ec) return false;
   path_ = file.string();
+  // FILE_SHARE_READ lets the shell's native window open the file while the
+  // core keeps publishing into it.
   HANDLE handle = CreateFileW(file.wstring().c_str(), GENERIC_READ | GENERIC_WRITE,
-                              0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL,
-                              nullptr);
+                              FILE_SHARE_READ, nullptr, CREATE_ALWAYS,
+                              FILE_ATTRIBUTE_NORMAL, nullptr);
   if (handle == INVALID_HANDLE_VALUE) return false;
   LARGE_INTEGER size;
   size.QuadPart = static_cast<LONGLONG>(bytes_);

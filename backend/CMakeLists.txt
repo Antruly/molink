@@ -218,6 +218,7 @@ set(MOLINK_CORE_SOURCES
   src/capture/vpx_stream_encoder.cpp
   src/capture/av1_frame.cpp
   src/surface/frame_surface.cpp
+  src/surface/surface_compositor.cpp
   src/clipboard/x11_clipboard.cpp
   src/clipboard/windows_clipboard.cpp
   src/access_requests.cpp
@@ -689,6 +690,22 @@ target_include_directories(molink-core-stream-qos-test PRIVATE src)
 set_target_properties(molink-core-stream-qos-test PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 add_test(NAME stream_qos COMMAND molink-core-stream-qos-test)
+
+# The native picture path: tiles compose into the shell's shared surface.
+add_executable(molink-core-surface-test
+  tests/surface_compositor_test.cpp
+  src/surface/frame_surface.cpp
+  src/surface/surface_compositor.cpp
+  src/protocol/frame_packet.cpp
+)
+target_include_directories(molink-core-surface-test PRIVATE src)
+if(MOLINK_HAVE_ZLIB)
+  target_compile_definitions(molink-core-surface-test PRIVATE MOLINK_HAVE_ZLIB=1)
+  target_link_libraries(molink-core-surface-test PRIVATE ZLIB::ZLIB)
+endif()
+set_target_properties(molink-core-surface-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME surface_compositor COMMAND molink-core-surface-test)
 
 # The rate-driven quality controller: preset in, viewer frame rate out.
 add_executable(molink-core-rate-quality-test

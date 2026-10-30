@@ -147,7 +147,7 @@ std::string ui_host() {
 
 bool start_core(const std::string& core, const std::string& web_root, int& port,
                 std::string& token, std::string& client_token, bool& tls,
-                std::string& err) {
+                std::string& surface_path, std::string& err) {
   // The core owns the port: it uses the persisted setting or 28418.
   std::vector<std::string> args = {core, "--print-ready", "--parent-pid",
                                    std::to_string(getpid())};
@@ -209,6 +209,8 @@ bool start_core(const std::string& core, const std::string& web_root, int& port,
   }
   port = static_cast<int>(parsed_port);
   tls = line.find("\"tls\":true") != std::string::npos;
+  // Set only when MOLINK_SURFACE asked the core to publish a native picture.
+  json_string(line, "surface", surface_path);
   return true;
 }
 
@@ -961,7 +963,7 @@ int main(int argc, char** argv) {
   }
   g_url_mode = !g_url_override.empty();
 
-  if (!g_url_mode && !g_smoke) {
+  if (!g_url_mode && !g_smoke && g_surface_path.empty()) {
     const std::string instance_path = instance_socket_path();
     bool already_running = false;
     if (!claim_instance_socket(instance_path, already_running)) {
@@ -1005,9 +1007,11 @@ int main(int argc, char** argv) {
     int port = 0;
     std::string token;
     std::string client_token;
+    std::string surface_path;
     bool tls = false;
     std::string error;
-    if (!start_core(core, web_root, port, token, client_token, tls, error)) {
+    if (!start_core(core, web_root, port, token, client_token, tls,
+                    surface_path, error)) {
       std::fprintf(stderr, "moLink shell: %s\n", error.c_str());
       stop_core();
       return 1;
@@ -1018,6 +1022,19 @@ int main(int argc, char** argv) {
     url = std::string(g_core_tls ? "https://" : "http://") + url_host(host) +
           ":" + std::to_string(port) + "/?host=";
     url += host + "&port=" + std::to_string(port);
+    // The core is publishing to a native surface: open the window that draws
+    // it, as a sibling process so the WebView keeps owning the UI.
+    if (!surface_path.empty()) {
+      const std::string executable = exe_path();
+      if (!executable.empty()) {
+        char* child_argv[] = {const_cast<char*>(executable.c_str()),
+                              const_cast<char*>("--surface"),
+                              const_cast<char*>(surface_path.c_str()), nullptr};
+        g_spawn_async(nullptr, child_argv, nullptr,
+                      static_cast<GSpawnFlags>(G_SPAWN_SEARCH_PATH), nullptr,
+                      nullptr, nullptr, nullptr);
+      }
+    }
     url += "&shell=1&platform=linux";
     if (!client_token.empty()) url += "&client=" + client_token;
   }

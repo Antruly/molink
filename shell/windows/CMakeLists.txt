@@ -30,7 +30,7 @@ endif()
 # quoted paths as escape sequences (e.g. \a, \m), which breaks the path.
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/app.rc.in"
                "${CMAKE_CURRENT_BINARY_DIR}/app.rc" @ONLY)
-add_executable(moLink WIN32 main.cpp "${CMAKE_CURRENT_BINARY_DIR}/app.rc")
+add_executable(moLink WIN32 main.cpp surface_window.cpp "${CMAKE_CURRENT_BINARY_DIR}/app.rc")
 target_include_directories(moLink PRIVATE "${WEBVIEW2_SDK}/build/native/include")
 if(MINGW)
   # MinGW-w64 omits EventToken.h; a minimal shim lives next to this file.
