@@ -280,35 +280,52 @@ void paint(HWND window) {
   g.target->BeginDraw();
   g.target->Clear(g.theme->bg);
 
-  // Tab strip.
+  // Web chrome is two rows: a 40 px title bar and an app header below it.
   {
-    const D2D1_RECT_F strip = D2D1::RectF(16, 12, w - 16, 52);
-    fill_round(g.target, strip, 10, g.theme->surface);
-    stroke_round(g.target, strip, 10, g.theme->line);
+    const D2D1_RECT_F title_bar = D2D1::RectF(0, 0, w, 40);
+    fill_round(g.target, title_bar, 0, D2D1::ColorF(0x1e2938, 0.85f));
+    // Window buttons: 32x28 at y=6, radius 6 (measured x=1052/1088/1124 at 1164).
+    const float bx = w - 112;
+    const D2D1_RECT_F buttons[3] = {
+        D2D1::RectF(bx, 6, bx + 32, 34),
+        D2D1::RectF(bx + 36, 6, bx + 68, 34),
+        D2D1::RectF(bx + 72, 6, bx + 104, 34),
+    };
+    for (int i = 0; i < 3; ++i) {
+      icon_button(g.target, *g.theme, buttons[i],
+                  i == 0 ? icon::chevron_down
+                         : (i == 1 ? icon::fullscreen : icon::close),
+                  inside(buttons[i], g.hover_x, g.hover_y));
+    }
+    g.hit_modal_close = buttons[2];
+
+    // App header: logo at x=16, tabs from x=127 (68x30, radius 8).
+    const float header_y = 49;
+    fill_round(g.target, D2D1::RectF(16, header_y + 3, 28, header_y + 15), 5,
+               g.theme->accent_strong);
+    text(g.target, g.body, L"moLink",
+         D2D1::RectF(36, header_y, 110, header_y + 30), g.theme->ink);
     static const std::vector<std::wstring> tabs = {L"首页", L"远程桌面",
                                                    L"文件", L"设置"};
-    static const icon tab_icons[] = {icon::monitor, icon::monitor,
-                                     icon::folder, icon::settings};
+    const D2D1_RECT_F strip = D2D1::RectF(0, 42, w, 82);
     for (int i = 0; i < 4; ++i) {
-      const D2D1_RECT_F r = tab_rect(strip, i, tabs);
-      pill(g.target, *g.theme, g.small, g.small_left, r, tabs[i], g.tab == i,
-           inside(r, g.hover_x, g.hover_y), tab_icons[i]);
+      const D2D1_RECT_F r =
+          D2D1::RectF(127 + i * 74, header_y, 127 + i * 74 + 68,
+                      header_y + 30);
+      const bool active = g.tab == (i == 0 ? 0 : (i == 1 ? 1 : (i == 2 ? 2 : 3)));
+      pill(g.target, *g.theme, g.small, g.small_left, r, tabs[i], active,
+           inside(r, g.hover_x, g.hover_y), icon::none);
     }
-    // Theme: 自动 / 亮色 / 暗色, then the close button.
-    {
-      const wchar_t* labels[3] = {L"自动", L"亮色", L"暗色"};
-      float mx = w - 56 - 12 - (3 * 48 + 2 * 6);
-      for (int i = 0; i < 3; ++i) {
-        g.hit_theme[i] = D2D1::RectF(mx, 19, mx + 48, 45);
-        pill(g.target, *g.theme, g.small, g.small_left, g.hit_theme[i], labels[i],
-             static_cast<int>(g.mode) == i,
-             inside(g.hit_theme[i], g.hover_x, g.hover_y), icon::none);
-        mx += 48 + 6;
-      }
-      const D2D1_RECT_F close = D2D1::RectF(w - 56, 19, w - 30, 45);
-      icon_button(g.target, *g.theme, close, icon::close,
-                  inside(close, g.hover_x, g.hover_y));
-      g.hit_modal_close = close;
+    (void)strip;
+    // Theme switch at the header's right edge.
+    const wchar_t* labels[3] = {L"自动", L"亮色", L"暗色"};
+    float mx = w - 24 - 3 * 48 - 2 * 6;
+    for (int i = 0; i < 3; ++i) {
+      g.hit_theme[i] = D2D1::RectF(mx, header_y, mx + 48, header_y + 30);
+      pill(g.target, *g.theme, g.small, g.small_left, g.hit_theme[i], labels[i],
+           static_cast<int>(g.mode) == i,
+           inside(g.hit_theme[i], g.hover_x, g.hover_y), icon::none);
+      mx += 48 + 6;
     }
   }
 
@@ -764,7 +781,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
       if (top) return HTTOP;
       if (bottom) return HTBOTTOM;
       // The tab strip doubles as the title bar.
-      if (client.y < static_cast<int>(52 * g_dpi / 96.0f)) return HTCAPTION;
+      if (client.y < static_cast<int>(79 * g_dpi / 96.0f)) return HTCAPTION;
       return base;
     }
     case WM_TIMER: {
