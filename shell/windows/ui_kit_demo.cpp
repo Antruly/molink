@@ -552,7 +552,7 @@ void paint(HWND window) {
   const float open = ease_out(g.panel_anim);
   if (open <= 0.02f) {
     // Panel tucked away: the picture area takes the whole row.
-    const D2D1_RECT_F stage = D2D1::RectF(16, 120, w - 16, h - 16);
+    const D2D1_RECT_F stage = D2D1::RectF(16, 176, w - 16, h - 16);
     fill_round(g.target, stage, 14, g.theme->surface);
     stroke_round(g.target, stage, 14, g.theme->line);
     text(g.target, g.small, L"远程画面（共享内存直绘）",
@@ -562,8 +562,8 @@ void paint(HWND window) {
     g.target->EndDraw();
     return;
   }
-  float y = 120;
-  const float card_h = 350 * open;
+  float y = 176;
+  const float card_h = 330 * open;
   const D2D1_RECT_F card = D2D1::RectF(16, y, 544, y + card_h);
   shadow(g.target, card, 14);
   fill_round(g.target, card, 14, g.theme->surface);
@@ -633,7 +633,7 @@ void paint(HWND window) {
   g.format_index = g.dropdown.index;
 
   // Picture area on the right: live surface when connected.
-  const D2D1_RECT_F stage = D2D1::RectF(560, 120, w - 16, h - 16);
+  const D2D1_RECT_F stage = D2D1::RectF(560, 176, w - 16, h - 16);
   fill_round(g.target, stage, 14, g.theme->surface);
   stroke_round(g.target, stage, 14, g.theme->line);
   if (g.surface_bitmap != nullptr) {
