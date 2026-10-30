@@ -3,6 +3,8 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 namespace molink::net {
@@ -162,6 +164,10 @@ bool ws_client::write_frame(uint8_t opcode, const uint8_t* data, size_t len) {
     }
     sent += static_cast<size_t>(n);
   }
+  if (std::getenv("MOLINK_WS_LOG") != nullptr) {
+    std::fprintf(stderr, "ws tx opcode=%u len=%zu %.100s\n", opcode, len,
+                 reinterpret_cast<const char*>(data));
+  }
   return true;
 }
 
@@ -203,6 +209,11 @@ void ws_client::reader_loop() {
     if (len > 0 && !read_exact(payload.data(), static_cast<size_t>(len))) break;
     if (masked) {
       for (size_t i = 0; i < payload.size(); ++i) payload[i] ^= mask[i % 4];
+    }
+    if (std::getenv("MOLINK_WS_LOG") != nullptr) {
+      std::fprintf(stderr, "ws rx opcode=%u fin=%d len=%zu %.120s\n", opcode,
+                   fin ? 1 : 0, static_cast<size_t>(len),
+                   len > 0 ? reinterpret_cast<const char*>(payload.data()) : "");
     }
     if (opcode == 0x8) break;              // close
     if (opcode == 0x9) {                   // ping -> pong
