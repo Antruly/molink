@@ -2796,12 +2796,23 @@ void session_supervisor::run() {
       } else if (!live) {
         had_viewers_ = false;
       }
+      // CPU SVT-AV1 at a few frames per second is worse than any other
+      // stream, so "auto" only ranks AV1 first when this host has a hardware
+      // AV1 encoder (NVENC). Pinning AV1 by hand still selects it.
+      bool av1_hardware = false;
+      for (const video_encoder_backend& backend : video_encoder_backends()) {
+        if (backend.available && backend.hardware && backend.av1_stream) {
+          av1_hardware = true;
+          break;
+        }
+      }
       const stream_choice stream =
           live && viewers > 0 && stream_allowed
               ? (pinned != stream_choice::none
                      ? pinned
                      : choose_video_codec(allow, all_stream, all_h264_stream,
-                                          all_vp9_stream, all_vp8_stream))
+                                          all_vp9_stream, all_vp8_stream,
+                                          av1_hardware))
               : stream_choice::none;
       options_.capture->set_av1_stream_allowed(stream == stream_choice::av1);
       options_.capture->set_h264_stream_allowed(stream == stream_choice::h264);

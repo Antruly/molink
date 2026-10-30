@@ -80,6 +80,23 @@ void test_video_codec_choice() {
   expect(molink::choose_video_codec(false, false, false) ==
              stream_choice::none,
          "no decoder at all stays on tiles");
+  // Without a hardware AV1 encoder, CPU AV1 is ranked behind every other
+  // stream: a few frames per second reads as a frozen picture.
+  expect(molink::choose_video_codec(true, true, true, true, true, false) ==
+             stream_choice::vp9,
+         "CPU-only AV1 yields to VP9");
+  expect(molink::choose_video_codec(true, true, true, false, true, false) ==
+             stream_choice::vp8,
+         "CPU-only AV1 yields to VP8");
+  expect(molink::choose_video_codec(true, true, true, false, false, false) ==
+             stream_choice::h264,
+         "CPU-only AV1 yields to H.264");
+  expect(molink::choose_video_codec(true, true, false, false, false, false) ==
+             stream_choice::av1,
+         "CPU-only AV1 is still used when nothing else is shared");
+  expect(molink::choose_video_codec(true, true, true, true, true, true) ==
+             stream_choice::av1,
+         "a hardware AV1 encoder keeps AV1 first");
 }
 }  // namespace
 

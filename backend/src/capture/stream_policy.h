@@ -103,22 +103,27 @@ enum class stream_choice : uint8_t {
   vp8,
 };
 
-/// The rungs a viewer set can all decode, best first: AV1 > VP9 > VP8 >
-/// H.264. Compression beats acceleration here -- VP9 is smaller than H.264
-/// even on the CPU -- and the capture stays on tiles when no rung is common to
-/// every viewer. `av1_enabled` is the host
-/// switch: disabling AV1 in the settings drops that rung even when everyone
-/// can decode it.
+/// The rungs a viewer set can all decode, best first. With a hardware AV1
+/// encoder that is AV1 > VP9 > VP8 > H.264; the capture stays on tiles when
+/// no rung is common to every viewer. `av1_enabled` is the host switch:
+/// disabling AV1 in the settings drops that rung even when everyone can
+/// decode it.
+///
+/// `av1_hardware` says whether this host really has an AV1 encoder on the
+/// GPU. CPU SVT-AV1 is not in the running for a live desktop: at a few frames
+/// per second it looks frozen, so without hardware AV1 the order is
+/// VP9 > VP8 > H.264 > AV1 -- compression still beats acceleration among the
+/// CPU codecs, but a CPU AV1 stream only wins when nothing else is decodable.
 inline stream_choice choose_video_codec(bool av1_enabled, bool all_av1,
                                          bool all_h264, bool all_vp9 = false,
-                                         bool all_vp8 = false) {
-  // AV1 > VP9 > VP8 > H.264. Compression wins over hardware acceleration: a
-  // CPU VP9 stream is smaller than a hardware H.264 one. Tiles are the last
-  // resort, chosen by the caller when this returns none.
-  if (av1_enabled && all_av1) return stream_choice::av1;
+                                         bool all_vp8 = false,
+                                         bool av1_hardware = true) {
+  if (av1_enabled && all_av1 && av1_hardware) return stream_choice::av1;
   if (all_vp9) return stream_choice::vp9;
   if (all_vp8) return stream_choice::vp8;
   if (all_h264) return stream_choice::h264;
+  // Nothing else is shared: a slow stream still beats no stream at all.
+  if (av1_enabled && all_av1) return stream_choice::av1;
   return stream_choice::none;
 }
 
