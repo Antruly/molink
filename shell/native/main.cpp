@@ -893,6 +893,36 @@ void on_script_message(WebKitUserContentManager*, WebKitJavascriptResult* result
   }
 }
 
+/// A download the page starts with an <a download> (a file from the remote
+/// desktop saved through the transfer drawer) goes to the user's Downloads
+/// folder. WebKitGTK cancels a download nobody handles, which is why clicking
+/// a file in the drawer did nothing.
+void on_download_started(WebKitWebView*, WebKitDownload* download, gpointer) {
+  const gchar* suggested = webkit_download_get_suggested_filename(download);
+  // The name comes from the remote machine, so keep only its last component:
+  // a suggested name like "../../x" must not escape the Downloads folder.
+  gchar* base = g_path_get_basename(suggested != nullptr && *suggested != '\0'
+                                        ? suggested
+                                        : "molink-download");
+  const gchar* downloads = g_get_user_special_dir(G_USER_DIRECTORY_DOWNLOAD);
+  gchar* dir = g_strdup(downloads != nullptr && *downloads != '\0'
+                            ? downloads
+                            : g_get_home_dir());
+  gchar* dest = g_build_filename(dir, base, nullptr);
+  for (int suffix = 1; suffix < 1000 && g_file_test(dest, G_FILE_TEST_EXISTS);
+       ++suffix) {
+    g_free(dest);
+    gchar* numbered = g_strdup_printf("%s (%d)", base, suffix);
+    dest = g_build_filename(dir, numbered, nullptr);
+    g_free(numbered);
+  }
+  webkit_download_set_destination(download, dest);
+  std::fprintf(stderr, "download -> %s\n", dest);
+  g_free(dest);
+  g_free(base);
+  g_free(dir);
+}
+
 int main(int argc, char** argv) {
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "--smoke-test") == 0) {
@@ -997,6 +1027,8 @@ int main(int argc, char** argv) {
   // newer WebKitGTK releases.
   webkit_settings_set_enable_media_stream(settings, TRUE);
   webkit_settings_set_enable_webrtc(settings, TRUE);
+  g_signal_connect(view, "download-started",
+                   G_CALLBACK(on_download_started), nullptr);
   gtk_container_add(GTK_CONTAINER(window), view);
 
   static const std::string origin =
