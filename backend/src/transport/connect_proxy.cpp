@@ -17,7 +17,6 @@
 #include <vector>
 
 #include "capture/av1_frame.h"
-#include "capture/jpeg_encode.h"
 #include "surface/frame_surface.h"
 #include "compression.h"
 #include "protocol/frame_packet.h"

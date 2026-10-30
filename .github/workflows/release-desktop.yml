@@ -208,7 +208,6 @@ jobs:
             -DMOLINK_UVCPP_PREFIX="$(cygpath -m "$RUNNER_TEMP/uvcpp")" \
             -DOPENSSL_ROOT_DIR="$(cygpath -m "$OPENSSL_ROOT_DIR")" \
             -DMOLINK_ENABLE_AV1=ON \
-            -DMOLINK_ENABLE_JPEG=ON \
             -DMOLINK_ENABLE_VPX=ON \
             -DMOLINK_ENABLE_WEBRTC=ON \
             -DCMAKE_PREFIX_PATH="$(cygpath -m "$VCPKG_INSTALLATION_ROOT/installed/x64-windows")"

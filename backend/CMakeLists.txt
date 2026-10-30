@@ -217,7 +217,6 @@ set(MOLINK_CORE_SOURCES
   src/capture/av1_encoder.cpp
   src/capture/vpx_stream_encoder.cpp
   src/capture/av1_frame.cpp
-  src/capture/jpeg_encode.cpp
   src/surface/frame_surface.cpp
   src/clipboard/x11_clipboard.cpp
   src/clipboard/windows_clipboard.cpp
@@ -377,30 +376,6 @@ if(MOLINK_ENABLE_VPX)
   endif()
 endif()
 
-# JPEG for full-screen stream frames handed to the page: the browser decodes a
-# JPEG with its native image decoder, which is far cheaper than inflating zlib
-# and much smaller than raw pixels. libjpeg-turbo provides JCS_EXT_BGRX, which
-# takes our BGRA rows without a conversion.
-option(MOLINK_ENABLE_JPEG "Encode stream frames as JPEG (needs libjpeg-turbo)" OFF)
-set(MOLINK_JPEG_SDK "" CACHE PATH
-  "Unpacked libjpeg-turbo dev tree (usr/include, usr/lib) when absent")
-set(MOLINK_HAVE_JPEG 0)
-if(MOLINK_ENABLE_JPEG)
-  if(MOLINK_JPEG_SDK)
-    find_path(JPEG_INCLUDE_DIR jpeglib.h HINTS "${MOLINK_JPEG_SDK}/usr/include")
-    find_library(JPEG_LIBRARY NAMES jpeg
-      HINTS "${MOLINK_JPEG_SDK}/usr/lib/x86_64-linux-gnu"
-            "${MOLINK_JPEG_SDK}/usr/lib")
-  else()
-    find_path(JPEG_INCLUDE_DIR jpeglib.h)
-    find_library(JPEG_LIBRARY NAMES jpeg)
-  endif()
-  if(JPEG_INCLUDE_DIR AND JPEG_LIBRARY)
-    set(MOLINK_HAVE_JPEG 1)
-  else()
-    message(STATUS "molink: libjpeg-turbo not found; stream frames stay raw")
-  endif()
-endif()
 
 # NVIDIA NVENC AV1 rectangles. The header is vendored under third_party, so
 # the feature is available on any build with the NVIDIA driver at runtime; the
@@ -522,12 +497,6 @@ if(MOLINK_BUILD_CORE)
     target_compile_definitions(molink-core PRIVATE MOLINK_HAVE_VPX=1)
     target_include_directories(molink-core PRIVATE ${VPX_INCLUDE_DIR})
     target_link_libraries(molink-core PRIVATE ${VPX_LIBRARY})
-  endif()
-  if(MOLINK_HAVE_JPEG)
-    target_compile_definitions(molink-core PRIVATE MOLINK_HAVE_JPEG=1)
-    target_include_directories(molink-core PRIVATE ${JPEG_INCLUDE_DIR})
-    target_link_libraries(molink-core PRIVATE ${JPEG_LIBRARY})
-    message(STATUS "molink: JPEG stream frames enabled (libjpeg-turbo)")
   endif()
   if(MOLINK_HAVE_NVENC)
     target_compile_definitions(molink-core PRIVATE MOLINK_HAVE_NVENC=1)
