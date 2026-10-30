@@ -165,9 +165,25 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
 /// Opens the native picture window for the core's surface at `path` and runs
 /// its message loop. Returns the process exit code.
 int run_surface_window(const std::wstring& path) {
+  // The shell starts this window without a console: log to a file so a failed
+  // start is diagnosable.
+  std::wstring log_path = path + L".log";
+  FILE* log = _wfopen(log_path.c_str(), L"a");
+  if (log != nullptr) {
+    std::fprintf(log, "surface window: path=%ls\n", path.c_str());
+    std::fflush(log);
+  }
   if (!map_surface(path)) {
     std::fprintf(stderr, "surface: cannot open %ls\n", path.c_str());
+    if (log != nullptr) {
+      std::fprintf(log, "map_surface failed\n");
+      std::fclose(log);
+    }
     return 1;
+  }
+  if (log != nullptr) {
+    std::fprintf(log, "mapped, bytes=%zu\n", g_state.bytes);
+    std::fflush(log);
   }
   HINSTANCE instance = GetModuleHandleW(nullptr);
   WNDCLASSEXW cls{};
@@ -185,8 +201,16 @@ int run_surface_window(const std::wstring& path) {
       CW_USEDEFAULT, CW_USEDEFAULT, 1280, 800, nullptr, nullptr, instance,
       nullptr);
   if (window == nullptr) {
+    if (log != nullptr) {
+      std::fprintf(log, "CreateWindow failed: %lu\n", GetLastError());
+      std::fclose(log);
+    }
     unmap_surface();
     return 1;
+  }
+  if (log != nullptr) {
+    std::fprintf(log, "window created\n");
+    std::fclose(log);
   }
   MSG message{};
   while (GetMessageW(&message, nullptr, 0, 0) > 0) {
