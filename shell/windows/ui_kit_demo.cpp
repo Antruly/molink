@@ -45,6 +45,7 @@ struct app_state {
   dropdown_state dropdown;
   int format_index = 2;
   int focus_field = 0;  // 0 none, 1 address, 2 code
+  bool more_open = false;
   std::wstring address_text = L"127.0.0.1:28428";
   std::wstring code_text;
   size_t address_caret = 14, code_caret = 0;
@@ -124,7 +125,8 @@ void paint(HWND window) {
   if (g.tab == 0) {
     // Home laid out from the measured web spec (web_layout_spec.md).
     // Left column: device card 16..395.
-    const D2D1_RECT_F card = D2D1::RectF(16, 96, 395, 380);
+    const D2D1_RECT_F card =
+        D2D1::RectF(16, 96, 395, g.more_open ? 470 : 380);
     shadow(g.target, card, 14);
     fill_round(g.target, card, 14, g.theme->surface);
     stroke_round(g.target, card, 14, g.theme->line);
@@ -155,8 +157,24 @@ void paint(HWND window) {
          D2D1::RectF(183, 238, 231, 262), L"多次", false, false);
     text(g.target, g.small_left, L"剩余 1 / 1 次",
          D2D1::RectF(37, 270, 300, 290), g.theme->muted);
-    text(g.target, g.small_left, L"更多设置",
-         D2D1::RectF(37, 344, 375, 359), g.theme->muted);
+    const D2D1_RECT_F more = D2D1::RectF(37, 336, 375, 368);
+    fill_round(g.target, more, 8,
+               inside(more, g.hover_x, g.hover_y) ? g.theme->panel
+                                                  : D2D1::ColorF(0, 0, 0, 0));
+    text(g.target, g.small_left, g.more_open ? L"收起设置" : L"更多设置",
+         D2D1::RectF(45, 336, 330, 368), g.theme->muted);
+    draw_icon(g.target, g.more_open ? icon::chevron_down : icon::plus, 356, 352,
+              g.theme->muted);
+    if (g.more_open) {
+      const wchar_t* rows[] = {L"设备名称", L"更新与版本", L"开机自启", L"服务状态"};
+      for (int i = 0; i < 4; ++i) {
+        const float ry = 380 + i * 22;
+        text(g.target, g.small_left, rows[i],
+             D2D1::RectF(45, ry, 330, ry + 20), g.theme->ink);
+        toggle(g.target, *g.theme,
+               D2D1::RectF(340, ry, 364, ry + 20), i != 2);
+      }
+    }
 
     // Right column: connect panel 413..1127.
     const D2D1_RECT_F join = D2D1::RectF(413, 96, w - 16, 380);
@@ -582,6 +600,14 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
         }
         if (inside(code, x, y)) {
           g.focus_field = 2;
+          InvalidateRect(window, nullptr, FALSE);
+          return 0;
+        }
+      }
+      {
+        const D2D1_RECT_F more = D2D1::RectF(37, 336, 375, 368);
+        if (inside(more, x, y)) {
+          g.more_open = !g.more_open;
           InvalidateRect(window, nullptr, FALSE);
           return 0;
         }
