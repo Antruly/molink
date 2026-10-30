@@ -15,6 +15,9 @@ struct session_endpoint {
   int port = 0;
   std::string target;    ///< device id for /ws/connect, empty for a typed address
   std::string token;     ///< client_token from the core's ready line
+  /// Smoke/testing: talk to the host core directly (/ws/session) instead of
+  /// going through a local core's proxy. `token` is then the access code.
+  bool direct_session = false;
 };
 
 class session_client {

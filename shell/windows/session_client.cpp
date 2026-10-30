@@ -6,6 +6,7 @@ namespace molink::net {
 namespace {
 
 std::string quality_path(const session_endpoint& endpoint) {
+  if (endpoint.direct_session) return "/ws/session";
   if (!endpoint.target.empty()) {
     return "/ws/connect?target=" + endpoint.target;
   }
