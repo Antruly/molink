@@ -29,6 +29,7 @@
 #include <WebView2.h>
 
 #include <atomic>
+#include <cstring>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -280,6 +281,8 @@ std::string g_surface_path;
 /// focus and let the core bind a dedicated port.
 bool g_standalone = false;
 int g_core_port = 0;
+/// DevTool/CDP port for the WebView2 environment (0 = off).
+int g_debug_port = 0;
 
 bool start_core(const std::wstring& core, const std::wstring& web_root, int& port,
                 std::string& token, std::string& client_token, bool& tls,
@@ -1054,6 +1057,82 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
   return DefWindowProcW(window, message, wparam, lparam);
 }
 
+/// Minimal ICoreWebView2EnvironmentOptions: the runtime's coclass is not in
+/// the C header, so a debugging build carries its own.
+class environment_options final : public ICoreWebView2EnvironmentOptions {
+ public:
+  explicit environment_options(std::wstring arguments)
+      : arguments_(std::move(arguments)) {}
+
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** out) override {
+    if (out == nullptr) return E_POINTER;
+    if (iid == __uuidof(ICoreWebView2EnvironmentOptions) ||
+        iid == __uuidof(IUnknown)) {
+      *out = this;
+      AddRef();
+      return S_OK;
+    }
+    *out = nullptr;
+    return E_NOINTERFACE;
+  }
+  ULONG STDMETHODCALLTYPE AddRef() override { return ++references_; }
+  ULONG STDMETHODCALLTYPE Release() override {
+    const ULONG left = --references_;
+    if (left == 0) delete this;
+    return left;
+  }
+  HRESULT STDMETHODCALLTYPE get_AdditionalBrowserArguments(
+      LPWSTR* value) override {
+    return copy_string(arguments_, value);
+  }
+  HRESULT STDMETHODCALLTYPE put_AdditionalBrowserArguments(
+      LPCWSTR value) override {
+    arguments_ = value != nullptr ? value : L"";
+    return S_OK;
+  }
+  HRESULT STDMETHODCALLTYPE get_Language(LPWSTR* value) override {
+    return copy_string(language_, value);
+  }
+  HRESULT STDMETHODCALLTYPE put_Language(LPCWSTR value) override {
+    language_ = value != nullptr ? value : L"";
+    return S_OK;
+  }
+  HRESULT STDMETHODCALLTYPE get_TargetCompatibleBrowserVersion(
+      LPWSTR* value) override {
+    return copy_string(version_, value);
+  }
+  HRESULT STDMETHODCALLTYPE put_TargetCompatibleBrowserVersion(
+      LPCWSTR value) override {
+    version_ = value != nullptr ? value : L"";
+    return S_OK;
+  }
+  HRESULT STDMETHODCALLTYPE get_AllowSingleSignOnUsingOSPrimaryAccount(
+      BOOL* allow) override {
+    if (allow == nullptr) return E_POINTER;
+    *allow = FALSE;
+    return S_OK;
+  }
+  HRESULT STDMETHODCALLTYPE put_AllowSingleSignOnUsingOSPrimaryAccount(
+      BOOL) override {
+    return S_OK;
+  }
+
+ private:
+  static HRESULT copy_string(const std::wstring& text, LPWSTR* out) {
+    if (out == nullptr) return E_POINTER;
+    const std::size_t bytes = (text.size() + 1) * sizeof(wchar_t);
+    *out = static_cast<LPWSTR>(CoTaskMemAlloc(bytes));
+    if (*out == nullptr) return E_OUTOFMEMORY;
+    std::memcpy(*out, text.c_str(), bytes);
+    return S_OK;
+  }
+
+  std::atomic<ULONG> references_{1};
+  std::wstring arguments_;
+  std::wstring language_;
+  std::wstring version_;
+};
+
 int run(HINSTANCE instance) {
   CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
@@ -1198,9 +1277,21 @@ int run(HINSTANCE instance) {
       browser_folder = bundled;
     }
 
+    // A CDP port for debugging: pass it through the environment options so
+    // the runtime actually listens (the WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS
+    // variable is not honoured on every runtime version, and the options
+    // coclass is not reachable through the C header).
+    environment_options* env_options = nullptr;
+    if (g_debug_port > 0) {
+      env_options = new environment_options(
+          L"--remote-debugging-port=" + std::to_wstring(g_debug_port) +
+          L" --remote-allow-origins=*");
+      env_options->AddRef();
+    }
     const HRESULT created = create_environment(
         browser_folder.empty() ? nullptr : browser_folder.c_str(),
-        user_data.c_str(), nullptr, new EnvironmentHandler());
+        user_data.c_str(), env_options, new EnvironmentHandler());
+    if (env_options != nullptr) env_options->Release();
     if (FAILED(created)) {
       if (g_smoke) {
         fail_box(L"could not create the WebView2 environment");
@@ -1256,6 +1347,9 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int) {
         g_standalone = true;
       } else if (wcscmp(argv[i], L"--core-port") == 0 && i + 1 < argc) {
         g_core_port = _wtoi(argv[++i]);
+      } else if (wcscmp(argv[i], L"--remote-debugging-port") == 0 &&
+                 i + 1 < argc) {
+        g_debug_port = _wtoi(argv[++i]);
       } else if (wcscmp(argv[i], L"--surface") == 0 && i + 1 < argc) {
         const std::wstring surface_path = argv[++i];
         LocalFree(argv);
