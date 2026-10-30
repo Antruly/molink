@@ -90,8 +90,8 @@ void paint(HWND window) {
     const D2D1_RECT_F strip = D2D1::RectF(16, 12, w - 16, 52);
     fill_round(g.target, strip, 10, g.theme->surface);
     stroke_round(g.target, strip, 10, g.theme->line);
-    static const std::vector<std::wstring> tabs = {L"远程桌面", L"文件",
-                                                   L"设置"};
+    static const std::vector<std::wstring> tabs = {L"首页", L"远程桌面",
+                                                   L"文件", L"设置"};
     tabs_draw(g.target, *g.theme, g.small, strip, tabs, g.tab, g.hover_x,
               g.hover_y);
     // Theme: 自动 / 亮色 / 暗色, then the close button.
@@ -112,7 +112,77 @@ void paint(HWND window) {
     }
   }
 
-  if (g.tab == 2) {
+  if (g.tab == 0) {
+    // Home: device card on the left, connect panel under it, chat/stage right.
+    const D2D1_RECT_F card = D2D1::RectF(16, 72, 470, 300);
+    shadow(g.target, card, 14);
+    fill_round(g.target, card, 14, g.theme->surface);
+    stroke_round(g.target, card, 14, g.theme->line);
+    // Avatar + device name + platform pill.
+    fill_round(g.target, D2D1::RectF(36, 92, 84, 140), 12,
+               g.theme->accent_soft);
+    draw_icon(g.target, icon::monitor, 60, 116, g.theme->accent);
+    text(g.target, g.title, L"INTERNET-REMOTE", D2D1::RectF(96, 92, 380, 116),
+         g.theme->ink);
+    pill(g.target, *g.theme, g.small, g.small_left,
+         D2D1::RectF(96, 120, 170, 144), L"windows", false, false);
+    // ID server status.
+    fill_round(g.target, D2D1::RectF(36, 156, 44, 164), 4,
+               g.theme->accent_strong);
+    text(g.target, g.small_left, L"ID 服务器已连接",
+         D2D1::RectF(52, 150, 300, 170), g.theme->muted);
+    // Device id + verification code rows.
+    text(g.target, g.small_left, L"BDV-NCK-9DN",
+         D2D1::RectF(36, 180, 300, 204), g.theme->ink);
+    text(g.target, g.small_left, L"验证码  ••••••",
+         D2D1::RectF(36, 206, 300, 230), g.theme->ink);
+    pill(g.target, *g.theme, g.small, g.small_left,
+         D2D1::RectF(300, 178, 356, 202), L"单次", true, false);
+    pill(g.target, *g.theme, g.small, g.small_left,
+         D2D1::RectF(362, 178, 418, 202), L"多次", false, false);
+    text(g.target, g.small_left, L"剩余 1 / 1 次",
+         D2D1::RectF(36, 238, 300, 258), g.theme->muted);
+    pill(g.target, *g.theme, g.small, g.small_left,
+         D2D1::RectF(36, 264, 200, 290), L"更多设置", false,
+         inside(D2D1::RectF(36, 264, 200, 290), g.hover_x, g.hover_y));
+
+    // Connect panel.
+    const D2D1_RECT_F join = D2D1::RectF(16, 312, 470, 440);
+    shadow(g.target, join, 14);
+    fill_round(g.target, join, 14, g.theme->surface);
+    stroke_round(g.target, join, 14, g.theme->line);
+    text(g.target, g.title, L"连接设备", D2D1::RectF(36, 326, 200, 350),
+         g.theme->ink);
+    const D2D1_RECT_F address = D2D1::RectF(36, 356, 350, 384);
+    fill_round(g.target, address, 8, g.theme->panel);
+    stroke_round(g.target, address, 8, g.theme->line_soft);
+    text(g.target, g.small_left, L"设备 ID 或 IP[:端口]",
+         D2D1::RectF(48, 356, 340, 384), g.theme->muted);
+    const D2D1_RECT_F code = D2D1::RectF(358, 356, 450, 384);
+    fill_round(g.target, code, 8, g.theme->panel);
+    stroke_round(g.target, code, 8, g.theme->line_soft);
+    text(g.target, g.small_left, L"验证码", D2D1::RectF(370, 356, 440, 384),
+         g.theme->muted);
+    const D2D1_RECT_F connect = D2D1::RectF(36, 394, 450, 422);
+    fill_round(g.target, connect, 8, g.theme->accent_strong);
+    text(g.target, g.small, L"连接", connect, g.theme->on_accent);
+
+    // Right: recent sessions / chat placeholder.
+    const D2D1_RECT_F side = D2D1::RectF(486, 72, w - 16, h - 16);
+    shadow(g.target, side, 14);
+    fill_round(g.target, side, 14, g.theme->surface);
+    stroke_round(g.target, side, 14, g.theme->line);
+    text(g.target, g.title, L"最近会话", D2D1::RectF(506, 88, 700, 112),
+         g.theme->ink);
+    text(g.target, g.small, L"暂无最近会话",
+         D2D1::RectF(side.left, (side.top + side.bottom) / 2 - 10, side.right,
+                     (side.top + side.bottom) / 2 + 10),
+         g.theme->muted);
+    g.target->EndDraw();
+    return;
+  }
+
+  if (g.tab == 3) {
     // Settings as a modal: scrim + panel from the kit, rows drawn in content.
     modal_scrim(g.target, size);
     D2D1_RECT_F close{};
@@ -412,8 +482,8 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
         }
       }
       {
-        static const std::vector<std::wstring> tabs = {L"远程桌面", L"文件",
-                                                       L"设置"};
+        static const std::vector<std::wstring> tabs = {L"首页", L"远程桌面",
+                                                       L"文件", L"设置"};
         RECT client{};
         GetClientRect(window, &client);
         const float cw = client.right * 96.0f / g_dpi;
