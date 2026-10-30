@@ -54,7 +54,7 @@ void pill(ID2D1RenderTarget* t, const palette& theme, IDWriteTextFormat* small,
     draw_icon(t, glyph, r.left + 14, (r.top + r.bottom) / 2,
               accent ? theme.accent : theme.muted);
     text(t, small_left, label,
-         D2D1::RectF(r.left + 26, r.top, r.right - 6, r.bottom),
+         D2D1::RectF(r.left + 26, r.top, r.right - 8, r.bottom),
          accent ? theme.accent : theme.muted);
   } else {
     text(t, small, label, r, accent ? theme.accent : theme.muted);
@@ -83,7 +83,8 @@ void slider(ID2D1RenderTarget* t, const palette& theme,
 }
 
 float tab_width(const std::wstring& label) {
-  return 24.0f + 12.0f * static_cast<float>(label.size());
+  // Leading icon (14) + gap (8) + label, plus 10 px padding on each side.
+  return 42.0f + 12.0f * static_cast<float>(label.size());
 }
 
 D2D1_RECT_F tab_rect(const D2D1_RECT_F& strip, int index,

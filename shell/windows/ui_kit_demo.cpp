@@ -11,6 +11,8 @@
 #include <windows.h>
 #include <d2d1.h>
 #include <dwrite.h>
+#include <wincodec.h>
+#include <commdlg.h>
 
 #include <algorithm>
 #include <cmath>
@@ -47,6 +49,8 @@ struct app_state {
   int focus_field = 0;  // 0 none, 1 address, 2 code
   bool more_open = false;
   bool connect_pressed = false;
+  ID2D1Bitmap* avatar_bitmap = nullptr;
+  std::wstring avatar_path;
   std::wstring address_text = L"127.0.0.1:28428";
   std::wstring code_text;
   size_t address_caret = 14, code_caret = 0;
@@ -85,6 +89,56 @@ const palette* resolve_theme() {
       L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &value, &size);
   if (status == ERROR_SUCCESS) return value != 0 ? &kLight : &kDark;
   return &kDark;
+}
+
+/// Loads an image through WIC and keeps it as a D2D bitmap for the avatar.
+bool load_avatar(const std::wstring& path) {
+  IWICImagingFactory* wic = nullptr;
+  if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr,
+                              CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic))) ||
+      wic == nullptr) {
+    return false;
+  }
+  IWICBitmapDecoder* decoder = nullptr;
+  IWICBitmapFrameDecode* frame = nullptr;
+  IWICFormatConverter* converter = nullptr;
+  bool ok = SUCCEEDED(wic->CreateDecoderFromFilename(
+                path.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnLoad,
+                &decoder)) &&
+            SUCCEEDED(decoder->GetFrame(0, &frame)) &&
+            SUCCEEDED(wic->CreateFormatConverter(&converter)) &&
+            SUCCEEDED(converter->Initialize(
+                frame, GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone,
+                nullptr, 0.0, WICBitmapPaletteTypeCustom));
+  if (ok && g.target != nullptr) {
+    ID2D1Bitmap* bitmap = nullptr;
+    if (SUCCEEDED(g.target->CreateBitmapFromWicBitmap(converter, nullptr,
+                                                      &bitmap))) {
+      if (g.avatar_bitmap != nullptr) g.avatar_bitmap->Release();
+      g.avatar_bitmap = bitmap;
+      g.avatar_path = path;
+    } else {
+      ok = false;
+    }
+  }
+  if (converter != nullptr) converter->Release();
+  if (frame != nullptr) frame->Release();
+  if (decoder != nullptr) decoder->Release();
+  wic->Release();
+  return ok;
+}
+
+bool pick_avatar(HWND window) {
+  wchar_t path[MAX_PATH] = {};
+  OPENFILENAMEW ofn{};
+  ofn.lStructSize = sizeof(ofn);
+  ofn.hwndOwner = window;
+  ofn.lpstrFilter = L"图片 (*.png;*.jpg;*.jpeg;*.bmp)\0*.png;*.jpg;*.jpeg;*.bmp\0所有文件\0*.*\0";
+  ofn.lpstrFile = path;
+  ofn.nMaxFile = MAX_PATH;
+  ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+  if (!GetOpenFileNameW(&ofn)) return false;
+  return load_avatar(path);
 }
 
 void paint(HWND window) {
@@ -138,7 +192,13 @@ void paint(HWND window) {
     stroke_round(g.target, card, 14, g.theme->line);
     fill_round(g.target, D2D1::RectF(37, 113, 95, 171), 16,
                g.theme->accent_soft);
-    draw_icon(g.target, icon::monitor, 66, 142, g.theme->accent);
+    if (g.avatar_bitmap != nullptr) {
+      const D2D1_RECT_F area = D2D1::RectF(37, 113, 95, 171);
+      g.target->DrawBitmap(g.avatar_bitmap, area, 1.0f,
+                           D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+    } else {
+      draw_icon(g.target, icon::monitor, 66, 142, g.theme->accent);
+    }
     // Platform badge at the avatar's bottom-right, like the web card.
     fill_round(g.target, D2D1::RectF(77, 149, 103, 175), 6,
                g.theme->surface);
@@ -662,6 +722,13 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
           return 0;
         }
       }
+      {
+        const D2D1_RECT_F avatar = D2D1::RectF(37, 113, 95, 171);
+        if (inside(avatar, x, y)) {
+          if (pick_avatar(window)) InvalidateRect(window, nullptr, FALSE);
+          return 0;
+        }
+      }
       if (inside(g.hit_collapse, x, y)) {
         g.collapsed = !g.collapsed;
         return 0;
@@ -752,6 +819,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+  CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
   for (int i = 1; i < __argc; ++i) {
     if (wcscmp(__wargv[i], L"--theme") == 0 && i + 1 < __argc) {
       const wchar_t* value = __wargv[++i];
