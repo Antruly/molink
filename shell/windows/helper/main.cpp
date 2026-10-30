@@ -25,6 +25,41 @@
 
 namespace {
 
+// WTSINFOEX is how the helper tells a locked session from the user's own
+// desktop, but mingw-w64 (the Win7 x86 kit uses GCC 13 with mingw-w64 11)
+// does not declare WTSINFOEXW, WTSSessionInfoEx or WTS_SESSIONSTATE_LOCK.
+// Windows 7 has them, so carry the documented layout and values here rather
+// than depending on a newer header set.
+struct wtsinfoex_level1 {
+  ULONG SessionId;
+  WTS_CONNECTSTATE_CLASS SessionState;
+  LONG SessionFlags;
+  WCHAR WinStationName[WINSTATIONNAME_LENGTH + 1];
+  WCHAR UserName[USERNAME_LENGTH + 1];
+  WCHAR DomainName[DOMAIN_LENGTH + 1];
+  LARGE_INTEGER LogonTime;
+  LARGE_INTEGER LogoffTime;
+  LARGE_INTEGER LastInputTime;
+  LARGE_INTEGER CurrentTime;
+  DWORD IncomingBytes;
+  DWORD OutgoingBytes;
+  DWORD IncomingFrames;
+  DWORD OutgoingFrames;
+  DWORD IncomingCompressedBytes;
+  DWORD OutgoingCompressedBytes;
+};
+
+struct wtsinfoex {
+  DWORD Level;
+  wtsinfoex_level1 Data;
+};
+
+// WTS_INFO_CLASS value and SessionFlags states (wtsapi32.h on recent SDKs).
+constexpr int kWTSSessionInfoEx = 25;
+constexpr LONG kWTSLocked = 0;    // WTS_SESSIONSTATE_LOCK
+constexpr LONG kWTSUnlocked = 1;  // WTS_SESSIONSTATE_UNLOCK
+static_assert(kWTSLocked != kWTSUnlocked, "lock and unlock must differ");
+
 // Each pipe thread must track its own desktop: SetThreadDesktop only affects
 // the calling thread, and a shared handle made the input thread believe it had
 // already switched when the capture thread changed desktops.
@@ -179,15 +214,17 @@ bool session_locked() {
   DWORD bytes = 0;
   const DWORD session = WTSGetActiveConsoleSessionId();
   if (session == 0xFFFFFFFF) return false;
+  const auto info_class = static_cast<WTS_INFO_CLASS>(kWTSSessionInfoEx);
   if (!WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, session,
-                                   WTSSessionInfoEx, &buffer, &bytes)) {
+                                   info_class, &buffer, &bytes)) {
     return false;
   }
   bool locked = false;
-  const auto* info = reinterpret_cast<const WTSINFOEXW*>(buffer);
+  const auto* info = reinterpret_cast<const wtsinfoex*>(buffer);
   if (info != nullptr && info->Level == 1) {
-    // WTS_SESSIONSTATE_LOCK is 0 and UNLOCK is 1.
-    locked = info->Data.WTSInfoExLevel1.SessionFlags == WTS_SESSIONSTATE_LOCK;
+    // WTS_SESSIONSTATE_LOCK is 0 and UNLOCK is 1, despite what the current
+    // Microsoft documentation page says.
+    locked = info->Data.SessionFlags == kWTSLocked;
   }
   WTSFreeMemory(buffer);
   return locked;
