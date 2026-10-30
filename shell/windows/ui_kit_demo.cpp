@@ -129,10 +129,10 @@ void paint(HWND window) {
          D2D1::RectF(107, 113, 300, 137), g.theme->ink);
     pill(g.target, *g.theme, g.small, g.small_left,
          D2D1::RectF(107, 143, 181, 167), L"windows", false, false);
-    fill_round(g.target, D2D1::RectF(239 - 110, 171, 247 - 110, 179), 4,
+    fill_round(g.target, D2D1::RectF(239, 172, 247, 180), 4,
                g.theme->accent_strong);
     text(g.target, g.small_left, L"ID 服务器已连接",
-         D2D1::RectF(239 - 100, 171, 360, 195), g.theme->muted);
+         D2D1::RectF(249, 168, 380, 192), g.theme->muted);
     text(g.target, g.body, L"BDV-NCK-9DN",
          D2D1::RectF(37, 197, 300, 221), g.theme->ink);
     text(g.target, g.body, L"验证码  ••••••",
@@ -156,12 +156,12 @@ void paint(HWND window) {
     const D2D1_RECT_F address = D2D1::RectF(433, 160, 900, 196);
     fill_round(g.target, address, 9.6f, g.theme->panel);
     stroke_round(g.target, address, 9.6f, g.theme->line_soft);
-    text(g.target, g.small_left, L"设备 ID 或 IP[:端口]",
+    text(g.target, g.body, L"设备 ID 或 IP[:端口]",
          D2D1::RectF(445, 160, 890, 196), g.theme->muted);
     const D2D1_RECT_F code = D2D1::RectF(910, 160, w - 36, 196);
     fill_round(g.target, code, 9.6f, g.theme->panel);
     stroke_round(g.target, code, 9.6f, g.theme->line_soft);
-    text(g.target, g.small_left, L"验证码",
+    text(g.target, g.body, L"验证码",
          D2D1::RectF(922, 160, w - 48, 196), g.theme->muted);
     // Measured: 连接 button spans the panel width, 36 high, radius 9.6.
     const D2D1_RECT_F connect =
