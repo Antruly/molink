@@ -39,7 +39,7 @@ struct app_state {
   int tab = 0;                 // 0 desktop, 1 files, 2 settings
   bool collapsed = false;      // floating toolbar collapsed
   float collapse_anim = 0.0f;  // 0 expanded, 1 collapsed
-  bool show_dropdown = false;
+  dropdown_state dropdown;
   int format_index = 2;
   int preset = 2;
   float hover_x = -1, hover_y = -1;
@@ -90,15 +90,10 @@ void paint(HWND window) {
     const D2D1_RECT_F strip = D2D1::RectF(16, 12, w - 16, 52);
     fill_round(g.target, strip, 10, g.theme->surface);
     stroke_round(g.target, strip, 10, g.theme->line);
-    float tx = 26;
-    for (int i = 0; i < 3; ++i) {
-      const float width = (i == 0 ? 84.0f : 66.0f);
-      g.hit_tab[i] = D2D1::RectF(tx, 19, tx + width, 45);
-      pill(g.target, *g.theme, g.small, g.small_left, g.hit_tab[i], kTabs[i], g.tab == i,
-           inside(g.hit_tab[i], g.hover_x, g.hover_y),
-           i == 0 ? icon::monitor : (i == 1 ? icon::folder : icon::settings));
-      tx += width + 6;
-    }
+    static const std::vector<std::wstring> tabs = {L"远程桌面", L"文件",
+                                                   L"设置"};
+    tabs_draw(g.target, *g.theme, g.small, strip, tabs, g.tab, g.hover_x,
+              g.hover_y);
     // Theme: 自动 / 亮色 / 暗色, then the close button.
     {
       const wchar_t* labels[3] = {L"自动", L"亮色", L"暗色"};
@@ -251,27 +246,12 @@ void paint(HWND window) {
   text(g.target, g.small_left, L"图像", D2D1::RectF(32, y, 90, y + 28),
        g.theme->muted);
   const D2D1_RECT_F format = D2D1::RectF(92, y, 512, y + 28);
-  g.hit_dropdown = format;
-  fill_round(g.target, format, 8, g.theme->panel);
-  stroke_round(g.target, format, 8, g.theme->line_soft);
-  text(g.target, g.small_left, kFormats[g.format_index],
-       D2D1::RectF(104, y, 490, y + 28), g.theme->ink);
-  draw_icon(g.target, icon::chevron_down, 496, y + 14, g.theme->muted);
-  if (g.show_dropdown) {
-    for (int i = 0; i < 4; ++i) {
-      const D2D1_RECT_F item = D2D1::RectF(
-          format.left, format.bottom + 6 + i * 30, format.right,
-          format.bottom + 32 + i * 30);
-      g.hit_dropdown_item[i] = item;
-      fill_round(g.target, item, 8,
-                 i == g.format_index ? g.theme->accent_soft : g.theme->panel);
-      stroke_round(g.target, item, 8,
-                   i == g.format_index ? g.theme->accent : g.theme->line_soft);
-      text(g.target, g.small_left, kFormats[i],
-           D2D1::RectF(item.left + 12, item.top, item.right, item.bottom),
-           i == g.format_index ? g.theme->accent : g.theme->ink);
-    }
-  }
+  static const std::vector<std::wstring> formats = {
+      L"跟随档位", L"黑白 8 位", L"16 位 RGB565", L"真彩 BGRA"};
+  g.dropdown.index = g.format_index;
+  dropdown_draw(g.target, *g.theme, g.small_left, format, formats, g.dropdown,
+                g.hover_x, g.hover_y);
+  g.format_index = g.dropdown.index;
 
   // Placeholder picture area on the right.
   const D2D1_RECT_F stage = D2D1::RectF(560, 120, w - 16, h - 16);
@@ -437,9 +417,16 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
           return 0;
         }
       }
-      for (int i = 0; i < 3; ++i) {
-        if (inside(g.hit_tab[i], x, y)) {
-          g.tab = i;
+      {
+        static const std::vector<std::wstring> tabs = {L"远程桌面", L"文件",
+                                                       L"设置"};
+        RECT client{};
+        GetClientRect(window, &client);
+        const float cw = client.right * 96.0f / g_dpi;
+        const D2D1_RECT_F strip = D2D1::RectF(16, 12, cw - 16, 52);
+        const int tab = tabs_hit(strip, tabs, x, y);
+        if (tab >= 0) {
+          g.tab = tab;
           InvalidateRect(window, nullptr, FALSE);
           return 0;
         }
@@ -448,19 +435,13 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
         g.collapsed = !g.collapsed;
         return 0;
       }
-      if (inside(g.hit_dropdown, x, y)) {
-        g.show_dropdown = !g.show_dropdown;
-        InvalidateRect(window, nullptr, FALSE);
-        return 0;
-      }
-      if (g.show_dropdown) {
-        for (int i = 0; i < 4; ++i) {
-          if (inside(g.hit_dropdown_item[i], x, y)) {
-            g.format_index = i;
-            g.show_dropdown = false;
-            InvalidateRect(window, nullptr, FALSE);
-            return 0;
-          }
+      {
+        static const std::vector<std::wstring> formats = {
+            L"跟随档位", L"黑白 8 位", L"16 位 RGB565", L"真彩 BGRA"};
+        const D2D1_RECT_F format = D2D1::RectF(92, 366, 512, 394);
+        if (dropdown_click(g.dropdown, format, formats, x, y) >= -1) {
+          g.format_index = g.dropdown.index;
+          InvalidateRect(window, nullptr, FALSE);
         }
       }
       return 0;
