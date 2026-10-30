@@ -6,6 +6,17 @@
 namespace molink::net {
 namespace {
 
+/// Microsecond clock (QPC): GetTickCount64's ~15.6 ms tick is coarser than a
+/// loopback round trip.
+uint64_t now_us() {
+  static LARGE_INTEGER frequency{};
+  if (frequency.QuadPart == 0) QueryPerformanceFrequency(&frequency);
+  LARGE_INTEGER counter{};
+  QueryPerformanceCounter(&counter);
+  return static_cast<uint64_t>(counter.QuadPart * 1000000 /
+                               (frequency.QuadPart > 0 ? frequency.QuadPart : 1));
+}
+
 std::string quality_path(const session_endpoint& endpoint) {
   if (endpoint.direct_session) return "/ws/session";
   if (!endpoint.target.empty()) {
@@ -112,7 +123,7 @@ void session_client::handle_text(const std::string& text) {
   } else if (type == "pong") {
     // The host echoes the ping's `t`, so the RTT needs no shared state.
     uint64_t sent = 0;
-    const uint64_t now = GetTickCount64();
+    const uint64_t now = now_us();
     const bool found = find_u64(text, "t", &sent);
     if (std::getenv("MOLINK_WS_LOG") != nullptr) {
       std::fprintf(stderr, "pong: found=%d sent=%llu now=%llu rtt=%lld\n",
@@ -121,7 +132,7 @@ void session_client::handle_text(const std::string& text) {
                    static_cast<long long>(now) - static_cast<long long>(sent));
     }
     if (found && sent > 0 && now >= sent) {
-      stats_->note_latency(static_cast<int>(now - sent));
+      stats_->note_latency(static_cast<int>((now - sent + 500) / 1000));
     }
     ping_sent_at_.store(0);
   } else if (type == "quality") {
@@ -137,7 +148,7 @@ void session_client::tick(uint64_t now_ms) {
   if (!ws_.is_open()) return;
   if (now_ms - last_ping_ >= 1000 && ping_sent_at_ == 0) {
     const std::string ping =
-        "{\"type\":\"ping\",\"t\":" + std::to_string(now_ms) + "}";
+        "{\"type\":\"ping\",\"t\":" + std::to_string(now_us()) + "}";
     if (ws_.send_text(ping)) ping_sent_at_ = now_ms;
   }
 }
