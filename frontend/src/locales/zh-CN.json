@@ -574,7 +574,8 @@
     "advancedMode": "切换到高级版"
   },
   "common": {
-    "cancel": "取消"
+    "cancel": "取消",
+    "close": "关闭"
   },
   "simple": {
     "modeDesktop": "远程桌面",

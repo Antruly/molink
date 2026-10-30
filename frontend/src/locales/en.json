@@ -574,7 +574,8 @@
     "advancedMode": "Switch to advanced mode"
   },
   "common": {
-    "cancel": "Cancel"
+    "cancel": "Cancel",
+    "close": "Close"
   },
   "simple": {
     "modeDesktop": "Remote desktop",
