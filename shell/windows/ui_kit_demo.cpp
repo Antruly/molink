@@ -976,6 +976,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   for (int i = 1; i < __argc; ++i) {
     if (wcscmp(__wargv[i], L"--surface") == 0 && i + 1 < __argc) {
       g.surface_path = __wargv[++i];
+      g.tab = 1;  // open on the desktop view when a picture is attached
     }
     if (wcscmp(__wargv[i], L"--theme") == 0 && i + 1 < __argc) {
       const wchar_t* value = __wargv[++i];
