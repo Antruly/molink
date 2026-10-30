@@ -574,10 +574,8 @@ void paint(HWND window) {
     chip(std::to_wstring(g.stats.kbps) + L" kbps", false, 78);
     chip(std::to_wstring(g.stats.latency_ms) + L" ms", false, 56);
     chip(g.stats.codec, true, 42);
-    const D2D1_RECT_F quality_chip = chip(kPresets[g.preset], true, 61);
-    if (inside(quality_chip, g.hover_x, g.hover_y)) {
-      // handled on click below
-    }
+    g.quality_chip = chip(kPresets[g.preset], true, 61);
+
   }
 
   // Content card: one vertical flow, so rows cannot overlap. The panel grows
@@ -985,6 +983,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     if (wcscmp(__wargv[i], L"--code") == 0 && i + 1 < __argc) {
       const std::wstring value = __wargv[++i];
       g.session_code.assign(value.begin(), value.end());
+    }
+    if (wcscmp(__wargv[i], L"--bar") == 0 && i + 1 < __argc) {
+      const wchar_t* mode = __wargv[++i];
+      if (wcscmp(mode, L"collapsed") == 0) g.collapsed = true;
+      if (wcscmp(mode, L"pinned") == 0) g.pinned = true;
     }
     if (wcscmp(__wargv[i], L"--surface") == 0 && i + 1 < __argc) {
       g.surface_path = __wargv[++i];
