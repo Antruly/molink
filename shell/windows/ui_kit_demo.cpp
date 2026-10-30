@@ -128,6 +128,44 @@ bool load_avatar(const std::wstring& path) {
   return ok;
 }
 
+std::wstring avatar_store_path() {
+  wchar_t buffer[MAX_PATH] = {};
+  const DWORD size = GetEnvironmentVariableW(L"APPDATA", buffer, MAX_PATH);
+  if (size == 0) return std::wstring();
+  std::wstring dir = std::wstring(buffer) + L"\\moLink";
+  CreateDirectoryW(dir.c_str(), nullptr);
+  return dir + L"\\ui-avatar.bin";
+}
+
+void save_avatar_path(const std::wstring& path) {
+  const std::wstring store = avatar_store_path();
+  if (store.empty()) return;
+  FILE* file = _wfopen(store.c_str(), L"wb");
+  if (file == nullptr) return;
+  const size_t length = path.size();
+  std::fwrite(&length, sizeof(length), 1, file);
+  std::fwrite(path.data(), sizeof(wchar_t), length, file);
+  std::fclose(file);
+}
+
+bool load_saved_avatar() {
+  const std::wstring store = avatar_store_path();
+  if (store.empty()) return false;
+  FILE* file = _wfopen(store.c_str(), L"rb");
+  if (file == nullptr) return false;
+  size_t length = 0;
+  bool ok = false;
+  if (std::fread(&length, sizeof(length), 1, file) == 1 && length > 0 &&
+      length < 1024) {
+    std::wstring path(length, L'\0');
+    if (std::fread(path.data(), sizeof(wchar_t), length, file) == length) {
+      ok = load_avatar(path);
+    }
+  }
+  std::fclose(file);
+  return ok;
+}
+
 bool pick_avatar(HWND window) {
   wchar_t path[MAX_PATH] = {};
   OPENFILENAMEW ofn{};
@@ -138,7 +176,9 @@ bool pick_avatar(HWND window) {
   ofn.nMaxFile = MAX_PATH;
   ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
   if (!GetOpenFileNameW(&ofn)) return false;
-  return load_avatar(path);
+  if (!load_avatar(path)) return false;
+  save_avatar_path(path);
+  return true;
 }
 
 void paint(HWND window) {
@@ -194,8 +234,16 @@ void paint(HWND window) {
                g.theme->accent_soft);
     if (g.avatar_bitmap != nullptr) {
       const D2D1_RECT_F area = D2D1::RectF(37, 113, 95, 171);
+      ID2D1RoundedRectangleGeometry* clip = nullptr;
+      g.factory->CreateRoundedRectangleGeometry(
+          D2D1::RoundedRect(area, 16, 16), &clip);
+      D2D1_LAYER_PARAMETERS params = D2D1::LayerParameters(
+          D2D1::InfiniteRect(), clip, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+      g.target->PushLayer(params, nullptr);
       g.target->DrawBitmap(g.avatar_bitmap, area, 1.0f,
                            D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+      g.target->PopLayer();
+      if (clip != nullptr) clip->Release();
     } else {
       draw_icon(g.target, icon::monitor, 66, 142, g.theme->accent);
     }
@@ -567,6 +615,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
   switch (message) {
     case WM_CREATE:
       if (!create_resources(window)) return -1;
+      load_saved_avatar();
       apply_rounded(window);
       SetTimer(window, 1, 16, nullptr);
       return 0;
