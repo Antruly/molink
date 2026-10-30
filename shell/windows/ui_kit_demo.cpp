@@ -745,7 +745,10 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
       if (top) return HTTOP;
       if (bottom) return HTBOTTOM;
       // The tab strip doubles as the title bar.
-      if (client.y < static_cast<int>(79 * g_dpi / 96.0f)) return HTCAPTION;
+      // Only the 40 px title bar drags the window. Returning HTCAPTION for the
+      // whole chrome band swallowed every click on the tabs, the theme square
+      // and the settings square (they never reached WM_LBUTTONDOWN).
+      if (client.y < static_cast<int>(40 * g_dpi / 96.0f)) return HTCAPTION;
       return base;
     }
     case WM_TIMER: {
