@@ -457,9 +457,9 @@ void paint(HWND window) {
       x -= width + 8;
       return r;
     };
-    chip(std::to_wstring(stat_kbps) + L" kbps", false, 78);
-    chip(std::to_wstring(stat_latency_ms) + L" ms", false, 56);
-    chip(stat_codec, true, 42);
+    chip(std::to_wstring(g.stat_kbps) + L" kbps", false, 78);
+    chip(std::to_wstring(g.stat_latency_ms) + L" ms", false, 56);
+    chip(g.stat_codec, true, 42);
     const D2D1_RECT_F quality_chip = chip(kPresets[g.preset], true, 61);
     if (inside(quality_chip, g.hover_x, g.hover_y)) {
       // handled on click below
