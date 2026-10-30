@@ -40,3 +40,30 @@ the visual and interaction reference. This is how it becomes the real shell.
 - DPI 150 %/200 % pass; listen for `WM_SETTINGCHANGE` to follow the system theme.
 - Core-side VP9/AV1 decode so the native picture works for streams, not just
   tiles.
+
+## WS contract for the shell's client (step 1 detail)
+
+The shell connects to its own core (the one it started) — not to the remote
+host — and lets the core do transport selection:
+
+- `ws://127.0.0.1:<port>/ws/direct?host=<host>&port=<port>` for a typed
+  address, or `/ws/connect?target=<device-id>` for an ID-server session.
+- Send `hello {token: <client_token from the ready line>, seq_clock: true,
+  video_push: true, h264_stream, vp9_stream, vp8_stream, av1_native}`.
+- Handle: `welcome` (stream_codecs, tiles.screen_w/h, codec_preference),
+  `codec` (wire, wire_rate, full), `ping`/`pong` (RTT), `quality` (ack of a
+  preset/slider change), `transport` (path/protocol for the status chip),
+  `error`.
+- Send: `quality {mode, fps, qp, bitrate_kbps, rate_mode, format}`,
+  `stream-codec {value}`, `viewer {fps, dropped, rx, rtt}` once a second,
+  `request-keyframe`.
+
+Binary frames are the picture; the native shell ignores them (the shared
+surface carries the composed picture) except for the seq clock.
+
+Implementation options, cheapest first:
+1. **Minimal WS client over Winsock** (~400 lines): HTTP Upgrade, masked
+   client frames, ping/pong, close, reconnect. No dependencies; works on Win7.
+2. **libuvcpp's web client** (already shipped as uvcpp.dll): less code, but
+   the shell would depend on the uvcpp DLL and its loop. Prefer this if the
+   API fits.
