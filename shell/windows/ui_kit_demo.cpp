@@ -79,6 +79,7 @@ struct app_state {
   int preset = 2;
   float hover_x = -1, hover_y = -1;
 
+  D2D1_RECT_F quality_chip{};
   D2D1_RECT_F hit_collapse{}, hit_theme[3]{}, hit_tab[3]{}, hit_dropdown{},
       hit_dropdown_item[4]{}, hit_settings{}, hit_modal_close{};
 };
@@ -570,101 +571,30 @@ void paint(HWND window) {
 
   // Content card: one vertical flow, so rows cannot overlap. The panel grows
   // and shrinks with panel_anim, keeping the measured 4px grid.
-  const float open = ease_out(g.panel_anim);
-  if (open <= 0.02f) {
-    // Panel tucked away: the picture area takes the whole row.
-    const D2D1_RECT_F stage = D2D1::RectF(16, 176, w - 16, h - 16);
-    fill_round(g.target, stage, 14, g.theme->surface);
-    stroke_round(g.target, stage, 14, g.theme->line);
-    text(g.target, g.small, L"远程画面（共享内存直绘）",
-         D2D1::RectF(stage.left, (stage.top + stage.bottom) / 2 - 12,
-                     stage.right, (stage.top + stage.bottom) / 2 + 12),
-         g.theme->muted);
-    g.target->EndDraw();
-    return;
-  }
-  float y = 176;
-  const float card_h = 330 * open;
-  const D2D1_RECT_F card = D2D1::RectF(16, y, 544, y + card_h);
-  shadow(g.target, card, 14);
-  fill_round(g.target, card, 14, g.theme->surface);
-  stroke_round(g.target, card, 14, g.theme->line);
-
-  y += 14;
-  text(g.target, g.title, L"画质", D2D1::RectF(32, y, 160, y + 24),
-       g.theme->ink);
-  y += 32;
-  if (open < 0.6f) {
-    g.target->EndDraw();
-    return;
-  }
-
-  // Preset chips: 4 columns, two rows.
-  for (int i = 0; i < 7; ++i) {
-    const float cx = 32 + (i % 4) * (116 + 8);
-    const float cy = y + (i / 4) * (28 + 8);
-    const D2D1_RECT_F r = D2D1::RectF(cx, cy, cx + 116, cy + 28);
-    pill(g.target, *g.theme, g.small, g.small_left, r, kPresets[i], g.preset == i,
-         inside(r, g.hover_x, g.hover_y), icon::none);
-  }
-  y += 2 * 28 + 8;
-  y += 16;
-
-  // Rate mode.
-  text(g.target, g.small_left, L"速率模式",
-       D2D1::RectF(32, y, 110, y + 26), g.theme->muted);
-  {
-    const wchar_t* modes[3] = {L"自动", L"恒定质量", L"恒定码率"};
-    const float widths[3] = {56, 84, 84};
-    float mx = 104;
-    for (int i = 0; i < 3; ++i) {
-      const D2D1_RECT_F r = D2D1::RectF(mx, y, mx + widths[i], y + 26);
-      pill(g.target, *g.theme, g.small, g.small_left, r, modes[i], g.preset >= 0 && i == 0,
-           inside(r, g.hover_x, g.hover_y), icon::none);
-      mx += widths[i] + 6;
-    }
-  }
-  y += 26 + 18;
-
-  // Sliders (ui_kit widgets).
-  {
-    const wchar_t* labels[3] = {L"质量", L"码率", L"帧率"};
-    const float fractions[3] = {0.72f, 0.35f, 0.5f};
-    wchar_t values[3][32] = {};
-    swprintf(values[0], 32, L"45");
-    swprintf(values[1], 32, L"4200 kbps");
-    swprintf(values[2], 32, L"30 fps");
-    for (int i = 0; i < 3; ++i) {
-      slider(g.target, *g.theme, g.small_left,
-                 D2D1::RectF(32, y + i * 30, 512, y + i * 30 + 20), labels[i],
-                 values[i], fractions[i]);
-    }
-  }
-  y += 3 * 30 + 12;
-
-  // Image format dropdown.
-  text(g.target, g.small_left, L"图像", D2D1::RectF(32, y, 90, y + 28),
-       g.theme->muted);
-  const D2D1_RECT_F format = D2D1::RectF(92, y, 512, y + 28);
-  static const std::vector<std::wstring> formats = {
-      L"跟随档位", L"黑白 8 位", L"16 位 RGB565", L"真彩 BGRA"};
-  g.dropdown.index = g.format_index;
-  dropdown_draw(g.target, *g.theme, g.small_left, format, formats, g.dropdown,
-                g.hover_x, g.hover_y);
-  g.format_index = g.dropdown.index;
-
-  // Picture area on the right: live surface when connected.
-  const D2D1_RECT_F stage = D2D1::RectF(560, 176, w - 16, h - 16);
+  // Session view: full-bleed picture, floating toolbar only (web layout).
+  const D2D1_RECT_F stage = D2D1::RectF(16, 176, w - 16, h - 16);
   fill_round(g.target, stage, 14, g.theme->surface);
   stroke_round(g.target, stage, 14, g.theme->line);
   if (g.surface_bitmap != nullptr) {
     g.target->DrawBitmap(g.surface_bitmap, stage, 1.0f,
                          D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+  } else {
+    text(g.target, g.small, L"远程画面（共享内存直绘）",
+         D2D1::RectF(stage.left, (stage.top + stage.bottom) / 2 - 12,
+                     stage.right, (stage.top + stage.bottom) / 2 + 12),
+         g.theme->muted);
   }
-  text(g.target, g.small, L"远程画面（共享内存直绘）",
-       D2D1::RectF(stage.left, (stage.top + stage.bottom) / 2 - 12,
-                   stage.right, (stage.top + stage.bottom) / 2 + 12),
-       g.theme->muted);
+  if (g.panel_open_quality) {
+    static const std::vector<std::wstring> presets = {
+        L"极速", L"流畅", L"平衡", L"清晰", L"超清", L"无损", L"自适应"};
+    dropdown_state state;
+    state.index = g.preset;
+    const float qx = g.quality_chip.right > 0 ? g.quality_chip.left : w - 260;
+    const float qy = g.quality_chip.bottom > 0 ? g.quality_chip.bottom : 171;
+    dropdown_draw(g.target, *g.theme, g.small_left,
+                  D2D1::RectF(qx, qy + 6, qx + 140, qy + 34), presets, state,
+                  g.hover_x, g.hover_y);
+  }
 
   g.target->EndDraw();
 }
