@@ -233,10 +233,22 @@ void paint(HWND window) {
     fill_round(g.target, D2D1::RectF(37, 113, 95, 171), 16,
                g.theme->accent_soft);
     if (g.avatar_bitmap != nullptr) {
-      const D2D1_RECT_F area = D2D1::RectF(37, 113, 95, 171);
+      const D2D1_RECT_F box = D2D1::RectF(37, 113, 95, 171);
+      const D2D1_SIZE_F src = g.avatar_bitmap->GetSize();
+      const float fit = (std::min)(box.right - box.left > 0
+                                       ? (box.right - box.left) / src.width
+                                       : 0.0f,
+                                   (box.bottom - box.top) / src.height);
+      const float dw = src.width * fit;
+      const float dh = src.height * fit;
+      const D2D1_RECT_F area =
+          D2D1::RectF(box.left + ((box.right - box.left) - dw) / 2,
+                      box.top + ((box.bottom - box.top) - dh) / 2,
+                      box.left + ((box.right - box.left) + dw) / 2,
+                      box.top + ((box.bottom - box.top) + dh) / 2);
       ID2D1RoundedRectangleGeometry* clip = nullptr;
       g.factory->CreateRoundedRectangleGeometry(
-          D2D1::RoundedRect(area, 16, 16), &clip);
+          D2D1::RoundedRect(box, 16, 16), &clip);
       D2D1_LAYER_PARAMETERS params = D2D1::LayerParameters(
           D2D1::InfiniteRect(), clip, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
       g.target->PushLayer(params, nullptr);
