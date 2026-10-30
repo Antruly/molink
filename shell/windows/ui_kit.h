@@ -43,7 +43,7 @@ inline void line(ID2D1RenderTarget* t, float x1, float y1, float x2, float y2,
 
 enum class icon {
   none, settings, clipboard, fullscreen, close, plus, sun, moon, chevron_down,
-  monitor, folder, chat, user
+  monitor, folder, chat, user, shield
 };
 
 /// 16x16 stroke icons drawn from line segments: no font dependency.
@@ -123,6 +123,14 @@ inline void draw_icon(ID2D1RenderTarget* t, icon kind, float cx, float cy,
       line(t, cx - 6, cy + 3, cx + 1, cy + 3, color);
       line(t, cx + 1, cy + 3, cx + 3, cy + 6, color);
       line(t, cx + 3, cy + 6, cx + 3, cy + 3, color);
+      break;
+    case icon::shield:
+      // Security/TLS badge: a small shield outline.
+      line(t, cx - 4, cy - 5, cx + 4, cy - 5, color);
+      line(t, cx - 4, cy - 5, cx - 4, cy - 1, color);
+      line(t, cx + 4, cy - 5, cx + 4, cy - 1, color);
+      line(t, cx - 4, cy - 1, cx, cy + 5, color);
+      line(t, cx + 4, cy - 1, cx, cy + 5, color);
       break;
     case icon::user:
       line(t, cx - 3, cy - 4, cx + 3, cy - 4, color);

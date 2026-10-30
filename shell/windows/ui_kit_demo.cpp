@@ -332,10 +332,12 @@ void paint(HWND window) {
                session_active ? g.theme->accent_soft : g.theme->panel);
     stroke_round(g.target, session_tab, 8,
                  session_active ? g.theme->accent : g.theme->line_soft);
-    fill_round(g.target, D2D1::RectF(247, header_y + 12, 253, header_y + 18), 3,
+    // Security badge, connection light, then the remote's name.
+    draw_icon(g.target, icon::shield, 254, header_y + 15, g.theme->muted);
+    fill_round(g.target, D2D1::RectF(263, header_y + 12, 269, header_y + 18), 3,
                g.theme->accent_strong);
     text(g.target, g.small_left, L"INTERNET-REMOTE",
-         D2D1::RectF(259, header_y, 355, header_y + 30),
+         D2D1::RectF(275, header_y, 355, header_y + 30),
          session_active ? g.theme->accent : g.theme->muted);
     draw_icon(g.target, icon::close, 370, header_y + 15, g.theme->muted);
     g.hit_tab[2] = session_tab;
