@@ -1062,7 +1062,10 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
 class environment_options final : public ICoreWebView2EnvironmentOptions {
  public:
   explicit environment_options(std::wstring arguments)
-      : arguments_(std::move(arguments)) {}
+      : arguments_(std::move(arguments)),
+        // The SDK's default (WebView2EnvironmentOptions.h); the runtime
+        // rejects an empty target version with E_INVALIDARG.
+        version_(L"154.0.4258.31") {}
 
   HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** out) override {
     if (out == nullptr) return E_POINTER;
