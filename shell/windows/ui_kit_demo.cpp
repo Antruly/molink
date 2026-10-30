@@ -113,71 +113,72 @@ void paint(HWND window) {
   }
 
   if (g.tab == 0) {
-    // Home: device card on the left, connect panel under it, chat/stage right.
-    const D2D1_RECT_F card = D2D1::RectF(16, 72, 470, 300);
+    // Home laid out from the measured web spec (web_layout_spec.md).
+    // Left column: device card 16..395.
+    const D2D1_RECT_F card = D2D1::RectF(16, 96, 395, 380);
     shadow(g.target, card, 14);
     fill_round(g.target, card, 14, g.theme->surface);
     stroke_round(g.target, card, 14, g.theme->line);
-    // Avatar + device name + platform pill.
-    fill_round(g.target, D2D1::RectF(36, 92, 84, 140), 12,
+    fill_round(g.target, D2D1::RectF(37, 113, 95, 171), 16,
                g.theme->accent_soft);
-    draw_icon(g.target, icon::monitor, 60, 116, g.theme->accent);
-    text(g.target, g.title, L"INTERNET-REMOTE", D2D1::RectF(96, 92, 380, 116),
-         g.theme->ink);
+    draw_icon(g.target, icon::monitor, 66, 142, g.theme->accent);
+    text(g.target, g.title, L"INTERNET-REMOTE",
+         D2D1::RectF(107, 113, 300, 137), g.theme->ink);
     pill(g.target, *g.theme, g.small, g.small_left,
-         D2D1::RectF(96, 120, 170, 144), L"windows", false, false);
-    // ID server status.
-    fill_round(g.target, D2D1::RectF(36, 156, 44, 164), 4,
+         D2D1::RectF(107, 143, 181, 167), L"windows", false, false);
+    fill_round(g.target, D2D1::RectF(239 - 110, 171, 247 - 110, 179), 4,
                g.theme->accent_strong);
     text(g.target, g.small_left, L"ID 服务器已连接",
-         D2D1::RectF(52, 150, 300, 170), g.theme->muted);
-    // Device id + verification code rows.
-    text(g.target, g.small_left, L"BDV-NCK-9DN",
-         D2D1::RectF(36, 180, 300, 204), g.theme->ink);
-    text(g.target, g.small_left, L"验证码  ••••••",
-         D2D1::RectF(36, 206, 300, 230), g.theme->ink);
+         D2D1::RectF(239 - 100, 171, 360, 195), g.theme->muted);
+    text(g.target, g.body, L"BDV-NCK-9DN",
+         D2D1::RectF(37, 197, 300, 221), g.theme->ink);
+    text(g.target, g.body, L"验证码  ••••••",
+         D2D1::RectF(37, 225, 300, 249), g.theme->ink);
     pill(g.target, *g.theme, g.small, g.small_left,
-         D2D1::RectF(300, 178, 356, 202), L"单次", true, false);
+         D2D1::RectF(129, 238, 177, 262), L"单次", true, false);
     pill(g.target, *g.theme, g.small, g.small_left,
-         D2D1::RectF(362, 178, 418, 202), L"多次", false, false);
+         D2D1::RectF(183, 238, 231, 262), L"多次", false, false);
     text(g.target, g.small_left, L"剩余 1 / 1 次",
-         D2D1::RectF(36, 238, 300, 258), g.theme->muted);
-    pill(g.target, *g.theme, g.small, g.small_left,
-         D2D1::RectF(36, 264, 200, 290), L"更多设置", false,
-         inside(D2D1::RectF(36, 264, 200, 290), g.hover_x, g.hover_y));
+         D2D1::RectF(37, 270, 300, 290), g.theme->muted);
+    text(g.target, g.small_left, L"更多设置",
+         D2D1::RectF(37, 344, 375, 359), g.theme->muted);
 
-    // Connect panel.
-    const D2D1_RECT_F join = D2D1::RectF(16, 312, 470, 440);
+    // Right column: connect panel 413..1127.
+    const D2D1_RECT_F join = D2D1::RectF(413, 96, w - 16, 380);
     shadow(g.target, join, 14);
     fill_round(g.target, join, 14, g.theme->surface);
     stroke_round(g.target, join, 14, g.theme->line);
-    text(g.target, g.title, L"连接设备", D2D1::RectF(36, 326, 200, 350),
-         g.theme->ink);
-    const D2D1_RECT_F address = D2D1::RectF(36, 356, 350, 384);
-    fill_round(g.target, address, 8, g.theme->panel);
-    stroke_round(g.target, address, 8, g.theme->line_soft);
+    text(g.target, g.title, L"连接设备",
+         D2D1::RectF(433, 112, 700, 136), g.theme->ink);
+    const D2D1_RECT_F address = D2D1::RectF(433, 160, 900, 196);
+    fill_round(g.target, address, 9.6f, g.theme->panel);
+    stroke_round(g.target, address, 9.6f, g.theme->line_soft);
     text(g.target, g.small_left, L"设备 ID 或 IP[:端口]",
-         D2D1::RectF(48, 356, 340, 384), g.theme->muted);
-    const D2D1_RECT_F code = D2D1::RectF(358, 356, 450, 384);
-    fill_round(g.target, code, 8, g.theme->panel);
-    stroke_round(g.target, code, 8, g.theme->line_soft);
-    text(g.target, g.small_left, L"验证码", D2D1::RectF(370, 356, 440, 384),
-         g.theme->muted);
-    const D2D1_RECT_F connect = D2D1::RectF(36, 394, 450, 422);
-    fill_round(g.target, connect, 8, g.theme->accent_strong);
-    text(g.target, g.small, L"连接", connect, g.theme->on_accent);
+         D2D1::RectF(445, 160, 890, 196), g.theme->muted);
+    const D2D1_RECT_F code = D2D1::RectF(910, 160, w - 36, 196);
+    fill_round(g.target, code, 9.6f, g.theme->panel);
+    stroke_round(g.target, code, 9.6f, g.theme->line_soft);
+    text(g.target, g.small_left, L"验证码",
+         D2D1::RectF(922, 160, w - 48, 196), g.theme->muted);
+    // Measured: 连接 button spans the panel width, 36 high, radius 9.6.
+    const D2D1_RECT_F connect =
+        D2D1::RectF(433, 301, w - 36, 337);
+    fill_round(g.target, connect, 9.6f, g.theme->accent_strong);
+    text(g.target, g.body, L"连接", connect, g.theme->on_accent);
 
-    // Right: recent sessions / chat placeholder.
-    const D2D1_RECT_F side = D2D1::RectF(486, 72, w - 16, h - 16);
-    shadow(g.target, side, 14);
-    fill_round(g.target, side, 14, g.theme->surface);
-    stroke_round(g.target, side, 14, g.theme->line);
-    text(g.target, g.title, L"最近会话", D2D1::RectF(506, 88, 700, 112),
-         g.theme->ink);
+    // Recent-session filter chips (measured row at y=402).
+    const wchar_t* filters[] = {L"最近", L"已保存", L"局域网", L"联网"};
+    const float widths[] = {51, 53, 53, 42};
+    float fx = 433;
+    for (int i = 0; i < 4; ++i) {
+      const D2D1_RECT_F r =
+          D2D1::RectF(fx, 402, fx + widths[i], 426);
+      pill(g.target, *g.theme, g.small, g.small_left, r, filters[i], i == 0,
+           inside(r, g.hover_x, g.hover_y));
+      fx += widths[i] + 8;
+    }
     text(g.target, g.small, L"暂无最近会话",
-         D2D1::RectF(side.left, (side.top + side.bottom) / 2 - 10, side.right,
-                     (side.top + side.bottom) / 2 + 10),
-         g.theme->muted);
+         D2D1::RectF(433, 460, w - 16, 484), g.theme->muted);
     g.target->EndDraw();
     return;
   }

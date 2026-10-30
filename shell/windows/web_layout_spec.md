@@ -30,3 +30,15 @@ grid) so the Direct2D UI matches the React UI position for position.
   16 (avatar).
 - Re-measure after any web style change; extend this table with the connect
   panel inputs and the recent-session rows next.
+
+## Connect panel + recent filters (measured)
+| element | x | y | w | h | font | radius |
+|---|---|---|---|---|---|---|
+| 连接 button (spans panel) | 413 | 301 | 714 | 36 | 12 | 9.6 |
+| 更多设置 row | 37 | 344 | 338 | 15 | 10 | 0 |
+| 最近 / 已保存 / 局域网 / 联网 | 317 / 370 / 425 / 480 | 402 | 51 / 53 / 53 / 42 | 24 | 11 | pill |
+| import/update chip | 48 | 508 | 71 | 23 | 10 | 8 |
+| icon buttons (row) | 1037 / 1069 / 1101 | 400 | 28 | 28 | 16 | 6 |
+
+The home is two columns: the device card on the left (x 16-395) and the
+connect/chat column on the right (x 413-1127).
