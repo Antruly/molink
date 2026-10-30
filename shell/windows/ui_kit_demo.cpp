@@ -1009,6 +1009,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   cls.hInstance = instance;
   cls.hCursor = LoadCursorW(nullptr, IDC_ARROW);
   cls.hbrBackground = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
+  // The exe's icon (resource id 1) gives the window and the taskbar button the
+  // product icon.
+  cls.hIcon = LoadIconW(instance, MAKEINTRESOURCEW(1));
+  cls.hIconSm = cls.hIcon;
   cls.lpszClassName = L"moLinkUiKitDemo";
   RegisterClassExW(&cls);
   HWND window = CreateWindowExW(
