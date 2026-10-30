@@ -113,30 +113,24 @@ void paint(HWND window) {
   }
 
   if (g.tab == 2) {
-    // Settings sheet.
-    const D2D1_RECT_F sheet = D2D1::RectF(w / 2 - 300, 84, w / 2 + 300, 400);
-    shadow(g.target, sheet, 14);
-    fill_round(g.target, sheet, 14, g.theme->surface);
-    stroke_round(g.target, sheet, 14, g.theme->line);
-    text(g.target, g.title, L"设置",
-         D2D1::RectF(sheet.left + 20, sheet.top + 14, sheet.left + 200,
-                     sheet.top + 40),
-         g.theme->ink);
-    g.hit_modal_close = D2D1::RectF(sheet.right - 44, sheet.top + 14,
-                                    sheet.right - 18, sheet.top + 40);
-    icon_button(g.target, *g.theme, g.hit_modal_close, icon::close,
-                inside(g.hit_modal_close, g.hover_x, g.hover_y));
+    // Settings as a modal: scrim + panel from the kit, rows drawn in content.
+    modal_scrim(g.target, size);
+    D2D1_RECT_F close{};
+    const D2D1_RECT_F content = modal_panel(
+        g.target, *g.theme, g.title, size, 600, 340, L"设置", &close);
+    g.hit_modal_close = close;
+    icon_button(g.target, *g.theme, close, icon::close,
+                inside(close, g.hover_x, g.hover_y));
     const wchar_t* rows[] = {L"开机自启", L"剪贴板同步", L"文件传输",
                              L"声音转发", L"硬件加速"};
     for (int i = 0; i < 5; ++i) {
-      const float y = sheet.top + 56 + i * 44;
+      const float y = content.top + i * 44;
       text(g.target, g.small_left, rows[i],
-           D2D1::RectF(sheet.left + 20, y, sheet.right - 100, y + 24),
+           D2D1::RectF(content.left, y, content.right - 90, y + 24),
            g.theme->ink);
-      // Toggle.
-      const D2D1_RECT_F track = D2D1::RectF(sheet.right - 78, y, sheet.right - 34,
-                                            y + 22);
-      toggle(g.target, *g.theme, track, i < 3);
+      toggle(g.target, *g.theme,
+             D2D1::RectF(content.right - 68, y, content.right - 24, y + 22),
+             i < 3);
     }
     g.target->EndDraw();
     return;
