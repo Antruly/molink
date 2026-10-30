@@ -21,11 +21,14 @@
 #include <cmath>
 #include <cstdio>
 #include <string>
+#include <memory>
 #include <vector>
 
+#include "session_client.h"
 #include "ui_kit.h"
 
 using namespace molink::ui;
+using namespace molink::net;
 
 namespace {
 
@@ -54,6 +57,10 @@ struct app_state {
   bool connect_pressed = false;
   // Live values the shell will feed from the session.
   session_stats stats = {L"VP9", L"1920x1080", 1200, 12};
+  std::unique_ptr<molink::net::session_client> session;
+  std::string session_host;
+  int session_port = 0;
+  std::string session_code;
   ID2D1Bitmap* avatar_bitmap = nullptr;
   // Shared-memory picture from the local core (--surface <path>).
   std::wstring surface_path;
@@ -715,6 +722,20 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
     case WM_CREATE:
       if (!create_resources(window)) return -1;
       if (!g.surface_path.empty()) surface_open(g.surface_path);
+      if (!g.session_host.empty() && g.session_port > 0) {
+        g.session = std::make_unique<molink::net::session_client>();
+        molink::net::session_endpoint endpoint;
+        endpoint.host = g.session_host;
+        endpoint.port = g.session_port;
+        endpoint.token = g.session_code;
+        endpoint.direct_session = true;
+        std::string error;
+        if (!g.session->start(endpoint.host, endpoint.port, endpoint, &g.stats,
+                              &error)) {
+          std::fprintf(stderr, "session: %s\n", error.c_str());
+          g.session.reset();
+        }
+      }
       load_saved_avatar();
       apply_rounded(window);
       SetTimer(window, 1, 16, nullptr);
@@ -748,6 +769,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
     }
     case WM_TIMER: {
       surface_poll();
+      if (g.session != nullptr) g.session->tick(GetTickCount64());
       const ULONGLONG now = GetTickCount64();
       if (now - g.caret_tick >= 500) {
         g.caret_tick = now;
@@ -971,6 +993,20 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
   CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
   for (int i = 1; i < __argc; ++i) {
+    if (wcscmp(__wargv[i], L"--session") == 0 && i + 1 < __argc) {
+      const std::wstring value = __wargv[++i];
+      const size_t colon = value.find(L':');
+      g.session_host = std::string(value.begin(),
+                                  colon == std::wstring::npos ? value.end()
+                                                              : value.begin() + colon);
+      g.session_port = colon == std::wstring::npos
+                           ? 0
+                           : _wtoi(value.c_str() + colon + 1);
+    }
+    if (wcscmp(__wargv[i], L"--code") == 0 && i + 1 < __argc) {
+      const std::wstring value = __wargv[++i];
+      g.session_code.assign(value.begin(), value.end());
+    }
     if (wcscmp(__wargv[i], L"--surface") == 0 && i + 1 < __argc) {
       g.surface_path = __wargv[++i];
       g.tab = 1;  // open on the desktop view when a picture is attached
