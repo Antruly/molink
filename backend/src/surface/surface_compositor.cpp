@@ -1,6 +1,9 @@
 #include "surface/surface_compositor.h"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include <cstring>
@@ -13,6 +16,18 @@
 
 namespace molink {
 namespace {
+
+/// Rate-limited diagnostics for the native path (MOLINK_SURFACE_LOG=1).
+bool surface_log_due() {
+  static uint64_t last = 0;
+  const uint64_t now = static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+  if (now - last < 1000) return false;
+  last = now;
+  return true;
+}
 
 using protocol::codec;
 
@@ -143,8 +158,21 @@ bool surface_compositor::ensure(int width, int height) {
 bool surface_compositor::ingest(const protocol::parsed_frame& frame) {
   if (!frame_surface::instance().active()) return false;
   const codec value = static_cast<codec>(frame.header.codec);
-  if (!is_tile_codec(value)) return false;  // streams wait for stage 2
-  if (!ensure(frame.header.screen_w, frame.header.screen_h)) return false;
+  if (!is_tile_codec(value)) {
+    if (std::getenv("MOLINK_SURFACE_LOG") != nullptr && surface_log_due()) {
+      std::fprintf(stderr, "surface: stream codec %u skipped (%u tiles)\n",
+                   static_cast<unsigned>(frame.header.codec),
+                   frame.header.tile_count);
+    }
+    return false;  // streams wait for stage 2
+  }
+  if (!ensure(frame.header.screen_w, frame.header.screen_h)) {
+    if (std::getenv("MOLINK_SURFACE_LOG") != nullptr && surface_log_due()) {
+      std::fprintf(stderr, "surface: bad size %ux%u\n",
+                   frame.header.screen_w, frame.header.screen_h);
+    }
+    return false;
+  }
 
   bool painted = false;
   for (const protocol::tile_view& tile : frame.tiles) {
