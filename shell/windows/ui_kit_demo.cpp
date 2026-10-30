@@ -11,6 +11,9 @@
 #include <windows.h>
 #include <d2d1.h>
 #include <dwrite.h>
+
+#include <atomic>
+#include <cstdint>
 #include <wincodec.h>
 #include <commdlg.h>
 
@@ -55,6 +58,14 @@ struct app_state {
   int stat_latency_ms = 12;
   std::wstring stat_resolution = L"1920x1080";
   ID2D1Bitmap* avatar_bitmap = nullptr;
+  // Shared-memory picture from the local core (--surface <path>).
+  std::wstring surface_path;
+  HANDLE surface_file = INVALID_HANDLE_VALUE;
+  HANDLE surface_mapping = nullptr;
+  uint8_t* surface_base = nullptr;
+  ID2D1Bitmap* surface_bitmap = nullptr;
+  uint32_t surface_w = 0, surface_h = 0;
+  uint64_t surface_seq = 0;
   std::wstring avatar_path;
   std::wstring address_text = L"127.0.0.1:28428";
   std::wstring code_text;
@@ -94,6 +105,76 @@ const palette* resolve_theme() {
       L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &value, &size);
   if (status == ERROR_SUCCESS) return value != 0 ? &kLight : &kDark;
   return &kDark;
+}
+
+constexpr uint32_t kSurfaceMagic = 0x5255534d;
+struct surface_header {
+  uint32_t magic, version, width, height, stride, format;
+  uint64_t sequence, timestamp_us;
+  uint32_t slot_bytes, reserved[5];
+};
+
+/// Opens the core's frame surface. Returns false and logs why on failure.
+bool surface_open(const std::wstring& path) {
+  FILE* log = _wfopen(L"C:\\Users\\za\\dev\\ui-kit-surface.log", L"a");
+  auto note = [log](const char* text) {
+    if (log != nullptr) {
+      std::fprintf(log, "%s\n", text);
+      std::fflush(log);
+    }
+  };
+  for (int attempt = 0; attempt < 20; ++attempt) {
+    g.surface_file = CreateFileW(path.c_str(), GENERIC_READ,
+                                 FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                                 OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (g.surface_file != INVALID_HANDLE_VALUE) break;
+    note("CreateFile failed, retrying");
+    Sleep(100);
+  }
+  if (g.surface_file == INVALID_HANDLE_VALUE) {
+    note("CreateFile gave up");
+    if (log != nullptr) std::fclose(log);
+    return false;
+  }
+  note("file open");
+  g.surface_mapping = CreateFileMappingW(g.surface_file, nullptr, PAGE_READONLY,
+                                         0, 0, nullptr);
+  if (g.surface_mapping == nullptr) {
+    note("CreateFileMapping failed");
+    if (log != nullptr) std::fclose(log);
+    return false;
+  }
+  g.surface_base =
+      static_cast<uint8_t*>(MapViewOfFile(g.surface_mapping, FILE_MAP_READ, 0, 0,
+                                          0));
+  note(g.surface_base != nullptr ? "mapped" : "MapViewOfFile failed");
+  if (log != nullptr) std::fclose(log);
+  return g.surface_base != nullptr;
+}
+
+/// Copies the newest published frame into the D2D bitmap.
+void surface_poll() {
+  if (g.surface_base == nullptr || g.target == nullptr) return;
+  auto* header = reinterpret_cast<surface_header*>(g.surface_base);
+  if (header->magic != kSurfaceMagic || header->width == 0) return;
+  const uint64_t sequence = header->sequence;
+  std::atomic_thread_fence(std::memory_order_acquire);
+  if (sequence == g.surface_seq) return;
+  const uint8_t* pixels = g.surface_base + 64 +
+                          static_cast<size_t>(sequence & 1) * header->slot_bytes;
+  if (g.surface_bitmap == nullptr || g.surface_w != header->width ||
+      g.surface_h != header->height) {
+    if (g.surface_bitmap != nullptr) g.surface_bitmap->Release();
+    D2D1_BITMAP_PROPERTIES props = D2D1::BitmapProperties(
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE));
+    g.target->CreateBitmap(D2D1::SizeU(header->width, header->height), pixels,
+                           header->width * 4, props, &g.surface_bitmap);
+    g.surface_w = header->width;
+    g.surface_h = header->height;
+  } else {
+    g.surface_bitmap->CopyFromMemory(nullptr, pixels, header->width * 4);
+  }
+  g.surface_seq = sequence;
 }
 
 /// Loads an image through WIC and keeps it as a D2D bitmap for the avatar.
@@ -551,10 +632,14 @@ void paint(HWND window) {
                 g.hover_x, g.hover_y);
   g.format_index = g.dropdown.index;
 
-  // Placeholder picture area on the right.
+  // Picture area on the right: live surface when connected.
   const D2D1_RECT_F stage = D2D1::RectF(560, 120, w - 16, h - 16);
   fill_round(g.target, stage, 14, g.theme->surface);
   stroke_round(g.target, stage, 14, g.theme->line);
+  if (g.surface_bitmap != nullptr) {
+    g.target->DrawBitmap(g.surface_bitmap, stage, 1.0f,
+                         D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+  }
   text(g.target, g.small, L"远程画面（共享内存直绘）",
        D2D1::RectF(stage.left, (stage.top + stage.bottom) / 2 - 12,
                    stage.right, (stage.top + stage.bottom) / 2 + 12),
@@ -632,6 +717,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
   switch (message) {
     case WM_CREATE:
       if (!create_resources(window)) return -1;
+      if (!g.surface_path.empty()) surface_open(g.surface_path);
       load_saved_avatar();
       apply_rounded(window);
       SetTimer(window, 1, 16, nullptr);
@@ -664,6 +750,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
       return base;
     }
     case WM_TIMER: {
+      surface_poll();
       const ULONGLONG now = GetTickCount64();
       if (now - g.caret_tick >= 500) {
         g.caret_tick = now;
@@ -887,6 +974,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
   CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
   for (int i = 1; i < __argc; ++i) {
+    if (wcscmp(__wargv[i], L"--surface") == 0 && i + 1 < __argc) {
+      g.surface_path = __wargv[++i];
+    }
     if (wcscmp(__wargv[i], L"--theme") == 0 && i + 1 < __argc) {
       const wchar_t* value = __wargv[++i];
       g.mode = wcscmp(value, L"light") == 0
