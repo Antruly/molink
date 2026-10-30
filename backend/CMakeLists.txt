@@ -602,8 +602,16 @@ if(MOLINK_BUILD_CORE)
 
   # Plain `uv` in uvcpp's interface needs a search path on platforms where
   # libuv is not a system library (Windows, macOS).
+  #
+  # BEFORE matters: the archive bundles its own nlohmann/json.hpp and its
+  # library was built against that copy, but vcpkg (pulled in by
+  # libdatachannel) also installs one. If vcpkg's copy is compiled into our
+  # objects, the ABI tag in every json type changes (v3_12_0 against the
+  # archive's v3_11_3) and the link fails on uvcpp_json_dump/parse with no
+  # hint as to why. Keep libuvcpp's headers in front.
   if(UVP_UVCPP_PREFIX)
-    target_include_directories(molink-core PRIVATE "${UVP_UVCPP_PREFIX}/include")
+    target_include_directories(molink-core BEFORE PRIVATE
+      "${UVP_UVCPP_PREFIX}/include")
     target_link_directories(molink-core PRIVATE
       "${UVP_UVCPP_PREFIX}/lib" "${UVP_UVCPP_PREFIX}/bin")
     foreach(_uvinc "${UVP_UVCPP_PREFIX}/include" "${UVP_UVCPP_PREFIX}/include/libuv")
