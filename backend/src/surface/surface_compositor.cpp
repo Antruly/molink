@@ -7,7 +7,7 @@
 
 #include "surface/frame_surface.h"
 
-#if defined(MOLINK_HAVE_ZLIB)
+#if defined(MOLINK_HAVE_ZLIB) && MOLINK_HAVE_ZLIB
 #include <zlib.h>
 #endif
 
@@ -157,7 +157,7 @@ bool surface_compositor::ingest(const protocol::parsed_frame& frame) {
     const uint8_t* source = tile.data;
 
     if (value != base) {
-#if defined(MOLINK_HAVE_ZLIB)
+#if defined(MOLINK_HAVE_ZLIB) && MOLINK_HAVE_ZLIB
       inflated_.resize(expected);
       uLongf out = static_cast<uLongf>(expected);
       if (uncompress(inflated_.data(), &out, tile.data,

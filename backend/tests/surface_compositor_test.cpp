@@ -37,7 +37,11 @@ molink::protocol::parsed_frame make_frame(int w, int h, uint8_t codec,
 }  // namespace
 
 int main() {
+#if defined(_WIN32)
+  _putenv_s("MOLINK_SURFACE", "1");
+#else
   setenv("MOLINK_SURFACE", "1", 1);
+#endif
   expect(molink::init_frame_surface_from_env(), "the surface is enabled");
   molink::surface_compositor compositor;
 
