@@ -12,6 +12,14 @@
   `MOLINK_ENABLE_JPEG` 开关和两个过期 `#include` 一直留着，Windows CI 还在打开它。
   现在整条删除，core 不再链接 libjpeg。
 
+### Fixed
+
+- **CPU AV1 也按档位限码率了**：SVT-AV1 流编码器此前完全忽略 `max_bitrate_kbps`，
+  永远恒定 QP——只有 CPU AV1 的 Windows 包在"清晰"档也能跑到 6MB/s 的原因就是它。
+  现在有预算时用 CBR（低延迟预测没有前视，SVT 不支持 VBR 会强制 CBR），预算为 0 的
+  超清/无损/raw 仍走恒定质量。实测 640×480 QP12：无上限 158KB/2s（≈632 kbit/s），
+  400 kbit/s 预算下 84KB/2s（≈337 kbit/s）；`av1_stream` 测试已覆盖。
+
 ## [0.9.79] — 2026-10-31
 
 ### Changed

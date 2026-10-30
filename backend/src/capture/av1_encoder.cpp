@@ -423,12 +423,17 @@ class svt_stream_encoder final : public av1_stream_encoder {
       return false;
     }
     qp = std::clamp(qp, 1, 63);
+    // The quality preset's stream budget, in kbit/s; 0 keeps constant quality
+    // (the top presets). Every other codec caps itself with this value, and a
+    // CPU AV1 stream without a cap is what produced several MB/s for a
+    // slideshow: the same ceiling applies here.
+    const int bitrate_kbps = (std::max)(0, config_.max_bitrate_kbps);
     const int padded_w = av1_padded_extent(width);
     const int padded_h = av1_padded_extent(height);
     if (handle_ == nullptr || width_ != padded_w || height_ != padded_h ||
-        qp_ != qp) {
+        qp_ != qp || bitrate_kbps_ != bitrate_kbps) {
       shutdown();
-      if (!init(padded_w, padded_h, qp, error)) return false;
+      if (!init(padded_w, padded_h, qp, bitrate_kbps, error)) return false;
       keyframe_pending_ = true;  // a fresh encoder starts with a keyframe
     }
     if (keyframe && !keyframe_pending_) {
@@ -437,7 +442,7 @@ class svt_stream_encoder final : public av1_stream_encoder {
       // picture is always a keyframe. It costs one re-initialisation, which
       // happens only when a viewer joins or a decoder lost the stream.
       shutdown();
-      if (!init(padded_w, padded_h, qp, error)) return false;
+      if (!init(padded_w, padded_h, qp, bitrate_kbps, error)) return false;
       keyframe_pending_ = true;
     }
     if (!convert(bgra, stride, width, height, padded_w, padded_h)) {
@@ -498,7 +503,8 @@ class svt_stream_encoder final : public av1_stream_encoder {
   }
 
  private:
-  bool init(int width, int height, int qp, std::string& error) {
+  bool init(int width, int height, int qp, int bitrate_kbps,
+            std::string& error) {
     EbSvtAv1EncConfiguration config{};
     const EbErrorType handle_rc = init_handle(handle_, config, 0);
     if (handle_rc != EB_ErrorNone) {
@@ -520,9 +526,19 @@ class svt_stream_encoder final : public av1_stream_encoder {
     if constexpr (!kModernApi) {
       config.intra_refresh_type = SVT_AV1_KF_REFRESH;
     }
-    config.rate_control_mode = SVT_AV1_RC_MODE_CQP_OR_CRF;
-    config.qp = static_cast<uint32_t>(qp);
-    disable_aq(config, 0);
+    const bool rate_controlled = bitrate_kbps > 0;
+    if (rate_controlled) {
+      // Low-delay prediction has no look-ahead, so SVT rejects VBR and forces
+      // CBR; ask for CBR directly. Rate control needs adaptive quantization,
+      // so disable_aq() must be skipped here (SVT rejects the combination).
+      config.rate_control_mode = SVT_AV1_RC_MODE_CBR;
+      config.target_bit_rate = static_cast<uint32_t>(bitrate_kbps) * 1000u;
+      config.qp = static_cast<uint32_t>(qp);
+    } else {
+      config.rate_control_mode = SVT_AV1_RC_MODE_CQP_OR_CRF;
+      config.qp = static_cast<uint32_t>(qp);
+      disable_aq(config, 0);
+    }
     config.look_ahead_distance = 0;
     config.encoder_color_format = EB_YUV420;
     config.encoder_bit_depth = 8;
@@ -552,6 +568,7 @@ class svt_stream_encoder final : public av1_stream_encoder {
     width_ = width;
     height_ = height;
     qp_ = qp;
+    bitrate_kbps_ = bitrate_kbps;
     y_plane_.assign(static_cast<std::size_t>(width) * height, 0);
     u_plane_.assign(static_cast<std::size_t>(width / 2) * (height / 2), 128);
     v_plane_.assign(static_cast<std::size_t>(width / 2) * (height / 2), 128);
@@ -630,6 +647,7 @@ class svt_stream_encoder final : public av1_stream_encoder {
   int width_ = 0;
   int height_ = 0;
   int qp_ = 0;
+  int bitrate_kbps_ = 0;
   std::vector<uint8_t> y_plane_;
   std::vector<uint8_t> u_plane_;
   std::vector<uint8_t> v_plane_;

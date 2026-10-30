@@ -128,6 +128,65 @@ int main() {
   }
   (void)first_luma;
 
+  // The quality preset hands every stream codec a bitrate budget; without one
+  // (the top presets) the encoder keeps constant quality. CPU SVT-AV1 ignored
+  // the budget for a while and produced several MB/s at a slideshow pace, so
+  // check that a capped encoder really stays near its number.
+  struct run_result {
+    long long bytes = 0;
+    int frames = 0;
+    bool ok = true;
+  };
+  const auto run_stream = [](int budget_kbps) {
+    run_result result;
+    molink::av1_encoder_config config;
+    config.max_bitrate_kbps = budget_kbps;
+    std::string run_error;
+    auto stream = molink::make_av1_stream_encoder(config, &run_error);
+    if (stream == nullptr) {
+      expect(false, "encoder with budget " + std::to_string(budget_kbps) +
+                        ": " + run_error);
+      result.ok = false;
+      return result;
+    }
+    // 60 frames of 640x480 movement at QP 12: constant quality spends a lot,
+    // and a 400 kbit/s budget over two seconds of video is 100 KB.
+    for (int frame = 0; frame < 60; ++frame) {
+      const auto pixels = make_frame(kW * 2, kH * 2, frame * 37);
+      std::vector<uint8_t> packet;
+      bool packet_keyframe = false;
+      if (!stream->encode_stream(pixels.data(),
+                                 static_cast<std::size_t>(kW * 2) * 4, kW * 2,
+                                 kH * 2, 12, /*keyframe=*/frame == 0, packet,
+                                 packet_keyframe, run_error)) {
+        expect(false, "budget " + std::to_string(budget_kbps) +
+                          " encode: " + run_error);
+        result.ok = false;
+        return result;
+      }
+      if (!packet.empty()) {
+        result.bytes += static_cast<long long>(packet.size());
+        ++result.frames;
+      }
+    }
+    return result;
+  };
+  const run_result uncapped = run_stream(0);
+  const run_result capped = run_stream(400);
+  std::printf("stream bytes: uncapped %lld over %d frames, 400 kbit/s %lld "
+              "over %d frames\n",
+              uncapped.bytes, uncapped.frames, capped.bytes, capped.frames);
+  expect(uncapped.ok && capped.ok, "both budget runs encode");
+  expect(capped.frames > 0, "the capped stream produced packets");
+  if (uncapped.ok && capped.ok) {
+    expect(capped.bytes < uncapped.bytes,
+           "the budget shrinks the stream on moving content");
+    // Two seconds of 400 kbit/s is 100 KB; allow room for the opening
+    // keyframe and the rate controller settling.
+    expect(capped.bytes <= 300LL * 1024,
+           "the capped stream stays near its budget");
+  }
+
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
 }
