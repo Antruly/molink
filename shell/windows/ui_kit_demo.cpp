@@ -103,8 +103,13 @@ void paint(HWND window) {
     stroke_round(g.target, strip, 10, g.theme->line);
     static const std::vector<std::wstring> tabs = {L"首页", L"远程桌面",
                                                    L"文件", L"设置"};
-    tabs_draw(g.target, *g.theme, g.small, strip, tabs, g.tab, g.hover_x,
-              g.hover_y);
+    static const icon tab_icons[] = {icon::monitor, icon::monitor,
+                                     icon::folder, icon::settings};
+    for (int i = 0; i < 4; ++i) {
+      const D2D1_RECT_F r = tab_rect(strip, i, tabs);
+      pill(g.target, *g.theme, g.small, g.small_left, r, tabs[i], g.tab == i,
+           inside(r, g.hover_x, g.hover_y), tab_icons[i]);
+    }
     // Theme: 自动 / 亮色 / 暗色, then the close button.
     {
       const wchar_t* labels[3] = {L"自动", L"亮色", L"暗色"};
@@ -233,24 +238,51 @@ void paint(HWND window) {
   }
 
   if (g.tab == 3) {
-    // Settings as a modal: scrim + panel from the kit, rows drawn in content.
-    modal_scrim(g.target, size);
-    D2D1_RECT_F close{};
-    const D2D1_RECT_F content = modal_panel(
-        g.target, *g.theme, g.title, size, 600, 340, L"设置", &close);
-    g.hit_modal_close = close;
-    icon_button(g.target, *g.theme, close, icon::close,
-                inside(close, g.hover_x, g.hover_y));
-    const wchar_t* rows[] = {L"开机自启", L"剪贴板同步", L"文件传输",
-                             L"声音转发", L"硬件加速"};
-    for (int i = 0; i < 5; ++i) {
-      const float y = content.top + i * 44;
-      text(g.target, g.small_left, rows[i],
-           D2D1::RectF(content.left, y, content.right - 90, y + 24),
+    // Settings page: grouped cards, like the web settings route.
+    text(g.target, g.title, L"设置", D2D1::RectF(24, 92, 200, 116),
+         g.theme->ink);
+    const struct {
+      const wchar_t* title;
+      const wchar_t* rows[4];
+      int count;
+    } groups[] = {
+        {L"外观", {L"主题", L"界面语言", L"启动时打开首页"}, 3},
+        {L"连接", {L"开机自启", L"ID 服务器", L"局域网发现"}, 3},
+        {L"传输", {L"剪贴板同步", L"文件传输", L"声音转发"}, 3},
+    };
+    float card_x = 24;
+    for (int gi = 0; gi < 3; ++gi) {
+      const D2D1_RECT_F card = D2D1::RectF(card_x, 128, card_x + 360, 420);
+      shadow(g.target, card, 14);
+      fill_round(g.target, card, 14, g.theme->surface);
+      stroke_round(g.target, card, 14, g.theme->line);
+      text(g.target, g.title, groups[gi].title,
+           D2D1::RectF(card.left + 16, card.top + 12, card.right - 16,
+                       card.top + 36),
            g.theme->ink);
-      toggle(g.target, *g.theme,
-             D2D1::RectF(content.right - 68, y, content.right - 24, y + 22),
-             i < 3);
+      for (int i = 0; i < groups[gi].count; ++i) {
+        const float ry = card.top + 52 + i * 52;
+        text(g.target, g.small_left, groups[gi].rows[i],
+             D2D1::RectF(card.left + 16, ry, card.right - 80, ry + 22),
+             g.theme->muted);
+        if (gi == 0 && i == 0) {
+          // Theme switch lives here on the web.
+          const wchar_t* labels[3] = {L"自动", L"亮色", L"暗色"};
+          float mx = card.left + 16;
+          for (int k = 0; k < 3; ++k) {
+            g.hit_theme[k] = D2D1::RectF(mx, ry + 22, mx + 56, ry + 48);
+            pill(g.target, *g.theme, g.small, g.small_left, g.hit_theme[k],
+                 labels[k], static_cast<int>(g.mode) == k,
+                 inside(g.hit_theme[k], g.hover_x, g.hover_y), icon::none);
+            mx += 62;
+          }
+        } else {
+          toggle(g.target, *g.theme,
+                 D2D1::RectF(card.right - 60, ry, card.right - 36, ry + 22),
+                 i != 2);
+        }
+      }
+      card_x += 376;
     }
     g.target->EndDraw();
     return;
