@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.9.77] — 2026-10-30
+
+### Fixed
+
+- **Windows x64 包改为整套打包 vcpkg 运行时**：0.9.76 补了 `datachannel.dll` /
+  `juice.dll`，递归检查又发现 `srtp2.dll` 也缺。手工列表追不上传递依赖，现在
+  直接复制 vcpkg 的全部运行时 DLL，CRT 也改为带上 `msvcp140_1/_2` 等变体。
+
 ## [0.9.76] — 2026-10-30
 
 ### Fixed

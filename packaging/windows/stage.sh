@@ -41,15 +41,14 @@ cp "$ROOT/shell/assets/icons/icon.ico" "$PKG/molink.ico"
 cp -r "$WEB/." "$PKG/web/"
 
 # WebRTC: libdatachannel comes from vcpkg when the core was built with it.
-# The DLL is named after the CMake target (datachannel.dll), and on the
-# dynamic triplets it imports libjuice, which has to travel with it. Earlier
-# packages looked for libdatachannel.dll, found nothing, and shipped a core
-# that could not load.
-for _dll in datachannel.dll juice.dll libdatachannel.dll; do
-  for _dir in "${VCPKG_INSTALLATION_ROOT:+$VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin}"; do
-    [ -n "$_dir" ] && [ -f "$_dir/$_dll" ] && cp "$_dir/$_dll" "$PKG/"
-  done
-done
+# Take vcpkg's whole runtime set rather than a hand-maintained list: the
+# import name differs from the package name (datachannel.dll, not
+# libdatachannel.dll) and its dependencies kept going missing one at a time
+# (juice.dll, then srtp2.dll), each time shipping a core that could not load.
+if [ -n "${VCPKG_INSTALLATION_ROOT:-}" ]; then
+  find "$VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin" -maxdepth 1 \
+    -name '*.dll' ! -name '*d.dll' -exec cp {} "$PKG/" \; 2>/dev/null || true
+fi
 
 # Runtime DLLs, when libuvcpp was built shared. A source install may keep them
 # in lib/, while the release archives put them in bin/ next to the import
@@ -98,8 +97,10 @@ done
 # on the machine; a newer MSVCP140 runs binaries built with older toolsets too.
 CRT=$(ls -d "/c/Program Files/Microsoft Visual Studio"/*/*/VC/Redist/MSVC/*/x64/Microsoft.VC14*CRT 2>/dev/null | sort -V | tail -n 1)
 if [ -n "${CRT:-}" ] && [ -d "$CRT" ]; then
-  for dll in msvcp140.dll vcruntime140.dll vcruntime140_1.dll concrt140.dll; do
-    [ -f "$CRT/$dll" ] && cp "$CRT/$dll" "$PKG/"
+  # msvcp140_1/_2 exist in newer redistributables and some vcpkg libraries
+  # import them; take the whole family rather than a fixed four.
+  for dll in "$CRT"/msvcp140*.dll "$CRT"/vcruntime140*.dll "$CRT"/concrt140.dll; do
+    [ -f "$dll" ] && cp "$dll" "$PKG/"
   done
 fi
 
