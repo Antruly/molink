@@ -37,6 +37,8 @@ struct app_state {
   theme_mode mode = theme_mode::automatic;
   const palette* theme = &kDark;
   int tab = 0;                 // 0 desktop, 1 files, 2 settings
+  bool panel_open_quality = true;
+  float panel_anim = 1.0f;     // 0 collapsed .. 1 expanded
   bool collapsed = false;      // floating toolbar collapsed
   float collapse_anim = 0.0f;  // 0 expanded, 1 collapsed
   dropdown_state dropdown;
@@ -243,21 +245,33 @@ void paint(HWND window) {
               inside(collapse_button, g.hover_x, g.hover_y));
   if (collapse < 0.99f) {
     float x = bar.right - 50;
-    auto chip = [&](const std::wstring& label, bool accent, float width) {
+    auto chip = [&](const std::wstring& label, bool accent,
+                    float width) -> D2D1_RECT_F {
       const D2D1_RECT_F r = D2D1::RectF(x - width, 115, x, 143);
-      pill(g.target, *g.theme, g.small, g.small_left, r, label, accent, inside(r, g.hover_x, g.hover_y),
-           icon::none);
+      pill(g.target, *g.theme, g.small, g.small_left, r, label, accent,
+           inside(r, g.hover_x, g.hover_y), icon::none);
       x -= width + 8;
+      return r;
     };
     chip(L"1.2 Mbps", false, 74);
     chip(L"12 ms", false, 52);
     chip(L"VP9", true, 42);
-    chip(kPresets[g.preset], true, 61);
+    const D2D1_RECT_F quality_chip = chip(kPresets[g.preset], true, 61);
+    if (inside(quality_chip, g.hover_x, g.hover_y)) {
+      // handled on click below
+    }
   }
 
-  // Content card: one vertical flow, so rows cannot overlap.
+  // Content card: one vertical flow, so rows cannot overlap. The panel grows
+  // and shrinks with panel_anim, keeping the measured 4px grid.
+  const float open = ease_out(g.panel_anim);
+  if (open <= 0.02f) {
+    g.target->EndDraw();
+    return;
+  }
   float y = 120;
-  const D2D1_RECT_F card = D2D1::RectF(16, y, 544, 470);
+  const float card_h = 350 * open;
+  const D2D1_RECT_F card = D2D1::RectF(16, y, 544, y + card_h);
   shadow(g.target, card, 14);
   fill_round(g.target, card, 14, g.theme->surface);
   stroke_round(g.target, card, 14, g.theme->line);
@@ -266,6 +280,10 @@ void paint(HWND window) {
   text(g.target, g.title, L"画质", D2D1::RectF(32, y, 160, y + 24),
        g.theme->ink);
   y += 32;
+  if (open < 0.6f) {
+    g.target->EndDraw();
+    return;
+  }
 
   // Preset chips: 4 columns, two rows.
   for (int i = 0; i < 7; ++i) {
@@ -432,6 +450,15 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
       return base;
     }
     case WM_TIMER: {
+      const float panel_target = g.panel_open_quality ? 1.0f : 0.0f;
+      if (std::fabs(g.panel_anim - panel_target) > 0.001f) {
+        const float step = 0.12f;
+        if (g.panel_anim < panel_target)
+          g.panel_anim = (std::min)(panel_target, g.panel_anim + step);
+        else
+          g.panel_anim = (std::max)(panel_target, g.panel_anim - step);
+        InvalidateRect(window, nullptr, FALSE);
+      }
       const float target = g.collapsed ? 1.0f : 0.0f;
       if (std::fabs(g.collapse_anim - target) > 0.001f) {
         const float step = 0.08f;
@@ -496,6 +523,18 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
         if (tab >= 0) {
           g.tab = tab;
           InvalidateRect(window, nullptr, FALSE);
+          return 0;
+        }
+      }
+      {
+        RECT client{};
+        GetClientRect(window, &client);
+        const float cw = client.right * 96.0f / g_dpi;
+        const D2D1_RECT_F bar = D2D1::RectF(16, 107, cw - 16, 163);
+        const D2D1_RECT_F quality_chip =
+            D2D1::RectF(bar.right - 50 - 61, 115, bar.right - 50, 143);
+        if (inside(quality_chip, x, y)) {
+          g.panel_open_quality = !g.panel_open_quality;
           return 0;
         }
       }
