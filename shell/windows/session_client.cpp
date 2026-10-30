@@ -1,6 +1,7 @@
 #include "session_client.h"
 
 #include <cstdio>
+#include <cstdlib>
 
 namespace molink::net {
 namespace {
@@ -112,7 +113,14 @@ void session_client::handle_text(const std::string& text) {
     // The host echoes the ping's `t`, so the RTT needs no shared state.
     uint64_t sent = 0;
     const uint64_t now = GetTickCount64();
-    if (find_u64(text, "t", &sent) && sent > 0 && now >= sent) {
+    const bool found = find_u64(text, "t", &sent);
+    if (std::getenv("MOLINK_WS_LOG") != nullptr) {
+      std::fprintf(stderr, "pong: found=%d sent=%llu now=%llu rtt=%lld\n",
+                   found ? 1 : 0, static_cast<unsigned long long>(sent),
+                   static_cast<unsigned long long>(now),
+                   static_cast<long long>(now) - static_cast<long long>(sent));
+    }
+    if (found && sent > 0 && now >= sent) {
       stats_->note_latency(static_cast<int>(now - sent));
     }
     ping_sent_at_.store(0);
