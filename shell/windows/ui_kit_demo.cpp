@@ -986,6 +986,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     }
     if (wcscmp(__wargv[i], L"--bar") == 0 && i + 1 < __argc) {
       const wchar_t* mode = __wargv[++i];
+      g.tab = 1;  // the bar states live on the session page
       if (wcscmp(mode, L"collapsed") == 0) g.collapsed = true;
       if (wcscmp(mode, L"pinned") == 0) g.pinned = true;
     }
