@@ -211,45 +211,48 @@ void paint(HWND window) {
   const float collapse = ease_out(g.collapse_anim);
   const float expanded_right = w - 16;
   const float collapsed_right = 236;
+  // Measured: controls are 28 high with a 9.6 radius; the bar wraps them
+  // with 8 px padding, floating at y=107 in the web UI.
   const D2D1_RECT_F bar =
-      D2D1::RectF(16, 64,
+      D2D1::RectF(16, 107,
                   expanded_right +
                       (collapsed_right - expanded_right) * collapse,
-                  108);
+                  163);
   shadow(g.target, bar, 12);
   fill_round(g.target, bar, 12, g.theme->surface);
   stroke_round(g.target, bar, 12, g.theme->line);
-  fill_round(g.target, D2D1::RectF(30, 78, 42, 90), 5, g.theme->accent_strong);
-  text(g.target, g.body, L"moLink", D2D1::RectF(50, 74, 112, 94),
+  fill_round(g.target, D2D1::RectF(30, 121, 42, 133), 5,
+             g.theme->accent_strong);
+  text(g.target, g.body, L"moLink", D2D1::RectF(50, 117, 112, 137),
        g.theme->ink);
   if (collapse < 0.99f) {
-    const D2D1_RECT_F device = D2D1::RectF(132, 73, 288, 99);
+    const D2D1_RECT_F device = D2D1::RectF(132, 115, 288, 143);
     fill_round(g.target, device, 8, g.theme->panel);
     stroke_round(g.target, device, 8, g.theme->line_soft);
-    fill_round(g.target, D2D1::RectF(144, 83, 152, 91), 4,
+    fill_round(g.target, D2D1::RectF(144, 125, 152, 133), 4,
                g.theme->accent_strong);
     text(g.target, g.small_left, L"INTERNET-REMOTE",
-         D2D1::RectF(160, 73, 280, 99), g.theme->muted);
+         D2D1::RectF(160, 115, 280, 143), g.theme->muted);
   }
   // Collapse chevron.
   const D2D1_RECT_F collapse_button =
-      D2D1::RectF(bar.right - 34, bar.top + 8, bar.right - 10, bar.bottom - 8);
+      D2D1::RectF(bar.right - 42, bar.top + 8, bar.right - 14, bar.top + 36);
   g.hit_collapse = collapse_button;
   icon_button(g.target, *g.theme, collapse_button,
               g.collapsed ? icon::chevron_down : icon::close,
               inside(collapse_button, g.hover_x, g.hover_y));
   if (collapse < 0.99f) {
-    float x = bar.right - 44;
+    float x = bar.right - 50;
     auto chip = [&](const std::wstring& label, bool accent, float width) {
-      const D2D1_RECT_F r = D2D1::RectF(x - width, 73, x, 99);
+      const D2D1_RECT_F r = D2D1::RectF(x - width, 115, x, 143);
       pill(g.target, *g.theme, g.small, g.small_left, r, label, accent, inside(r, g.hover_x, g.hover_y),
            icon::none);
       x -= width + 8;
     };
     chip(L"1.2 Mbps", false, 74);
     chip(L"12 ms", false, 52);
-    chip(L"VP9", true, 44);
-    chip(std::wstring(L"画质 · ") + kPresets[g.preset], true, 112);
+    chip(L"VP9", true, 42);
+    chip(kPresets[g.preset], true, 61);
   }
 
   // Content card: one vertical flow, so rows cannot overlap.
