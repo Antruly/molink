@@ -46,6 +46,7 @@ struct app_state {
   int format_index = 2;
   int focus_field = 0;  // 0 none, 1 address, 2 code
   bool more_open = false;
+  bool connect_pressed = false;
   std::wstring address_text = L"127.0.0.1:28428";
   std::wstring code_text;
   size_t address_caret = 14, code_caret = 0;
@@ -210,7 +211,8 @@ void paint(HWND window) {
     // Measured: 连接 button spans the panel width, 36 high, radius 9.6.
     const D2D1_RECT_F connect =
         D2D1::RectF(433, 301, w - 36, 337);
-    fill_round(g.target, connect, 9.6f, g.theme->accent_strong);
+    fill_round(g.target, connect, 9.6f,
+               g.connect_pressed ? g.theme->accent : g.theme->accent_strong);
     text(g.target, g.body_center, L"连接", connect, g.theme->on_accent);
 
     // Recent-session filter chips (measured row at y=402).
@@ -311,6 +313,14 @@ void paint(HWND window) {
   // and shrinks with panel_anim, keeping the measured 4px grid.
   const float open = ease_out(g.panel_anim);
   if (open <= 0.02f) {
+    // Panel tucked away: the picture area takes the whole row.
+    const D2D1_RECT_F stage = D2D1::RectF(16, 120, w - 16, h - 16);
+    fill_round(g.target, stage, 14, g.theme->surface);
+    stroke_round(g.target, stage, 14, g.theme->line);
+    text(g.target, g.small, L"远程画面（共享内存直绘）",
+         D2D1::RectF(stage.left, (stage.top + stage.bottom) / 2 - 12,
+                     stage.right, (stage.top + stage.bottom) / 2 + 12),
+         g.theme->muted);
     g.target->EndDraw();
     return;
   }
@@ -605,6 +615,14 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
         }
       }
       {
+        const D2D1_RECT_F connect = D2D1::RectF(433, 301, 1130, 337);
+        if (inside(connect, x, y)) {
+          g.connect_pressed = true;
+          InvalidateRect(window, nullptr, FALSE);
+          return 0;
+        }
+      }
+      {
         const D2D1_RECT_F more = D2D1::RectF(37, 336, 375, 368);
         if (inside(more, x, y)) {
           g.more_open = !g.more_open;
@@ -684,6 +702,12 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
       InvalidateRect(window, nullptr, FALSE);
       return 0;
     }
+    case WM_LBUTTONUP:
+      if (g.connect_pressed) {
+        g.connect_pressed = false;
+        InvalidateRect(window, nullptr, FALSE);
+      }
+      return 0;
     case WM_DESTROY:
       PostQuitMessage(0);
       return 0;
