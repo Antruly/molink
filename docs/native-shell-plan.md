@@ -67,3 +67,24 @@ Implementation options, cheapest first:
 2. **libuvcpp's web client** (already shipped as uvcpp.dll): less code, but
    the shell would depend on the uvcpp DLL and its loop. Prefer this if the
    API fits.
+
+## Build/link status (2026-10-31)
+
+All native modules compile and link into one executable:
+
+```
+x86_64-w64-mingw32-g++ -std=c++20 -D_WIN32_WINNT=0x0A00 -O2 -mwindows \
+  -municode -static -I shell/windows -o ui-full.exe \
+  shell/windows/ui_kit_demo.cpp shell/windows/ui_kit.cpp \
+  shell/windows/ws_client.cpp shell/windows/session_client.cpp \
+  -ld2d1 -ldwrite -lole32 -luser32 -lgdi32 -ladvapi32 \
+  -lwindowscodecs -lcomdlg32 -lws2_32
+```
+
+- `ws_client` and `session_client` build at `_WIN32_WINNT=0x0601` (Win7 ok).
+- The **demo** uses `GetDpiForWindow` / `SetProcessDpiAwarenessContext`, which
+  need `0x0A00`; for the Win7 build those two calls must be resolved through
+  `GetProcAddress` with a fallback.
+- Still to wire in the shell: start the core, read the ready line, call
+  `session_client::start()`, call `tick()` from the UI timer, and invoke
+  `send_quality()` from the quality panel.
