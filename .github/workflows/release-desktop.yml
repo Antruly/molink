@@ -300,16 +300,26 @@ jobs:
         shell: pwsh
         run: |
           choco install msys2 -y --no-progress
-          $msys = 'C:\msys64\usr\bin\bash.exe'
+          # Chocolatey installs MSYS2 under C:\tools\msys64; older runner
+          # images used C:\msys64. Do not hard-code one of them.
+          $msysRoot = if (Test-Path 'C:\msys64\usr\bin\bash.exe') { 'C:\msys64' } else { 'C:\tools\msys64' }
+          $msys = Join-Path $msysRoot 'usr\bin\bash.exe'
+          if (-not (Test-Path $msys)) { throw "MSYS2 shell not found under $msysRoot" }
           & $msys -lc "pacman -Sy --noconfirm --needed mingw-w64-x86_64-gcc mingw-w64-x86_64-libwebp" | Out-Null
-          $env:PATH = "C:\msys64\mingw64\bin;$env:PATH"
+          $mingw = Join-Path $msysRoot 'mingw64'
+          if (-not (Test-Path (Join-Path $mingw 'bin\x86_64-w64-mingw32-windres.exe'))) {
+            throw "the MSYS2 MinGW toolchain was not installed under $mingw"
+          }
+          $env:PATH = "$(Join-Path $mingw 'bin');$env:PATH"
+          $mingwInc = Join-Path $mingw 'include'
+          $mingwLib = Join-Path $mingw 'lib'
           & x86_64-w64-mingw32-windres -O coff -I . shell/windows/ui_kit_demo.rc -o "$env:RUNNER_TEMP\native-res.o"
           & x86_64-w64-mingw32-g++ -std=c++20 -D_WIN32_WINNT=0x0A00 -DMOLINK_HAVE_WEBP -O2 -mwindows -municode -static `
-            -I shell/windows -I C:\msys64\mingw64\include `
+            -I shell/windows "-I$mingwInc" `
             -o build\windows\pkg\moLink-native.exe `
             shell/windows/ui_kit_demo.cpp shell/windows/ui_kit.cpp shell/windows/ws_client.cpp `
             shell/windows/session_client.cpp shell/windows/puff.c "$env:RUNNER_TEMP\native-res.o" `
-            -LC:\msys64\mingw64\lib -lwebp -lsharpyuv -ld2d1 -ldwrite -lole32 -luser32 -lgdi32 -ladvapi32 `
+            "-L$mingwLib" -lwebp -lsharpyuv -ld2d1 -ldwrite -lole32 -luser32 -lgdi32 -ladvapi32 `
             -lwindowscodecs -lcomdlg32 -lws2_32 -lwinhttp -lshell32
           if (-not (Test-Path build\windows\pkg\moLink-native.exe)) { throw 'native shell did not build' }
 
@@ -549,6 +559,9 @@ jobs:
           path: win7-codecs.tar.gz
 
   win7-x86:
+    # The codec artifact must exist before this job starts; without `needs`
+    # download-artifact runs immediately and fails with "Artifact not found".
+    needs: win7-codecs
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
