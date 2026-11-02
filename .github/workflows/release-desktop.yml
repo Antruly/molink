@@ -296,6 +296,7 @@ jobs:
           MSYS2_ARG_CONV_EXCL='*' MSYS_NO_PATHCONV=1 \
             "$ISCC" /DAppVersion="$VERSION" /DPkgDir="$PKG_DIR" \
             /DOutputDir="$OUT_DIR" /DLangFile="$LANG_FILE" \
+            /DOutputName="moLink-$VERSION-setup-x64" \
             packaging/windows/installer.iss
           MSYS2_ARG_CONV_EXCL='*' MSYS_NO_PATHCONV=1 \
             "/c/Program Files (x86)/NSIS/makensis.exe" /DVERSION="$VERSION" \

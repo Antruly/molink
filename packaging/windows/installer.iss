@@ -32,8 +32,12 @@
 #ifndef AppExeName
   #define AppExeName "moLink.exe"
 #endif
+; A nested {#...} inside a #define is expanded only once, so
+; "moLink-{#AppVersion}-..." would keep the literal braces in the filename
+; when OutputName itself is used with {#OutputName}. Concatenate at define
+; time instead; the workflow also passes an explicit OutputName.
 #ifndef OutputName
-  #define OutputName "moLink-{#AppVersion}-setup-x64"
+  #define OutputName "moLink-" + AppVersion + "-setup-x64"
 #endif
 #define AppId "{{B2D9F7D4-6C38-4E7A-9A4B-0B5E8C3F1A72}"
 
