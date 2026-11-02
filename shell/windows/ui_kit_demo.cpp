@@ -1039,14 +1039,23 @@ bool start_local_core(int* port, std::string* client_token,
     }
   }
   CloseHandle(read_pipe);
-  // Keep only the ready JSON: log lines before it would otherwise be searched
-  // for "port"/"token" too.
-  const size_t ready_at = line.find("{\"event\":\"ready\"");
-  if (ready_at != std::string::npos) {
-    const size_t ready_end = line.find('\n', ready_at);
-    line = line.substr(ready_at, ready_end == std::string::npos
-                                    ? std::string::npos
-                                    : ready_end - ready_at);
+  // Keep only the ready JSON. nlohmann sorts object keys, so the line starts
+  // with "capture", not "event": search for the marker and take the object
+  // that contains it, starting after the previous newline.
+  {
+    const size_t marker = line.find("\"event\":\"ready\"");
+    if (marker != std::string::npos) {
+      const size_t start = line.rfind('\n', marker) == std::string::npos
+                               ? 0
+                               : line.rfind('\n', marker) + 1;
+      const size_t brace = line.find('{', start);
+      const size_t end = line.find('\n', marker);
+      if (brace != std::string::npos) {
+        line = line.substr(brace, end == std::string::npos
+                                      ? std::string::npos
+                                      : end - brace);
+      }
+    }
   }
   auto find_number = [&line](const char* key, int* out) {
     const std::string needle = std::string("\"") + key + "\":";
@@ -1068,7 +1077,7 @@ bool start_local_core(int* port, std::string* client_token,
   int ready_port = 0;
   std::string token;
   std::string surface_utf8;
-  if (ready_at == std::string::npos || !find_number("port", &ready_port) ||
+  if (line.empty() || line.front() != '{' || !find_number("port", &ready_port) ||
       ready_port <= 0) {
     native_log(L"local core: no ready line: " +
                std::wstring(line.begin(), line.end()));
