@@ -6,6 +6,11 @@ on:
   # Manual runs build the artifacts without publishing a release; the release
   # steps below only fire for a tag.
   workflow_dispatch:
+    inputs:
+      skip_slow:
+        description: 'Only run the Windows jobs (skip Linux and macOS)'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -22,6 +27,9 @@ env:
 # are built and attached to the release.
 jobs:
   linux:
+    # workflow_dispatch may skip the two slow Unix jobs while iterating on a
+    # Windows fix; tag builds never set the input and always run everything.
+    if: ${{ inputs.skip_slow != true }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -430,6 +438,7 @@ jobs:
 
   # Temporarily disabled during the test phase (macOS runners are scarce).
   macos:
+    if: ${{ inputs.skip_slow != true }}
     strategy:
       fail-fast: false
       matrix:
