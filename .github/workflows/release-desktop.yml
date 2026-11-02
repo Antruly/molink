@@ -314,37 +314,68 @@ jobs:
           # compiler before using it.
           $msysRoot = $null
           $mingw = $null
+          $windres = $null
+          $gxx = $null
           foreach ($candidate in @('C:\tools\msys64', 'C:\msys64')) {
             $bash = Join-Path $candidate 'usr\bin\bash.exe'
             if (-not (Test-Path $bash)) { continue }
             Write-Host "== trying MSYS2 at $candidate"
-            & $bash -lc "pacman -Sy --noconfirm --needed mingw-w64-x86_64-gcc mingw-w64-x86_64-libwebp"
-            if ($LASTEXITCODE -ne 0) {
-              Write-Warning "pacman failed under $candidate (exit $LASTEXITCODE)"
+            # The mirror can be slow; a partial transaction used to leave a
+            # half-installed toolchain. Disable the per-read timeout and retry.
+            & $bash -lc "pacman -Sy --noconfirm --needed --disable-download-timeout mingw-w64-x86_64-gcc"
+            $candidateGxx = Join-Path $candidate 'mingw64\bin\x86_64-w64-mingw32-g++.exe'
+            if (-not (Test-Path $candidateGxx)) {
+              Write-Warning "mingw g++ is missing under $candidate (exit $LASTEXITCODE)"
               continue
             }
-            $mingwCandidate = Join-Path $candidate 'mingw64'
-            if (Test-Path (Join-Path $mingwCandidate 'bin\x86_64-w64-mingw32-windres.exe')) {
-              $msysRoot = $candidate
-              $mingw = $mingwCandidate
-              break
-            }
-            Write-Warning "the MinGW toolchain is missing under $candidate"
+            $msysRoot = $candidate
+            $mingw = Join-Path $candidate 'mingw64'
+            $gxx = $candidateGxx
+            $windres = Get-ChildItem (Join-Path $mingw 'bin') -Filter '*windres*.exe' |
+              Select-Object -First 1 -ExpandProperty FullName
+            break
           }
           if ($null -eq $msysRoot) { throw 'no usable MSYS2 MinGW toolchain was found' }
           Write-Host "== using MSYS2 at $msysRoot"
-          $env:PATH = "$(Join-Path $mingw 'bin');$env:PATH"
+          if (-not $windres) {
+            # binutils normally arrives with gcc; ask for it explicitly if the
+            # naming differs from the expected prefixed binary.
+            & (Join-Path $msysRoot 'usr\bin\bash.exe') -lc "pacman -S --noconfirm --needed --disable-download-timeout mingw-w64-x86_64-binutils"
+            $windres = Get-ChildItem (Join-Path $mingw 'bin') -Filter '*windres*.exe' |
+              Select-Object -First 1 -ExpandProperty FullName
+          }
+          if (-not $windres) { throw "no windres found under $mingw" }
+          # WebP is only used for the remote device avatar. Its package pulls a
+          # large dependency set and the mirror occasionally times out, so it
+          # is best-effort: without it the shell falls back to initial-letter
+          # avatars instead of failing the whole release.
+          $haveWebp = Test-Path (Join-Path $mingw 'lib\libwebp.a')
+          for ($attempt = 0; $attempt -lt 3 -and -not $haveWebp; $attempt++) {
+            & (Join-Path $msysRoot 'usr\bin\bash.exe') -lc "pacman -S --noconfirm --needed --disable-download-timeout mingw-w64-x86_64-libwebp"
+            $haveWebp = Test-Path (Join-Path $mingw 'lib\libwebp.a')
+          }
+          if ($haveWebp) { Write-Host '== libwebp found' } else { Write-Warning 'libwebp unavailable; building without WebP avatars' }
           $mingwInc = Join-Path $mingw 'include'
           $mingwLib = Join-Path $mingw 'lib'
-          & x86_64-w64-mingw32-windres -O coff -I . shell/windows/ui_kit_demo.rc -o "$env:RUNNER_TEMP\native-res.o"
+          & $windres -O coff -I . shell/windows/ui_kit_demo.rc -o "$env:RUNNER_TEMP\native-res.o"
           if ($LASTEXITCODE -ne 0) { throw 'native resources failed' }
-          & x86_64-w64-mingw32-g++ -std=c++20 -D_WIN32_WINNT=0x0A00 -DMOLINK_HAVE_WEBP -O2 -mwindows -municode -static `
-            -I shell/windows "-I$mingwInc" `
-            -o build\windows\pkg\moLink-native.exe `
-            shell/windows/ui_kit_demo.cpp shell/windows/ui_kit.cpp shell/windows/ws_client.cpp `
-            shell/windows/session_client.cpp shell/windows/puff.c "$env:RUNNER_TEMP\native-res.o" `
-            "-L$mingwLib" -lwebp -lsharpyuv -ld2d1 -ldwrite -lole32 -luser32 -lgdi32 -ladvapi32 `
-            -lwindowscodecs -lcomdlg32 -lws2_32 -lwinhttp -lshell32
+          $common = @(
+            '-std=c++20', '-D_WIN32_WINNT=0x0A00', '-O2', '-mwindows', '-municode', '-static',
+            '-I', 'shell/windows', "-I$mingwInc",
+            '-o', 'build\windows\pkg\moLink-native.exe',
+            'shell/windows/ui_kit_demo.cpp', 'shell/windows/ui_kit.cpp',
+            'shell/windows/ws_client.cpp', 'shell/windows/session_client.cpp',
+            'shell/windows/puff.c', "$env:RUNNER_TEMP\native-res.o",
+            "-L$mingwLib"
+          )
+          $tail = @('-ld2d1', '-ldwrite', '-lole32', '-luser32', '-lgdi32', '-ladvapi32',
+                    '-lwindowscodecs', '-lcomdlg32', '-lws2_32', '-lwinhttp', '-lshell32')
+          if ($haveWebp) {
+            $gccArgs = $common + @('-DMOLINK_HAVE_WEBP', '-lwebp', '-lsharpyuv') + $tail
+          } else {
+            $gccArgs = $common + $tail
+          }
+          & $gxx @gccArgs
           if ($LASTEXITCODE -ne 0) { throw 'native shell did not build' }
           if (-not (Test-Path build\windows\pkg\moLink-native.exe)) { throw 'native shell did not build' }
 
