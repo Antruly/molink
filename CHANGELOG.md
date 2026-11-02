@@ -37,7 +37,12 @@
 - **会话端读不到 core 的 ready 行**：libuvcpp 的控制台日志先于 ready JSON 写在
   stdout，三个外壳（Win32/WebView2、native Direct2D、Linux GTK）都在第一个
   换行处停止读取，把日志行当成 ready 行解析，随后报告「没有 ready 端口」。
-  现在一直读到 `"event":"ready"` 标记并只解析该 JSON。
+  现在一直读到 `"event":"ready"` 标记，并按标记所在行取 JSON（nlohmann 按键
+  排序，行首不一定是 `event`，按 `{"event":"ready"` 找开头同样会失败）。
+- **native 壳读取共享表面时崩溃**：表面文件以 `FILE_MAP_READ` 只读映射，
+  而读取 64 位序号用了 `InterlockedCompareExchange64`（带 lock 的写操作），
+  在只读页上必然触发访问冲突。改为与 Linux 壳相同的 acquire 顺序普通读取；
+  发布端仍用 interlocked 写。
 - **Win7 x86 包里的原生安装器缺少图标**：win7 构建脚本没有把 `molink.ico`
   复制到暂存目录，而 `installer.iss` 以 `{#PkgDir}\molink.ico` 作为
   SetupIconFile。已补上。
