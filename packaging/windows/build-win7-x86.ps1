@@ -326,6 +326,14 @@ $iscc = @(
   'C:\Program Files (x86)\Inno Setup 6\ISCC.exe',
   'C:\Program Files\Inno Setup 6\ISCC.exe'
 ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+# These are needed by both installer paths; they used to be defined inside the
+# non-NativeOnly branch, so `-NativeOnly` passed an empty /DLangFile and Inno
+# aborted with 'Parameter "MessagesFile" is empty'.
+$lang = Join-Path $Repo 'packaging\windows\ChineseSimplified.isl'
+$icon = Join-Path $Repo 'shell\assets\icons\icon.ico'
+if (-not (Test-Path $lang)) {
+  throw "the installer language file is missing: $lang"
+}
 if (-not $NativeOnly) {
   $zip = Join-Path $Out "moLink-$Version-win7-x86.zip"
   Remove-Item -Force $zip -ErrorAction SilentlyContinue
@@ -334,8 +342,6 @@ if (-not $NativeOnly) {
 }
 if ($iscc -and -not $NativeOnly) {
   $iss = Join-Path $Repo 'packaging\windows\win7-x86-installer.iss'
-  $lang = Join-Path $Repo 'packaging\windows\ChineseSimplified.isl'
-  $icon = Join-Path $Repo 'shell\assets\icons\icon.ico'
   & $iscc "/DAppVersion=$Version" "/DPkgDir=$pkg" "/DOutputDir=$Out" `
     "/DLangFile=$lang" "/DIconFile=$icon" $iss
   if ($LASTEXITCODE -ne 0) { throw 'Inno Setup compile failed' }

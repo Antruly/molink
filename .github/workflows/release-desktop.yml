@@ -300,20 +300,36 @@ jobs:
         shell: pwsh
         run: |
           choco install msys2 -y --no-progress
-          # Chocolatey installs MSYS2 under C:\tools\msys64; older runner
-          # images used C:\msys64. Do not hard-code one of them.
-          $msysRoot = if (Test-Path 'C:\msys64\usr\bin\bash.exe') { 'C:\msys64' } else { 'C:\tools\msys64' }
-          $msys = Join-Path $msysRoot 'usr\bin\bash.exe'
-          if (-not (Test-Path $msys)) { throw "MSYS2 shell not found under $msysRoot" }
-          & $msys -lc "pacman -Sy --noconfirm --needed mingw-w64-x86_64-gcc mingw-w64-x86_64-libwebp" | Out-Null
-          $mingw = Join-Path $msysRoot 'mingw64'
-          if (-not (Test-Path (Join-Path $mingw 'bin\x86_64-w64-mingw32-windres.exe'))) {
-            throw "the MSYS2 MinGW toolchain was not installed under $mingw"
+          # Chocolatey deploys MSYS2 to C:\tools\msys64, while some runner
+          # images also carry a C:\msys64. The toolchain must come from the
+          # root whose pacman actually installed it, so try both and verify the
+          # compiler before using it.
+          $msysRoot = $null
+          $mingw = $null
+          foreach ($candidate in @('C:\tools\msys64', 'C:\msys64')) {
+            $bash = Join-Path $candidate 'usr\bin\bash.exe'
+            if (-not (Test-Path $bash)) { continue }
+            Write-Host "== trying MSYS2 at $candidate"
+            & $bash -lc "pacman -Sy --noconfirm --needed mingw-w64-x86_64-gcc mingw-w64-x86_64-libwebp"
+            if ($LASTEXITCODE -ne 0) {
+              Write-Warning "pacman failed under $candidate (exit $LASTEXITCODE)"
+              continue
+            }
+            $mingwCandidate = Join-Path $candidate 'mingw64'
+            if (Test-Path (Join-Path $mingwCandidate 'bin\x86_64-w64-mingw32-windres.exe')) {
+              $msysRoot = $candidate
+              $mingw = $mingwCandidate
+              break
+            }
+            Write-Warning "the MinGW toolchain is missing under $candidate"
           }
+          if ($null -eq $msysRoot) { throw 'no usable MSYS2 MinGW toolchain was found' }
+          Write-Host "== using MSYS2 at $msysRoot"
           $env:PATH = "$(Join-Path $mingw 'bin');$env:PATH"
           $mingwInc = Join-Path $mingw 'include'
           $mingwLib = Join-Path $mingw 'lib'
           & x86_64-w64-mingw32-windres -O coff -I . shell/windows/ui_kit_demo.rc -o "$env:RUNNER_TEMP\native-res.o"
+          if ($LASTEXITCODE -ne 0) { throw 'native resources failed' }
           & x86_64-w64-mingw32-g++ -std=c++20 -D_WIN32_WINNT=0x0A00 -DMOLINK_HAVE_WEBP -O2 -mwindows -municode -static `
             -I shell/windows "-I$mingwInc" `
             -o build\windows\pkg\moLink-native.exe `
@@ -321,6 +337,7 @@ jobs:
             shell/windows/session_client.cpp shell/windows/puff.c "$env:RUNNER_TEMP\native-res.o" `
             "-L$mingwLib" -lwebp -lsharpyuv -ld2d1 -ldwrite -lole32 -luser32 -lgdi32 -ladvapi32 `
             -lwindowscodecs -lcomdlg32 -lws2_32 -lwinhttp -lshell32
+          if ($LASTEXITCODE -ne 0) { throw 'native shell did not build' }
           if (-not (Test-Path build\windows\pkg\moLink-native.exe)) { throw 'native shell did not build' }
 
       - name: Package the native client (x64)
