@@ -2635,13 +2635,15 @@ uint64_t surface_sequence_now() {
   if (g.surface_base == nullptr) return 0;
   const auto* header = reinterpret_cast<const surface_header*>(g.surface_base);
   if (header->magic != kSurfaceMagic) return 0;
-  // The core publishes the 64-bit sequence with an interlocked store. On
-  // 32-bit a plain load is two reads and can tear; a locked compare-exchange
-  // with equal operands is an atomic load on every supported Windows.
-  return static_cast<uint64_t>(InterlockedCompareExchange64(
-      const_cast<volatile LONG64*>(
-          reinterpret_cast<const volatile LONG64*>(&header->sequence)),
-      0, 0));
+  // The shell maps the surface read-only (FILE_MAP_READ). An interlocked
+  // compare-exchange is a *write* even with equal operands, so it faults on
+  // that mapping. Use the same acquire-ordered plain read as the Linux shell;
+  // the core's interlocked store keeps the published value coherent, and a
+  // torn 64-bit read can only pick the other double-buffer slot for one poll,
+  // which the next frame corrects.
+  const uint64_t sequence = header->sequence;
+  std::atomic_thread_fence(std::memory_order_acquire);
+  return sequence;
 }
 
 /// Copies the newest published frame into the D2D bitmap.
@@ -2649,8 +2651,8 @@ void surface_poll() {
   if (g.surface_base == nullptr || g.target == nullptr) return;
   auto* header = reinterpret_cast<surface_header*>(g.surface_base);
   if (header->magic != kSurfaceMagic || header->width == 0) return;
-  const uint64_t sequence = static_cast<uint64_t>(InterlockedCompareExchange64(
-      reinterpret_cast<volatile LONG64*>(&header->sequence), 0, 0));
+  // Read-only mapping: a plain acquire-ordered load (see surface_sequence_now).
+  const uint64_t sequence = header->sequence;
   std::atomic_thread_fence(std::memory_order_acquire);
   if (g.surface_hold) {
     // Still the previous session's picture: wait for the core to publish for
