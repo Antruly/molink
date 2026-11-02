@@ -185,7 +185,16 @@ bool start_core(const std::string& core, const std::string& web_root, int& port,
   const auto deadline =
       std::chrono::steady_clock::now() + std::chrono::seconds(10);
   bool complete = false;
+  // libuvcpp's console logger writes startup lines to stdout ahead of the
+  // ready JSON. Stopping at the first newline parsed a log line and left the
+  // shell without a core (no port, no client token, no surface).
   while (!complete && std::chrono::steady_clock::now() < deadline) {
+    const size_t marker = line.find("\"event\":\"ready\"");
+    if (marker != std::string::npos &&
+        line.find('\n', marker) != std::string::npos) {
+      complete = true;
+      break;
+    }
     struct pollfd descriptor;
     descriptor.fd = stdout_fd;
     descriptor.events = POLLIN;
@@ -196,9 +205,16 @@ bool start_core(const std::string& core, const std::string& web_root, int& port,
     const ssize_t got = ::read(stdout_fd, buffer, sizeof(buffer));
     if (got <= 0) break;
     line.append(buffer, static_cast<std::size_t>(got));
-    if (line.find('\n') != std::string::npos) complete = true;
+    if (line.size() > 256 * 1024) break;
   }
   if (stdout_fd >= 0) ::close(stdout_fd);
+  const size_t ready_at = line.find("{\"event\":\"ready\"");
+  if (ready_at != std::string::npos) {
+    const size_t ready_end = line.find('\n', ready_at);
+    line = line.substr(ready_at, ready_end == std::string::npos
+                                    ? std::string::npos
+                                    : ready_end - ready_at);
+  }
 
   long parsed_port = 0;
   if (!complete || !json_number(line, "port", parsed_port) ||

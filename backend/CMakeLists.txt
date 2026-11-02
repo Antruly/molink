@@ -344,7 +344,14 @@ if(MOLINK_ENABLE_AV1)
   endif()
   if(NOT MOLINK_DAV1D_FOUND)
     message(STATUS "molink: dav1d not found; AV1 decoding disabled")
+    if(MOLINK_REQUIRE_DAV1D)
+      message(FATAL_ERROR
+        "MOLINK_REQUIRE_DAV1D=ON but dav1d was not found (DAV1D_INCLUDE_DIR=${DAV1D_INCLUDE_DIR}, DAV1D_LIBRARY=${DAV1D_LIBRARY}).")
+    endif()
   endif()
+endif()
+if(MOLINK_REQUIRE_DAV1D AND NOT MOLINK_ENABLE_AV1)
+  message(FATAL_ERROR "MOLINK_REQUIRE_DAV1D=ON needs MOLINK_ENABLE_AV1=ON")
 endif()
 
 # VP9/VP8 stream encoding is optional: libvpx provides the encoder cells. The
@@ -357,6 +364,13 @@ option(MOLINK_ENABLE_VPX
   "Enable VP9/VP8 stream encoding (needs libvpx)" OFF)
 set(MOLINK_VPX_SDK "" CACHE PATH
   "Unpacked libvpx dev tree (usr/include, usr/lib) when the package is absent")
+# A packaging build that is supposed to ship the stream path must fail loudly
+# when the SDK was not found: the resulting core silently stays tiles-only,
+# which is exactly the "native shows no picture" report from Windows 7.
+option(MOLINK_REQUIRE_VPX
+  "Fail the configure step when libvpx is not found" OFF)
+option(MOLINK_REQUIRE_DAV1D
+  "Fail the configure step when dav1d (AV1 decode) is not found" OFF)
 set(MOLINK_HAVE_VPX 0)
 if(MOLINK_ENABLE_VPX)
   if(MOLINK_VPX_SDK)
@@ -372,9 +386,16 @@ if(MOLINK_ENABLE_VPX)
   if(VPX_INCLUDE_DIR AND VPX_LIBRARY)
     set(MOLINK_HAVE_VPX 1)
     message(STATUS "molink: VP9/VP8 stream encoding enabled (libvpx ${VPX_LIBRARY})")
+  elseif(MOLINK_REQUIRE_VPX)
+    message(FATAL_ERROR
+      "MOLINK_REQUIRE_VPX=ON but libvpx was not found (VPX_INCLUDE_DIR=${VPX_INCLUDE_DIR}, VPX_LIBRARY=${VPX_LIBRARY}). "
+      "Point VPX_INCLUDE_DIR/VPX_LIBRARY at an unpacked libvpx tree.")
   else()
     message(STATUS "molink: libvpx not found; VP9/VP8 streams disabled")
   endif()
+endif()
+if(MOLINK_REQUIRE_VPX AND NOT MOLINK_ENABLE_VPX)
+  message(FATAL_ERROR "MOLINK_REQUIRE_VPX=ON needs MOLINK_ENABLE_VPX=ON")
 endif()
 
 
@@ -521,8 +542,11 @@ if(MOLINK_BUILD_CORE)
   endif()
 
   if(WIN32)
+    # crypt32: a static libcrypto's CAPI engine calls the Windows certificate
+    # store APIs directly (MinGW builds against a static OpenSSL need it).
     target_link_libraries(molink-core PRIVATE
-      d3d11 dxgi dxguid gdi32 user32 ole32 uuid ws2_32 iphlpapi advapi32 shell32)
+      d3d11 dxgi dxguid gdi32 user32 ole32 uuid ws2_32 iphlpapi advapi32
+      shell32 crypt32)
     if(MINGW)
       # WASAPI format GUIDs (KSDATAFORMAT_SUBTYPE_*) live in ksguid on MinGW;
       # MSVC pulls them in through the SDK's default libraries.
@@ -696,6 +720,7 @@ add_executable(molink-core-surface-test
   tests/surface_compositor_test.cpp
   src/surface/frame_surface.cpp
   src/surface/surface_compositor.cpp
+  src/capture/av1_frame.cpp
   src/protocol/frame_packet.cpp
 )
 target_include_directories(molink-core-surface-test PRIVATE src)

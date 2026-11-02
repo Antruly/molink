@@ -3,7 +3,7 @@
 !include "MUI2.nsh"
 
 !ifndef VERSION
-  !define VERSION "0.9.36"
+  !define VERSION "0.10.0"
 !endif
 !ifndef PKG_DIR
   !error "PKG_DIR must point at the staged package directory"
@@ -11,9 +11,16 @@
 !ifndef OUT_DIR
   !define OUT_DIR "."
 !endif
+; The native shell reuses this launcher with its own exe and file name.
+!ifndef APP_EXE
+  !define APP_EXE "moLink.exe"
+!endif
+!ifndef OUT_NAME
+  !define OUT_NAME "moLink-${VERSION}-portable-x64.exe"
+!endif
 
 Name "moLink Portable"
-OutFile "${OUT_DIR}\moLink-${VERSION}-portable-x64.exe"
+OutFile "${OUT_DIR}\${OUT_NAME}"
 Icon "${PKG_DIR}\molink.ico"
 Unicode true
 RequestExecutionLevel user
@@ -30,5 +37,5 @@ VIAddVersionKey "LegalCopyright" "MIT"
 Section
   SetOutPath "$INSTDIR"
   File /r "${PKG_DIR}\*.*"
-  Exec "$INSTDIR\moLink.exe"
+  Exec "$INSTDIR\${APP_EXE}"
 SectionEnd

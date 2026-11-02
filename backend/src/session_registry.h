@@ -71,6 +71,11 @@ struct session_info {
   /// usable base image yet.
   int64_t last_capture_seq = -1;
   bool has_image = false;
+  /// Last time this session asked the capture for a keyframe. A viewer that
+  /// can never get a picture asks on every push tick; one request a second is
+  /// enough to recover and stops it from turning each tick into a full-screen
+  /// encode that also advances every cell of the tile clock.
+  uint64_t last_keyframe_request_ms = 0;
   /// Cursor state last sent to this session. 0xffffffff forces a shape send.
   uint32_t cursor_serial = 0xffffffffu;
   int cursor_x = INT32_MIN;

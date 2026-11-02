@@ -6,7 +6,7 @@ set -euo pipefail
 trap 'rm -rf "${WORK:-}"' EXIT
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
-VERSION=${VERSION:-0.9.36}
+VERSION=${VERSION:-0.10.0}
 ARCH=${ARCH:-$(dpkg --print-architecture)}
 # Stage in a real POSIX filesystem: the source tree may live on a mount that
 # ignores chmod, and dpkg-deb requires DEBIAN to be exactly 0755.
@@ -66,7 +66,7 @@ MULTIARCH=$(gcc -print-multiarch 2>/dev/null || echo x86_64-linux-gnu)
 for dir in ${MOLINK_AV1_SDK:+$MOLINK_AV1_SDK/usr/lib/$MULTIARCH} \
            "/usr/lib/$MULTIARCH" /usr/lib64 /usr/lib; do
   [ -d "$dir" ] || continue
-  for pattern in 'libSvtAv1Enc.so.*' 'libdav1d.so.*'; do
+  for pattern in 'libSvtAv1Enc.so.*' 'libdav1d.so.*' 'libvpx.so.*'; do
     cp -P "$dir"/$pattern "$STAGE$PREFIX/lib/" 2>/dev/null || true
   done
 done

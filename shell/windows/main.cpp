@@ -333,7 +333,16 @@ bool start_core(const std::wstring& core, const std::wstring& web_root, int& por
   std::string line;
   const ULONGLONG deadline = GetTickCount64() + 10000;
   bool complete = false;
+  // The core's libuvcpp logger prints to stdout before the ready JSON, so keep
+  // reading until the ready marker itself arrives; stopping at the first
+  // newline parsed a log line and the shell then ran without a core.
   while (!complete && GetTickCount64() < deadline) {
+    const size_t marker = line.find("\"event\":\"ready\"");
+    if (marker != std::string::npos &&
+        line.find('\n', marker) != std::string::npos) {
+      complete = true;
+      break;
+    }
     DWORD available = 0;
     if (!PeekNamedPipe(read_pipe, nullptr, 0, nullptr, &available, nullptr)) break;
     if (available > 0) {
@@ -344,12 +353,19 @@ bool start_core(const std::wstring& core, const std::wstring& web_root, int& por
         break;
       }
       line.append(buffer, got);
-      if (line.find('\n') != std::string::npos) complete = true;
+      if (line.size() > 256 * 1024) break;
     } else {
       Sleep(100);
     }
   }
   CloseHandle(read_pipe);
+  const size_t ready_at = line.find("{\"event\":\"ready\"");
+  if (ready_at != std::string::npos) {
+    const size_t ready_end = line.find('\n', ready_at);
+    line = line.substr(ready_at, ready_end == std::string::npos
+                                    ? std::string::npos
+                                    : ready_end - ready_at);
+  }
 
   long parsed_port = 0;
   if (!complete || !json_number(line, "port", parsed_port) ||

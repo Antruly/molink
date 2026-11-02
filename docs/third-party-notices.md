@@ -1,5 +1,10 @@
 # Third-party notices
 
+- **puff.c / puff.h** — the reference inflate from zlib's `contrib/puff`
+  (Copyright (C) 2002-2013 Mark Adler, zlib license), vendored as
+  `shell/windows/puff.c`. It inflates the `deflate-bgra`/`deflate-rgb24`/
+  `deflate-rgb565`/`deflate-gray8` tile codecs in the native shell.
+
 - **APNIC delegated statistics** — `src/security/cn_cidr_generated.inc` in the
   [moLink Server](https://github.com/Antruly/molink-server) repository is
   generated from <https://ftp.apnic.net/stats/apnic/>. The snapshot date and

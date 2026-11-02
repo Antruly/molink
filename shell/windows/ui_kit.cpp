@@ -3,45 +3,108 @@
 #include <dwrite.h>
 
 #include <algorithm>
+#include <cstdint>
+#include <unordered_map>
 
 namespace molink::ui {
+namespace {
+
+/// Solid-colour brush cache. The UI repaints every animation frame and each
+/// rounded rect/text used to create and release its own brush; that churn was
+/// a visible part of the settings open/close stutter.
+struct brush_cache {
+  ID2D1RenderTarget* target = nullptr;
+  std::unordered_map<uint64_t, ID2D1SolidColorBrush*> map;
+
+  ~brush_cache() { clear(); }
+
+  void clear() {
+    for (auto& item : map) item.second->Release();
+    map.clear();
+  }
+
+  ID2D1SolidColorBrush* get(ID2D1RenderTarget* t, const D2D1_COLOR_F& c) {
+    if (t != target) {
+      clear();
+      target = t;
+    }
+    const uint64_t key = (static_cast<uint64_t>(c.r * 255.0f + 0.5f) << 24) |
+                         (static_cast<uint64_t>(c.g * 255.0f + 0.5f) << 16) |
+                         (static_cast<uint64_t>(c.b * 255.0f + 0.5f) << 8) |
+                         static_cast<uint64_t>(c.a * 255.0f + 0.5f);
+    const auto found = map.find(key);
+    if (found != map.end()) return found->second;
+    ID2D1SolidColorBrush* brush = nullptr;
+    if (FAILED(t->CreateSolidColorBrush(c, &brush)) || brush == nullptr) {
+      return nullptr;
+    }
+    if (map.size() > 512) clear();
+    map.emplace(key, brush);
+    return brush;
+  }
+};
+
+brush_cache g_brushes;
+
+}  // namespace
 
 void fill_round(ID2D1RenderTarget* t, const D2D1_RECT_F& r, float radius,
                 const D2D1_COLOR_F& color) {
-  ID2D1SolidColorBrush* b = nullptr;
-  if (FAILED(t->CreateSolidColorBrush(color, &b)) || b == nullptr) return;
+  ID2D1SolidColorBrush* b = g_brushes.get(t, color);
+  if (b == nullptr) return;
   t->FillRoundedRectangle(D2D1::RoundedRect(r, radius, radius), b);
-  b->Release();
 }
 
 void stroke_round(ID2D1RenderTarget* t, const D2D1_RECT_F& r, float radius,
                   const D2D1_COLOR_F& color, float width) {
-  ID2D1SolidColorBrush* b = nullptr;
-  if (FAILED(t->CreateSolidColorBrush(color, &b)) || b == nullptr) return;
+  ID2D1SolidColorBrush* b = g_brushes.get(t, color);
+  if (b == nullptr) return;
   t->DrawRoundedRectangle(D2D1::RoundedRect(r, radius, radius), b, width);
-  b->Release();
 }
 
-void shadow(ID2D1RenderTarget* t, const D2D1_RECT_F& r, float radius) {
-  const float alphas[] = {0.20f, 0.12f, 0.06f};
-  for (int i = 0; i < 3; ++i) {
-    const float spread = 1.0f + i * 3.0f;
-    const float dy = 3.0f + i * 4.0f;
+void shadow(ID2D1RenderTarget* t, const palette& th, const D2D1_RECT_F& r,
+            float radius) {
+  const bool light = th.ink.r < 0.5f;
+  if (!light) {
+    // Dark keeps the original menu/card shadow: it already matches the web.
+    const float alphas[] = {0.20f, 0.12f, 0.06f};
+    for (int i = 0; i < 3; ++i) {
+      const float spread = 1.0f + i * 3.0f;
+      const float dy = 3.0f + i * 4.0f;
+      fill_round(t,
+                 D2D1::RectF(r.left - spread, r.top - spread + dy,
+                             r.right + spread, r.bottom + spread + dy),
+                 radius + spread, D2D1::ColorF(0, 0, 0, alphas[i]));
+    }
+    return;
+  }
+  // Light: the web's --shadow-md is a wide, very soft blue-black
+  // (0 18px 40px -28px rgba(15,23,42,.25)); a hard black drop read as a
+  // different layout.
+  // Web light --shadow-md is `0 18px 40px -28px rgba(15,23,42,.25)`:
+  // the negative spread insets the shadow inside the card, and the downward
+  // offset leaves it peeking out at the bottom only -- not a halo on every
+  // side. Layers are inset and pushed down accordingly.
+  constexpr int kLayers = 6;
+  for (int i = 0; i < kLayers; ++i) {
+    const float progress = static_cast<float>(i) / (kLayers - 1);
+    const float inset = 1.0f + progress * 16.0f;
+    const float dy = 5.0f + progress * 15.0f;
+    const float alpha = 0.045f * (1.0f - 0.45f * progress);
     fill_round(t,
-               D2D1::RectF(r.left - spread, r.top - spread + dy,
-                           r.right + spread, r.bottom + spread + dy),
-               radius + spread, D2D1::ColorF(0, 0, 0, alphas[i]));
+               D2D1::RectF(r.left + inset, r.top + inset + dy,
+                           r.right - inset, r.bottom - inset + dy),
+               radius + inset * 0.5f, D2D1::ColorF(0x0f172a, alpha));
   }
 }
 
 void text(ID2D1RenderTarget* t, IDWriteTextFormat* format,
           const std::wstring& s, const D2D1_RECT_F& r,
           const D2D1_COLOR_F& color) {
-  ID2D1SolidColorBrush* b = nullptr;
-  if (FAILED(t->CreateSolidColorBrush(color, &b)) || b == nullptr) return;
+  ID2D1SolidColorBrush* b = g_brushes.get(t, color);
+  if (b == nullptr) return;
   t->DrawTextW(s.c_str(), static_cast<UINT32>(s.size()), format, r, b,
                D2D1_DRAW_TEXT_OPTIONS_CLIP);
-  b->Release();
 }
 
 void pill(ID2D1RenderTarget* t, const palette& theme, IDWriteTextFormat* small,
@@ -182,7 +245,7 @@ void tooltip(ID2D1RenderTarget* t, const palette& theme,
   float top = y + 14;
   if (top + h > size.height - 8) top = y - h - 8;
   const D2D1_RECT_F r = D2D1::RectF(left, top, left + w, top + h);
-  shadow(t, r, 6);
+  shadow(t, theme, r, 6);
   fill_round(t, r, 6, theme.panel_strong);
   stroke_round(t, r, 6, theme.line);
   text(t, small, label, r, theme.ink);
@@ -197,7 +260,7 @@ void toast(ID2D1RenderTarget* t, const palette& theme,
   const float left = (size.width - w) / 2;
   const float top = size.height - h - 24;
   const D2D1_RECT_F r = D2D1::RectF(left, top, left + w, top + h);
-  shadow(t, r, 8);
+  shadow(t, theme, r, 8);
   fill_round(t, r, 8, theme.panel_strong);
   stroke_round(t, r, 8, theme.line);
   text(t, small, state.text, r, theme.ink);
@@ -216,7 +279,7 @@ D2D1_RECT_F modal_panel(ID2D1RenderTarget* t, const palette& theme,
   const D2D1_RECT_F panel =
       D2D1::RectF((size.width - width) / 2, (size.height - height) / 2,
                   (size.width + width) / 2, (size.height + height) / 2);
-  shadow(t, panel, 14);
+  shadow(t, theme, panel, 14);
   fill_round(t, panel, 14, theme.surface);
   stroke_round(t, panel, 14, theme.line);
   text(t, title, heading,

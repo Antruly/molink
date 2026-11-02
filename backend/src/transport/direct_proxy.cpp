@@ -725,14 +725,45 @@ class direct_proxy final : public std::enable_shared_from_this<direct_proxy> {
       bool native = false;
       const auto it = hello.find("av1_native");
       if (it != hello.end() && it->is_boolean()) native = it->get<bool>();
+      // A native shell advertises decoders that the *local core* runs for the
+      // shared surface. The page takes the same route through this proxy but
+      // does its own decoding, so only clamp the native client.
+      bool surface_client = false;
+      const auto client = hello.find("client");
+      if (client != hello.end() && client->is_string() &&
+          client->get<std::string>() == "molink-native") {
+        surface_client = true;
+      }
+      const auto surface = hello.find("surface");
+      if (surface != hello.end() && surface->is_boolean() &&
+          surface->get<bool>()) {
+        surface_client = true;
+      }
       hello.erase("av1");
-      if (native) {
+      if (surface_client) {
+#if !defined(MOLINK_HAVE_VPX) || !MOLINK_HAVE_VPX
+        // This core has no libvpx: it cannot decode the host's VP9/VP8
+        // stream, and claiming it left the native window blank while input
+        // still worked. Tiles always decode (raw or zlib).
+        hello["vp9_stream"] = false;
+        hello["vp8_stream"] = false;
+#endif
+#if !defined(MOLINK_HAVE_DAV1D) || !MOLINK_HAVE_DAV1D
+        hello["av1_native"] = false;
+        hello.erase("av1_stream");
+#else
+        if (native) hello["av1_stream"] = true;
+#endif
+        // The core-side compositor has no H.264 decoder.
+        hello["h264_stream"] = false;
+      } else if (native) {
         hello["av1_stream"] = true;
-        if (std::getenv("MOLINK_AV1_LOG") != nullptr) {
-          std::fprintf(stderr, "proxy: injected av1_stream into hello\n");
-        }
       } else {
         hello.erase("av1_stream");
+      }
+      if (std::getenv("MOLINK_AV1_LOG") != nullptr &&
+          hello.value("av1_stream", false)) {
+        std::fprintf(stderr, "proxy: injected av1_stream into hello\n");
       }
       return hello.dump();
     } catch (...) {

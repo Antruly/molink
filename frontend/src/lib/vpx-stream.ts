@@ -10,7 +10,11 @@
 /// the configuration is not the same as being able to decode it (WebKitGTK
 /// before 2.54 fails every AV1 frame, WebKit bug 327481).
 
-const kMaxQueuedDeltas = 2
+// A decoder queue of a couple of frames is normal while the main thread paints
+// a 1080p picture. Treating that as "broken" forced a keyframe every second --
+// a full-screen re-anchor that itself costs more than the frames it replaced.
+// Allow a small backlog; only a real one drops to a keyframe.
+const kMaxQueuedDeltas = 4
 
 export type VpxCodec = 'vp8' | 'vp9' | 'av1'
 

@@ -24,7 +24,10 @@ namespace molink {
 struct stream_policy {
   static constexpr double kDefaultEnterFraction = 0.15;
   static constexpr uint64_t kEnterDwellMs = 1000;
-  static constexpr uint64_t kExitDwellMs = 10000;
+  /// Leave the stream quickly once the picture settles: a 10 s tail kept
+  /// encoding P frames long after the last real movement, which is why an
+  /// otherwise idle desktop still showed 30-80 KB/s.
+  static constexpr uint64_t kExitDwellMs = 2000;
 
   /// How much of the screen must move before the stream takes over, and how
   /// little may move before it hands back to tiles. Both come from the host

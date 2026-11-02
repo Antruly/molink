@@ -8,10 +8,16 @@
 
 #include <cstring>
 
+#include "capture/av1_frame.h"
 #include "surface/frame_surface.h"
 
 #if defined(MOLINK_HAVE_ZLIB) && MOLINK_HAVE_ZLIB
 #include <zlib.h>
+#endif
+
+#if defined(MOLINK_HAVE_VPX) && MOLINK_HAVE_VPX
+#include <vpx/vp8dx.h>
+#include <vpx/vpx_decoder.h>
 #endif
 
 namespace molink {
@@ -138,12 +144,277 @@ void blit(const uint8_t* source, codec value, int tile_w, int tile_h, int x,
 
 }  // namespace
 
+#if defined(MOLINK_HAVE_VPX) && MOLINK_HAVE_VPX
+struct surface_compositor::vpx_decoder {
+  vpx_codec_ctx_t ctx{};
+  bool open = false;
+  ~vpx_decoder() {
+    if (open) vpx_codec_destroy(&ctx);
+  }
+  bool init(bool vp9) {
+    if (open) {
+      vpx_codec_destroy(&ctx);
+      open = false;
+    }
+    const vpx_codec_iface_t* iface =
+        vp9 ? vpx_codec_vp9_dx() : vpx_codec_vp8_dx();
+    vpx_codec_dec_cfg_t cfg{};
+    cfg.threads = 4;  // tile/row parallel decode
+    if (vpx_codec_dec_init(&ctx, iface, &cfg, 0) != VPX_CODEC_OK) {
+      return false;
+    }
+    open = true;
+    return true;
+  }
+};
+#else
+struct surface_compositor::vpx_decoder {};
+#endif
+
+surface_compositor::surface_compositor() = default;
+
+surface_compositor::~surface_compositor() {
+  {
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    stop_ = true;
+    queue_.clear();
+    queued_bytes_ = 0;
+  }
+  queue_cv_.notify_all();
+  if (worker_.joinable()) worker_.join();
+}
+
 void surface_compositor::reset() {
+  bool started = false;
+  {
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    started = worker_started_;
+    if (started) {
+      // Stale frames from the old session must not decode into the new one.
+      queue_.clear();
+      queued_bytes_ = 0;
+      reset_pending_.store(true);
+    }
+  }
+  if (started) {
+    queue_cv_.notify_all();
+  } else {
+    reset_sync();
+  }
+}
+
+void surface_compositor::reset_sync() {
   canvas_.clear();
   width_ = 0;
   height_ = 0;
   published_ = 0;
   inflated_.clear();
+  av1_.reset();
+  vpx_.reset();
+  vpx_codec_kind_ = 0;
+  stream_has_image_ = false;
+  need_keyframe_.store(false);
+}
+
+bool surface_compositor::enqueue_packet(const uint8_t* data, std::size_t len) {
+  if (!frame_surface::instance().active() || data == nullptr) return false;
+  if (len < protocol::kPacketHeaderSize + protocol::kFrameHeaderSize) {
+    return false;
+  }
+  if (std::memcmp(data, protocol::kMagic, sizeof(protocol::kMagic)) != 0) {
+    return false;
+  }
+  if (data[5] != static_cast<uint8_t>(protocol::packet_type::frame)) {
+    return false;
+  }
+  {
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    if (!worker_started_) {
+      worker_ = std::thread([this] { worker_loop(); });
+      worker_started_ = true;
+    }
+    // Bound memory and latency. Dropping an individual delta corrupts the
+    // reference chain, so on overflow drop the backlog and wait for the next
+    // keyframe instead.
+    constexpr std::size_t kMaxQueuedPackets = 512;
+    constexpr std::size_t kMaxQueuedBytes = 96u * 1024u * 1024u;
+    if (queue_.size() >= kMaxQueuedPackets ||
+        queued_bytes_ + len > kMaxQueuedBytes) {
+      queue_.clear();
+      queued_bytes_ = 0;
+      need_keyframe_.store(true);
+    }
+    queue_.emplace_back(data, data + len);
+    queued_bytes_ += len;
+  }
+  queue_cv_.notify_one();
+  return true;
+}
+
+void surface_compositor::worker_loop() {
+  for (;;) {
+    std::vector<uint8_t> packet;
+    {
+      std::unique_lock<std::mutex> lock(queue_mutex_);
+      queue_cv_.wait(lock, [this] { return stop_ || !queue_.empty(); });
+      if (stop_) return;
+      packet = std::move(queue_.front());
+      queue_.pop_front();
+      queued_bytes_ -= packet.size();
+    }
+    if (reset_pending_.exchange(false)) reset_sync();
+    protocol::parsed_frame parsed;
+    std::string error;
+    if (!protocol::parse_frame_payload(
+            packet.data() + protocol::kPacketHeaderSize,
+            packet.size() - protocol::kPacketHeaderSize, parsed, error)) {
+      continue;
+    }
+    const protocol::codec kind =
+        static_cast<protocol::codec>(parsed.header.codec);
+    const bool stream =
+        kind == protocol::codec::av1_stream ||
+        kind == protocol::codec::h264_stream ||
+        kind == protocol::codec::vp9_stream ||
+        kind == protocol::codec::vp8_stream;
+    const bool keyframe =
+        (parsed.header.flags & protocol::kFrameFlagKeyframe) != 0;
+    if (stream && need_keyframe_.load() && !keyframe) continue;
+    if (keyframe) need_keyframe_.store(false);
+    const bool published = ingest(parsed);
+    if (!published && stream) need_keyframe_.store(true);
+    if (std::getenv("MOLINK_SURFACE_LOG") != nullptr && surface_log_due()) {
+      std::fprintf(stderr,
+                   "surface: packet=%zu codec=%u tiles=%u %ux%u key=%d "
+                   "published=%d%s%s\n",
+                   packet.size(), parsed.header.codec,
+                   parsed.header.tile_count, parsed.header.screen_w,
+                   parsed.header.screen_h, keyframe ? 1 : 0, published ? 1 : 0,
+                   error.empty() ? "" : " err=", error.c_str());
+    }
+  }
+}
+
+bool surface_compositor::publish_bgra(const std::vector<uint8_t>& bgra,
+                                      int width, int height) {
+  if (width <= 0 || height <= 0 ||
+      bgra.size() < static_cast<std::size_t>(width) * height * 4) {
+    return false;
+  }
+  frame_surface::instance().publish(bgra.data(), width, height, width * 4,
+                                    frame_surface::format::bgra);
+  width_ = width;
+  height_ = height;
+  ++published_;
+  return true;
+}
+
+bool surface_compositor::ingest_av1_stream(
+    const protocol::parsed_frame& frame, bool keyframe) {
+  if (frame.tiles.empty() || frame.tiles[0].data == nullptr ||
+      frame.tiles[0].size == 0) {
+    return false;
+  }
+  // A delta references the previous picture; wait for a keyframe.
+  if (!stream_has_image_ && !keyframe) return false;
+  if (!av1_) av1_ = std::make_unique<av1_stream_decoder>();
+  std::vector<uint8_t> bgra;
+  int width = 0;
+  int height = 0;
+  std::string error;
+  if (!av1_->decode(frame.tiles[0].data, frame.tiles[0].size, keyframe, bgra,
+                    width, height, error)) {
+    if (std::getenv("MOLINK_SURFACE_LOG") != nullptr && surface_log_due()) {
+      std::fprintf(stderr, "surface: av1 stream decode failed: %s\n",
+                   error.c_str());
+    }
+    av1_->reset();
+    stream_has_image_ = false;
+    return false;
+  }
+  stream_has_image_ = true;
+  return publish_bgra(bgra, width, height);
+}
+
+bool surface_compositor::ingest_vpx_stream(
+    const protocol::parsed_frame& frame, protocol::codec value, bool keyframe) {
+#if defined(MOLINK_HAVE_VPX) && MOLINK_HAVE_VPX
+  if (frame.tiles.empty() || frame.tiles[0].data == nullptr ||
+      frame.tiles[0].size == 0) {
+    return false;
+  }
+  if (!stream_has_image_ && !keyframe) return false;
+  const bool vp9 = value == codec::vp9_stream;
+  const int kind = vp9 ? 9 : 8;
+  if (!vpx_ || vpx_codec_kind_ != kind) {
+    vpx_ = std::make_unique<vpx_decoder>();
+    if (!vpx_->init(vp9)) {
+      vpx_.reset();
+      return false;
+    }
+    vpx_codec_kind_ = kind;
+  }
+  if (vpx_codec_decode(&vpx_->ctx, frame.tiles[0].data,
+                       static_cast<unsigned int>(frame.tiles[0].size), nullptr,
+                       0) != VPX_CODEC_OK) {
+    vpx_.reset();
+    stream_has_image_ = false;
+    return false;
+  }
+  vpx_codec_iter_t iterator = nullptr;
+  vpx_image_t* image = vpx_codec_get_frame(&vpx_->ctx, &iterator);
+  if (image == nullptr || image->fmt != VPX_IMG_FMT_I420) return false;
+  const int width = static_cast<int>(image->d_w);
+  const int height = static_cast<int>(image->d_h);
+  if (width <= 0 || height <= 0) return false;
+  std::vector<uint8_t> bgra(static_cast<std::size_t>(width) * height * 4, 0);
+  // Honour the bitstream's color range: libvpx writes studio-range samples
+  // for the web and signals it, so treating them as full range washes the
+  // picture out next to the browser canvas.
+  const bool full_range = image->range == VPX_CR_FULL_RANGE;
+  // The matrix travels with the bitstream; libvpx's screen encoder writes
+  // BT.601 weights, AV1/SVT writes BT.709.
+  const bool bt709 = image->cs == VPX_CS_BT_709;
+  const int b_coef = bt709 ? 475 : 454;   // 1.8556 / 1.772
+  const int r_coef = bt709 ? 403 : 359;   // 1.5748 / 1.402
+  const int g_cb = bt709 ? 48 : 88;       // 0.1873 / 0.3441
+  const int g_cr = bt709 ? 120 : 183;     // 0.4681 / 0.7141
+  for (int y = 0; y < height; ++y) {
+    const uint8_t* y_row = image->planes[VPX_PLANE_Y] +
+                           static_cast<std::ptrdiff_t>(y) * image->stride[VPX_PLANE_Y];
+    const uint8_t* u_row =
+        image->planes[VPX_PLANE_U] +
+        static_cast<std::ptrdiff_t>(y / 2) * image->stride[VPX_PLANE_U];
+    const uint8_t* v_row =
+        image->planes[VPX_PLANE_V] +
+        static_cast<std::ptrdiff_t>(y / 2) * image->stride[VPX_PLANE_V];
+    uint8_t* out = bgra.data() + static_cast<std::size_t>(y) * width * 4;
+    for (int x = 0; x < width; ++x) {
+      int luma = y_row[x];
+      int cb = u_row[x / 2] - 128;
+      int cr = v_row[x / 2] - 128;
+      if (!full_range) {
+        luma = ((luma - 16) * 255 + 109) / 219;
+        cb = (cb * 255 + 112) / 224;
+        cr = (cr * 255 + 112) / 224;
+      }
+      out[x * 4 + 0] = static_cast<uint8_t>(
+          std::clamp(luma + ((b_coef * cb) >> 8), 0, 255));
+      out[x * 4 + 1] = static_cast<uint8_t>(std::clamp(
+          luma - ((g_cb * cb + g_cr * cr) >> 8), 0, 255));
+      out[x * 4 + 2] = static_cast<uint8_t>(
+          std::clamp(luma + ((r_coef * cr) >> 8), 0, 255));
+      out[x * 4 + 3] = 255;
+    }
+  }
+  stream_has_image_ = true;
+  return publish_bgra(bgra, width, height);
+#else
+  (void)frame;
+  (void)value;
+  (void)keyframe;
+  return false;
+#endif
 }
 
 bool surface_compositor::ensure(int width, int height) {
@@ -158,13 +429,21 @@ bool surface_compositor::ensure(int width, int height) {
 bool surface_compositor::ingest(const protocol::parsed_frame& frame) {
   if (!frame_surface::instance().active()) return false;
   const codec value = static_cast<codec>(frame.header.codec);
+  const bool keyframe =
+      (frame.header.flags & protocol::kFrameFlagKeyframe) != 0;
+  if (value == codec::av1_stream) {
+    return ingest_av1_stream(frame, keyframe);
+  }
+  if (value == codec::vp9_stream || value == codec::vp8_stream) {
+    return ingest_vpx_stream(frame, value, keyframe);
+  }
   if (!is_tile_codec(value)) {
     if (std::getenv("MOLINK_SURFACE_LOG") != nullptr && surface_log_due()) {
       std::fprintf(stderr, "surface: stream codec %u skipped (%u tiles)\n",
                    static_cast<unsigned>(frame.header.codec),
                    frame.header.tile_count);
     }
-    return false;  // streams wait for stage 2
+    return false;
   }
   if (!ensure(frame.header.screen_w, frame.header.screen_h)) {
     if (std::getenv("MOLINK_SURFACE_LOG") != nullptr && surface_log_due()) {
@@ -214,34 +493,9 @@ bool surface_compositor::ingest(const protocol::parsed_frame& frame) {
 
 bool surface_ingest_packet(surface_compositor& compositor,
                            const uint8_t* data, std::size_t len) {
-  if (!frame_surface::instance().active()) return false;
-  if (len < protocol::kPacketHeaderSize + protocol::kFrameHeaderSize) {
-    return false;
-  }
-  if (std::memcmp(data, protocol::kMagic, sizeof(protocol::kMagic)) != 0) {
-    return false;
-  }
-  if (data[5] != static_cast<uint8_t>(protocol::packet_type::frame)) {
-    return false;
-  }
-  protocol::parsed_frame parsed;
-  std::string error;
-  const bool parsed_ok = protocol::parse_frame_payload(
-      data + protocol::kPacketHeaderSize, len - protocol::kPacketHeaderSize,
-      parsed, error);
-  const bool published = parsed_ok && compositor.ingest(parsed);
-  if (std::getenv("MOLINK_SURFACE_LOG") != nullptr && surface_log_due()) {
-    std::fprintf(stderr,
-                 "surface: packet=%zu codec=%u tiles=%u %ux%u parsed=%d "
-                 "published=%d%s%s\n",
-                 len, parsed_ok ? parsed.header.codec : 0,
-                 parsed_ok ? parsed.header.tile_count : 0,
-                 parsed_ok ? parsed.header.screen_w : 0,
-                 parsed_ok ? parsed.header.screen_h : 0, parsed_ok ? 1 : 0,
-                 published ? 1 : 0, parsed_ok ? "" : " err=",
-                 parsed_ok ? "" : error.c_str());
-  }
-  return published;
+  // The network loop only queues; parsing, decoding and publishing happen on
+  // the compositor's decode thread.
+  return compositor.enqueue_packet(data, len);
 }
 
 }  // namespace molink

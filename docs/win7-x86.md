@@ -121,6 +121,9 @@ Win7 上如果服务端使用自签证书，需要把 CA PEM 放到本机并在 
 - 没有 WebView2 时，可以先使用 core 托管的 Web UI：
   `allow_web_client=1`，用支持现代 JS 的浏览器打开 `http://127.0.0.1:28418/`。
   Win7 自带 IE11 不支持 React 19，需要 Firefox ESR 115 或 Chrome 109。
+  注意裸地址会被 loopback 客户端令牌门挡住（403 `client_token_required`）；
+  用 `molink-core.exe --open-ui`（安装包的 `start-browser-ui.cmd` 已改用它）
+  由核心打开带 `?client=<token>` 的地址。
 - 服务/helper（`molink-service.exe` / `molink-helper.exe`）同样用 i686 工具链
   构建，才能支持锁屏/登录页采集。
 
@@ -175,8 +178,8 @@ core、shell、service/helper、打包、Inno Setup）：
 | 现象 | 处理 |
 |---|---|
 | 原生壳启动后空白/提示 WebView2 | Win7 需要 WebView2 Runtime **109**（最后一个支持 Win7 的版本）；没有时用 `start-browser-ui.cmd` + Firefox ESR 115 / Chrome 109 |
-| 浏览器打开后是白屏或脚本错误 | 不要用 IE11；确认设置里 `allow_web_client=1`，并使用 Firefox ESR 115/Chrome 109 |
-| 局域网能发现设备但连不上 | 入站 28418 被防火墙挡住；管理员运行 `install-firewall.cmd` 或安装器的防火墙任务（`profile=any`）；确认两台机器在同一网段、没有 NAT 隔离 |
+| 浏览器打开后是白屏或脚本错误 | 不要用 IE11；确认设置里 `allow_web_client=1`，并使用 Firefox ESR 115/Chrome 109。直接用 `http://127.0.0.1:28418/` 打开会返回 `client_token_required`：请用 `start-browser-ui.cmd`（核心会以 `--open-ui` 打开带 `?client=` 的地址），或在桌面壳里打开 |
+| 局域网能发现设备但连不上 | 入站被防火墙挡住；安装器的防火墙任务现在按 `molink-core.exe` + `profile=any` 放行（旧版只放行专用/域网络，公用网络下完全不可达）。也可管理员运行 `install-firewall.cmd`；确认两台机器在同一网段、没有 NAT 隔离 |
 | 远程桌面有画面但没有键鼠 | 核心需要运行在登录用户的交互式会话（桌面/启动项/计划任务），不能是服务会话；查看欢迎消息 `input=true` |
 | 锁屏/登录页看不到 | 需要以管理员安装 `molink-service`（安装器勾选“安装安全桌面服务”或运行 `install-service.cmd`）；纯 GDI 桌面采集不覆盖 Winlogon |
 | 目录 TLS 失败 | 默认目录是 `https://molink.ssvr.top:28430`，服务器必须在 28430 提供 TLS；自签/私有 CA 要在客户端 `server_ca` 指定 PEM；检查证书 SAN 含域名和系统时间 |

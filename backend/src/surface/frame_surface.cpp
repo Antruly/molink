@@ -57,7 +57,7 @@ bool frame_surface::active() const { return mapping_ != nullptr; }
 
 std::string frame_surface::path() const { return path_; }
 
-uint64_t frame_surface::sequence() const { return sequence_; }
+uint64_t frame_surface::sequence() const { return sequence_.load(); }
 
 bool frame_surface::map(int max_width, int max_height) {
   if (mapping_ != nullptr && max_width <= max_width_ &&
@@ -161,7 +161,10 @@ void frame_surface::publish(const uint8_t* pixels, int width, int height,
     return;
   }
   if (stride < width * 4) return;
-  const uint64_t next = sequence_ + 1;
+  // Several viewer proxies can publish to the same surface; keep the double
+  // buffer consistent between them.
+  std::lock_guard<std::mutex> lock(publish_mutex_);
+  const uint64_t next = sequence_.load() + 1;
   uint8_t* target =
       slots(static_cast<uint8_t*>(mapping_)) + (next & 1) * slot_bytes_;
   const std::size_t row = static_cast<std::size_t>(width) * 4;
@@ -177,11 +180,16 @@ void frame_surface::publish(const uint8_t* pixels, int width, int height,
   header->slot_bytes = static_cast<uint32_t>(slot_bytes_);
 #if defined(_WIN32)
   MemoryBarrier();
-  header->sequence = next;
+  // A 64-bit plain store is not atomic on x86: the shell could read a torn
+  // sequence and either miss a frame or, worse, pick the wrong double-buffer
+  // slot. InterlockedExchange64 is available on every Windows version we
+  // support (it lowers to cmpxchg8b on 32-bit).
+  InterlockedExchange64(reinterpret_cast<volatile LONG64*>(&header->sequence),
+                        static_cast<LONG64>(next));
 #else
   __atomic_store_n(&header->sequence, next, __ATOMIC_RELEASE);
 #endif
-  sequence_ = next;
+  sequence_.store(next);
 }
 
 bool init_frame_surface_from_env() {

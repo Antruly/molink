@@ -128,13 +128,23 @@ uint8_t clamp_u8(int value) {
   return static_cast<uint8_t>(std::clamp(value, 0, 255));
 }
 
-/// Inverse of the encoder's full-range BT.709 conversion.
-inline void yuv_to_bgra(int y, int u, int v, uint8_t* out) {
-  const int cb = u - 128;
-  const int cr = v - 128;
-  out[0] = clamp_u8(y + ((475 * cb) >> 8));
-  out[1] = clamp_u8(y - ((48 * cb + 120 * cr) >> 8));
-  out[2] = clamp_u8(y + ((403 * cr) >> 8));
+/// BT.709 YUV to BGRA. `full` follows the bitstream's color_range: JFrames
+/// written by the encoder are full range, but VP9/AV1 from other sources
+/// commonly signal studio range (16..235). Treating studio samples as full
+/// range is exactly what made the native picture look washed out next to the
+/// web canvas, which honours the flag.
+inline void yuv_to_bgra(int y, int u, int v, bool full, uint8_t* out) {
+  int cb = u - 128;
+  int cr = v - 128;
+  int luma = y;
+  if (!full) {
+    luma = ((y - 16) * 255 + 109) / 219;
+    cb = (cb * 255 + 112) / 224;
+    cr = (cr * 255 + 112) / 224;
+  }
+  out[0] = clamp_u8(luma + ((475 * cb) >> 8));
+  out[1] = clamp_u8(luma - ((48 * cb + 120 * cr) >> 8));
+  out[2] = clamp_u8(luma + ((403 * cr) >> 8));
   out[3] = 255;
 }
 
@@ -208,10 +218,12 @@ bool decode_tile(const protocol::tile_view& tile, protocol::tile_blob& out,
         chroma_v + static_cast<std::size_t>(sy / 2) * chroma_stride;
     uint8_t* out_row =
         out.data.data() + static_cast<std::size_t>(y) * tile.w * 4;
+    const bool full_range =
+        picture.seq_hdr != nullptr && picture.seq_hdr->color_range != 0;
     for (int x = 0; x < tile.w; ++x) {
       const int sx = scale_up ? std::min(picture_w - 1, x * picture_w / tile.w)
                               : x;
-      yuv_to_bgra(y_row[sx], u_row[sx / 2], v_row[sx / 2],
+      yuv_to_bgra(y_row[sx], u_row[sx / 2], v_row[sx / 2], full_range,
                   out_row + static_cast<std::size_t>(x) * 4);
     }
   }
@@ -275,7 +287,9 @@ bool av1_stream_decoder::decode(const uint8_t* data, std::size_t len,
     }
     Dav1dSettings settings{};
     dav1d_default_settings(&settings);
-    settings.n_threads = 1;
+    // Tile-parallel decode keeps a 1080p stream well under one frame
+    // interval; frame delay stays at one for low latency.
+    settings.n_threads = 4;
     settings.max_frame_delay = 1;
     if (dav1d_open(&impl_->ctx, &settings) != 0) {
       error = "av1 stream: could not open dav1d";
@@ -324,8 +338,10 @@ bool av1_stream_decoder::decode(const uint8_t* data, std::size_t len,
     const uint8_t* v_row =
         chroma_v + static_cast<std::size_t>(y / 2) * chroma_stride;
     uint8_t* out_row = bgra.data() + static_cast<std::size_t>(y) * width * 4;
+    const bool full_range =
+        picture.seq_hdr != nullptr && picture.seq_hdr->color_range != 0;
     for (int x = 0; x < width; ++x) {
-      yuv_to_bgra(y_row[x], u_row[x / 2], v_row[x / 2],
+      yuv_to_bgra(y_row[x], u_row[x / 2], v_row[x / 2], full_range,
                   out_row + static_cast<std::size_t>(x) * 4);
     }
   }

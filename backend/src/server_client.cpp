@@ -29,6 +29,7 @@
 // The config macro comes from the web headers above. Windows dependency builds
 // may omit OpenSSL entirely, in which case HTTPS reports a clear error.
 #if UVCPP_OPENSSL_ENABLE
+#include <openssl/err.h>
 #include <ssl/uvcpp_ssl_context.h>
 #endif
 
@@ -935,7 +936,26 @@ bool server_client::request(bool post_method, const std::string& base_url,
 #endif
   if (client.connect_wait(parsed.host.c_str(), parsed.port, kHttpTimeoutMs) !=
       0) {
+#if UVCPP_OPENSSL_ENABLE
+    if (parsed.tls) {
+      // Surface the TLS reason: "could not connect" alone cannot tell a
+      // reachability problem from a certificate/handshake failure.
+      const std::string verify = client.peer_verify_error();
+      const int code = client.get_last_error();
+      if (!verify.empty()) {
+        error = "could not connect to the server: " + verify;
+      } else if (code != 0) {
+        error = "could not connect to the server (code " +
+                std::to_string(code) + ")";
+      } else {
+        error = "could not connect to the server (TLS handshake failed)";
+      }
+    } else {
+      error = "could not connect to the server";
+    }
+#else
     error = "could not connect to the server";
+#endif
     return false;
   }
   auto outgoing = post_method
@@ -1204,6 +1224,14 @@ bool server_client::try_heartbeat() {
     clear_credentials();
     set_state(false, false,
               "the server does not know this device; registering again");
+    return false;
+  }
+  if (http_status == 409) {
+    // The directory only lets one address refresh a device id at a time. A
+    // copied configuration therefore waits here until the original address
+    // stops heartbeating; it does not silently fight over the record.
+    set_state(true, false,
+              "this id is online from another device; retrying");
     return false;
   }
   set_state(true, false,

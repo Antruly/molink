@@ -2,7 +2,7 @@
 
 跨平台远程桌面。Web 优先，一套后台 + 浏览器壳层，桌面端直连，移动端经服务端中转。
 
-> 官方网站：[ssvr.top/molink](https://ssvr.top/molink) · 版本 0.9.36 · MIT · 协议版本 1
+> 官方网站：[ssvr.top/molink](https://ssvr.top/molink) · 版本 0.10.0 · MIT · 协议版本 1
 
 ![主页（亮色）](docs/screenshots/home-light.png)
 ![会话页（合成测试帧）](docs/screenshots/session-light.png)
@@ -144,9 +144,9 @@ cmake --build shell/native/build --parallel
 生成 Linux 安装包：
 
 ```bash
-./packaging/linux/build-deb.sh       # build/package/molink_0.9.30_amd64.deb
-./packaging/linux/build-appimage.sh  # build/package/moLink-0.9.30-x86_64.AppImage
-./packaging/linux/build-rpm.sh       # build/package/molink-0.9.30-1.x86_64.rpm
+./packaging/linux/build-deb.sh       # build/package/molink_0.10.0_amd64.deb
+./packaging/linux/build-appimage.sh  # build/package/moLink-0.10.0-x86_64.AppImage
+./packaging/linux/build-rpm.sh       # build/package/molink-0.10.0-1.x86_64.rpm
 ```
 
 Windows（需 WebView2 SDK、Inno Setup 6 与 NSIS）与 macOS（`.app` + `.dmg`）的构建步骤见
@@ -155,6 +155,26 @@ Windows（需 WebView2 SDK、Inno Setup 6 与 NSIS）与 macOS（`.app` + `.dmg`
 > 本机若出现 `libllhttp.so.9.2: cannot open shared object file`，说明安装的
 > `libuvcpp.so` 缺少 `RUNPATH`。本项目的 CMake 已用旧式 `RPATH` 让间接依赖可解析；
 > 发布包仍需把 `libuvcpp`、`libllhttp` 等共享库一并打入。
+
+### 原生 Windows 客户端（实验）
+
+`shell/windows/ui_kit_demo.cpp` 是一个不依赖 WebView2 的 Direct2D 客户端，界面与
+web 端对齐（lucide 图标、亮/暗主题、最近/已保存设备、头像、会话工具栏）。它通过
+本机 `molink-core` 的 `/ws/direct` 代理连接，由 core 解码 VP9/VP8/AV1 后经共享
+内存表面交给壳绘制。
+
+```bash
+x86_64-w64-mingw32-g++ -std=c++20 -D_WIN32_WINNT=0x0A00 -DMOLINK_HAVE_WEBP \
+  -O2 -mwindows -municode -static -I shell/windows -I <libwebp>/src \
+  -o moLink-native.exe shell/windows/ui_kit_demo.cpp shell/windows/ui_kit.cpp \
+  shell/windows/ws_client.cpp shell/windows/session_client.cpp \
+  shell/windows/puff.c shell/windows/ui_kit_demo.rc.res <libwebp>.a \
+  -ld2d1 -ldwrite -lole32 -luser32 -lgdi32 -ladvapi32 -lwindowscodecs \
+  -lcomdlg32 -lws2_32 -lwinhttp
+```
+
+`-DMOLINK_HAVE_WEBP` 用于解码主机头像（WebP）；不定义时退回首字母头像。Windows
+x64 的 core 需带 OpenSSL 编译（TLS / 中继 / HTTP3）。
 
 ## 界面
 

@@ -39,14 +39,14 @@ void test_short_burst_does_not_enter() {
   expect(!policy.streaming, "mode unchanged after the burst");
 }
 
-void test_leaves_after_ten_seconds_still() {
+void test_leaves_after_two_seconds_still() {
   molink::stream_policy policy;
   policy.note(0.40, 0);
   policy.note(0.40, 1000);  // enters
   expect(policy.streaming, "streaming after one second");
-  expect(!policy.note(0.01, 3000), "three seconds still is not enough");
-  expect(!policy.note(0.01, 12000), "nine seconds still is not enough");
-  expect(policy.note(0.01, 13000), "ten seconds still leaves the stream");
+  expect(!policy.note(0.01, 4000), "the still frame starts the exit clock");
+  expect(!policy.note(0.01, 5999), "just under two seconds is not enough");
+  expect(policy.note(0.01, 6000), "two seconds still leaves the stream");
   expect(!policy.streaming, "back on tiles");
 }
 
@@ -56,9 +56,10 @@ void test_movement_resets_the_exit_clock() {
   policy.note(0.40, 1000);
   policy.note(0.01, 5000);    // starts the exit clock
   policy.note(0.50, 8000);    // movement again: exit clock restarts
-  expect(!policy.note(0.01, 12000), "the exit dwell restarts after movement");
+  expect(!policy.note(0.01, 10000), "the exit dwell restarts after movement");
   expect(policy.streaming, "still streaming after a fresh still window");
-  expect(policy.note(0.01, 22000), "ten quiet seconds after the last movement");
+  expect(!policy.note(0.01, 11999), "one millisecond short keeps the stream");
+  expect(policy.note(0.01, 12000), "two quiet seconds after the last movement");
 }
 void test_video_codec_choice() {
   using molink::stream_choice;
@@ -104,7 +105,7 @@ int main() {
   test_enters_after_one_second_of_movement();
   test_still_screen_never_enters();
   test_short_burst_does_not_enter();
-  test_leaves_after_ten_seconds_still();
+  test_leaves_after_two_seconds_still();
   test_movement_resets_the_exit_clock();
   test_video_codec_choice();
   std::printf("%d checks, %d failures\n", checks, failures);

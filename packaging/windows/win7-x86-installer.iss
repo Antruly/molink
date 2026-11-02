@@ -1,7 +1,7 @@
 ; moLink Windows 7 x86 (32-bit) preview installer.
 ;
 ; Build (on Windows, after staging the Win7 package directory):
-;   ISCC.exe /DAppVersion=0.9.36 \
+;   ISCC.exe /DAppVersion=0.10.0 \
 ;            /DPkgDir=C:\path\to\molink-win7-x86-release \
 ;            /DOutputDir=C:\path\to\output \
 ;            /DLangFile=C:\path\to\ChineseSimplified.isl \
@@ -12,7 +12,7 @@
 ; and helper, the web UI, and the runtime DLLs.
 
 #ifndef AppVersion
-  #define AppVersion "0.9.36"
+  #define AppVersion "0.10.0"
 #endif
 #ifndef PkgDir
   #error PkgDir must point at the staged Win7 x86 package directory
@@ -76,8 +76,9 @@ Name: "{group}\{#AppName} (browser UI)"; Filename: "{app}\start-browser-ui.cmd";
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\{#AppExeName}"; Tasks: desktopicon; AppUserModelID: "com.molink.desktop"
 
 [Run]
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""moLink Core"""; Flags: runhidden
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""moLink Core 28418"""; Flags: runhidden
-Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""moLink Core 28418"" dir=in action=allow protocol=TCP localport=28418 profile=any enable=yes"; Flags: runhidden; Tasks: firewall
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""moLink Core"" dir=in action=allow program=""{app}\molink-core.exe"" profile=any enable=yes"; Flags: runhidden; Tasks: firewall
 Filename: "{sys}\sc.exe"; Parameters: "stop moLinkSession"; Flags: runhidden; Tasks: service
 Filename: "{sys}\sc.exe"; Parameters: "delete moLinkSession"; Flags: runhidden; Tasks: service
 Filename: "{sys}\sc.exe"; Parameters: "create moLinkSession binPath= ""{commonappdata}\moLink\service\molink-service.exe"" start= demand DisplayName= ""moLink session helper"""; Flags: runhidden waituntilterminated; Tasks: service
@@ -87,6 +88,7 @@ Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchProgram,{#AppName}}"; F
 
 [UninstallRun]
 Filename: "{sys}\taskkill.exe"; Parameters: "/F /T /IM moLink.exe"; Flags: runhidden; RunOnceId: "KillShell"
+Filename: "{sys}\taskkill.exe"; Parameters: "/F /T /IM moLink-native.exe"; Flags: runhidden; RunOnceId: "KillNativeShell"
 Filename: "{sys}\taskkill.exe"; Parameters: "/F /T /IM molink-core.exe"; Flags: runhidden; RunOnceId: "KillCore"
 Filename: "{sys}\sc.exe"; Parameters: "stop moLinkSession"; Flags: runhidden; RunOnceId: "StopService"
 Filename: "{sys}\sc.exe"; Parameters: "delete moLinkSession"; Flags: runhidden; RunOnceId: "DeleteService"
@@ -120,7 +122,9 @@ begin
 end;
 
 // The shell hides to the tray on WM_CLOSE, so Restart Manager cannot close it.
-// Kill the tray app and the core before replacing files.
+// Kill the tray app and the core before replacing files. The native shell is
+// moLink-native.exe; leaving it running makes the file replacement fail with
+// "DeleteFile 失败；错误代码 5" halfway through the upgrade.
 procedure StopRunningApp();
 var
   Code: Integer;
@@ -128,6 +132,8 @@ begin
   Exec(ExpandConstant('{sys}\sc.exe'), 'stop moLinkSession', '', SW_HIDE,
        ewWaitUntilTerminated, Code);
   Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /T /IM moLink.exe', '',
+       SW_HIDE, ewWaitUntilTerminated, Code);
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /T /IM moLink-native.exe', '',
        SW_HIDE, ewWaitUntilTerminated, Code);
   Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /T /IM molink-core.exe', '',
        SW_HIDE, ewWaitUntilTerminated, Code);

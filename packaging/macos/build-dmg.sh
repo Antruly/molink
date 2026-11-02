@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
-VERSION=${VERSION:-0.9.36}
+VERSION=${VERSION:-0.10.0}
 ARCH=${ARCH:-$(uname -m)}
 BUILD=${BUILD_DIR:-$ROOT/build/macos}
 APP="$BUILD/moLink.app"
@@ -27,7 +27,8 @@ if [ -n "$AV1_PREFIX" ]; then
   AV1_ARG="-DCMAKE_PREFIX_PATH=$AV1_PREFIX${CMAKE_PREFIX_PATH:+;$CMAKE_PREFIX_PATH}"
 fi
 cmake -S "$ROOT/backend" -B "$ROOT/backend/build" -DCMAKE_BUILD_TYPE=Release \
-  -DMOLINK_ENABLE_AV1=ON -DMOLINK_ENABLE_JPEG=ON -DMOLINK_ENABLE_VPX=ON \
+  -DMOLINK_ENABLE_AV1=ON -DMOLINK_ENABLE_VPX=ON \
+  -DMOLINK_REQUIRE_VPX=ON -DMOLINK_REQUIRE_DAV1D=ON \
     ${AV1_ARG:+"$AV1_ARG"} \
   ${OPENSSL_ROOT_ARG:+"$OPENSSL_ROOT_ARG"} >/dev/null
 cmake --build "$ROOT/backend/build" --parallel
@@ -61,9 +62,11 @@ if [ -n "${OPENSSL_LIB_DIR:-}" ] && [ -d "$OPENSSL_LIB_DIR" ]; then
     cp "$OPENSSL_LIB_DIR"/$pattern "$APP/Contents/MacOS/" 2>/dev/null || true
   done
 fi
-# AV1: SVT-AV1 encodes on hosts, dav1d decodes on clients.
+# AV1: SVT-AV1 encodes on hosts, dav1d decodes on clients; libvpx carries the
+# VP9/VP8 streams.
 if [ -n "$AV1_PREFIX" ]; then
-  for pattern in 'libSvtAv1Enc*.dylib' 'libdav1d*.dylib' 'libfastfeat*.dylib'; do
+  for pattern in 'libSvtAv1Enc*.dylib' 'libdav1d*.dylib' 'libfastfeat*.dylib' \
+                 'libvpx*.dylib'; do
     cp -P "$AV1_PREFIX/lib"/$pattern "$APP/Contents/MacOS/" 2>/dev/null || true
   done
 fi
@@ -102,7 +105,7 @@ if command -v otool >/dev/null 2>&1; then
     [ -f "$binary" ] || continue
     while read -r dep; do
       case "$dep" in
-        *uvcpp*|*llhttp*|*libuv*|*libssl*|*libcrypto*|*SvtAv1*|*dav1d*|*fastfeat*)
+        *uvcpp*|*llhttp*|*libuv*|*libssl*|*libcrypto*|*SvtAv1*|*dav1d*|*fastfeat*|*vpx*)
           install_name_tool -change "$dep" "@loader_path/$(basename "$dep")" \
             "$binary" 2>/dev/null || true
           ;;

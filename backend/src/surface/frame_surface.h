@@ -1,7 +1,9 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 #include <string>
 
 namespace molink {
@@ -61,7 +63,9 @@ class frame_surface {
   int max_width_ = 0;
   int max_height_ = 0;
   std::string path_;
-  uint64_t sequence_ = 0;
+  /// Published from decode threads (one per viewer proxy); serialise writers.
+  std::mutex publish_mutex_;
+  std::atomic<uint64_t> sequence_{0};
 };
 
 /// Allocates the surface when MOLINK_SURFACE is set; safe to call more than

@@ -2,6 +2,7 @@
 
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <mstcpip.h>
 
 #include <cstdio>
 #include <cstdlib>
@@ -45,6 +46,8 @@ ws_client::~ws_client() { close(); }
 bool ws_client::connect(const std::string& host, int port,
                         const std::string& path, std::string* error) {
   close();
+  close_code_ = 0;
+  close_reason_.clear();
   if (!init_winsock()) {
     if (error != nullptr) *error = "WSAStartup failed";
     return false;
@@ -81,6 +84,26 @@ bool ws_client::connect(const std::string& host, int port,
     close();
     return false;
   }
+  // The upgrade uses the short receive timeout above; once live, block until
+  // data or close. A 5 s timeout on the reader turned every lag spike on a
+  // slow link into a dropped session (and an immediate reconnect).
+  DWORD no_timeout = 0;
+  setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO,
+             reinterpret_cast<const char*>(&no_timeout), sizeof(no_timeout));
+  // A peer that vanishes without a close frame (host killed, NAT mapping
+  // dropped) used to leave this reader blocked in recv() forever: the shell
+  // then sat on a dead socket and never reconnected. Keepalive probes turn
+  // that into a socket error within about ten seconds.
+  BOOL keepalive = TRUE;
+  setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE,
+             reinterpret_cast<const char*>(&keepalive), sizeof(keepalive));
+  tcp_keepalive probe{};
+  probe.onoff = 1;
+  probe.keepalivetime = 5000;
+  probe.keepaliveinterval = 2000;
+  DWORD probe_bytes = 0;
+  WSAIoctl(sock, SIO_KEEPALIVE_VALS, &probe, sizeof(probe), nullptr, 0,
+           &probe_bytes, nullptr, nullptr);
   running_.store(true);
   reader_ = std::thread([this] { reader_loop(); });
   return true;
@@ -129,8 +152,13 @@ bool ws_client::send_text(const std::string& text) {
                      text.size());
 }
 
+bool ws_client::send_binary(const uint8_t* data, size_t len) {
+  return write_frame(0x2, data, len);
+}
+
 bool ws_client::write_frame(uint8_t opcode, const uint8_t* data, size_t len) {
   if (!running_.load()) return false;
+  std::lock_guard<std::mutex> guard(write_mutex_);
   std::vector<uint8_t> frame;
   frame.push_back(static_cast<uint8_t>(0x80 | opcode));
   if (len < 126) {
@@ -185,6 +213,8 @@ bool ws_client::read_exact(void* buffer, size_t len) {
 
 void ws_client::reader_loop() {
   std::string assembled;
+  std::vector<uint8_t> binary;
+  uint8_t fragment_opcode = 0;
   while (running_.load()) {
     uint8_t head[2];
     if (!read_exact(head, 2)) break;
@@ -215,22 +245,43 @@ void ws_client::reader_loop() {
                    fin ? 1 : 0, static_cast<size_t>(len),
                    len > 0 ? reinterpret_cast<const char*>(payload.data()) : "");
     }
-    if (opcode == 0x8) break;              // close
+    if (opcode == 0x8) {                   // close: keep code + reason
+      if (payload.size() >= 2) {
+        close_code_ = (static_cast<int>(payload[0]) << 8) | payload[1];
+        close_reason_.assign(
+            reinterpret_cast<const char*>(payload.data()) + 2,
+            payload.size() - 2);
+      }
+      break;
+    }
     if (opcode == 0x9) {                   // ping -> pong
       write_frame(0xA, payload.data(), payload.size());
       continue;
     }
     if (opcode == 0xA) continue;           // pong
     if (!fin) {
-      assembled.append(reinterpret_cast<const char*>(payload.data()),
-                       payload.size());
+      if (opcode == 0x1 || opcode == 0x2) fragment_opcode = opcode;
+      if (fragment_opcode == 0x2) {
+        binary.insert(binary.end(), payload.begin(), payload.end());
+      } else {
+        assembled.append(reinterpret_cast<const char*>(payload.data()),
+                         payload.size());
+      }
       continue;
     }
     if (opcode == 0x0) {
-      assembled.append(reinterpret_cast<const char*>(payload.data()),
-                       payload.size());
-      if (on_text) on_text(assembled);
-      assembled.clear();
+      // Final fragment of a text or binary message.
+      if (fragment_opcode == 0x2) {
+        binary.insert(binary.end(), payload.begin(), payload.end());
+        if (on_binary) on_binary(binary.data(), binary.size());
+        binary.clear();
+      } else {
+        assembled.append(reinterpret_cast<const char*>(payload.data()),
+                         payload.size());
+        if (on_text) on_text(assembled);
+        assembled.clear();
+      }
+      fragment_opcode = 0;
     } else if (opcode == 0x1) {
       if (!assembled.empty()) {
         assembled.append(reinterpret_cast<const char*>(payload.data()),
@@ -240,6 +291,14 @@ void ws_client::reader_loop() {
       } else if (on_text) {
         on_text(std::string(reinterpret_cast<const char*>(payload.data()),
                             payload.size()));
+      }
+    } else if (opcode == 0x2) {
+      if (!binary.empty()) {
+        binary.insert(binary.end(), payload.begin(), payload.end());
+        if (on_binary) on_binary(binary.data(), binary.size());
+        binary.clear();
+      } else if (on_binary) {
+        on_binary(payload.data(), payload.size());
       }
     }
   }

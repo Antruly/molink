@@ -8,6 +8,7 @@ import {
   type Welcome,
 } from './client'
 import type { Frame } from './protocol'
+import { FrameFlag } from './protocol'
 import { PcmPlayer } from './audio'
 import { ClipboardFileSync } from './clipboard-sync'
 import {
@@ -16,6 +17,7 @@ import {
   drawVideoToSession,
   forgetSessionScreenBuffer,
 } from './screen-buffer'
+import { forgetSessionFrames, noteSessionFrame } from './session-repaint'
 
 export interface Stats {
   /** Frames that were actually painted in the last second. */
@@ -142,6 +144,12 @@ export class SessionConnection {
   private fileSync: ClipboardFileSync | null = null
   private fileSyncTimer: number | null = null
   private fileSyncPaused = false
+  /// The last time frame metadata was pushed into the store, and its shape.
+  /// The canvas repaints from session-repaint.ts; React only needs the frame
+  /// for sizes/codec labels and the stats panel, so updating it per wire frame
+  /// re-rendered the whole session view 30 times a second.
+  private lastFramePatchAt = 0
+  private lastFrameSignature = ''
   private readonly listeners = new Set<SessionEventListener>()
 
   constructor(
@@ -246,11 +254,27 @@ export class SessionConnection {
         } else {
           applyFrameToSession(this.sessionKey, frame)
         }
+        // Wake the canvas directly: this is the per-frame path and must not
+        // wait for a React render.
+        noteSessionFrame(this.sessionKey)
         const now = performance.now()
         this.frames += 1
         this.frameTimes.push(now)
         this.byteWindow.push({ t: now, n: bytes })
-        this.sink.onPatch({ frame, stats: this.snapshot(now) })
+        // Sizes, codec and "first picture" are what the view needs from the
+        // frame; push those immediately, but throttle the rest so a 30 fps
+        // stream does not re-render the session chrome 30 times a second.
+        const signature = `${frame.codec}:${frame.screenW}x${frame.screenH}:` +
+          `${(frame.flags & FrameFlag.keyframe) !== 0 ? 1 : 0}`
+        if (
+          this.frames === 1 ||
+          signature !== this.lastFrameSignature ||
+          now - this.lastFramePatchAt >= 500
+        ) {
+          this.lastFrameSignature = signature
+          this.lastFramePatchAt = now
+          this.sink.onPatch({ frame, stats: this.snapshot(now) })
+        }
       },
       onRemoteVideo: (video) => {
         // The RTC track is whole pictures: paint each decoded frame into the
@@ -260,10 +284,20 @@ export class SessionConnection {
           if (video.readyState >= 2) {
             const frame = drawVideoToSession(this.sessionKey, video)
             if (frame !== null) {
+              noteSessionFrame(this.sessionKey)
               const now = performance.now()
               this.frames += 1
               this.frameTimes.push(now)
-              this.sink.onPatch({ frame, stats: this.snapshot(now) })
+              const signature = `${frame.screenW}x${frame.screenH}`
+              if (
+                this.frames === 1 ||
+                signature !== this.lastFrameSignature ||
+                now - this.lastFramePatchAt >= 500
+              ) {
+                this.lastFrameSignature = signature
+                this.lastFramePatchAt = now
+                this.sink.onPatch({ frame, stats: this.snapshot(now) })
+              }
             }
           }
           video.requestVideoFrameCallback(paint)
@@ -495,8 +529,11 @@ export class SessionConnection {
     this.stopViewerStats()
     this.stopAv1Indicator()
     forgetSessionScreenBuffer(this.sessionKey)
+    forgetSessionFrames(this.sessionKey)
     this.frames = 0
     this.lastWirePatch = 0
+    this.lastFramePatchAt = 0
+    this.lastFrameSignature = ''
     this.sink.onPatch({
       stats: emptyStats(),
       error: null,
