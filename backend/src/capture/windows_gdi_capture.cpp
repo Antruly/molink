@@ -13,6 +13,8 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -160,11 +162,29 @@ class gdi_capture final : public capture_base {
       // made the host cursor (and layered windows) blink -- the same fix the
       // secure-desktop helper already carries. The composed desktop is in the
       // screen DC on every supported Windows version.
+      const auto grab_start = std::chrono::steady_clock::now();
       if (BitBlt(mem_dc_, 0, 0, width_, height_, screen_dc_, x_, y_,
                  SRCCOPY)) {
+        const auto grab_end = std::chrono::steady_clock::now();
         note_grab(true, width_, height_);
         publish_frame();
         update_cursor();
+        if (std::getenv("MOLINK_STREAM_LOG") != nullptr) {
+          static thread_local uint64_t last_log = 0;
+          const auto frame_end = std::chrono::steady_clock::now();
+          const uint64_t now = GetTickCount64();
+          if (now - last_log >= 1000) {
+            last_log = now;
+            const double grab_ms =
+                std::chrono::duration<double, std::milli>(grab_end - grab_start)
+                    .count();
+            const double frame_ms =
+                std::chrono::duration<double, std::milli>(frame_end - grab_end)
+                    .count();
+            std::fprintf(stderr, "gdi: grab=%.1fms frame=%.1fms target=%d\n",
+                         grab_ms, frame_ms, target_fps());
+          }
+        }
       }
       next += std::chrono::milliseconds(1000 / std::max(1, target_fps()));
       const auto now = std::chrono::steady_clock::now();
@@ -204,13 +224,33 @@ class gdi_capture final : public capture_base {
     header.tile_w = tile;
     header.tile_h = tile;
 
+    const bool stream_pinned =
+        stream_always_.load() || std::getenv("MOLINK_STREAM_FORCE") != nullptr ||
+        monotonic_ms() < stream_nudge_until_.load();
     const auto build_start = std::chrono::steady_clock::now();
     std::vector<protocol::tile_blob> tiles;
-    build_changed_tiles(pixels, stride, width_, height_, tile,
-                        previous_.data(), keyframe, nullptr,
-                        /*force_opaque=*/true,
-                        quality_change_threshold(options_.change_threshold),
-                        tiles);
+    double moving = 1.0;
+    if (stream_pinned) {
+      // The stream encoder takes the full picture; the per-pixel tile diff
+      // exists only to decide the tile/stream hand-over. Keep previous_
+      // current with one memcpy (cheap) so the next real diff is accurate.
+      if (previous_.size() != stride * height_) {
+        previous_.assign(stride * height_, 0);
+      }
+      std::memcpy(previous_.data(), pixels, stride * height_);
+    } else {
+      build_changed_tiles(pixels, stride, width_, height_, tile,
+                          previous_.data(), keyframe, nullptr,
+                          /*force_opaque=*/true,
+                          quality_change_threshold(options_.change_threshold),
+                          tiles);
+      int64_t changed = 0;
+      for (const auto& tile_blob : tiles) {
+        changed += static_cast<int64_t>(tile_blob.w) * tile_blob.h;
+      }
+      const double area = static_cast<double>(width_) * height_;
+      moving = area > 0 ? static_cast<double>(changed) / area : 0.0;
+    }
 
     encode_options encoding;
     encoding.compress = options_.compress && quality_compress();
@@ -225,8 +265,19 @@ class gdi_capture final : public capture_base {
     encoding.av1_full_frame = quality_av1_full_frame();
     encoding.av1_full_screen_until_us = av1_full_screen_until();
     bool stream_keyframe = false;
-    encoding.av1_stream = stream_for_frame(tiles, header.screen_w,
-                                           header.screen_h, stream_keyframe);
+    encoding.av1_stream = stream_for_frame_moving(
+        moving, header.screen_w, header.screen_h, stream_keyframe);
+    if (encoding.av1_stream == nullptr && tiles.empty()) {
+      // Pinned to the stream but no encoder is available (or the policy is
+      // not engaged): a complete tile keyframe is the fallback picture.
+      keyframe = true;
+      header.flags = protocol::kFrameFlagKeyframe;
+      build_changed_tiles(pixels, stride, width_, height_, tile,
+                          previous_.data(), keyframe, nullptr,
+                          /*force_opaque=*/true,
+                          quality_change_threshold(options_.change_threshold),
+                          tiles);
+    }
     // A still desktop needs no frame: the previous payload still describes it
     // pixel for pixel, and publishing an empty delta every tick made the host
     // send a packet (and walk its replay history) at the full capture rate.

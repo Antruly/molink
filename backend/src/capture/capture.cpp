@@ -372,13 +372,18 @@ bool capture_base::tile_clock(std::vector<uint8_t>& out) {
 av1_stream_encoder* capture_base::stream_for_frame(
     const std::vector<protocol::tile_blob>& tiles, int screen_w, int screen_h,
     bool& keyframe) {
-  keyframe = false;
   int64_t changed = 0;
   for (const auto& tile : tiles) {
     changed += static_cast<int64_t>(tile.w) * tile.h;
   }
   const double area = static_cast<double>(screen_w) * screen_h;
   const double moving = area > 0 ? static_cast<double>(changed) / area : 0.0;
+  return stream_for_frame_moving(moving, screen_w, screen_h, keyframe);
+}
+
+av1_stream_encoder* capture_base::stream_for_frame_moving(
+    double moving, int screen_w, int screen_h, bool& keyframe) {
+  keyframe = false;
   // Field diagnosis: MOLINK_STREAM_FORCE=1 pins the stream path on so a host
   // can be checked without making the screen move.
   // Host setting: how much of the screen must move before the stream takes
