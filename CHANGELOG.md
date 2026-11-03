@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.10.5] — 2026-11-04
+
+### Fixed
+
+- **Web 远程 native 报 `TypeError: Failed to Decode Data.`**：浏览器的
+  `DecompressionStream("deflate")` 遇到不是 zlib 流的瓦片（部分 native 构建的
+  raw deflate）或传输中截断的压缩瓦片时会抛这个 TypeError。现在先检测 zlib
+  头，按实际格式解压，失败再尝试 `deflate-raw`/`deflate`；真正的解压失败只丢弃
+  该帧并请求关键帧，不再把致命错误抛到 UI，并通过限频 `client-log` 记录
+  codec/seq/原因供主机日志排查。
+
 ## [0.10.4] — 2026-11-04
 
 ### Performance

@@ -344,11 +344,38 @@ function decodeBase64(text: string): Uint8Array | null {
   }
 }
 
-async function inflateTile(data: Uint8Array): Promise<Uint8Array> {
+async function inflateWith(
+  data: Uint8Array,
+  format: CompressionFormat,
+): Promise<Uint8Array> {
   const stream = new Blob([data as BlobPart])
     .stream()
-    .pipeThrough(new DecompressionStream('deflate'))
+    .pipeThrough(new DecompressionStream(format))
   return new Uint8Array(await new Response(stream).arrayBuffer())
+}
+
+async function inflateTile(data: Uint8Array): Promise<Uint8Array> {
+  if (data.byteLength === 0) {
+    throw new Error('empty compressed tile')
+  }
+  // The host normally sends a zlib-wrapped stream (compress2), which is what
+  // DecompressionStream("deflate") expects. Some native builds/tiles carry raw
+  // deflate instead (the native shell's puff decoder accepts both by checking
+  // this same header). A browser given the wrong wrapping throws
+  // "TypeError: Failed to Decode Data." for the whole frame, so detect the
+  // header and fall back to the other format before giving up.
+  const zlibWrapped =
+    data.byteLength >= 2 &&
+    (data[0]! & 0x0f) === 8 &&
+    (((data[0]! << 8) | data[1]!) % 31) === 0
+  const first: CompressionFormat = zlibWrapped ? 'deflate' : 'deflate-raw'
+  const second: CompressionFormat = zlibWrapped ? 'deflate-raw' : 'deflate'
+  try {
+    return await inflateWith(data, first)
+  } catch (error) {
+    if (data.byteLength < 2) throw error
+    return inflateWith(data, second)
+  }
 }
 
 /// Frame timestamps older than this are ignored when estimating the host clock
@@ -443,6 +470,8 @@ export class MolinkClient {
   private lastKeyframeRecovery = 0
   /// Last time a stream-decoder failure was forwarded to the core's log.
   private lastDecoderLog = 0
+  /// Last time a tile decompression failure was forwarded (rate limit).
+  private lastTileInflateLog = 0
   /// Mean brightness of the last decoded picture, for the black-frame probe.
   private lastFrameLuma = 0
   private lumaCanvas: HTMLCanvasElement | null = null
@@ -1907,15 +1936,38 @@ export class MolinkClient {
     }
     const bytesPerPixel = codecBytesPerPixel(frame.codec)
     if (bytesPerPixel === 0) throw new Error('unsupported deflate codec')
-    const tiles = await Promise.all(
-      frame.tiles.map(async (tile) => {
-        const data = await inflateTile(tile.data)
-        if (data.byteLength !== tile.w * tile.h * bytesPerPixel) {
-          throw new Error('tile size mismatch after decompression')
-        }
-        return { ...tile, data }
-      }),
-    )
+    let tiles: Frame['tiles']
+    try {
+      tiles = await Promise.all(
+        frame.tiles.map(async (tile) => {
+          const data = await inflateTile(tile.data)
+          if (data.byteLength !== tile.w * tile.h * bytesPerPixel) {
+            throw new Error('tile size mismatch after decompression')
+          }
+          return { ...tile, data }
+        }),
+      )
+    } catch (error) {
+      // A lost/truncated tile is a transport problem, not a fatal session
+      // error. The old path threw this into the UI as
+      // "TypeError: Failed to Decode Data." even though the next keyframe or
+      // tile-clock repair would have recovered the picture. Drop the frame,
+      // ask the host for a fresh keyframe, and keep the last picture.
+      this.handlers.onFrameDropped?.()
+      this.requestKeyframeThrottled()
+      const now = performance.now()
+      if (now - this.lastTileInflateLog >= 1000) {
+        this.lastTileInflateLog = now
+        this.sendJson({
+          type: 'client-log',
+          text:
+            `tile inflate failed codec=${frame.codec} ` +
+            `tiles=${frame.tiles.length} seq=${frame.frameSeq}: ` +
+            (error instanceof Error ? error.message : String(error)),
+        })
+      }
+      return
+    }
     this.deliver({ ...frame, tiles }, byteLength, tsUs, refresh)
   }
 
