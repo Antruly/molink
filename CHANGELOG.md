@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.10.4] — 2026-11-04
+
+### Performance
+
+- **Windows 7 GDI 流模式跳过逐像素瓦片 diff**：流被 pin 住时（`MOLINK_STREAM_FORCE`、
+  `video_mode=stream`、或新会话的 join nudge），编码器直接取整帧，瓦片 diff 只用于
+  瓦片/流切换判定，纯属浪费。改为一次 `memcpy` 维持 `previous_`，通过新的
+  `stream_for_frame_moving()` 传入 `moving=1.0`；没有编码器时回退到整屏瓦片
+  关键帧。
+- 真机（212 Win7 SP1 x86 VM）实测：主机采集 **11 fps → 15–16 fps @target15**，
+  `build_ms` **15.8 → 2.8–4.2 ms**；target 30 时观看端 **16–17 fps**
+  （dropped=0）。`gdi:` 日志显示剩余瓶颈是 **BitBlt 55 ms**，编码/发布仅
+  **4 ms**；物理 Win7 上 BitBlt 应更快。
+- 新增 `MOLINK_STREAM_LOG=1` 下的 `gdi: grab=…ms frame=…ms target=…` 每秒日志。
+
 ## [0.10.3] — 2026-11-04
 
 ### Fixed / Performance

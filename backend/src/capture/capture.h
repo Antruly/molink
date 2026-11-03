@@ -663,6 +663,11 @@ class capture_base : public capture_source {
   av1_stream_encoder* stream_for_frame(
       const std::vector<protocol::tile_blob>& tiles, int screen_w,
       int screen_h, bool& keyframe);
+  /// Same decision with the moving fraction supplied by the caller. A capture
+  /// that is pinned to the stream can skip the per-pixel tile diff and pass
+  /// 1.0, which is the expensive half of a GDI frame on Windows 7.
+  av1_stream_encoder* stream_for_frame_moving(double moving, int screen_w,
+                                              int screen_h, bool& keyframe);
   /// True when AV1 should carry the entire picture instead of only patches.
   bool quality_av1_full_frame() const {
     av1_encoding_settings settings;
