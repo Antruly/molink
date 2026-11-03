@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.10.2] — 2026-11-03
+
+### Fixed
+
+- **Win7 native 观看端连接后崩溃（`d2d1.dll` 0xc0000005）**：Win7 自带的
+  Direct2D 6.1.7601 在画面绘制调用 `PushLayer`（无限 contentBounds + 圆角
+  几何 mask）时访问冲突，日志停在 `picture: PushLayer begin`，WER 记录
+  `d2d1.dll` 偏移 0x00027c60。画面改为 `PushAxisAlignedClip` 矩形裁剪。
+- **只读共享表面直接交给 D2D 不稳定**：先把表面像素复制到自有可写缓冲，再
+  `CreateBitmap` / `CopyFromMemory`。
+- **重复的瓦片位图路径**：本机 core 已在发布共享表面时，原生壳不再额外维护和
+  绘制一份瓦片位图；surface 停止 1 秒后自动回退到瓦片位图。
+
 ## [0.10.1] — 2026-11-03
 
 ### Fixed

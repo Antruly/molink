@@ -154,6 +154,10 @@ struct app_state {
   ID2D1Bitmap* surface_bitmap = nullptr;
   uint32_t surface_w = 0, surface_h = 0;
   uint64_t surface_seq = 0;
+  /// Owned copy of the published frame. Windows 7's d2d1 (6.1.7601) crashed
+  /// inside CreateBitmap/CopyFromMemory when handed pixels that live in a
+  /// read-only file mapping, so copy them out first.
+  std::vector<uint8_t> surface_pixels;
   /// A fresh connect drops the surface bitmap but the file still holds the
   /// previous session's last stream frame; only a sequence newer than this one
   /// proves the core has published for the new session.
@@ -2667,16 +2671,44 @@ void surface_poll() {
   const ULONGLONG now = GetTickCount64();
   if (g.surface_copy_at != 0 && now - g.surface_copy_at < 30) return;
   g.surface_copy_at = now;
-  const uint8_t* pixels = g.surface_base + 64 +
+  const uint8_t* source = g.surface_base + 64 +
                           static_cast<size_t>(sequence & 1) * header->slot_bytes;
+  const size_t frame_bytes =
+      static_cast<size_t>(header->width) * header->height * 4;
+  if (header->width > 8192 || header->height > 8192 ||
+      frame_bytes > header->slot_bytes) {
+    return;
+  }
+  // Windows 7's d2d1 (6.1.7601) crashed with 0xc0000005 inside
+  // CreateBitmap/CopyFromMemory when the source pixels were the read-only
+  // file mapping. Copy into an owned, writable buffer first.
+  if (g.surface_pixels.size() != frame_bytes) {
+    g.surface_pixels.assign(frame_bytes, 0);
+  }
+  std::memcpy(g.surface_pixels.data(), source, frame_bytes);
+  const uint8_t* pixels = g.surface_pixels.data();
+  static int surface_diag = 0;
+  const bool diag = surface_diag < 3;
+  if (diag) {
+    native_log(L"surface: poll seq=" + std::to_wstring(sequence) + L" size=" +
+               std::to_wstring(header->width) + L"x" +
+               std::to_wstring(header->height) + L" slot=" +
+               std::to_wstring(header->slot_bytes));
+  }
   if (g.surface_bitmap == nullptr || g.surface_w != header->width ||
       g.surface_h != header->height) {
     if (g.surface_bitmap != nullptr) g.surface_bitmap->Release();
     D2D1_BITMAP_PROPERTIES props = D2D1::BitmapProperties(
         D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE));
+    if (diag) native_log(L"surface: CreateBitmap begin");
     const HRESULT hr = g.target->CreateBitmap(
         D2D1::SizeU(header->width, header->height), pixels,
         header->width * 4, props, &g.surface_bitmap);
+    if (diag) {
+      native_log(L"surface: CreateBitmap hr=" +
+                 std::to_wstring(static_cast<long long>(hr)));
+      ++surface_diag;
+    }
     if (FAILED(hr) && std::getenv("MOLINK_WS_LOG") != nullptr) {
       std::fprintf(stderr, "surface bitmap create failed hr=0x%08lx\n",
                    static_cast<unsigned long>(hr));
@@ -2684,7 +2716,14 @@ void surface_poll() {
     g.surface_w = header->width;
     g.surface_h = header->height;
   } else {
-    g.surface_bitmap->CopyFromMemory(nullptr, pixels, header->width * 4);
+    if (diag) native_log(L"surface: CopyFromMemory begin");
+    const HRESULT hr =
+        g.surface_bitmap->CopyFromMemory(nullptr, pixels, header->width * 4);
+    if (diag) {
+      native_log(L"surface: CopyFromMemory hr=" +
+                 std::to_wstring(static_cast<long long>(hr)));
+      ++surface_diag;
+    }
   }
   g.surface_seq = sequence;
   g.surface_at = now;
@@ -3454,14 +3493,23 @@ void draw_picture(const D2D1_RECT_F& stage) {
   const float dw = stage.right - stage.left;
   const float dh = stage.bottom - stage.top;
   if (sw <= 0 || sh <= 0) return;
-  ID2D1RoundedRectangleGeometry* clip = nullptr;
-  if (!g.immersive) {
-    g.factory->CreateRoundedRectangleGeometry(D2D1::RoundedRect(stage, 12, 12),
-                                              &clip);
+  // Windows 7's d2d1 (6.1.7601) access-violates in ID2D1RenderTarget::
+  // PushLayer when the layer uses an infinite content bounds and a rounded
+  // geometry mask. Use a plain axis-aligned clip for the picture instead; the
+  // rounded corners are cosmetic and the stage is clipped by the window.
+  static int picture_diag = 0;
+  const bool detailed = picture_diag < 3;
+  if (detailed) {
+    native_log(L"picture: draw source=" +
+               std::wstring(bitmap == g.surface_bitmap ? L"surface" : L"tile") +
+               L" size=" + std::to_wstring(static_cast<int>(sw)) + L"x" +
+               std::to_wstring(static_cast<int>(sh)) + L" mode=" +
+               std::to_wstring(g.display_mode) + L" stage=" +
+               std::to_wstring(static_cast<int>(dw)) + L"x" +
+               std::to_wstring(static_cast<int>(dh)));
+    ++picture_diag;
   }
-  const D2D1_LAYER_PARAMETERS params = D2D1::LayerParameters(
-      D2D1::InfiniteRect(), clip, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-  g.target->PushLayer(params, nullptr);
+  g.target->PushAxisAlignedClip(stage, D2D1_ANTIALIAS_MODE_ALIASED);
   if (g.display_mode == 1) {
     // 1:1: pixels at their native size from the top-left corner.
     g.picture_rect = D2D1::RectF(stage.left, stage.top, stage.left + sw,
@@ -3485,8 +3533,7 @@ void draw_picture(const D2D1_RECT_F& stage) {
                     stage.left + (dw + fw) / 2, stage.top + (dh + fh) / 2);
     g.target->DrawBitmap(bitmap, g.picture_rect);
   }
-  g.target->PopLayer();
-  if (clip != nullptr) clip->Release();
+  g.target->PopAxisAlignedClip();
 }
 
 void dark_chip(ID2D1RenderTarget* t, const palette& th,
@@ -8499,26 +8546,54 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
         }
         int fw = 0, fh = 0;
         uint64_t fseq = 0;
-        if (g.session->copy_frame(g.stream_pixels, &fw, &fh, &fseq,
+        // When the local core is publishing decoded frames on the shared
+        // surface, the shell's own tile bitmap is redundant (and a second D2D
+        // bitmap path that Windows 7's d2d1 crashed in). Keep it only as a
+        // bootstrap/fallback while the surface is not producing.
+        const bool surface_active =
+            g.surface_base != nullptr && g.surface_seq != 0 &&
+            GetTickCount64() - g.surface_at < 1000;
+        if (!surface_active &&
+            g.session->copy_frame(g.stream_pixels, &fw, &fh, &fseq,
                                   g.stream_seq) &&
             g.target != nullptr) {
           g.stream_seq = fseq;
+          static int tile_diag = 0;
+          const bool diag = tile_diag < 3;
+          if (diag) {
+            native_log(L"tile: bitmap mode=" +
+                       std::to_wstring(g.stream_bitmap == nullptr ||
+                                        g.stream_w != static_cast<uint32_t>(fw) ||
+                                        g.stream_h != static_cast<uint32_t>(fh))
+                       + L" size=" + std::to_wstring(fw) + L"x" +
+                       std::to_wstring(fh));
+          }
           if (g.stream_bitmap == nullptr || g.stream_w != static_cast<uint32_t>(fw) ||
               g.stream_h != static_cast<uint32_t>(fh)) {
             if (g.stream_bitmap != nullptr) g.stream_bitmap->Release();
             const D2D1_BITMAP_PROPERTIES props = D2D1::BitmapProperties(
                 D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
                                   D2D1_ALPHA_MODE_IGNORE));
-            g.target->CreateBitmap(D2D1::SizeU(static_cast<UINT32>(fw),
-                                               static_cast<UINT32>(fh)),
-                                   g.stream_pixels.data(),
-                                   static_cast<UINT32>(fw) * 4, props,
-                                   &g.stream_bitmap);
+            const HRESULT hr = g.target->CreateBitmap(
+                D2D1::SizeU(static_cast<UINT32>(fw),
+                            static_cast<UINT32>(fh)),
+                g.stream_pixels.data(), static_cast<UINT32>(fw) * 4, props,
+                &g.stream_bitmap);
+            if (diag) {
+              native_log(L"tile: CreateBitmap hr=" +
+                         std::to_wstring(static_cast<long long>(hr)));
+              ++tile_diag;
+            }
             g.stream_w = static_cast<uint32_t>(fw);
             g.stream_h = static_cast<uint32_t>(fh);
           } else {
-            g.stream_bitmap->CopyFromMemory(
+            const HRESULT hr = g.stream_bitmap->CopyFromMemory(
                 nullptr, g.stream_pixels.data(), static_cast<UINT32>(fw) * 4);
+            if (diag) {
+              native_log(L"tile: CopyFromMemory hr=" +
+                         std::to_wstring(static_cast<long long>(hr)));
+              ++tile_diag;
+            }
           }
           g.stream_at = GetTickCount64();
           InvalidateRect(window, nullptr, FALSE);
