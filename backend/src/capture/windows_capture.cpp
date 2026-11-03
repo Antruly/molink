@@ -582,7 +582,18 @@ class windows_capture final : public capture_base {
     snapshot.serial = static_cast<uint32_t>(
         reinterpret_cast<uintptr_t>(info.hCursor) & 0xffffffffu);
     if ((info.flags & CURSOR_SHOWING) != 0 && info.hCursor != nullptr) {
-      draw_cursor(info.hCursor, snapshot);
+      // Reuse the bitmap for the same cursor handle; redrawing it (two DIBs +
+      // DrawIconEx) on every frame is pure overhead when the pointer moves.
+      if (snapshot.serial != cursor_bitmap_serial_ ||
+          cursor_bitmap_.rgba.empty()) {
+        draw_cursor(info.hCursor, cursor_bitmap_);
+        cursor_bitmap_serial_ = snapshot.serial;
+      }
+      snapshot.width = cursor_bitmap_.width;
+      snapshot.height = cursor_bitmap_.height;
+      snapshot.hotspot_x = cursor_bitmap_.hotspot_x;
+      snapshot.hotspot_y = cursor_bitmap_.hotspot_y;
+      snapshot.rgba = cursor_bitmap_.rgba;
     }
     set_cursor(std::move(snapshot));
   }
@@ -677,6 +688,9 @@ class windows_capture final : public capture_base {
   std::vector<uint8_t> previous_;
   mutable std::mutex pixels_mutex_;
   bool have_previous_ = false;
+  /// Cached cursor bitmap for the current handle (see update_cursor).
+  uint32_t cursor_bitmap_serial_ = 0;
+  cursor_snapshot cursor_bitmap_;
   std::thread thread_;
 
   std::vector<display_info> displays_;

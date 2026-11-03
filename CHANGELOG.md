@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.10.3] — 2026-11-04
+
+### Fixed / Performance
+
+- **Windows 7 GDI 采集帧率**：`update_cursor` 每帧都重建光标位图（两个 DIB +
+  DrawIconEx），在 Win7 VM 上比编码本身还贵。实测 `capture-stats` 从
+  **11 fps (target 15, build_ms 15.8)** 提升到 **13–15 fps (build_ms 12–14)**；
+  同一光标句柄复用位图。
+- **无视频能力的会话不再 veto 编码**：supervisor 统计 “所有 viewer 都能解码 X”
+  时会把只发控制/聊天/文件、没有视频解码能力的会话说成 viewer，导致一个这样的
+  会话把所有人的视频流关掉。现在跳过既没用 push 时钟、也没有任何流解码能力的
+  会话。
+- 完整真机矩阵（210 Win10 x64 + 212 Win7 x86）：native↔WebView2 壳、native↔
+  native、web↔web 均正常出画面；210 路径 15–25 fps，Win7 VM 主机 13–15 fps
+  （编码 build_ms 12–14 ms，瓶颈在虚拟机的 GDI BitBlt/采集节奏）；VP9 在 Win7
+  主机上由 auto 自动选择，210 有 NVENC 时 auto 选 AV1，Web 观看端 auto 回退
+  VP8。
+
 ## [0.10.2] — 2026-11-03
 
 ### Fixed
