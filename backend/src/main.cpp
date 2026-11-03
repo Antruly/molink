@@ -58,6 +58,7 @@
 
 #ifdef _WIN32
 #include <process.h>
+#include <shellapi.h>
 #include <windows.h>
 #define MOLINK_GETPID _getpid
 #else
@@ -128,6 +129,22 @@ std::string resolve_web_root(const molink::core_config& cfg) {
   return std::string();
 }
 
+/// Opens the local web UI in the user's default browser (`--open-ui`).
+void open_in_browser(const std::string& url) {
+  std::cerr << "molink: opening the web UI at " << url << "\n";
+#if defined(_WIN32)
+  // ShellExecuteA on a local http URL is the default-browser launch; it does
+  // not block the core.
+  ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+#elif defined(__APPLE__)
+  const std::string command = "open '" + url + "' >/dev/null 2>&1 &";
+  std::system(command.c_str());
+#else
+  const std::string command = "xdg-open '" + url + "' >/dev/null 2>&1 &";
+  std::system(command.c_str());
+#endif
+}
+
 void print_usage() {
   std::cout
       << "molink-core " MOLINK_VERSION "\n\n"
@@ -153,6 +170,8 @@ void print_usage() {
       << "  --no-clipboard       disable clipboard synchronization\n"
       << "  --web-root <dir>     serve a built frontend at / (default: auto)\n"
       << "  --print-ready        print one JSON line on stdout when ready\n"
+      << "  --open-ui            open the local web UI in the default browser\n"
+      << "                       (the URL carries the per-run client token)\n"
       << "  --version            print version and exit\n"
       << "  --help               show this help\n";
 }
@@ -203,6 +222,24 @@ void print_ready(const molink::core_config& cfg, int port,
     const std::string surface_path = molink::frame_surface::instance().path();
     if (!surface_path.empty()) j["surface"] = surface_path;
   }
+  // What the native shell can advertise in its hello: the core owns the
+  // decoders and publishes them on the shared surface, so a viewer built
+  // without libvpx/dav1d must not claim VP9/VP8/AV1 to the host (that is how a
+  // Win7 client showed a blank picture while input worked).
+  j["video_decoders"] = uvcpp::uvcpp_json::array();
+#if defined(MOLINK_HAVE_VPX) && MOLINK_HAVE_VPX
+  j["video_decoders"].push_back("vp9");
+  j["video_decoders"].push_back("vp8");
+#endif
+#if defined(MOLINK_HAVE_DAV1D) && MOLINK_HAVE_DAV1D
+  j["video_decoders"].push_back("av1");
+#endif
+  // The loopback web UI gate needs this token; a browser opened by hand has
+  // no way to know it, which is why a packaged `start-browser-ui.cmd` that
+  // opened a bare URL showed a 403 instead of the app.
+  j["ui_url"] = std::string(tls_enabled ? "https://" : "http://") +
+                "127.0.0.1:" + std::to_string(port) + "/?client=" +
+                client_token;
   std::cout << uvcpp::uvcpp_json_dump(j) << std::endl;
 }
 
@@ -1079,6 +1116,15 @@ int main(int argc, char** argv) {
               << "remote access "
               << (auth->settings().allow_remote_access ? "on" : "off")
               << "\n";
+  }
+  if (cfg.open_ui && !web_root.empty()) {
+    // The loopback UI gate wants the per-run client token. A user clicking a
+    // packaged shortcut cannot type it, so the core opens the browser with the
+    // token already in the URL (this is how the desktop shell enters the UI).
+    const std::string url =
+        std::string(tls_enabled ? "https://" : "http://") + "127.0.0.1:" +
+        std::to_string(port) + "/?client=" + client_token;
+    open_in_browser(url);
   }
 
   while (g_stop == 0) {

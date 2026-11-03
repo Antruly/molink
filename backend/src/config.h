@@ -27,6 +27,11 @@ struct core_config {
   /// Empty means "generate one at startup" (the default).
   std::string token;
   bool print_ready_json = false;
+  /// Open the local web UI in the default browser once the core is listening.
+  /// The URL carries the per-run client token, which the loopback UI gate
+  /// requires when `allow_web_client` is off. A packaged `start-browser-ui`
+  /// cannot know that token, so the core opens the browser itself.
+  bool open_ui = false;
   /// Required only when --host explicitly names a non-loopback address.
   bool allow_remote = false;
   bool show_help = false;

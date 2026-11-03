@@ -4,7 +4,7 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
-VERSION=${VERSION:-0.9.36}
+VERSION=${VERSION:-0.10.1}
 BUILD=${BUILD_DIR:-$ROOT/build/appimage}
 APPDIR="$BUILD/AppDir"
 TOOLS="$ROOT/build/tools"
@@ -15,7 +15,7 @@ if [ -n "${MOLINK_AV1_SDK:-}" ]; then
   AV1_ARG+=("-DMOLINK_AV1_SDK=$MOLINK_AV1_SDK")
 fi
 cmake -S "$ROOT/backend" -B "$ROOT/backend/build" -DCMAKE_BUILD_TYPE=Release \
-  -DMOLINK_ENABLE_AV1=ON ${AV1_ARG[@]+"${AV1_ARG[@]}"} \
+  -DMOLINK_ENABLE_AV1=ON -DMOLINK_ENABLE_VPX=ON ${AV1_ARG[@]+"${AV1_ARG[@]}"} \
   ${MOLINK_EXTRA_CMAKE_ARGS:-} >/dev/null
 cmake --build "$ROOT/backend/build" --parallel
 (cd "$ROOT/frontend" && pnpm install --frozen-lockfile >/dev/null && pnpm build >/dev/null)
@@ -46,7 +46,7 @@ MULTIARCH=$(gcc -print-multiarch 2>/dev/null || echo x86_64-linux-gnu)
 for dir in ${MOLINK_AV1_SDK:+$MOLINK_AV1_SDK/usr/lib/$MULTIARCH} \
            "/usr/lib/$MULTIARCH" /usr/lib64 /usr/lib; do
   [ -d "$dir" ] || continue
-  for pattern in 'libSvtAv1Enc.so.*' 'libdav1d.so.*'; do
+  for pattern in 'libSvtAv1Enc.so.*' 'libdav1d.so.*' 'libvpx.so.*'; do
     cp -P "$dir"/$pattern "$APPDIR/usr/lib/" 2>/dev/null || true
   done
 done

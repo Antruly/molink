@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <deque>
 #include <fstream>
 #include <future>
@@ -575,7 +576,14 @@ void p2p_manager::start_lan_direct(uint64_t id,
     plog("lan pinned certificate " + pin.fingerprint);
   }
   it->second.lan = attempt;
-  if (info.quic_port > 0) {
+  // MOLINK_LAN_TCP=1 forces the LAN leg over TCP. The QUIC leg is faster but
+  // interop with a differently built peer can close the connection right after
+  // the handshake; this lets a deployment (or the native shell) fall back.
+  const char* lan_tcp = std::getenv("MOLINK_LAN_TCP");
+  const bool force_tcp =
+      lan_tcp != nullptr &&
+      (std::strcmp(lan_tcp, "1") == 0 || std::strcmp(lan_tcp, "on") == 0);
+  if (info.quic_port > 0 && !(force_tcp && info.tcp_port > 0)) {
     start_lan_quic(id, attempt);
   } else if (info.tcp_port > 0) {
     start_lan_tcp(id, attempt);

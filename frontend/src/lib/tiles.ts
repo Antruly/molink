@@ -46,6 +46,7 @@ export function expandTile(
   data: Uint8Array,
   width: number,
   height: number,
+  target?: Uint8ClampedArray<ArrayBuffer> | null,
 ): Uint8ClampedArray<ArrayBuffer> | null {
   const kind = tilePixelKind(codec)
   const bytesPerPixel = codecBytesPerPixel(codec)
@@ -53,7 +54,13 @@ export function expandTile(
   const pixels = width * height
   if (data.byteLength < pixels * bytesPerPixel) return null
 
-  const rgba = new Uint8ClampedArray(pixels * 4)
+  // Reuse the caller's scratch buffer when it has the right size: a 1080p
+  // RGB565 tile otherwise allocates 8 MB per frame, which is enough garbage to
+  // cause periodic GC pauses and the stutter that was blamed on the network.
+  const rgba =
+    target != null && target.length === pixels * 4
+      ? target
+      : new Uint8ClampedArray(pixels * 4)
   // One 32-bit store per pixel is much cheaper than four clamped byte stores.
   // RGBA bytes are written as a little-endian word: A<<24 | B<<16 | G<<8 | R.
   const out = new Uint32Array(rgba.buffer)

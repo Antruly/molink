@@ -427,7 +427,13 @@ av1_stream_encoder* capture_base::stream_for_frame(
   }
   // Mirror the mode for other threads: a session that joins now uses it to
   // wait for the stream keyframe instead of replaying a tile keyframe.
-  stream_live_.store(stream_policy_.streaming);
+  // Claim a stream only once this frame actually gets an encoder below. The
+  // movement policy engages with no codec the viewer set can decode (no GPU
+  // encoder, or a client that advertises none), and the old mirror made every
+  // new session wait for an AV1 keyframe that never came: the host kept
+  // publishing tile frames the session could decode, yet it only ever saw
+  // empty frames. A tile bootstrap is cheaper than a blank picture.
+  stream_live_.store(false);
   // MOLINK_STREAM_LOG=1: one line per mode change, with the movement that
   // caused it. Without this a session that stays on tiles looks identical to
   // one the policy never armed.
@@ -597,6 +603,9 @@ av1_stream_encoder* capture_base::stream_for_frame(
     }
   }
   if (!stream_policy_.streaming || !stream_encoder_) return nullptr;
+  // This frame really is going to the stream encoder, so a joining session
+  // may wait for its keyframe; see the store(false) above.
+  stream_live_.store(true);
   keyframe = stream_keyframe_pending_.load();
   stream_keyframe_pending_.store(false);
   return stream_encoder_.get();

@@ -109,7 +109,7 @@ export function h264CodecString(bytes: Uint8Array): string | null {
 /// Deltas allowed in the decoder queue before frames are dropped. WebCodecs
 /// decodes asynchronously; letting this grow means the picture runs further and
 /// further behind the capture instead of skipping.
-const kMaxQueuedDeltas = 2
+const kMaxQueuedDeltas = 4
 
 export class H264StreamDecoder {
   private decoder: VideoDecoder | null = null

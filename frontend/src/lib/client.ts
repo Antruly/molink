@@ -382,6 +382,14 @@ const kPingMissLimit = 6
 /// request is retried every second by requestFrame().
 const kFrameMissLimit = 15
 
+/// Asynchronous frames (decompression, stream submission) may be this far
+/// behind before newer ones are dropped. The chain used to grow without bound:
+/// a viewer that could not inflate a 1080p keyframe kept applying every frame
+/// that followed, so latency climbed to seconds and then the picture jumped.
+/// A skipped tile frame is repaired by the host's tile clock; a skipped stream
+/// frame breaks the reference chain and is answered with a keyframe request.
+const kMaxQueuedDecodes = 4
+
 export class MolinkClient {
   private ws: WebSocket | null = null
   private handlers: Partial<ClientHandlers> = {}
@@ -529,6 +537,8 @@ export class MolinkClient {
   private hasImage = false
   // Decompression is asynchronous; chaining keeps frames applied in order.
   private frameQueue: Promise<void> = Promise.resolve()
+  /// Work items currently in that chain (queued or running).
+  private frameQueueDepth = 0
 
   constructor() {
     // One probe, up front: hello goes out on the first connect, and the host
@@ -637,6 +647,7 @@ export class MolinkClient {
     this.tileAppliedAt.clear()
     this.pendingTiles.clear()
     this.frameQueue = Promise.resolve()
+    this.frameQueueDepth = 0
 
     // Two devices on the same LAN should not pay the ICE signaling round
     // trips: the directory only hands out a private address to requesters
@@ -1519,6 +1530,31 @@ export class MolinkClient {
     }
   }
 
+  /// Chains asynchronous frame work with a hard depth bound. Returns false
+  /// when the frame was dropped; `onOverflow` lets the caller ask for a repair
+  /// or a keyframe instead of letting latency accumulate.
+  private queueFrameWork(
+    work: () => Promise<void>,
+    onOverflow?: () => void,
+  ): boolean {
+    if (this.frameQueueDepth >= kMaxQueuedDecodes) {
+      onOverflow?.()
+      return false
+    }
+    this.frameQueueDepth += 1
+    this.frameQueue = this.frameQueue
+      .then(work)
+      .catch((error: unknown) => {
+        this.handlers.onError?.(
+          error instanceof Error ? error.message : 'frame decode failed',
+        )
+      })
+      .finally(() => {
+        this.frameQueueDepth -= 1
+      })
+    return true
+  }
+
   private handleBinary(buffer: ArrayBuffer): void {
     this.noteInbound()
     try {
@@ -1565,13 +1601,13 @@ export class MolinkClient {
         if ((packet.flags & PacketFlag.compressed) !== 0) {
           const payload = packet.payload
           const epoch = this.tileEpoch
-          this.frameQueue = this.frameQueue
-            .then(async () => {
-              const inflated = await inflateTile(payload)
-              if (epoch !== this.tileEpoch) return
-              this.handleTileSeq(inflated)
-            })
-            .catch(() => {})
+          // Clock maps are advisory: under backlog, skip one (the next arrives
+          // in about 100 ms) rather than queueing behind a busy decoder.
+          this.queueFrameWork(async () => {
+            const inflated = await inflateTile(payload)
+            if (epoch !== this.tileEpoch) return
+            this.handleTileSeq(inflated)
+          })
         } else {
           this.handleTileSeq(packet.payload)
         }
@@ -1686,8 +1722,11 @@ export class MolinkClient {
         // out, and the queue never moves again. Output order follows input
         // order, so painting as promises resolve keeps the picture ordered.
         const decoder = this.streamDecoderFor(frame)
-        this.frameQueue = this.frameQueue
-          .then(() => {
+        // Submissions are cheap (the decoder holds the actual queue), but a
+        // backed-up chain still means the main thread is not keeping up. Drop
+        // this picture and re-anchor on a keyframe instead of building latency.
+        this.queueFrameWork(
+          async () => {
             void decoder
               .decode(accessUnit, keyframe)
               .then((picture) => {
@@ -1708,8 +1747,15 @@ export class MolinkClient {
                 }
               })
               .catch(() => undefined)
-          })
-          .catch(() => undefined)
+          },
+          () => {
+            this.handlers.onFrameDropped?.()
+            this.streamHasImage = false
+            this.lastStreamSeq = -1
+            decoder.close()
+            this.requestKeyframeThrottled()
+          },
+        )
         return
       }
       if ((packet.flags & PacketFlag.tileRefresh) !== 0) {
@@ -1717,9 +1763,14 @@ export class MolinkClient {
         // picture: the AV1 stream sends everything as a refresh, and without
         // this the page would refuse every frame of a fresh stream and stay
         // frozen while asking for a keyframe that also arrives as a refresh.
-        // While a stream was just on screen, a refresh is the host filling in
-        // for a gap; painting it turned a seamless stream into a tile flash.
-        if (this.preferredCodec !== 'tiles' &&
+        // While a stream was just on screen, a partial refresh is the host
+        // filling in for a gap; painting it turned a seamless stream into a
+        // tile flash. A *keyframe* refresh is different: it is the host's
+        // deliberate hand-over back to tiles (it forces a full frame when it
+        // leaves the stream), and ignoring it kept the page frozen for up to
+        // fifteen seconds after the stream settled.
+        const refreshKeyframe = (frame.flags & FrameFlag.keyframe) !== 0
+        if (this.preferredCodec !== 'tiles' && !refreshKeyframe &&
             performance.now() - this.lastStreamPaintAt < 15000) {
           return
         }
@@ -1730,16 +1781,17 @@ export class MolinkClient {
           return
         }
         if (isDeflatedCodec(frame.codec)) {
-          this.frameQueue = this.frameQueue
-            .then(() =>
+          // Repairs ride the same chain; under backlog the next tile clock
+          // re-asks for these cells, so skipping one is harmless.
+          this.queueFrameWork(
+            () =>
               this.deliverCompressed(frame, buffer.byteLength, packet.tsUs,
                                      true),
-            )
-            .catch((error: unknown) => {
-              this.handlers.onError?.(
-                error instanceof Error ? error.message : 'tile refresh failed',
-              )
-            })
+            () => {
+              this.handlers.onFrameDropped?.()
+              this.queueTileRefresh(frame, packet.tsUs)
+            },
+          )
         } else {
           this.deliver(frame, buffer.byteLength, packet.tsUs, true)
         }
@@ -1750,7 +1802,11 @@ export class MolinkClient {
       // encoder is ready. Painting them made the picture flash to tiles and
       // stutter for several seconds; keep the last stream picture instead and
       // let the stream resume, unless the viewer actually asked for tiles.
-      if (this.preferredCodec !== 'tiles' &&
+      // A tile keyframe is exempt: the host forces one when it deliberately
+      // hands the picture back to tiles, and dropping it froze the picture
+      // until the suppression window expired.
+      const tileKeyframe = (frame.flags & FrameFlag.keyframe) !== 0
+      if (this.preferredCodec !== 'tiles' && !tileKeyframe &&
           performance.now() - this.lastStreamPaintAt < 15000) {
         return
       }
@@ -1786,22 +1842,20 @@ export class MolinkClient {
 
       if (isDeflatedCodec(frame.codec)) {
         const epoch = this.tileEpoch
-        this.frameQueue = this.frameQueue
-          .then(() => {
+        this.queueFrameWork(
+          async () => {
             if (epoch !== this.tileEpoch) return
-            return this.deliverCompressed(
+            await this.deliverCompressed(
               frame,
               buffer.byteLength,
               packet.tsUs,
             )
-          })
-          .catch((error: unknown) => {
-            this.handlers.onError?.(
-              error instanceof Error
-                ? error.message
-                : 'tile decompression failed',
-            )
-          })
+          },
+          () => {
+            this.handlers.onFrameDropped?.()
+            this.queueTileRefresh(frame, packet.tsUs)
+          },
+        )
         return
       }
 

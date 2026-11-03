@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { Frame } from '../lib/protocol'
 import { sessionScreenBuffer } from '../lib/screen-buffer'
+import { onSessionFrame } from '../lib/session-repaint'
 
 /**
  * Paints one session's composited back buffer.
@@ -69,6 +70,27 @@ export function TileCanvas({
   useLayoutEffect(() => {
     blit()
   }, [blit, frame, mode, box.width, box.height])
+
+  // Wire frames wake this canvas directly (session-repaint.ts) and the blit is
+  // coalesced to one per display refresh. The previous path re-rendered the
+  // whole session view per frame; on a 1080p stream that cost more than the
+  // decode itself and read as constant stutter.
+  useEffect(() => {
+    let request = 0
+    const schedule = () => {
+      if (request !== 0) return
+      request = requestAnimationFrame(() => {
+        request = 0
+        blit()
+      })
+    }
+    const off = onSessionFrame(sessionKey, schedule)
+    schedule()
+    return () => {
+      off()
+      if (request !== 0) cancelAnimationFrame(request)
+    }
+  }, [blit, sessionKey])
 
   // A window/WM fullscreen transition can lose the canvas backing store
   // without producing a new frame (or before the resize observer runs). Blit

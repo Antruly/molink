@@ -156,8 +156,12 @@ class gdi_capture final : public capture_base {
         next = std::chrono::steady_clock::now();
         continue;
       }
+      // Plain SRCCOPY: CAPTUREBLT forces DWM to compose on every grab, which
+      // made the host cursor (and layered windows) blink -- the same fix the
+      // secure-desktop helper already carries. The composed desktop is in the
+      // screen DC on every supported Windows version.
       if (BitBlt(mem_dc_, 0, 0, width_, height_, screen_dc_, x_, y_,
-                 SRCCOPY | CAPTUREBLT)) {
+                 SRCCOPY)) {
         note_grab(true, width_, height_);
         publish_frame();
         update_cursor();
@@ -223,6 +227,15 @@ class gdi_capture final : public capture_base {
     bool stream_keyframe = false;
     encoding.av1_stream = stream_for_frame(tiles, header.screen_w,
                                            header.screen_h, stream_keyframe);
+    // A still desktop needs no frame: the previous payload still describes it
+    // pixel for pixel, and publishing an empty delta every tick made the host
+    // send a packet (and walk its replay history) at the full capture rate.
+    // A keyframe/refresh reads the live pixels; a viewer that lost its base
+    // asks for one. While the stream is on, the encoder must still see the
+    // picture, so only skip the tile path.
+    if (tiles.empty() && !keyframe && encoding.av1_stream == nullptr) {
+      return;
+    }
     encoding.av1_stream_keyframe = stream_keyframe;
     encoding.av1_stream_qp = quality_av1_qp_stream();
     std::vector<uint8_t> av1_payload;

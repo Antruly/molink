@@ -6,9 +6,20 @@ on:
   # Manual runs build the artifacts without publishing a release; the release
   # steps below only fire for a tag.
   workflow_dispatch:
+    inputs:
+      skip_slow:
+        description: 'Only run the Windows jobs (skip Linux and macOS)'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
+
+# A tag names the release; a manual run still builds (and uploads) the same
+# artifacts, using the version in backend/src/version.h. Without this, manual
+# runs produced packages named after the branch ("main").
+env:
+  PKG_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '0.10.0' }}
 
 # Linux and Windows download the prebuilt libuvcpp archive (UVCPP_VERSION,
 # default 1.8.7); macOS has no prebuilt asset yet and builds it from the
@@ -16,6 +27,9 @@ permissions:
 # are built and attached to the release.
 jobs:
   linux:
+    # workflow_dispatch may skip the two slow Unix jobs while iterating on a
+    # Windows fix; tag builds never set the input and always run everything.
+    if: ${{ inputs.skip_slow != true }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -107,7 +121,7 @@ jobs:
           PKG_CONFIG_PATH: ${{ runner.temp }}/uvcpp/lib/pkgconfig
           UVCPP_LIB_DIR: ${{ runner.temp }}/uvcpp/lib
           UVCPP_ROOT: ${{ runner.temp }}/uvcpp
-          VERSION: ${{ github.ref_name }}
+          VERSION: ${{ env.PKG_VERSION }}
         run: |
           export VERSION="${VERSION#v}"
           export MOLINK_EXTRA_CMAKE_ARGS="-DMOLINK_UVCPP_PREFIX=$RUNNER_TEMP/uvcpp -DMOLINK_ENABLE_WEBRTC=ON -DOPENSSL_ROOT_DIR=$RUNNER_TEMP/openssl-quic -DOPENSSL_USE_STATIC_LIBS=ON"
@@ -115,8 +129,17 @@ jobs:
           ./packaging/linux/build-appimage.sh
           ./packaging/linux/build-rpm.sh
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: moLink-linux
+          if-no-files-found: error
+          path: |
+            build/package/*.deb
+            build/package/*.AppImage
+            build/package/*.rpm
+
       - uses: softprops/action-gh-release@v2
-        if: github.ref_type == 'tag' 
+        if: github.ref_type == 'tag'
         with:
           name: moLink ${{ github.ref_name }}
           body: 'Linux packages: .deb, .AppImage and .rpm.'
@@ -210,6 +233,8 @@ jobs:
             -DOPENSSL_ROOT_DIR="$(cygpath -m "$OPENSSL_ROOT_DIR")" \
             -DMOLINK_ENABLE_AV1=ON \
             -DMOLINK_ENABLE_VPX=ON \
+            -DMOLINK_REQUIRE_VPX=ON \
+            -DMOLINK_REQUIRE_DAV1D=ON \
             -DMOLINK_ENABLE_WEBRTC=ON \
             -DCMAKE_PREFIX_PATH="$(cygpath -m "$VCPKG_INSTALLATION_ROOT/installed/x64-windows")"
           cmake --build backend/build --config Release --parallel
@@ -251,7 +276,7 @@ jobs:
           bash packaging/windows/stage.sh
           choco install innosetup nsis -y --no-progress
           mkdir -p build/package
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${PKG_VERSION#v}"
           PKG_DIR="$(cygpath -w "$GITHUB_WORKSPACE/build/windows/pkg")"
           OUT_DIR="$(cygpath -w "$GITHUB_WORKSPACE/build/package")"
           LANG_FILE="$(cygpath -w "$GITHUB_WORKSPACE/packaging/windows/ChineseSimplified.isl")"
@@ -271,11 +296,130 @@ jobs:
           MSYS2_ARG_CONV_EXCL='*' MSYS_NO_PATHCONV=1 \
             "$ISCC" /DAppVersion="$VERSION" /DPkgDir="$PKG_DIR" \
             /DOutputDir="$OUT_DIR" /DLangFile="$LANG_FILE" \
+            /DOutputName="moLink-$VERSION-setup-x64" \
             packaging/windows/installer.iss
           MSYS2_ARG_CONV_EXCL='*' MSYS_NO_PATHCONV=1 \
             "/c/Program Files (x86)/NSIS/makensis.exe" /DVERSION="$VERSION" \
             /DPKG_DIR="$PKG_DIR" /DOUT_DIR="$OUT_DIR" \
             packaging/windows/portable.nsi
+
+      # The native Direct2D shell: same staged tree, MinGW-w64 build, packaged
+      # with the same installer/launcher scripts (AppExeName=moLink-native.exe).
+      - name: Build the native shell (x64)
+        shell: pwsh
+        run: |
+          choco install msys2 -y --no-progress
+          # Chocolatey deploys MSYS2 to C:\tools\msys64, while some runner
+          # images also carry a C:\msys64. The toolchain must come from the
+          # root whose pacman actually installed it, so try both and verify the
+          # compiler before using it.
+          $msysRoot = $null
+          $mingw = $null
+          $windres = $null
+          $gxx = $null
+          foreach ($candidate in @('C:\tools\msys64', 'C:\msys64')) {
+            $bash = Join-Path $candidate 'usr\bin\bash.exe'
+            if (-not (Test-Path $bash)) { continue }
+            Write-Host "== trying MSYS2 at $candidate"
+            # The mirror can be slow; a partial transaction used to leave a
+            # half-installed toolchain. Disable the per-read timeout and retry.
+            & $bash -lc "pacman -Sy --noconfirm --needed --disable-download-timeout mingw-w64-x86_64-gcc"
+            $candidateGxx = Join-Path $candidate 'mingw64\bin\x86_64-w64-mingw32-g++.exe'
+            if (-not (Test-Path $candidateGxx)) {
+              Write-Warning "mingw g++ is missing under $candidate (exit $LASTEXITCODE)"
+              continue
+            }
+            $msysRoot = $candidate
+            $mingw = Join-Path $candidate 'mingw64'
+            $gxx = $candidateGxx
+            $windres = Get-ChildItem (Join-Path $mingw 'bin') -Filter '*windres*.exe' |
+              Select-Object -First 1 -ExpandProperty FullName
+            break
+          }
+          if ($null -eq $msysRoot) { throw 'no usable MSYS2 MinGW toolchain was found' }
+          Write-Host "== using MSYS2 at $msysRoot"
+          if (-not $windres) {
+            # binutils normally arrives with gcc; ask for it explicitly if the
+            # naming differs from the expected prefixed binary.
+            & (Join-Path $msysRoot 'usr\bin\bash.exe') -lc "pacman -S --noconfirm --needed --disable-download-timeout mingw-w64-x86_64-binutils"
+            $windres = Get-ChildItem (Join-Path $mingw 'bin') -Filter '*windres*.exe' |
+              Select-Object -First 1 -ExpandProperty FullName
+          }
+          if (-not $windres) { throw "no windres found under $mingw" }
+          # WebP is only used for the remote device avatar. Its package pulls a
+          # large dependency set and the mirror occasionally times out, so it
+          # is best-effort: without it the shell falls back to initial-letter
+          # avatars instead of failing the whole release.
+          $haveWebp = Test-Path (Join-Path $mingw 'lib\libwebp.a')
+          for ($attempt = 0; $attempt -lt 3 -and -not $haveWebp; $attempt++) {
+            & (Join-Path $msysRoot 'usr\bin\bash.exe') -lc "pacman -S --noconfirm --needed --disable-download-timeout mingw-w64-x86_64-libwebp"
+            $haveWebp = Test-Path (Join-Path $mingw 'lib\libwebp.a')
+          }
+          if ($haveWebp) { Write-Host '== libwebp found' } else { Write-Warning 'libwebp unavailable; building without WebP avatars' }
+          $mingwInc = Join-Path $mingw 'include'
+          $mingwLib = Join-Path $mingw 'lib'
+          & $windres -O coff -I . shell/windows/ui_kit_demo.rc -o "$env:RUNNER_TEMP\native-res.o"
+          if ($LASTEXITCODE -ne 0) { throw 'native resources failed' }
+          $common = @(
+            '-std=c++20', '-D_WIN32_WINNT=0x0A00', '-O2', '-mwindows', '-municode', '-static',
+            '-I', 'shell/windows', "-I$mingwInc",
+            '-o', 'build\windows\pkg\moLink-native.exe',
+            'shell/windows/ui_kit_demo.cpp', 'shell/windows/ui_kit.cpp',
+            'shell/windows/ws_client.cpp', 'shell/windows/session_client.cpp',
+            'shell/windows/puff.c', "$env:RUNNER_TEMP\native-res.o",
+            "-L$mingwLib"
+          )
+          $tail = @('-ld2d1', '-ldwrite', '-lole32', '-luser32', '-lgdi32', '-ladvapi32',
+                    '-lwindowscodecs', '-lcomdlg32', '-lws2_32', '-lwinhttp', '-lshell32')
+          if ($haveWebp) {
+            $gccArgs = $common + @('-DMOLINK_HAVE_WEBP', '-lwebp', '-lsharpyuv') + $tail
+          } else {
+            $gccArgs = $common + $tail
+          }
+          & $gxx @gccArgs
+          if ($LASTEXITCODE -ne 0) { throw 'native shell did not build' }
+          if (-not (Test-Path build\windows\pkg\moLink-native.exe)) { throw 'native shell did not build' }
+
+      - name: Package the native client (x64)
+        shell: bash
+        run: |
+          VERSION="${PKG_VERSION#v}"
+          PKG_DIR="$(cygpath -w "$GITHUB_WORKSPACE/build/windows/pkg")"
+          OUT_DIR="$(cygpath -w "$GITHUB_WORKSPACE/build/package")"
+          LANG_FILE="$(cygpath -w "$GITHUB_WORKSPACE/packaging/windows/ChineseSimplified.isl")"
+          ISCC=$(find "/c/Program Files (x86)" "/c/Program Files" -maxdepth 2 -iname ISCC.exe 2>/dev/null | head -n 1)
+          MSYS2_ARG_CONV_EXCL='*' MSYS_NO_PATHCONV=1 \
+            "$ISCC" /DAppVersion="$VERSION" /DPkgDir="$PKG_DIR" \
+            /DOutputDir="$OUT_DIR" /DLangFile="$LANG_FILE" \
+            /DAppExeName=moLink-native.exe \
+            /DOutputName="moLink-$VERSION-native-setup-x64" \
+            packaging/windows/installer.iss
+          MSYS2_ARG_CONV_EXCL='*' MSYS_NO_PATHCONV=1 \
+            "/c/Program Files (x86)/NSIS/makensis.exe" /DVERSION="$VERSION" \
+            /DPKG_DIR="$PKG_DIR" /DOUT_DIR="$OUT_DIR" \
+            /DAPP_EXE=moLink-native.exe \
+            /DOUT_NAME="moLink-$VERSION-native-portable-x64.exe" \
+            packaging/windows/portable.nsi
+          # The WebView2 installer already packed the staged tree; it must not
+          # pick up moLink-native.exe, so it is built before this step and the
+          # native setup uses its own output name.
+
+      # The release promises four x64 Windows artifacts; fail here (not in the
+      # upload step) with a clear message if one of them was not produced.
+      - name: Verify the four x64 artifacts
+        shell: bash
+        run: |
+          VERSION="${PKG_VERSION#v}"
+          for name in "$VERSION-setup-x64.exe" "$VERSION-portable-x64.exe" \
+                      "$VERSION-native-setup-x64.exe" \
+                      "$VERSION-native-portable-x64.exe"; do
+            test -f "build/package/moLink-$name" || {
+              echo "::error title=missing-artifact::build/package/moLink-$name was not produced"
+              ls -l build/package
+              exit 1
+            }
+          done
+          ls -l build/package
 
       # A package that silently lost a runtime DLL (jpeg62.dll and the zlib
       # runtime went missing this way) installs but cannot start. Check the
@@ -311,8 +455,14 @@ jobs:
           }
           Write-Host "runtime dependencies OK"
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: moLink-windows-x64
+          if-no-files-found: error
+          path: build/package/*.exe
+
       - uses: softprops/action-gh-release@v2
-        if: github.ref_type == 'tag' 
+        if: github.ref_type == 'tag'
         with:
           name: moLink ${{ github.ref_name }}
           body: 'Windows installer (Inno Setup) and portable executable (x64).'
@@ -320,6 +470,7 @@ jobs:
 
   # Temporarily disabled during the test phase (macOS runners are scarce).
   macos:
+    if: ${{ inputs.skip_slow != true }}
     strategy:
       fail-fast: false
       matrix:
@@ -380,22 +531,95 @@ jobs:
         env:
           CMAKE_PREFIX_PATH: ${{ runner.temp }}/uvcpp
           UVCPP_LIB_DIR: ${{ runner.temp }}/uvcpp/lib
-          VERSION: ${{ github.ref_name }}
+          VERSION: ${{ env.PKG_VERSION }}
           ARCH: ${{ matrix.arch }}
         run: |
           export VERSION="${VERSION#v}"
           export OPENSSL_LIB_DIR="$(brew --prefix openssl@3)/lib"
           ./packaging/macos/build-dmg.sh
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: moLink-macos-${{ matrix.arch }}
+          if-no-files-found: error
+          path: build/package/*.dmg
+
       - uses: softprops/action-gh-release@v2
-        if: github.ref_type == 'tag' 
+        if: github.ref_type == 'tag'
         with:
           name: moLink ${{ github.ref_name }}
           body: 'macOS disk image.'
           files: build/package/*.dmg
 
   # Windows 7 x86 ships in the same release as the other platforms.
+  # Cross-built i686 codec libraries for the Win7 x86 core. The kit's toolchain
+  # is MinGW/MSVCRT, so they are built on Linux with the matching mingw-w64
+  # cross compiler; both are C libraries, so no C++ runtime crosses the line.
+  # Without them the Win7 core is tiles-only (no VP9/VP8/AV1 stream at all).
+  win7-codecs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install i686 cross toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-mingw-w64-i686 g++-mingw-w64-i686 nasm curl
+
+      - name: Build libvpx 1.15.0 (i686, static)
+        run: |
+          curl -sSL --retry 5 -o libvpx.tar.gz \
+            https://github.com/webmproject/libvpx/archive/refs/tags/v1.15.0.tar.gz
+          tar xzf libvpx.tar.gz
+          mv libvpx-1.15.0 libvpx
+          cd libvpx
+          CROSS=i686-w64-mingw32- ./configure --target=x86-win32-gcc --as=nasm \
+            --disable-shared --enable-static --disable-examples --disable-tools \
+            --disable-docs --disable-unit-tests --disable-webm-io --disable-libyuv
+          make -j"$(nproc)"
+
+      - name: Build dav1d 1.4.3 (i686, static)
+        run: |
+          python3 -m pip install --user meson ninja
+          export PATH="$HOME/.local/bin:$PATH"
+          curl -sSL --retry 5 -o dav1d.tar.gz \
+            https://code.videolan.org/videolan/dav1d/-/archive/1.4.3/dav1d-1.4.3.tar.gz
+          tar xzf dav1d.tar.gz
+          cat > i686-cross.txt <<'EOF'
+          [binaries]
+          c = 'i686-w64-mingw32-gcc'
+          ar = 'i686-w64-mingw32-ar'
+          strip = 'i686-w64-mingw32-strip'
+          windres = 'i686-w64-mingw32-windres'
+          [host_machine]
+          system = 'windows'
+          cpu_family = 'x86'
+          cpu = 'i686'
+          endian = 'little'
+          EOF
+          meson setup dav1d-build dav1d-1.4.3 --cross-file i686-cross.txt \
+            -Dbuildtype=release -Denable_asm=false -Denable_tools=false \
+            -Denable_tests=false -Ddefault_library=static
+          ninja -C dav1d-build
+
+      - name: Package the codec prefix
+        run: |
+          mkdir -p out/include/dav1d out/include/vpx out/lib
+          cp libvpx/vpx/*.h out/include/vpx/
+          cp libvpx/vpx_config.h libvpx/vpx_version.h out/include/
+          cp dav1d-1.4.3/include/dav1d/*.h out/include/dav1d/
+          cp dav1d-build/include/dav1d/version.h out/include/dav1d/
+          cp libvpx/libvpx.a dav1d-build/src/libdav1d.a out/lib/
+          tar czf win7-codecs.tar.gz -C out .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: win7-codecs
+          path: win7-codecs.tar.gz
+
   win7-x86:
+    # The codec artifact must exist before this job starts; without `needs`
+    # download-artifact runs immediately and fails with "Artifact not found".
+    needs: win7-codecs
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -415,13 +639,18 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm build
 
-      - name: Fetch WebView2 SDK
+      - name: Fetch the cross-built codecs
+        uses: actions/download-artifact@v4
+        with:
+          name: win7-codecs
+          path: ${{ runner.temp }}/codecs
+
+      - name: Extract the codecs
         shell: pwsh
         run: |
-          $version = '1.0.4258.31'
-          $url = "https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/$version/microsoft.web.webview2.$version.nupkg"
-          Invoke-WebRequest -Uri $url -OutFile wv2.zip
-          Expand-Archive wv2.zip -DestinationPath wv2
+          tar -xzf "$env:RUNNER_TEMP\codecs\win7-codecs.tar.gz" `
+            -C "$env:RUNNER_TEMP\codecs"
+          Get-ChildItem "$env:RUNNER_TEMP\codecs\lib"
 
       # The 1.8.5 kit supplies cmake/make, the zlib static library and a
       # prebuilt/ prefix with the full/webapp profile, so libuvcpp is not
@@ -447,13 +676,30 @@ jobs:
       - name: Build Win7 x86 package
         shell: pwsh
         run: |
-          $version = '${{ github.ref_name }}' -replace '^v',''
+          $version = '${{ env.PKG_VERSION }}' -replace '^v',''
           ./packaging/windows/build-win7-x86.ps1 `
             -Kit "$PWD\kit\libuvcpp-1.8.5-mingw32" `
             -Gcc "$PWD\gcc13\mingw32" `
-            -WebView2 "$PWD\wv2" `
+            -VpxPrefix "$env:RUNNER_TEMP\codecs" `
+            -Dav1dPrefix "$env:RUNNER_TEMP\codecs" `
+            -NativeOnly `
             -Version $version `
             -Out "$PWD\build\package"
+
+      - name: Verify the two x86 artifacts
+        shell: pwsh
+        run: |
+          $version = '${{ env.PKG_VERSION }}' -replace '^v',''
+          $expected = @(
+            "build\package\moLink-$version-native-setup-x86.exe",
+            "build\package\moLink-$version-native-portable-x86.zip"
+          )
+          foreach ($path in $expected) {
+            if (-not (Test-Path $path)) {
+              throw "missing Win7 x86 artifact: $path"
+            }
+          }
+          Get-ChildItem build\package | Format-Table Name,Length
 
       - name: Smoke test the packaged core
         shell: pwsh
@@ -484,15 +730,16 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: moLink-win7-x86
+          if-no-files-found: error
           path: |
-            build/package/*win7-x86.zip
-            build/package/*win7-x86-setup.exe
+            build/package/*native-portable-x86.zip
+            build/package/*native-setup-x86.exe
 
       - name: Attach to the shared release
         uses: softprops/action-gh-release@v2
-        if: github.ref_type == 'tag' 
+        if: github.ref_type == 'tag'
         with:
           overwrite_files: true
           files: |
-            build/package/*win7-x86.zip
-            build/package/*win7-x86-setup.exe
+            build/package/*native-portable-x86.zip
+            build/package/*native-setup-x86.exe

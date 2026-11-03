@@ -108,14 +108,42 @@ class connect_proxy final
       bool native = false;
       const auto it = hello.find("av1_native");
       if (it != hello.end() && it->is_boolean()) native = it->get<bool>();
+      // The native shell's decoders live in this core (the shared surface),
+      // not in the shell, so only what this build actually carries may be
+      // claimed. Claiming libvpx without it made a Win7 viewer stay blank
+      // while its mouse and keyboard still reached the host.
+      bool surface_client = false;
+      const auto client = hello.find("client");
+      if (client != hello.end() && client->is_string() &&
+          client->get<std::string>() == "molink-native") {
+        surface_client = true;
+      }
+      const auto surface = hello.find("surface");
+      if (surface != hello.end() && surface->is_boolean() &&
+          surface->get<bool>()) {
+        surface_client = true;
+      }
       hello.erase("av1");
-      if (native) {
+      if (surface_client) {
+#if !defined(MOLINK_HAVE_VPX) || !MOLINK_HAVE_VPX
+        hello["vp9_stream"] = false;
+        hello["vp8_stream"] = false;
+#endif
+#if !defined(MOLINK_HAVE_DAV1D) || !MOLINK_HAVE_DAV1D
+        hello["av1_native"] = false;
+        hello.erase("av1_stream");
+#else
+        if (native) hello["av1_stream"] = true;
+#endif
+        hello["h264_stream"] = false;
+      } else if (native) {
         hello["av1_stream"] = true;
-        if (std::getenv("MOLINK_AV1_LOG") != nullptr) {
-          std::fprintf(stderr, "proxy: injected av1_stream into hello\n");
-        }
       } else {
         hello.erase("av1_stream");
+      }
+      if (std::getenv("MOLINK_AV1_LOG") != nullptr &&
+          hello.value("av1_stream", false)) {
+        std::fprintf(stderr, "proxy: injected av1_stream into hello\n");
       }
       return hello.dump();
     } catch (...) {

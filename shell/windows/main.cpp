@@ -333,7 +333,16 @@ bool start_core(const std::wstring& core, const std::wstring& web_root, int& por
   std::string line;
   const ULONGLONG deadline = GetTickCount64() + 10000;
   bool complete = false;
+  // The core's libuvcpp logger prints to stdout before the ready JSON, so keep
+  // reading until the ready marker itself arrives; stopping at the first
+  // newline parsed a log line and the shell then ran without a core.
   while (!complete && GetTickCount64() < deadline) {
+    const size_t marker = line.find("\"event\":\"ready\"");
+    if (marker != std::string::npos &&
+        line.find('\n', marker) != std::string::npos) {
+      complete = true;
+      break;
+    }
     DWORD available = 0;
     if (!PeekNamedPipe(read_pipe, nullptr, 0, nullptr, &available, nullptr)) break;
     if (available > 0) {
@@ -344,15 +353,35 @@ bool start_core(const std::wstring& core, const std::wstring& web_root, int& por
         break;
       }
       line.append(buffer, got);
-      if (line.find('\n') != std::string::npos) complete = true;
+      if (line.size() > 256 * 1024) break;
     } else {
       Sleep(100);
     }
   }
   CloseHandle(read_pipe);
+  // Keep only the ready JSON. The JSON object's keys are sorted, so it starts
+  // with "capture" or another key, never necessarily "event"; find the object
+  // that contains the marker rather than assuming it starts the line.
+  {
+    const size_t marker = line.find("\"event\":\"ready\"");
+    if (marker != std::string::npos) {
+      const size_t previous_newline = line.rfind('\n', marker);
+      const size_t start = previous_newline == std::string::npos
+                               ? 0
+                               : previous_newline + 1;
+      const size_t brace = line.find('{', start);
+      const size_t end = line.find('\n', marker);
+      if (brace != std::string::npos) {
+        line = line.substr(brace, end == std::string::npos
+                                      ? std::string::npos
+                                      : end - brace);
+      }
+    }
+  }
 
   long parsed_port = 0;
-  if (!complete || !json_number(line, "port", parsed_port) ||
+  if (!complete || line.empty() || line.front() != '{' ||
+      !json_number(line, "port", parsed_port) ||
       !json_string(line, "token", token) ||
       !json_string(line, "client_token", client_token) || parsed_port <= 0) {
     error = L"molink-core did not report a ready port and tokens";

@@ -11,6 +11,24 @@ import { expandTile, tilePixelKind } from './tiles'
  * of waiting for a fresh keyframe (which used to show black for a while).
  */
 const buffers = new Map<string, HTMLCanvasElement>()
+/// Reusable pixel/image buffers keyed by "wxh". Tiles of the same size (a
+/// full-screen keyframe, or the strips of a delta) reuse one allocation.
+interface ScratchPixels {
+  pixels: Uint8ClampedArray<ArrayBuffer>
+  image: ImageData
+}
+const scratchPixels = new Map<string, ScratchPixels>()
+
+function scratchFor(width: number, height: number): ScratchPixels {
+  const key = `${width}x${height}`
+  let scratch = scratchPixels.get(key)
+  if (scratch === undefined) {
+    const pixels = new Uint8ClampedArray(width * height * 4)
+    scratch = { pixels, image: new ImageData(pixels, width, height) }
+    scratchPixels.set(key, scratch)
+  }
+  return scratch
+}
 
 /// Applies one frame to the session's picture. Deltas are painted over the
 /// previous image; a resolution change waits for the core's keyframe.
@@ -30,9 +48,14 @@ export function applyFrameToSession(key: string, frame: Frame): void {
   context.imageSmoothingEnabled = false
   for (const tile of frame.tiles) {
     if (tile.w === 0 || tile.h === 0) continue
-    const rgba = expandTile(frame.codec, tile.data, tile.w, tile.h)
+    const scratch = scratchFor(tile.w, tile.h)
+    const rgba = expandTile(frame.codec, tile.data, tile.w, tile.h,
+                            scratch.pixels)
     if (rgba === null) continue
-    context.putImageData(new ImageData(rgba, tile.w, tile.h), tile.x, tile.y)
+    const image = rgba === scratch.pixels
+      ? scratch.image
+      : new ImageData(rgba, tile.w, tile.h)
+    context.putImageData(image, tile.x, tile.y)
   }
 }
 
@@ -115,4 +138,5 @@ export function sessionScreenBuffer(key: string): HTMLCanvasElement | null {
 
 export function forgetSessionScreenBuffer(key: string): void {
   buffers.delete(key)
+  scratchPixels.clear()
 }

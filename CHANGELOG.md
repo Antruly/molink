@@ -1,5 +1,163 @@
 # Changelog
 
+## [0.10.1] — 2026-11-03
+
+### Fixed
+
+- **浏览器打开本机 Web UI 直接 403（`client_token_required`）**：桌面壳会把
+  `?client=<token>` 带进 URL，而安装包里的 `start-browser-ui.cmd` 只是打开
+  `http://127.0.0.1:28418/`，于是 Win7 等没有 WebView2 的机器看到的是一段错误
+  JSON 而不是界面。核心新增 `--open-ui`，启动后自己用带 token 的地址打开默认
+  浏览器；ready 行也给出 `ui_url` 与 `video_decoders`。
+- **Windows 7 native 端「已连接但一直等画面，键鼠正常」**：native 壳的
+  `--proxy`/`--core` 分支只设置了 `request_tiles=false`，没有声明流解码能力，
+  welcome 后也不会请求首帧（另一分支才发 `request-keyframe`/`request-frame`）；
+  共享表面解码线程发布第一帧后也没有任何信号让壳停止重试。现在：
+  1. 所有模式在 welcome 后都会请求首帧，未拿到画面时每 500 ms 重试（带
+     整屏瓦片刷新），surface 发布新帧会调用 `note_surface_frame()` 结束引导；
+  2. proxy 分支在有共享表面时声明 `set_stream_decoding()`；
+  3. hello 携带 `client:"molink-native"`，本机 core 会把
+     `vp9_stream`/`vp8_stream`/`av1_native` 收敛到它**真正编译进来的解码器**
+     （没有 libvpx/dav1d 时不再向主机要一个自己解不了的流）；
+  4. ready 行的 `video_decoders` 让壳按 core 的真实能力选择。
+- **主机端没有画面时的最终保底**：新会话在采集历史里找不到关键帧时，现在先
+  用当前像素发一次整屏瓦片刷新（覆盖 90% 以上时在帧头置 `keyframe` 位），
+  页面/原生端都会把这次刷新当成第一张完整画面；以前整屏刷新不带关键帧位，
+  页面在 `hasImage=false` 时直接丢弃，主机却以为已经给过画面。
+- **裁掉流之后画面冻结最多 15 秒（Web）**：主机离开流模式时会强制一张整屏
+  瓦片关键帧，但页面把所有「最近 15 秒内有流画面」的瓦片都忽略了。现在瓦片
+  **关键帧**豁免（只忽略流结束后的局部补洞），流→瓦片交接立即可见。
+- **Web 壳每帧重渲染整棵会话视图**：连接层不再把每一帧都写进 zustand，
+  画布通过 `session-repaint` 事件在 `requestAnimationFrame` 里只 blit 一次；
+  帧元数据（尺寸/编码/关键帧）变化时立即更新，其余最多 500 ms 一次。
+- **Web 端解码队列无上限**：`DecompressionStream` 的异步工作链现在最多排 4
+  帧，超出时丢弃并请求瓦片修复/关键帧；VP8/VP9/H.264 的 WebCodecs 延迟容忍
+  从 2 帧提高到 4 帧，避免「稍微慢一点就整屏重发关键帧」的抖动。瓦片解码复用
+  每会话的像素缓冲区，1080p RGB565 不再每帧分配约 8 MB。
+- **会话端读不到 core 的 ready 行**：libuvcpp 的控制台日志先于 ready JSON 写在
+  stdout，三个外壳（Win32/WebView2、native Direct2D、Linux GTK）都在第一个
+  换行处停止读取，把日志行当成 ready 行解析，随后报告「没有 ready 端口」。
+  现在一直读到 `"event":"ready"` 标记，并按标记所在行取 JSON（nlohmann 按键
+  排序，行首不一定是 `event`，按 `{"event":"ready"` 找开头同样会失败）。
+- **native 壳读取共享表面时崩溃**：表面文件以 `FILE_MAP_READ` 只读映射，
+  而读取 64 位序号用了 `InterlockedCompareExchange64`（带 lock 的写操作），
+  在只读页上必然触发访问冲突。改为与 Linux 壳相同的 acquire 顺序普通读取；
+  发布端仍用 interlocked 写。
+- **Win7 x86 包里的原生安装器缺少图标**：win7 构建脚本没有把 `molink.ico`
+  复制到暂存目录，而 `installer.iss` 以 `{#PkgDir}\molink.ico` 作为
+  SetupIconFile。已补上。
+- **防火墙只允许「专用/域」网络**：Win7/家用网络常被标为「公用」，安装器的
+  程序规则因此不生效，远程连接表现为完全不可达。安装器与
+  `install-firewall.cmd` 改为按程序 `molink-core.exe`、`profile=any` 放行。
+- **Win7 x86 构建可能悄悄退化成只发瓦片**：新增
+  `MOLINK_REQUIRE_VPX`/`MOLINK_REQUIRE_DAV1D`，打包脚本传入后缺少
+  libvpx/dav1d 会直接 configure 失败，而不是产出一个没有流能力的包。
+- 共享表面序号的 Windows 读写改为 `InterlockedExchange64` /
+  `InterlockedCompareExchange64`，32 位不再可能读到撕裂的 64 位序号而取错
+  双缓冲槽。
+- **新会话一直黑屏（主机端）**：`capture_base::stream_for_frame` 用
+  `stream_policy_.streaming` 给 `stream_live_` 赋值，但策略可以在**没有可用编码器**
+  时照常进入流模式（没有 GPU 编码器，或查看端一个流编解码器都不支持）。于是一个
+  新会话会一直等 AV1 关键帧，主机却只发布它其实能解码的瓦片帧 —— 画面全黑。
+  现在只有真正拿到编码器的那一帧才把 `stream_live_` 置真；`session_controller`
+  也只在最新帧确实是流帧时（`latest->av1_only`）才等流关键帧，否则从瓦片关键帧
+  起步。
+- **瓦片模式的会话永远没有「已有画面」**：整屏刷新
+  （`kPacketFlagTileRefresh`）覆盖 90% 以上时现在记为 `has_image`，主机因此会
+  发送瓦片时钟，客户端只补真正过期的格子，不再每隔几秒整屏轮询。
+- **关键帧请求风暴**：每个会话的关键帧请求加了 1 秒节流。没有画面时推送时钟每
+  一拍都请求一次关键帧，每次都让采集发布整帧，并把所有瓦片时钟格子标成变化，
+  连带别的查看端也整屏重传。
+- **正常会话被 `1001: idle timeout` 误杀**：`session_supervisor` 里
+  `now - last_seen_ms` 在快照时间戳晚于 `now` 时会回绕成约 2^64，所有「超过 N 毫秒」
+  判断同时成立。现在用饱和减法。
+- **覆盖安装原生版时报「DeleteFile 失败；错误代码 5」**：安装程序的
+  `StopRunningApp` 只杀了 `moLink.exe` / `molink-core.exe`，没杀原生外壳
+  `moLink-native.exe`；升级一台正在运行原生版的机器时，装到外壳那一步就被占用
+  挡住并回滚（`/VERYSILENT` 下直接以退出码 5 失败）。现在升级/卸载都会先结束
+  `moLink-native.exe`。
+- **新会话显示上一个远程的画面（原生客户端）**：连接新主机时只清掉了瓦片位图，
+  共享表面位图仍指向上一次会话最后一帧，而绘制时无条件优先用它 —— 于是新会话
+  一帧都没收到时，把上一个远程的桌面画在窗口里。现在新建连接会释放表面位图，
+  并记下当时的共享内存序号，只有序号前进（证明核心真的为新会话发布过帧）才重新
+  采纳；同时记录两条画面各自的刷新时刻，切换流式/瓦片时挑正在更新的那条。
+
+## [0.10.0] — 2026-10-31
+
+原生 Windows 客户端与传输稳定性版本。
+
+### Added
+
+- **原生 Windows 客户端**（`shell/windows/ui_kit_demo.cpp`，Direct2D，不依赖
+  WebView2）：首页自助卡片、最近/已保存设备、会话工具栏、设置与安全面板、聊天
+  与文件抽屉。图标改为直接使用 web 端 lucide 图标数据（同一份 SVG 路径，2/24
+  线宽、圆头圆角）。
+- **瓦片时钟（0x15）**：客户端按 128 px 格子维护已应用采集时间戳，只请求真正
+  过期的格子（每秒最多一次、最多 64 个矩形），静态桌面不再整屏轮询。
+- **流编码菜单**：native 客户端可直接选 自动 / 平铺 / VP9 / VP8（链接了
+  OpenSSL 的 core 还会提供 AV1）。选择后由本机 core 解码并发布到共享表面。
+- **设备头像**：主机 `welcome` 携带自己的头像；上传的 WebP 由 shell 解码一次并
+  缓存为 BMP，客户端以圆角图像显示；没有头像时显示首字母彩色块。
+- **最近连接**：按目标去重、单击回填、双击直连、星标保存到「已保存」、备注
+  重命名；行内操作（星标/编辑/删除/快捷动作）悬停淡入。
+- **检查更新**：先请求最新 release 标签，有新版才显示「立即更新」，再点才打开
+  下载页（只指向 native 资产）。
+- 默认窗口 1280×800 并居中于工作区。
+
+### Fixed
+
+- **原生客户端连不上自己启动的核心**：`local_core_port()` 只认
+  `MOLINK_CORE_PORT`，否则回落到 28418，而壳层用 `--port 0` 启动主机核心后
+  ready 行给的端口是随机的，于是「设置」「身份」请求打到 28418，首页一直显示
+  「本机核心未运行」。现在优先返回 ready 行的端口；外部核心仍可用
+  `MOLINK_CORE_PORT` 指定。
+- **Win7 无法启动 core**：包内 `libuv.dll`（1.51）静态导入 Windows 8+ 的
+  `GetSystemTimePreciseAsFileTime`，Win7 加载时报「无法定位程序输入点」。
+  重新构建的 DLL 在运行时探测该入口，缺失时回退到 `GetSystemTimeAsFileTime`；
+  导入表只剩 Win7 具备的函数。
+- **安装包 x64 构建失败**：`installer.iss` 的 `#define ArchAllowed "x64"`
+  写在使用它的 `ArchitecturesAllowed` 之后，未显式传 `/DArchAllowed` 时会
+  报 Undeclared identifier；默认定义已前移。
+- **原生客户端的身份是假的**：首页自助卡片里的设备 ID、验证码、地址和
+  「ID 服务器已连接」都是写死的演示值（`BDV-NCK-9DN` / `482913` /
+  `192.168.1.8:28418`）。所有装了 native 版的机器都显示同一个"已注册"设备，
+  而目录里从来没有这个 ID，所以拿它去连接必然失败。现在壳层在启动时启动并
+  持有主机核心，从本机核心的 `/api/device` 与 `/api/state` 读取真实身份：
+  已注册时显示目录下发的 display id，验证码、局域网地址、剩余次数与在线状态
+  都来自核心；没有核心时显示「本机核心未运行」而不是假数据。「更换验证码」
+  改为调用 `/api/auth/code` 轮换主机真实的码，不再在本地随机编一个。
+- **原生客户端启动主机核心**：与 WebView2 壳一致，`moLink-native.exe` 启动
+  时拉起 `molink-core.exe` 并持有它的 ready 行 token，因此装好即成为可被
+  远程控制的主机并注册到 ID 服务器。新增单实例互斥
+  （`Local\moLinkShellInstance`，与 WebView2 壳共用；`--standalone` 跳过），
+  防止同一配置目录下两个核心用同一个 ID 同时心跳。
+- **反复掉线**：主机 supervisor 的 `now - last_seen` 使用无符号减法，消息恰好
+  在检查窗口内到达时下溢，健康的会话被误判为「空闲超时」关闭。三处超时判断
+  统一改为 `elapsed_since()`。
+- **重启主机后连不上**：`hello_required` 的重发被 200 ms 时间闸跳过，客户端
+  永远收不到 welcome；现在收到即重发（最多 6 次）。
+- **瓦片模式引导**：整屏刷新不再让会话一直停留在「无画面」，刷新覆盖 ≥90% 时
+  标记 `has_image`，瓦片时钟随之开始下发；无画面的会话每会话每秒最多请求一次
+  关键帧，避免把每次推送都变成全屏编码。
+- **编码菜单只剩平铺**：native 客户端不再在连接时改写主机全局 `stream_codec`；
+  菜单按「是否具备流解码能力」启用条目，直连瓦片模式如实只提供平铺。
+- 设置页关闭动画卡顿：缓存文字测量、实心画刷与背景渐变，并精简亮色阴影层数
+  （1280×800 下每帧 14.3 ms → 11.6 ms）。
+
+### Changed
+
+- 亮色主题补齐 web 的页面渐变与两层辉光；暗色保持不变。亮色阴影改为 web
+  `--shadow-md` 的语义（向内收、向下偏移的柔和投影）。
+- Windows core 重新以 OpenSSL 静态链接构建，恢复 TLS/WSS/HTTP3 能力。
+- 本机 core 优先用于 host:port 连接（解码流到共享表面），失败自动回退直连
+  瓦片并提示。
+
+### Verified
+
+- 静态桌面瓦片模式实测 ≈5.6 KB/s；瓦片时钟只请求变化格子。
+- 主机修复后连续运行零掉线；VP8 流选择后画面正常解码显示。
+- 后端测试与前端 build 沿用 0.9.82 的基线（本次改动集中在会话/壳/主题）。
+
 ## [0.9.82] — 2026-10-31
 
 ### Added

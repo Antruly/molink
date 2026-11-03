@@ -451,10 +451,23 @@ bool send_tile_refresh(session_transport* transport,
     err = "refresh rectangles were empty";
     return false;
   }
+  // A refresh that covers the whole screen leaves the viewer with a complete
+  // picture, exactly like a keyframe. Mark it as one in the frame header: the
+  // page refuses a tile refresh until it has an image, so without the flag the
+  // bootstrap refresh was thrown away and the session stayed on "waiting for
+  // the first frame" even though the host had just sent it the whole desktop.
+  uint64_t covered = 0;
+  for (const protocol::tile_blob& tile : tiles) {
+    covered += static_cast<uint64_t>(tile.w) * tile.h;
+  }
+  const uint64_t screen =
+      static_cast<uint64_t>(width) * static_cast<uint64_t>(height);
+  const bool full_refresh = screen > 0 && covered * 10 >= screen * 9;
   protocol::frame_header header;
   header.frame_seq = 0;
   header.codec = static_cast<uint8_t>(protocol::codec::bgra);
   header.flags = protocol::kFrameFlagPartial;
+  if (full_refresh) header.flags |= protocol::kFrameFlagKeyframe;
   header.screen_w = static_cast<uint16_t>(width);
   header.screen_h = static_cast<uint16_t>(height);
   header.tile_w = 128;
@@ -472,9 +485,15 @@ bool send_tile_refresh(session_transport* transport,
                             nullptr, err)) {
     return false;
   }
-  return send_frame_payload(transport, session,
-                            protocol::kPacketFlagTileRefresh, epoch_us(),
-                            payload);
+  if (!send_frame_payload(transport, session,
+                          protocol::kPacketFlagTileRefresh, epoch_us(),
+                          payload)) {
+    return false;
+  }
+  // The full-screen refresh above was flagged as a keyframe, so it counts as
+  // the session's first complete picture; tile clocks can start flowing.
+  if (full_refresh) session->has_image = true;
+  return true;
 }
 
 /// Cursor bitmap and position are sent alongside frames: they are small, change
@@ -540,6 +559,21 @@ void send_capture_frame(session_transport* transport,
     send_empty_frame(transport, session, 0, 0, false);
     return;
   }
+  // Per-session keyframe throttle. The push clock calls this function at the
+  // capture rate; a session without a picture would otherwise request a
+  // keyframe every tick, and each request makes the capture publish a
+  // full-screen frame -- expensive, and it marks every tile-clock cell as
+  // changed, which sends every *other* viewer after the whole screen too.
+  const auto ask_keyframe = [&opt, &session]() {
+    if (!opt.capture) return;
+    const uint64_t now = now_ms();
+    if (session->last_keyframe_request_ms != 0 &&
+        now - session->last_keyframe_request_ms < 1000) {
+      return;
+    }
+    session->last_keyframe_request_ms = now;
+    opt.capture->request_keyframe();
+  };
 
   const std::shared_ptr<const captured_frame> latest = opt.capture->latest();
   if (!latest) {
@@ -568,7 +602,32 @@ void send_capture_frame(session_transport* transport,
       }
     }
     if (start_seq < 0) {
-      opt.capture->request_keyframe();
+      // No keyframe is left in the replay history. On a tile-capture host the
+      // history can have evicted the only keyframe while the desktop stayed
+      // still (DXGI produces no frames, and a GDI host may have been idle for
+      // longer than the one-second history). Asking the capture is the plan A,
+      // but a capture that is stuck or switching desktops can leave the viewer
+      // on "waiting for a picture" indefinitely. A full-screen refresh reads
+      // the *current* pixels directly and is not gated on the capture's
+      // keyframe state, so it always bootstraps the picture. Only for a tile
+      // capture: a stream viewer would have its tiles overwritten by the next
+      // stream keyframe anyway.
+      if (!latest->av1_only) {
+        const uint64_t now = now_ms();
+        if (session->last_keyframe_request_ms == 0 ||
+            now - session->last_keyframe_request_ms >= 1000) {
+          session->last_keyframe_request_ms = now;
+          const std::vector<refresh_rect> full{{0, 0, latest->width,
+                                                latest->height}};
+          std::string refresh_error;
+          if (send_tile_refresh(transport, session, opt, full,
+                                refresh_error)) {
+            session->last_capture_seq = static_cast<int64_t>(latest->seq);
+            return;
+          }
+        }
+      }
+      ask_keyframe();
       if (!push) {
         send_empty_frame(transport, session, latest->width, latest->height,
                          false);
@@ -580,11 +639,15 @@ void send_capture_frame(session_transport* transport,
     // and it made the first second of a session stutter before the stream
     // took over. Wait for the stream's own keyframe instead, which follows
     // within a frame.
-    if (opt.capture->stream_on()) {
+    // Only while the newest frame really is a stream frame: a capture whose
+    // encoder fell back to tiles (or whose viewer set cannot decode the
+    // stream) must let the session start from the tile keyframe, otherwise
+    // it waits for a keyframe that will never be produced.
+    if (opt.capture->stream_on() && latest->av1_only) {
       const std::shared_ptr<const captured_frame> start =
           opt.capture->find(static_cast<uint32_t>(start_seq));
       if (!start || !start->av1_only) {
-        opt.capture->request_keyframe();
+        ask_keyframe();
         if (!push) {
           send_empty_frame(transport, session, latest->width, latest->height,
                            false);
@@ -682,7 +745,7 @@ void send_capture_frame(session_transport* transport,
   }
   if (action == replay_action::request_keyframe) {
     session->last_capture_seq = -1;
-    opt.capture->request_keyframe();
+    ask_keyframe();
     send_empty_frame(transport, session, latest->width, latest->height, false);
     return;
   }
@@ -704,7 +767,7 @@ void send_capture_frame(session_transport* transport,
         return;
       }
       session->last_capture_seq = -1;
-      opt.capture->request_keyframe();
+      ask_keyframe();
       send_empty_frame(transport, session, latest->width, latest->height,
                        false);
       return;
@@ -748,7 +811,7 @@ void send_capture_frame(session_transport* transport,
       }
       session->has_image = false;
       session->last_capture_seq = -1;
-      opt.capture->request_keyframe();
+      ask_keyframe();
       send_empty_frame(transport, session, latest->width, latest->height, false);
       return;
     }
@@ -759,7 +822,7 @@ void send_capture_frame(session_transport* transport,
       // capture because not every session supports it.
       session->has_image = false;
       session->last_capture_seq = -1;
-      opt.capture->request_keyframe();
+      ask_keyframe();
       send_empty_frame(transport, session, frame->width, frame->height, false);
       return;
     }
@@ -809,7 +872,7 @@ void send_capture_frame(session_transport* transport,
       }
       session->has_image = false;
       session->last_capture_seq = -1;
-      opt.capture->request_keyframe();
+      ask_keyframe();
       return;
     }
     session->last_capture_seq = seq;
@@ -952,6 +1015,13 @@ void send_welcome(session_transport* transport, const session_info& session,
   }
   j["codec_preference"] =
       opt.auth ? opt.auth->settings().stream_codec : std::string("auto");
+  // Host-global video path (stream / mixed / tiles). The native shell shows
+  // the same three-way switch the web's preferences panel offers.
+  j["video_mode"] =
+      opt.auth ? opt.auth->settings().video_mode : std::string("mixed");
+  // The host's own avatar (a `preset:*` key or a small data URL), so a native
+  // viewer can show the same picture the directory does.
+  j["avatar"] = opt.auth ? opt.auth->settings().avatar : std::string();
   // WebRTC (Phase 4): the host can offer an H.264 video track the browser
   // decodes natively. Only advertised by builds that carry the media stack.
   j["webrtc"] = MOLINK_HAVE_WEBRTC ? true : false;
@@ -2219,6 +2289,34 @@ void session_controller::on_text(const std::string& text) {
     return;
   }
 
+  // Host-global video path, the session-scoped twin of POST /api/settings
+  // `video_mode`: the native shell has no HTTP client and the web's settings
+  // page is not available to it, so the mode travels over the same socket the
+  // picture does.
+  if (type == "video-mode") {
+    if (!require_auth()) return;
+    const std::string value = string_field(j, "value");
+    if (!options_.auth || !options_.auth->set_video_mode(value)) {
+      send_error(transport.get(), "bad_video_mode",
+                 "expected stream, mixed or tiles");
+      return;
+    }
+    if (options_.capture) {
+      // "stream" pins the video path; the supervisor's next tick applies
+      // mixed/tiles and re-evaluates every viewer's capabilities.
+      options_.capture->set_stream_always(value == "stream");
+    }
+    uvcpp_json shared;
+    shared["type"] = "video-mode";
+    shared["value"] = value;
+    shared["scope"] = "global";
+    for (const session_info& peer : registry_->snapshot()) {
+      if (!peer.authenticated || !peer.transport) continue;
+      send_json(peer.transport.get(), shared);
+    }
+    return;
+  }
+
   if (type == "stream-codec") {
     if (!require_auth()) return;
     const std::string value = string_field(j, "value");
@@ -2867,6 +2965,13 @@ void session_supervisor::run() {
       // the pinned/laddered AV1 was always refused and silently fell back to
       // H.264.
       const bool allow = enabled && live && all_stream;
+      // A stream round is only worth starting when at least one viewer can
+      // actually decode it. With a tiles-only viewer (or a host build without
+      // the encoders) the join window below used to hold the stream path for
+      // kJoinStreamMs and the first picture waited for it; tiles can start at
+      // once instead.
+      const bool can_stream = allow || all_h264_stream || all_vp9_stream ||
+                              all_vp8_stream;
       if (std::getenv("MOLINK_AV1_LOG") != nullptr && allow != av1_allowed_) {
         std::fprintf(stderr, "host: av1 allowed=%d\n", allow ? 1 : 0);
         av1_allowed_ = allow;
@@ -2923,7 +3028,8 @@ void session_supervisor::run() {
       // first tile keyframe of a full screen is the expensive one and made
       // the first seconds stutter. The movement rule takes over after this
       // window, so a still screen still settles on tiles ten seconds in.
-      if (live && !had_viewers_ && stream_allowed && options_.capture) {
+      if (live && !had_viewers_ && stream_allowed && can_stream &&
+          options_.capture) {
         options_.capture->request_stream(kJoinStreamMs);
         had_viewers_ = true;
       } else if (!live) {
@@ -3204,6 +3310,14 @@ void session_supervisor::run() {
         }
       }
     }
+    // A snapshot timestamp can be newer than `now`: a message that arrived
+    // while this tick was being assembled updates last_seen_ms past the value
+    // read at the top of the loop. Unsigned subtraction then wraps to ~2^64
+    // and every "older than N ms" test fires. That is what closed healthy
+    // sessions with a bogus `1001: idle timeout` every few seconds.
+    const auto elapsed_since = [now](uint64_t then) -> uint64_t {
+      return now > then ? now - then : 0;
+    };
     for (const session_info& s : sessions) {
       if (!s.authenticated) {
         // A pending approval is a deliberate wait, not a stuck client.
@@ -3211,7 +3325,7 @@ void session_supervisor::run() {
                                    ? 120000
                                    : static_cast<uint64_t>(
                                          options_.hello_timeout_ms);
-        if (now - s.connected_ms > limit) {
+        if (elapsed_since(s.connected_ms) > limit) {
           const uint32_t id = s.id;
           app_.post([registry = registry_, id] {
             const auto live = registry->find(id);
@@ -3228,7 +3342,7 @@ void session_supervisor::run() {
         continue;
       }
 
-      if (now - s.last_ping_ms >=
+      if (elapsed_since(s.last_ping_ms) >=
           static_cast<uint64_t>(options_.heartbeat_ms)) {
         const uint32_t id = s.id;
         app_.post([registry = registry_, id] {
@@ -3243,8 +3357,16 @@ void session_supervisor::run() {
       }
 
       if (!s.awaiting_approval &&
-          now - s.last_seen_ms >
+          elapsed_since(s.last_seen_ms) >
               static_cast<uint64_t>(options_.idle_close_ms)) {
+        if (std::getenv("MOLINK_STREAM_LOG") != nullptr) {
+          std::fprintf(stderr,
+                       "host: idle close id=%u now=%llu last_seen=%llu "
+                       "idle_ms=%d\n",
+                       s.id, static_cast<unsigned long long>(now),
+                       static_cast<unsigned long long>(s.last_seen_ms),
+                       options_.idle_close_ms);
+        }
         const uint32_t id = s.id;
         app_.post([registry = registry_, id] {
           const auto live = registry->find(id);

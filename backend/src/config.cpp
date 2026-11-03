@@ -109,6 +109,10 @@ bool parse_args(int argc, char** argv, core_config& cfg, std::string& err) {
       cfg.print_ready_json = true;
       continue;
     }
+    if (arg == "--open-ui") {
+      cfg.open_ui = true;
+      continue;
+    }
     if (arg == "--allow-remote") {
       cfg.allow_remote = true;
       continue;
