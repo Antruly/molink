@@ -2915,6 +2915,14 @@ void session_supervisor::run() {
       for (const session_info& peer : registry_->snapshot()) {
         if (!peer.authenticated) continue;
         if (!still_watching(peer)) continue;
+        // A session that neither receives the push clock nor advertised any
+        // video decoder is a control/chat/file client, not a viewer. Counting
+        // it in the "all viewers can decode X" test made a single such
+        // session disable the stream for every real viewer.
+        const bool video_viewer =
+            peer.video_push || peer.av1_stream || peer.h264_stream ||
+            peer.vp9_stream || peer.vp8_stream;
+        if (!video_viewer) continue;
         live = true;
         ++viewers;
         if (!peer.av1_stream) all_stream = false;

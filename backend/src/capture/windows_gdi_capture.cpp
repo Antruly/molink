@@ -278,7 +278,20 @@ class gdi_capture final : public capture_base {
     snapshot.serial = static_cast<uint32_t>(
         reinterpret_cast<uintptr_t>(info.hCursor) & 0xffffffffu);
     if ((info.flags & CURSOR_SHOWING) != 0 && info.hCursor != nullptr) {
-      draw_cursor(info.hCursor, snapshot);
+      // The cursor bitmap only depends on the handle, not its position. It
+      // used to be redrawn (two DIBs + DrawIconEx) on every captured frame,
+      // which on a Windows 7 VM cost more than the encode itself and capped
+      // the capture at ~11 fps. Reuse the bitmap for the same handle.
+      if (snapshot.serial != cursor_bitmap_serial_ ||
+          cursor_bitmap_.rgba.empty()) {
+        draw_cursor(info.hCursor, cursor_bitmap_);
+        cursor_bitmap_serial_ = snapshot.serial;
+      }
+      snapshot.width = cursor_bitmap_.width;
+      snapshot.height = cursor_bitmap_.height;
+      snapshot.hotspot_x = cursor_bitmap_.hotspot_x;
+      snapshot.hotspot_y = cursor_bitmap_.hotspot_y;
+      snapshot.rgba = cursor_bitmap_.rgba;
     }
     set_cursor(std::move(snapshot));
   }
@@ -354,6 +367,11 @@ class gdi_capture final : public capture_base {
   HBITMAP bitmap_ = nullptr;
   HGDIOBJ old_bitmap_ = nullptr;
   void* bits_ = nullptr;
+  /// Last cursor bitmap drawn, keyed by the cursor handle. The bitmap does not
+  /// change when the pointer moves; redrawing it per frame was a measurable
+  /// capture-rate cost on Windows 7.
+  uint32_t cursor_bitmap_serial_ = 0;
+  cursor_snapshot cursor_bitmap_;
   int x_ = 0;
   int y_ = 0;
   uint16_t width_ = 0;
