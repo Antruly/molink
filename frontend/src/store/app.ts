@@ -36,6 +36,7 @@ import type {
   Welcome,
 } from '../lib/client'
 import { cleanDeviceNote, deviceNoteKey } from '../lib/device-note'
+import { logDiag } from '../lib/diag-log'
 import type { FpsSetting } from '../lib/frame-rate'
 import { parseFpsSetting } from '../lib/frame-rate'
 import type { Frame } from '../lib/protocol'
@@ -1229,6 +1230,13 @@ export const useAppStore = create<AppState>((set, get) => {
         tabs: [...state.tabs, tab],
         activeTabId: id,
       }))
+      logDiag('info', 'session.create', tab.label, {
+        target: `${tab.host}:${tab.port}`,
+        mode: tab.mode,
+        intent: tab.intent,
+        access: requestAccess || undefined,
+        device: deviceId || undefined,
+      })
       get().syncUiState()
 
       const connection = new SessionConnection({
@@ -1290,6 +1298,12 @@ export const useAppStore = create<AppState>((set, get) => {
     },
 
     closeTab: (id) => {
+      const closing = get().tabs.find((tab) => tab.id === id)
+      if (closing) {
+        logDiag('info', 'session.close', closing.label, {
+          target: `${closing.host}:${closing.port}`,
+        })
+      }
       const connection = runtimes.get(id)
       connection?.disconnect()
       runtimes.delete(id)

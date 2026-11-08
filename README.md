@@ -2,7 +2,7 @@
 
 跨平台远程桌面。Web 优先，一套后台 + 浏览器壳层，桌面端直连，移动端经服务端中转。
 
-> 官方网站：[ssvr.top/molink](https://ssvr.top/molink) · 版本 0.10.5 · MIT · 协议版本 1
+> 官方网站：[ssvr.top/molink](https://ssvr.top/molink) · 版本 0.10.6 · MIT · 协议版本 1
 
 ![主页（亮色）](docs/screenshots/home-light.png)
 ![会话页（合成测试帧）](docs/screenshots/session-light.png)
@@ -144,9 +144,9 @@ cmake --build shell/native/build --parallel
 生成 Linux 安装包：
 
 ```bash
-./packaging/linux/build-deb.sh       # build/package/molink_0.10.5_amd64.deb
-./packaging/linux/build-appimage.sh  # build/package/moLink-0.10.5-x86_64.AppImage
-./packaging/linux/build-rpm.sh       # build/package/molink-0.10.5-1.x86_64.rpm
+./packaging/linux/build-deb.sh       # build/package/molink_0.10.6_amd64.deb
+./packaging/linux/build-appimage.sh  # build/package/moLink-0.10.6-x86_64.AppImage
+./packaging/linux/build-rpm.sh       # build/package/molink-0.10.6-1.x86_64.rpm
 ```
 
 Windows（需 WebView2 SDK、Inno Setup 6 与 NSIS）与 macOS（`.app` + `.dmg`）的构建步骤见

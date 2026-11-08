@@ -1,8 +1,9 @@
-// Checks the relay/ICE split. The sender moves keyframes, AV1 patches, tile
-// refreshes, tile clocks, file data and repair requests to the relay once ICE
-// is active; the receiving switchable must accept exactly the same set from
-// the relay and leave everything else on ICE. Regression test for the split
-// that silently dropped every repair packet after a P2P switch.
+// Checks the relay/ICE split. File data and legacy AV1 patches stay on the
+// reliable relay; keyframes, tile refreshes, tile clocks and repair requests
+// follow the video on ICE once it is active, so a relay that goes half-open
+// after the P2P upgrade cannot silently swallow the packets that keep the
+// picture decodable. The receiving switchable still accepts the old repair set
+// from the relay, for peers that have not been updated yet.
 
 #include <cstdint>
 #include <cstdio>
@@ -181,6 +182,16 @@ void test_relay_split() {
   expect(texts.size() == 1 && binaries.size() == 1,
          "relay is fully read before the switch");
 
+  // Outbound repairs also start on the relay, where they are reliable.
+  const auto early_keyframe = keyframe_packet();
+  switcher->send_text("{\"type\":\"request-tiles\",\"tiles\":[]}");
+  switcher->send_binary(early_keyframe.data(), early_keyframe.size());
+  expect(relay->sent_text.size() == 1 && relay->sent_binary.size() == 1 &&
+             ice->sent_text.empty() && ice->sent_binary.empty(),
+         "before the switch repairs use the relay");
+  relay->sent_text.clear();
+  relay->sent_binary.clear();
+
   texts.clear();
   binaries.clear();
   switcher->set_ice(ice);
@@ -211,32 +222,41 @@ void test_relay_split() {
   expect(texts.size() == 1 && binaries.size() == 1,
          "ICE carries deltas and ordinary text");
 
-  // Outbound routing matches the inbound split.
+  // Outbound: once ICE is active, everything that keeps the picture
+  // decodable follows the video. The relay keeps only file data and legacy
+  // AV1 patches.
   relay->sent_text.clear();
   relay->sent_binary.clear();
   ice->sent_text.clear();
   ice->sent_binary.clear();
   switcher->send_text("{\"type\":\"request-tiles\",\"tiles\":[]}");
+  switcher->send_text("{\"type\":\"request-keyframe\"}");
   switcher->send_text("{\"type\":\"ping\"}");
   const auto delta = delta_packet();
   switcher->send_binary(delta.data(), delta.size());
   const auto keyframe = keyframe_packet();
   switcher->send_binary(keyframe.data(), keyframe.size());
-  expect(relay->sent_text.size() == 1 && ice->sent_text.size() == 1,
-         "request-tiles goes to the relay and ping to ICE");
-  expect(relay->sent_binary.size() == 1 && ice->sent_binary.size() == 1,
-         "keyframe goes to the relay and delta to ICE");
+  const auto refresh = tile_refresh_packet();
+  switcher->send_binary(refresh.data(), refresh.size());
+  const auto clock = tile_clock_packet();
+  switcher->send_binary(clock.data(), clock.size());
+  expect(relay->sent_text.empty() && ice->sent_text.size() == 3,
+         "repair requests and ordinary text follow video on ICE");
+  expect(relay->sent_binary.empty() && ice->sent_binary.size() == 4,
+         "keyframe/refresh/clock/delta use ICE");
 
   relay->sent_text.clear();
   relay->sent_binary.clear();
   ice->sent_text.clear();
   ice->sent_binary.clear();
   const auto file = file_data_packet();
+  const auto av1 = av1_packet();
   switcher->send_text(transport_channel::control, "{\"type\":\"ping\"}");
   switcher->send_binary(transport_channel::file, file.data(), file.size());
+  switcher->send_binary(transport_channel::video, av1.data(), av1.size());
   switcher->send_binary(transport_channel::video, delta.data(), delta.size());
-  expect(relay->sent_binary.size() == 1 && ice->sent_binary.size() == 1,
-         "explicit file channel uses relay while video uses ICE");
+  expect(relay->sent_binary.size() == 2 && ice->sent_binary.size() == 1,
+         "file and a legacy non-refresh AV1 frame use relay, video uses ICE");
   expect(ice->sent_text_channels.size() == 1 &&
              ice->sent_text_channels.front() == transport_channel::control,
          "explicit control channel uses active transport");

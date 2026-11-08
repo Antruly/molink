@@ -19,7 +19,7 @@ permissions:
 # artifacts, using the version in backend/src/version.h. Without this, manual
 # runs produced packages named after the branch ("main").
 env:
-  PKG_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '0.10.0' }}
+  PKG_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '0.10.6' }}
 
 # Linux and Windows download the prebuilt libuvcpp archive (UVCPP_VERSION,
 # default 1.8.7); macOS has no prebuilt asset yet and builds it from the
@@ -33,6 +33,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Check package version
+        shell: bash
+        run: |
+          core=$(sed -n 's/^#define MOLINK_VERSION "\(.*\)"/\1/p' backend/src/version.h)
+          if [ "${PKG_VERSION#v}" != "$core" ]; then
+            echo "::error title=version-mismatch::PKG_VERSION=${PKG_VERSION} but backend/src/version.h=${core}"
+            exit 1
+          fi
 
       - name: Install build dependencies
         run: |
@@ -152,6 +161,15 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Check package version
+        shell: bash
+        run: |
+          core=$(sed -n 's/^#define MOLINK_VERSION "\(.*\)"/\1/p' backend/src/version.h)
+          if [ "${PKG_VERSION#v}" != "$core" ]; then
+            echo "::error title=version-mismatch::PKG_VERSION=${PKG_VERSION} but backend/src/version.h=${core}"
+            exit 1
+          fi
 
       - uses: pnpm/action-setup@v4
         with:
@@ -483,6 +501,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check package version
+        shell: bash
+        run: |
+          core=$(sed -n 's/^#define MOLINK_VERSION "\(.*\)"/\1/p' backend/src/version.h)
+          if [ "${PKG_VERSION#v}" != "$core" ]; then
+            echo "::error title=version-mismatch::PKG_VERSION=${PKG_VERSION} but backend/src/version.h=${core}"
+            exit 1
+          fi
+
       - uses: pnpm/action-setup@v4
         with:
           version: 9
@@ -623,6 +650,15 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Check package version
+        shell: bash
+        run: |
+          core=$(sed -n 's/^#define MOLINK_VERSION "\(.*\)"/\1/p' backend/src/version.h)
+          if [ "${PKG_VERSION#v}" != "$core" ]; then
+            echo "::error title=version-mismatch::PKG_VERSION=${PKG_VERSION} but backend/src/version.h=${core}"
+            exit 1
+          fi
 
       - uses: pnpm/action-setup@v4
         with:

@@ -6,6 +6,7 @@ import {
   Monitor,
   Network,
   RefreshCw,
+  ScrollText,
   Server,
   Settings2,
   ShieldCheck,
@@ -22,6 +23,7 @@ import {
 } from '../lib/api'
 import { useAppStore } from '../store/app'
 import { AboutPanel } from './AboutPanel'
+import { DiagLogPanel } from './DiagLogPanel'
 import { PreferencesControls } from './PreferencesControls'
 
 function Switch({
@@ -797,6 +799,9 @@ type SettingsSection =
   | 'display'
   | 'service'
   | 'about'
+  /// Not in the nav: this page is reached from the low-contrast footer entry
+  /// so the log surface stays out of the way during normal use.
+  | 'logs'
 
 const SETTINGS_SECTIONS: {
   id: SettingsSection
@@ -939,7 +944,27 @@ export function SettingsPanel() {
 
             {section === 'about' ? <AboutPanel /> : null}
 
+            {section === 'logs' ? (
+              <DiagLogPanel onBack={() => setSection('general')} />
+            ) : null}
           </div>
+        </div>
+
+        <div className="flex shrink-0 items-center border-t border-line-soft px-4 py-1">
+          <button
+            type="button"
+            onClick={() => setSection('logs')}
+            aria-pressed={section === 'logs'}
+            className={
+              'inline-flex items-center gap-1 rounded px-1.5 py-1 text-[10px] transition ' +
+              (section === 'logs'
+                ? 'text-accent'
+                : 'text-muted opacity-60 hover:opacity-100 hover:text-ink')
+            }
+          >
+            <ScrollText size={11} />
+            {t('diagnostics.open')}
+          </button>
         </div>
       </div>
     </div>
