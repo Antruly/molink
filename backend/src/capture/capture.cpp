@@ -14,10 +14,33 @@
 #endif
 
 #include <algorithm>
+#include <cstdlib>
 #include <thread>
 #include <utility>
 
 namespace molink {
+namespace {
+
+/// Optional tuning for the tile <-> stream hysteresis, in milliseconds.
+/// Defaults match stream_policy; the environment only exists so a field
+/// diagnosis can widen or shorten the dwells without a rebuild.
+uint64_t env_u64(const char* name, uint64_t fallback) {
+  const char* value = std::getenv(name);
+  if (value == nullptr || *value == '\0') return fallback;
+  char* end = nullptr;
+  const unsigned long long parsed = std::strtoull(value, &end, 10);
+  return end == value ? fallback : static_cast<uint64_t>(parsed);
+}
+
+double env_double(const char* name, double fallback) {
+  const char* value = std::getenv(name);
+  if (value == nullptr || *value == '\0') return fallback;
+  char* end = nullptr;
+  const double parsed = std::strtod(value, &end);
+  return end == value ? fallback : parsed;
+}
+
+}  // namespace
 
 void set_display_awake(bool awake) {
 #if defined(_WIN32)
@@ -395,41 +418,120 @@ av1_stream_encoder* capture_base::stream_for_frame_moving(
     applied_enter_fraction_ = wanted_enter;
     stream_policy_.set_enter_fraction(wanted_enter);
   }
+  const uint64_t now = monotonic_ms();
+  if (!stream_config_loaded_) {
+    // Hysteresis and dwells are configuration, not magic numbers: defaults
+    // live in stream_policy, the environment can override them for a field
+    // diagnosis, and the effective values are logged once per source.
+    stream_config_loaded_ = true;
+    stream_policy_.set_exit_ratio(
+        env_double("MOLINK_STREAM_EXIT_RATIO", stream_policy_.exit_ratio));
+    stream_policy_.set_timing(env_u64("MOLINK_STREAM_WINDOW_MS",
+                                      stream_policy_.window_ms),
+                              env_u64("MOLINK_STREAM_ENTER_DWELL_MS",
+                                      stream_policy_.enter_dwell_ms),
+                              env_u64("MOLINK_STREAM_EXIT_DWELL_MS",
+                                      stream_policy_.exit_dwell_ms),
+                              env_u64("MOLINK_STREAM_COOLDOWN_MS",
+                                      stream_policy_.cooldown_ms));
+    switch_inhibit_ms_.store(static_cast<int>(
+        env_u64("MOLINK_STREAM_INHIBIT_MS", 1500)));
+    drag_hold_ms_.store(
+        static_cast<int>(env_u64("MOLINK_STREAM_DRAG_HOLD_MS", 300)));
+    std::fprintf(stderr,
+                 "host: stream switch window=%llums enter=%.0f%% exit=%.0f%% "
+                 "enter_dwell=%llums exit_dwell=%llums cooldown=%llums "
+                 "inhibit=%dms drag_hold=%dms\n",
+                 static_cast<unsigned long long>(stream_policy_.window_ms),
+                 stream_policy_.enter_fraction * 100.0,
+                 stream_policy_.exit_fraction * 100.0,
+                 static_cast<unsigned long long>(
+                     stream_policy_.enter_dwell_ms),
+                 static_cast<unsigned long long>(stream_policy_.exit_dwell_ms),
+                 static_cast<unsigned long long>(stream_policy_.cooldown_ms),
+                 switch_inhibit_ms_.load(), drag_hold_ms_.load());
+  }
   const bool forced = std::getenv("MOLINK_STREAM_FORCE") != nullptr;
   // The secure desktop (lock screen, UAC) is captured through the SYSTEM
   // helper at a few frames per second; its tiles never arrive in time to
   // paint, so it always uses the stream, whatever the movement rule or the
   // viewer's codec choice says.
   const bool secure_desktop = is_secure_desktop();
+  // Switching is vetoed while a drag is in flight (a drag must not pay an
+  // encoder restart or a full-screen keyframe) or while the transport reported
+  // a refused send; those vetoes clear by deadline, so a momentary queue spike
+  // does not pin the mode. An encoder over its frame budget only bars
+  // *entering* the stream: leaving it is the repair, and vetoing that pinned a
+  // slow encoder in "streaming" long after the screen settled.
+  const bool dragging =
+      pointer_down_.load() || now < drag_until_ms_.load();
+  const bool congested = now < switch_inhibit_until_ms_.load();
+  const uint64_t frame_budget = frame_budget_us(target_fps_.load());
+  const bool encoder_blocked =
+      stream_policy_.streaming && frame_budget > 0 &&
+      build_time_us_.load() > frame_budget * 2;
+  // Do not enter the stream before the supervisor has found a codec every
+  // viewer can decode. The evaluation runs once a second, so a fast-moving
+  // screen used to engage the policy first, fail to build an encoder, roll
+  // back, wait out the cooldown and try again -- a visible switch cycle with
+  // no picture behind it.
+  const bool any_stream_codec =
+      av1_stream_allowed_.load() || h264_stream_allowed_.load() ||
+      vp9_stream_allowed_.load() || vp8_stream_allowed_.load();
+  const bool cooldown_before = stream_policy_.in_cooldown(now);
+  const bool allow_switch =
+      stream_switch_allowed(dragging, congested, any_stream_codec,
+                            stream_policy_.streaming, encoder_blocked);
   bool mode_changed = false;
   if (forced || secure_desktop) {
     stream_policy_.armed = true;
-    mode_changed = !stream_policy_.streaming;
-    stream_policy_.streaming = true;
+    mode_changed = stream_policy_.force(true, now);
   } else {
-    mode_changed = stream_policy_.note(moving, monotonic_ms());
-    if (stream_always_.load() || rate_starved_.load() ||
-        monotonic_ms() < stream_nudge_until_.load()) {
-      // The tile path is stalling while content is changing: the link cannot
-      // carry the tiles, and the stream is the cheaper encoding. Switch even
-      // though the movement rule alone would not have.
+    // An explicit mode request ("video encoding", a viewer picking a codec,
+    // the join window) or a starved tile path holds the stream for its
+    // window. The heuristic is still fed so its 500 ms average and armed flag
+    // stay warm, but it may not switch: letting the heuristic exit during the
+    // join window and the nudge immediately force it back produced a
+    // stream -> tile -> stream cycle every few seconds.
+    const bool explicit_stream =
+        stream_always_.load() || now < stream_nudge_until_.load();
+    const bool starved = rate_starved_.load();
+    const bool hold_stream = !dragging && !congested && any_stream_codec &&
+                             (explicit_stream || starved);
+    if (hold_stream) {
+      stream_policy_.note(moving, now, /*allow_switch=*/false);
       stream_policy_.exiting = false;
-      if (!stream_policy_.streaming) {
-        stream_policy_.streaming = true;
-        stream_policy_.entering = false;
-        mode_changed = true;
+      if (!stream_policy_.streaming &&
+          (explicit_stream || !stream_policy_.in_cooldown(now))) {
+        mode_changed = stream_policy_.force(true, now);
       }
-    }
-    if (mode_changed && stream_policy_.streaming) {
-      // The viewer's decoder has no reference frame for this stream yet.
-      stream_keyframe_pending_.store(true);
-    } else if (mode_changed) {
-      // Leaving the stream: the viewer's tile base is as old as the stream it
-      // was painted over, so the first tile frame back has to be a full one.
-      // Without this the picture stays half stale until the periodic refresh.
-      request_keyframe();
+    } else {
+      mode_changed = stream_policy_.note(moving, now, allow_switch);
     }
   }
+  // Every accepted switch starts a new epoch with a keyframe: the stream path
+  // forces an IDR/Keyframe on its first frame (never waits for a GOP), and the
+  // tile path sends a full-screen keyframe so the old stream picture cannot
+  // show through.
+  if (mode_changed && stream_policy_.streaming) {
+    stream_keyframe_pending_.store(true);
+  } else if (mode_changed) {
+    request_keyframe();
+  }
+  // Mirror the epoch for the session layer: it sends stream-epoch_id with the
+  // first frame of the new mode so the decoder drops the old references.
+  stream_epoch_.store(stream_policy_.epoch());
+  // A switch that cannot produce an encoder must leave the viewer on tiles
+  // instead of parking the policy in "streaming" with no stream to send.
+  const auto rollback_stream = [&](const char* reason) {
+    if (!stream_policy_.streaming) return;
+    stream_policy_.rollback(monotonic_ms());
+    stream_epoch_.store(stream_policy_.epoch());
+    stream_live_.store(false);
+    std::fprintf(stderr,
+                 "host: stream switch rollback (%s) epoch=%u\n", reason,
+                 stream_policy_.epoch());
+  };
   // Mirror the mode for other threads: a session that joins now uses it to
   // wait for the stream keyframe instead of replaying a tile keyframe.
   // Claim a stream only once this frame actually gets an encoder below. The
@@ -443,10 +545,19 @@ av1_stream_encoder* capture_base::stream_for_frame_moving(
   // caused it. Without this a session that stays on tiles looks identical to
   // one the policy never armed.
   if (mode_changed && std::getenv("MOLINK_STREAM_LOG") != nullptr) {
+    static thread_local uint64_t log_origin = 0;
+    if (log_origin == 0) log_origin = now;
     std::fprintf(stderr,
-                 "host: stream %s (moving=%.1f%%, viewers av1=%d h264=%d "
-                 "vp9=%d vp8=%d)\n",
-                 stream_policy_.streaming ? "on" : "off", moving * 100.0,
+                 "host: stream %s t=+%llums epoch=%u avg=%.1f%% enter=%.1f%% "
+                 "exit=%.1f%% dragging=%d congested=%d encoder_blocked=%d "
+                 "in_cooldown=%d viewers av1=%d h264=%d vp9=%d vp8=%d\n",
+                 stream_policy_.streaming ? "on" : "off",
+                 static_cast<unsigned long long>(now - log_origin),
+                 stream_policy_.epoch(), stream_policy_.average() * 100.0,
+                 stream_policy_.enter_fraction * 100.0,
+                 stream_policy_.exit_fraction * 100.0, dragging ? 1 : 0,
+                 congested ? 1 : 0, encoder_blocked ? 1 : 0,
+                 cooldown_before ? 1 : 0,
                  av1_stream_allowed_.load() ? 1 : 0,
                  h264_stream_allowed_.load() ? 1 : 0,
                  vp9_stream_allowed_.load() ? 1 : 0,
@@ -501,6 +612,7 @@ av1_stream_encoder* capture_base::stream_for_frame_moving(
         std::fprintf(stderr, "host: no stream codec every viewer can decode\n");
       }
     }
+    rollback_stream("no decodable codec");
     return nullptr;
   }
   const bool budget_changed = applied_budget_kbps_ != budget_kbps;
@@ -592,7 +704,14 @@ av1_stream_encoder* capture_base::stream_for_frame_moving(
     encoder_retry_at_ms_ = stream_encoder_ ? 0 : monotonic_ms() + kEncoderRetryMs;
     video_codec_ = chosen;
     applied_budget_kbps_ = stream_encoder_ ? budget_kbps : -1;
-    stream_keyframe_pending_.store(true);
+    if (stream_encoder_) {
+      stream_keyframe_pending_.store(true);
+    } else {
+      // No rung could be built: stay on tiles and roll the policy back, so a
+      // session does not wait for a stream keyframe that will never come.
+      rollback_stream("no encoder");
+      return nullptr;
+    }
   }
   if (std::getenv("MOLINK_STREAM_LOG") != nullptr) {
     static thread_local uint64_t last_mode_log = 0;
@@ -600,11 +719,14 @@ av1_stream_encoder* capture_base::stream_for_frame_moving(
     if (now - last_mode_log >= 1000) {
       last_mode_log = now;
       std::fprintf(stderr,
-                   "host: capture mode streaming=%d secure=%d ladder=%zu "
+                   "host: capture mode streaming=%d epoch=%u avg=%.1f%% "
+                   "dragging=%d congested=%d blocked=%d secure=%d ladder=%zu "
                    "encoder=%d backend=%s\n",
-                   stream_policy_.streaming ? 1 : 0, secure_desktop ? 1 : 0,
-                   ladder.size(), stream_encoder_ ? 1 : 0,
-                   backend().c_str());
+                   stream_policy_.streaming ? 1 : 0, stream_policy_.epoch(),
+                   stream_policy_.average() * 100.0, dragging ? 1 : 0,
+                   congested ? 1 : 0, encoder_blocked ? 1 : 0,
+                   secure_desktop ? 1 : 0, ladder.size(),
+                   stream_encoder_ ? 1 : 0, backend().c_str());
     }
   }
   if (!stream_policy_.streaming || !stream_encoder_) return nullptr;
@@ -688,10 +810,14 @@ void capture_base::note_build_time(uint64_t us) {
       offset >= kMaxAv1QpOffset && av1_downscale_.load(), monotonic_ms());
 }
 
-void capture_base::publish(std::shared_ptr<const captured_frame> frame) {
+void capture_base::publish(std::shared_ptr<captured_frame> frame) {
   stat_frames_.fetch_add(1);
   stat_bytes_.fetch_add(frame->payload.size());
   if (frame->keyframe) stat_keyframes_.fetch_add(1);
+  // Stamp the mode epoch on the frame itself: the session layer compares it
+  // with what the viewer last acknowledged and sends stream-epoch_id before
+  // the first frame of a new mode.
+  frame->stream_epoch = stream_epoch_.load();
 
   std::lock_guard<std::mutex> lock(mutex_);
   update_cell_clock(*frame);

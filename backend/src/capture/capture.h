@@ -94,6 +94,10 @@ struct captured_frame {
   uint16_t tile_h = 0;
   uint8_t codec = 0;  ///< protocol::codec of the payload
   std::vector<uint8_t> payload;
+  /// stream_epoch_id: incremented on every tile <-> stream switch. The
+  /// session layer forwards it to the client so it can drop the previous
+  /// mode's references before waiting for the switch keyframe.
+  uint32_t stream_epoch = 0;
   /// Optional AV1 picture (a complete FRAME payload with codec::av1). Covers
   /// every changed rectangle when full-frame AV1 is on, otherwise only the
   /// large ones that were removed from `payload`. Empty when AV1 is off or
@@ -306,6 +310,21 @@ class capture_source {
   virtual void set_av1_stream_allowed(bool allowed) { (void)allowed; }
   /// Percentage of the screen that must move before the stream takes over.
   virtual void set_stream_enter_percent(int percent) { (void)percent; }
+  /// A frame send was refused (transport queue full). The adaptive switch
+  /// stands down for a short window instead of adding a keyframe on top of a
+  /// backlog that is already draining.
+  virtual void set_switch_inhibited(bool inhibited) { (void)inhibited; }
+  /// Pointer activity for the adaptive switch: a pressed primary button (and
+  /// the motion while it stays pressed) freezes tile <-> stream changes, so a
+  /// drag never pays an encoder restart or a full-screen keyframe.
+  virtual void note_pointer(bool button_down, bool moving,
+                            uint64_t now_ms) {
+    (void)button_down;
+    (void)moving;
+    (void)now_ms;
+  }
+  /// stream_epoch_id of the current capture mode; increments on every switch.
+  virtual uint32_t stream_epoch() const { return 0; }
 
   /// Whether a hardware H.264 stream may be used instead. This is the fallback
   /// for viewers that cannot decode AV1 (the browser decodes H.264 through
@@ -632,6 +651,33 @@ class capture_base : public capture_source {
   void set_stream_enter_percent(int percent) override {
     stream_enter_percent_.store(percent);
   }
+  void set_switch_inhibited(bool inhibited) override {
+    if (inhibited) {
+      const uint64_t until =
+          monotonic_ms() + static_cast<uint64_t>(switch_inhibit_ms_.load());
+      uint64_t previous = switch_inhibit_until_ms_.load();
+      while (previous < until &&
+             !switch_inhibit_until_ms_.compare_exchange_weak(previous, until)) {
+      }
+    } else {
+      switch_inhibit_until_ms_.store(0);
+    }
+  }
+  void note_pointer(bool button_down, bool moving, uint64_t now_ms) override {
+    const uint64_t hold = static_cast<uint64_t>(drag_hold_ms_.load());
+    if (button_down) {
+      pointer_down_.store(true);
+      drag_until_ms_.store(now_ms + hold);
+    } else if (!moving) {
+      pointer_down_.store(false);
+      // Keep the veto through the release so the settle after a drag is not
+      // mistaken for a still screen.
+      drag_until_ms_.store(now_ms + hold);
+    } else if (pointer_down_.load()) {
+      drag_until_ms_.store(now_ms + hold);
+    }
+  }
+  uint32_t stream_epoch() const override { return stream_epoch_.load(); }
   void set_stream_always(bool always) override {
     stream_always_.store(always);
   }
@@ -706,7 +752,7 @@ class capture_base : public capture_source {
  protected:
   static int clamp_fps(int fps) { return fps < 1 ? 1 : (fps > 60 ? 60 : fps); }
 
-  void publish(std::shared_ptr<const captured_frame> frame);
+  void publish(std::shared_ptr<captured_frame> frame);
   /// Records the CPU time spent building/encoding one frame (EMA, 1/8 weight).
   void note_build_time(uint64_t us);
   /// Updates the per-cell freshness grid from a published frame's tiles.
@@ -759,6 +805,19 @@ class capture_base : public capture_source {
   uint64_t av1_full_screen_until_us_ = 0;
   /// Tile <-> AV1 stream hand-over, fed once per frame.
   stream_policy stream_policy_;
+  /// Mirror of stream_policy_.epoch() for other threads (session layer).
+  std::atomic<uint32_t> stream_epoch_{0};
+  /// Adaptive switching stands down until this deadline: a send was refused,
+  /// so the transport is backed up and a keyframe would only deepen it.
+  std::atomic<uint64_t> switch_inhibit_until_ms_{0};
+  std::atomic<int> switch_inhibit_ms_{1500};
+  /// Pointer drag latch: while a primary button is down (and just after it is
+  /// released) the tile <-> stream decision is frozen.
+  std::atomic<bool> pointer_down_{false};
+  std::atomic<uint64_t> drag_until_ms_{0};
+  std::atomic<int> drag_hold_ms_{300};
+  /// Env overrides for the hysteresis/timing are applied once per source.
+  bool stream_config_loaded_ = false;
   std::shared_ptr<av1_stream_encoder> stream_encoder_;
   /// Make-before-break: while the new codec's encoder is being built, the
   /// old one keeps producing frames. The swap happens on the next frame.
