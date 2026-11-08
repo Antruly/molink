@@ -698,5 +698,23 @@
     "forceRelay": "强制中继（不打洞）",
     "controlHost": "远程本机",
     "controlHostHint": "远程控制当前提供此页面的这台电脑。"
+  },
+  "diagnostics": {
+    "open": "运行日志",
+    "title": "运行日志",
+    "back": "返回设置",
+    "hint": "只保存在本机，不会上传。记录连接、编解码与错误信息，最多保留最近 {{max}} 条。",
+    "filterAll": "全部",
+    "filterWarn": "警告+",
+    "filterError": "错误",
+    "search": "搜索 codec、seq、地址…",
+    "copy": "复制",
+    "copied": "已复制",
+    "export": "导出",
+    "clear": "清空",
+    "clearConfirm": "确认清空？",
+    "empty": "暂无日志。连接或解码出现问题时，记录会显示在这里。",
+    "noMatch": "没有匹配的记录。",
+    "privacy": "日志只写入本机存储，不包含验证码、聊天或剪贴板内容。"
   }
 }

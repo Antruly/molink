@@ -2375,6 +2375,16 @@ void session_controller::on_text(const std::string& text) {
     if (std::getenv("MOLINK_STREAM_LOG") != nullptr) {
       std::fprintf(stderr, "host: request-keyframe\n");
     }
+    // A keyframe costs the capture a full-screen encode and is broadcast to
+    // every viewer, so one struggling decoder must not turn the whole host
+    // into a keyframe pump. The client already throttles to 300 ms; this is
+    // the same one-per-second budget the replay path uses.
+    const uint64_t now = now_ms();
+    if (session->last_keyframe_request_ms != 0 &&
+        now - session->last_keyframe_request_ms < 1000) {
+      return;
+    }
+    session->last_keyframe_request_ms = now;
     if (options_.capture) options_.capture->request_keyframe();
     return;
   }
@@ -2973,13 +2983,32 @@ void session_supervisor::run() {
       // the pinned/laddered AV1 was always refused and silently fell back to
       // H.264.
       const bool allow = enabled && live && all_stream;
+      // What this host can actually encode. The viewer set only says what is
+      // decodable; a Windows build without libvpx still has NVENC H.264, and
+      // choosing VP9 merely because every viewer can decode it made the
+      // capture fail to create an encoder and stay on tiles forever. Keep the
+      // viewer and host capability sets intersected.
+      bool host_av1 = false;
+      bool host_h264 = false;
+      bool host_vp9 = false;
+      bool host_vp8 = false;
+      bool av1_hardware = false;
+      for (const video_encoder_backend& backend : video_encoder_backends()) {
+        if (!backend.available) continue;
+        host_av1 = host_av1 || backend.av1_stream;
+        host_h264 = host_h264 || backend.h264_stream;
+        host_vp9 = host_vp9 || backend.vp9_stream;
+        host_vp8 = host_vp8 || backend.vp8_stream;
+        if (backend.hardware && backend.av1_stream) av1_hardware = true;
+      }
       // A stream round is only worth starting when at least one viewer can
       // actually decode it. With a tiles-only viewer (or a host build without
       // the encoders) the join window below used to hold the stream path for
       // kJoinStreamMs and the first picture waited for it; tiles can start at
       // once instead.
-      const bool can_stream = allow || all_h264_stream || all_vp9_stream ||
-                              all_vp8_stream;
+      const bool can_stream =
+          (allow && host_av1) || (all_h264_stream && host_h264) ||
+          (all_vp9_stream && host_vp9) || (all_vp8_stream && host_vp8);
       if (std::getenv("MOLINK_AV1_LOG") != nullptr && allow != av1_allowed_) {
         std::fprintf(stderr, "host: av1 allowed=%d\n", allow ? 1 : 0);
         av1_allowed_ = allow;
@@ -3000,13 +3029,13 @@ void session_supervisor::run() {
       const std::string preference =
           options_.auth ? options_.auth->settings().stream_codec : "auto";
       stream_choice pinned = stream_choice::none;
-      if (preference == "av1" && allow && all_stream) {
+      if (preference == "av1" && allow && all_stream && host_av1) {
         pinned = stream_choice::av1;
-      } else if (preference == "h264" && all_h264_stream) {
+      } else if (preference == "h264" && all_h264_stream && host_h264) {
         pinned = stream_choice::h264;
-      } else if (preference == "vp9" && all_vp9_stream) {
+      } else if (preference == "vp9" && all_vp9_stream && host_vp9) {
         pinned = stream_choice::vp9;
-      } else if (preference == "vp8" && all_vp8_stream) {
+      } else if (preference == "vp8" && all_vp8_stream && host_vp8) {
         pinned = stream_choice::vp8;
       }
       const std::string video_mode =
@@ -3046,20 +3075,15 @@ void session_supervisor::run() {
       // CPU SVT-AV1 at a few frames per second is worse than any other
       // stream, so "auto" only ranks AV1 first when this host has a hardware
       // AV1 encoder (NVENC). Pinning AV1 by hand still selects it.
-      bool av1_hardware = false;
-      for (const video_encoder_backend& backend : video_encoder_backends()) {
-        if (backend.available && backend.hardware && backend.av1_stream) {
-          av1_hardware = true;
-          break;
-        }
-      }
       const stream_choice stream =
           live && viewers > 0 && stream_allowed
               ? (pinned != stream_choice::none
                      ? pinned
-                     : choose_video_codec(allow, all_stream, all_h264_stream,
-                                          all_vp9_stream, all_vp8_stream,
-                                          av1_hardware))
+                     : choose_video_codec(
+                           allow && host_av1, all_stream,
+                           all_h264_stream && host_h264,
+                           all_vp9_stream && host_vp9,
+                           all_vp8_stream && host_vp8, av1_hardware))
               : stream_choice::none;
       options_.capture->set_av1_stream_allowed(stream == stream_choice::av1);
       options_.capture->set_h264_stream_allowed(stream == stream_choice::h264);

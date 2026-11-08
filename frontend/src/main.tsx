@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import App from './App'
 import { initialTheme } from './store/app'
 import './i18n'
+import './lib/diag-log'
 import './index.css'
 
 // Apply the persisted theme before the first paint: the core uses a new port

@@ -9,9 +9,13 @@
 namespace molink {
 
 /// A session transport that starts on the relay and switches to the direct
-/// ICE path once hole punching completes. Deltas, input and ordinary control
-/// text use ICE; file data, keyframes, AV1 patches, tile refreshes, the tile
-/// clock and repair requests stay on the reliable relay in both directions.
+/// ICE path once hole punching completes. File data stays on the reliable
+/// relay. Everything that makes the picture decodable -- keyframes, tile
+/// refreshes (which carry AV1 patches), the tile clock and the repair
+/// requests that ask for them -- follows the video on ICE once the switch
+/// happened: a relay
+/// that goes half-open after the upgrade would swallow exactly those packets
+/// while deltas keep arriving, leaving a permanently frozen picture.
 class switchable_transport final : public session_transport {
  public:
   explicit switchable_transport(std::shared_ptr<session_transport> initial);
@@ -45,6 +49,8 @@ class switchable_transport final : public session_transport {
 
  private:
   void wire(const std::shared_ptr<session_transport>& transport);
+  /// True once the ICE transport replaced the relay as the active path.
+  bool ice_active() const;
 
   std::shared_ptr<session_transport> active_;
   std::shared_ptr<session_transport> relay_;

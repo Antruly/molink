@@ -19,9 +19,10 @@ bool is_file_data(const uint8_t* data, std::size_t len) {
          data[5] == static_cast<uint8_t>(protocol::packet_type::file_data);
 }
 
-/// AV1 patches are large (one message per changed rectangle) and UDP
-/// fragmentation cannot repair a missing fragment, so keep them on the relay
-/// just like file bytes. Tile frames are small enough to stay on ICE.
+/// Legacy standalone AV1 frames stay on the relay like file bytes: UDP
+/// fragmentation cannot repair a missing fragment. AV1 *patches* are sent as
+/// tile refreshes, so is_video_repair moves those with the video once ICE is
+/// up.
 bool is_av1_frame(const uint8_t* data, std::size_t len) {
   return data != nullptr &&
          len >= protocol::kPacketHeaderSize + protocol::kFrameHeaderSize &&
@@ -31,11 +32,10 @@ bool is_av1_frame(const uint8_t* data, std::size_t len) {
              static_cast<uint8_t>(protocol::codec::av1);
 }
 
-/// A keyframe is the only frame a client cannot recover without: if its UDP
-/// fragments are lost the picture never appears. Keep it on the reliable
-/// relay path; deltas and tile refreshes stay on ICE.
-/// Tile refreshes are the repair for pixels the client missed; losing them
-/// over UDP defeats the whole compensation path, so they take the relay too.
+/// A keyframe is the re-anchor the decoder cannot produce for itself, and a
+/// tile refresh replaces pixels the client missed. Both travel with the video
+/// once ICE is active so a half-open relay cannot swallow them; before the
+/// switch (or without ICE) they use the relay.
 bool is_tile_refresh(const uint8_t* data, std::size_t len) {
   return data != nullptr &&
          len >= protocol::kPacketHeaderSize + protocol::kFrameHeaderSize &&
@@ -44,17 +44,16 @@ bool is_tile_refresh(const uint8_t* data, std::size_t len) {
          (data[6] & static_cast<uint8_t>(protocol::kPacketFlagTileRefresh)) != 0;
 }
 
-/// Repair requests must reach the host; one lost UDP datagram would otherwise
-/// leave the stale rectangle untouched until something else drops.
+/// Repair requests must reach the host. They follow the same rule as the
+/// repairs they ask for: relay before the switch, ICE afterwards.
 bool is_compensation_text(const std::string& text) {
   return text.find("\"type\":\"request-tiles\"") != std::string::npos ||
          text.find("\"type\":\"request-keyframe\"") != std::string::npos;
 }
 
 /// The tile clock is the host's side of the same repair loop. It is one small
-/// packet per second, so the reliable path costs nothing; keeping it off ICE
-/// means a lossy link cannot silence the clock that is supposed to notice the
-/// very losses it creates.
+/// packet per second and follows the video path, together with the repairs it
+/// schedules.
 bool is_tile_clock(const uint8_t* data, std::size_t len) {
   return data != nullptr && len >= protocol::kPacketHeaderSize &&
          std::memcmp(data, protocol::kMagic, sizeof(protocol::kMagic)) == 0 &&
@@ -70,13 +69,25 @@ bool is_keyframe(const uint8_t* data, std::size_t len) {
           protocol::kFrameFlagKeyframe) != 0;
 }
 
-/// The binary packets that must ride the relay even after ICE takes over.
-/// The receiving side has to accept exactly this set from the relay; it used
-/// to accept only file_data, which silently dropped every keyframe, AV1
-/// patch, tile refresh and tile clock after the P2P switch.
+/// Binary packets that may legitimately arrive on the relay. The receiving
+/// side accepts them so an older peer (which sends repairs over the relay)
+/// keeps working; this build sends the video duplicates over ICE instead.
+/// It used to accept only file_data, which silently dropped every keyframe,
+/// AV1 patch, tile refresh and tile clock after the P2P switch.
 bool rides_relay(const uint8_t* data, std::size_t len) {
   return is_file_data(data, len) || is_av1_frame(data, len) ||
          is_keyframe(data, len) || is_tile_refresh(data, len) ||
+         is_tile_clock(data, len);
+}
+
+/// Packets that keep the picture decodable: the re-anchor keyframe, the
+/// pixel-level repair and the clock that asks for repairs. These follow the
+/// video once ICE is up. The relay is not a safe place for them after the
+/// P2P switch: it can go half-open, after which every keyframe and repair is
+/// silently swallowed while deltas over ICE keep arriving. The result is a
+/// frozen picture that no repair request can recover.
+bool is_video_repair(const uint8_t* data, std::size_t len) {
+  return is_keyframe(data, len) || is_tile_refresh(data, len) ||
          is_tile_clock(data, len);
 }
 
@@ -118,8 +129,16 @@ transport_capabilities switchable_transport::capabilities() const {
   return result;
 }
 
+bool switchable_transport::ice_active() const {
+  return ice_ != nullptr && active_.get() == ice_.get();
+}
+
 bool switchable_transport::send_text(const std::string& text) {
-  if (is_compensation_text(text) && relay_ && relay_->is_open()) {
+  // Repair requests are part of the video path. Once ICE is up they must not
+  // be left to a relay that may already be half-open: the host would never
+  // learn that the viewer needs a keyframe.
+  if (is_compensation_text(text) && !ice_active() && relay_ &&
+      relay_->is_open()) {
     return relay_->send_text(text);
   }
   return active_ && active_->send_text(text);
@@ -128,13 +147,16 @@ bool switchable_transport::send_text(const std::string& text) {
 bool switchable_transport::send_text(transport_channel channel,
                                      const std::string& text) {
   if (channel == transport_channel::control && is_compensation_text(text) &&
-      relay_ && relay_->is_open()) {
+      !ice_active() && relay_ && relay_->is_open()) {
     return relay_->send_text(channel, text);
   }
   return active_ && active_->send_text(channel, text);
 }
 
 bool switchable_transport::send_binary(const uint8_t* data, std::size_t len) {
+  if (is_video_repair(data, len) && ice_active()) {
+    return active_ && active_->send_binary(data, len);
+  }
   if (rides_relay(data, len) && relay_ && relay_->is_open()) {
     return relay_->send_binary(data, len);
   }
@@ -146,6 +168,10 @@ bool switchable_transport::send_binary(transport_channel channel,
                                        std::size_t len) {
   if (channel == transport_channel::file && relay_ && relay_->is_open()) {
     return relay_->send_binary(channel, data, len);
+  }
+  if (channel == transport_channel::video && is_video_repair(data, len) &&
+      ice_active()) {
+    return active_ && active_->send_binary(channel, data, len);
   }
   if (channel == transport_channel::video && rides_relay(data, len) && relay_ &&
       relay_->is_open()) {
@@ -179,10 +205,11 @@ void switchable_transport::wire(
   transport->set_handlers(
       [this, source](const std::string& text) {
         if (closed_ || !text_) return;
-        // After the P2P switch the relay carries the packets that must not be
-        // lost: file data, keyframes, AV1 patches, tile refreshes and the
-        // tile clock. Repair requests travel the other way on the same path.
-        // Everything else still arrives on the active transport.
+        // After the P2P switch the relay carries file data and AV1 patches.
+        // This build sends video repairs with the video on ICE, but still
+        // accept relay-borne keyframes, refreshes and repair requests: the
+        // peer may be an older build, and dropping them would freeze its
+        // picture. Everything else arrives on the active transport.
         if (active_.get() != source && !is_compensation_text(text)) return;
         text_(text);
       },

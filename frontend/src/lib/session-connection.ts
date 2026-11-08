@@ -9,6 +9,7 @@ import {
 } from './client'
 import type { Frame } from './protocol'
 import { FrameFlag } from './protocol'
+import { logDiag } from './diag-log'
 import { PcmPlayer } from './audio'
 import { ClipboardFileSync } from './clipboard-sync'
 import {
@@ -150,6 +151,15 @@ export class SessionConnection {
   /// re-rendered the whole session view 30 times a second.
   private lastFramePatchAt = 0
   private lastFrameSignature = ''
+  /// "host:port" for the diagnostics buffer; the tab id alone is meaningless
+  /// once the tab is closed.
+  private target = ''
+  /// Frame drops are aggregated: one entry per burst, not one per frame.
+  private dropLogAt = 0
+  private dropLogCount = 0
+  /// The retry path announces "connecting" twice (once before the timer, once
+  /// when the socket opens); only a change is worth a log line.
+  private lastLoggedPhase = ''
   private readonly listeners = new Set<SessionEventListener>()
 
   constructor(
@@ -160,6 +170,20 @@ export class SessionConnection {
   ) {
     this.client.setHandlers({
       onPhase: (phase, detail) => {
+        const phaseKey = `${phase}|${detail ?? ''}`
+        if (phaseKey !== this.lastLoggedPhase) {
+          this.lastLoggedPhase = phaseKey
+          logDiag(
+            phase === 'error'
+              ? 'error'
+              : phase === 'disconnected'
+                ? 'warn'
+                : 'info',
+            'session.phase',
+            detail ?? undefined,
+            { phase, target: this.target || undefined },
+          )
+        }
         if (phase === 'error') {
           this.stopBackgroundPull()
           this.stopFileSync()
@@ -206,6 +230,9 @@ export class SessionConnection {
         })
       },
       onAccessRequested: () => {
+        logDiag('info', 'session.access-requested', undefined, {
+          target: this.target || undefined,
+        })
         this.sink.onPatch({
           phase: 'connecting',
           error: null,
@@ -228,6 +255,21 @@ export class SessionConnection {
         // The computer name is the user-facing identity. The device ID is a
         // phase-2 server registration concept and is only a fallback.
         const label = welcome.device_name || welcome.device_id
+        logDiag('info', 'session.welcome', label || this.target, {
+          target: this.target || undefined,
+          host: label || undefined,
+          version: welcome.version,
+          protocol: welcome.protocol,
+          transport: welcome.transport,
+          path: welcome.transport_path,
+          codec: welcome.tiles.codec,
+          quality: welcome.tiles.quality,
+          screen: `${welcome.tiles.screen_w}x${welcome.tiles.screen_h}`,
+          backend: welcome.tiles.backend,
+          stream: welcome.stream_codecs?.join(',') || undefined,
+          preferred: welcome.codec_preference,
+          display: welcome.display_index,
+        })
         this.sink.onPatch({
           welcome,
           displayIndex: welcome.display_index ?? 0,
@@ -311,14 +353,30 @@ export class SessionConnection {
         this.latency = ms
         this.sink.onPatch({ stats: this.snapshot() })
       },
-      onError: (message, code) =>
-        this.sink.onPatch({ error: message, errorCode: code ?? null, notice: null }),
-      onTransport: (mode, path, protocol) =>
+      onError: (message, code) => {
+        logDiag('error', 'session.error', message, {
+          target: this.target || undefined,
+          code: code ?? undefined,
+        })
+        this.sink.onPatch({
+          error: message,
+          errorCode: code ?? null,
+          notice: null,
+        })
+      },
+      onTransport: (mode, path, protocol) => {
+        logDiag('info', 'session.transport', undefined, {
+          target: this.target || undefined,
+          mode,
+          path,
+          protocol,
+        })
         this.sink.onPatch({
           transport: mode,
           ...(path ? { path } : {}),
           ...(protocol ? { protocol } : {}),
-        }),
+        })
+      },
       onCodec: (info) => {
         // Patches arrive continuously while a lossy preset is in use; the
         // badge disappears if none have arrived for five seconds.
@@ -338,10 +396,21 @@ export class SessionConnection {
           this.sink.onPatch({ av1Active: false })
         }, 10000)
       },
-      onStreamVideo: (codec) => this.sink.onPatch({ streamCodec: codec }),
+      onStreamVideo: (codec) => {
+        logDiag('info', 'session.stream', undefined, {
+          target: this.target || undefined,
+          codec,
+        })
+        this.sink.onPatch({ streamCodec: codec })
+      },
       onCodecOptions: (options) => this.sink.onPatch({ codecOptions: options }),
-      onCodecPreference: (value) =>
-        this.sink.onPatch({ codecPreference: value }),
+      onCodecPreference: (value) => {
+        logDiag('info', 'session.preferred-codec', undefined, {
+          target: this.target || undefined,
+          value,
+        })
+        this.sink.onPatch({ codecPreference: value })
+      },
       onQualityShared: (mode) =>
         this.sink.onPatch({ sharedQuality: { mode } }),
       onQualityKnobs: (knobs) => this.sink.onPatch({ sharedKnobs: knobs }),
@@ -349,6 +418,10 @@ export class SessionConnection {
       onCursorPosition: (cursorPosition) =>
         this.sink.onPatch({ cursorPosition }),
       onRetryScheduled: (atMs) => {
+        logDiag('warn', 'session.retry-scheduled', undefined, {
+          target: this.target || undefined,
+          waitMs: Math.max(0, atMs - Date.now()),
+        })
         this.sink.onPatch({
           phase: 'disconnected',
           notice: 'connection_lost',
@@ -359,6 +432,21 @@ export class SessionConnection {
         // Recorded as a congestion signal for the frame-rate controller in
         // SessionView, which owns the single host-wide rate decision.
         this.dropTimes.push(performance.now())
+        // The same signal goes to the diagnostics buffer, but aggregated: a
+        // lossy link drops many frames a second and one entry per drop would
+        // flush the ring in seconds.
+        this.dropLogCount += 1
+        const now = performance.now()
+        if (this.dropLogAt === 0 || now - this.dropLogAt >= 5000) {
+          logDiag('info', 'frame.dropped', undefined, {
+            target: this.target || undefined,
+            count: this.dropLogCount,
+            windowMs:
+              this.dropLogAt === 0 ? undefined : Math.round(now - this.dropLogAt),
+          })
+          this.dropLogAt = now
+          this.dropLogCount = 0
+        }
       },
       onCaptureStats: (info) =>
         this.sink.onPatch({
@@ -414,7 +502,12 @@ export class SessionConnection {
     this.fileSync = new ClipboardFileSync(
       () => this,
       token,
-      (message) => this.sink.onPatch({ error: message, errorCode: null }),
+      (message) => {
+        logDiag('warn', 'clipboard.file', message, {
+          target: this.target || undefined,
+        })
+        this.sink.onPatch({ error: message, errorCode: null })
+      },
     )
   }
 
@@ -434,7 +527,12 @@ export class SessionConnection {
       this.fileSync = new ClipboardFileSync(
         () => this,
         () => '',
-        (message) => this.sink.onPatch({ error: message, errorCode: null }),
+        (message) => {
+          logDiag('warn', 'clipboard.file', message, {
+            target: this.target || undefined,
+          })
+          this.sink.onPatch({ error: message, errorCode: null })
+        },
       )
     }
     void this.fileSync.uploadFiles(files, pasteAfterUpload)
@@ -513,6 +611,24 @@ export class SessionConnection {
     if (forceRelay !== undefined) this.forceRelay = forceRelay
     if (clientName !== undefined) this.clientName = clientName
     if (clientId !== undefined) this.clientId = clientId
+    this.target = `${host}:${port}`
+    this.dropLogAt = 0
+    this.dropLogCount = 0
+    this.lastLoggedPhase = ''
+    // Never record the code itself: "code" only says how this session
+    // authenticated.
+    logDiag('info', 'session.connect', undefined, {
+      target: this.target,
+      auth:
+        token.trim() !== ''
+          ? 'code'
+          : requestAccess
+            ? 'request'
+            : 'none',
+      path: this.forceRelay ? 'relay-only' : 'auto',
+      tab: this.sessionKey || undefined,
+      device: deviceId || undefined,
+    })
     this.stopBackgroundPull()
     this.stopFileSync()
     this.stopClipboardSync()

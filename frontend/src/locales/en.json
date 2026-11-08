@@ -698,5 +698,23 @@
     "forceRelay": "Force relay (no hole punching)",
     "controlHost": "Control this machine",
     "controlHostHint": "Open a remote desktop session to the machine serving this page."
+  },
+  "diagnostics": {
+    "open": "Activity log",
+    "title": "Activity log",
+    "back": "Back to settings",
+    "hint": "Stored on this device only, never uploaded. Connections, codecs and errors; keeps the latest {{max}} entries.",
+    "filterAll": "All",
+    "filterWarn": "Warnings+",
+    "filterError": "Errors",
+    "search": "Search codec, seq, address…",
+    "copy": "Copy",
+    "copied": "Copied",
+    "export": "Export",
+    "clear": "Clear",
+    "clearConfirm": "Clear all?",
+    "empty": "No entries yet. Connection and decode problems will show up here.",
+    "noMatch": "No matching entries.",
+    "privacy": "The log stays in local storage and never contains codes, chat or clipboard content."
   }
 }
