@@ -235,6 +235,23 @@ struct stream_policy {
   }
 };
 
+/// Whether the adaptive switch may run on this frame.
+///
+/// A drag, a refused send and a viewer set with no decodable codec veto every
+/// switch in both directions. A stream encoder that misses its frame budget is
+/// different: it is a reason not to *enter* the stream (the picture would
+/// stutter), but also the strongest reason to *leave* it, because tiles do not
+/// pay that encoder cost at all. Vetoing both directions pinned a slow encoder
+/// in "streaming" at a handful of frames per second even after the screen
+/// settled, because the stream keeps encoding P frames and the measured build
+/// time never recovers.
+inline bool stream_switch_allowed(bool dragging, bool congested,
+                                  bool any_stream_codec, bool streaming,
+                                  bool encoder_blocked) {
+  if (dragging || congested || !any_stream_codec) return false;
+  return streaming || !encoder_blocked;
+}
+
 /// Which codec the low-delay stream should use for the current viewer set.
 enum class stream_choice : uint8_t {
   none,

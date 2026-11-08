@@ -120,6 +120,31 @@ void test_veto_drops_the_dwell() {
   expect(policy.note(0.01, 7600), "2.5 s after the veto the exit proceeds");
 }
 
+void test_slow_encoder_only_blocks_entering() {
+  using molink::stream_switch_allowed;
+  // A stream encoder over its budget must not be entered: the picture would
+  // stutter. It must, however, be allowed to leave, because leaving is the
+  // repair -- tiles do not pay the encoder cost. Vetoing both directions kept
+  // a slow host streaming at a few frames per second forever.
+  expect(!stream_switch_allowed(/*dragging=*/false, /*congested=*/false,
+                                /*any_stream_codec=*/true,
+                                /*streaming=*/false,
+                                /*encoder_blocked=*/true),
+         "a slow encoder keeps the policy out of the stream");
+  expect(stream_switch_allowed(false, false, true, true, true),
+         "a slow encoder must not pin an existing stream");
+  expect(!stream_switch_allowed(true, false, true, true, false),
+         "a drag vetoes every switch");
+  expect(!stream_switch_allowed(false, true, true, true, false),
+         "a refused send vetoes every switch");
+  expect(!stream_switch_allowed(false, false, false, true, false),
+         "no decodable codec vetoes every switch");
+  expect(stream_switch_allowed(false, false, true, true, false),
+         "a healthy streaming session may leave");
+  expect(stream_switch_allowed(false, false, true, false, false),
+         "a healthy idle session may enter");
+}
+
 void test_force_and_rollback() {
   molink::stream_policy policy;
   expect(policy.force(true, 1000), "force enters the stream");
@@ -182,6 +207,7 @@ int main() {
   test_movement_resets_the_exit_clock();
   test_cooldown_blocks_an_immediate_switch_back();
   test_veto_drops_the_dwell();
+  test_slow_encoder_only_blocks_entering();
   test_force_and_rollback();
   test_video_codec_choice();
   std::printf("%d checks, %d failures\n", checks, failures);

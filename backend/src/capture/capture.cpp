@@ -458,10 +458,11 @@ av1_stream_encoder* capture_base::stream_for_frame_moving(
   // viewer's codec choice says.
   const bool secure_desktop = is_secure_desktop();
   // Switching is vetoed while a drag is in flight (a drag must not pay an
-  // encoder restart or a full-screen keyframe), while the transport reported a
-  // refused send, or while the stream encoder is running over its frame
-  // budget. The veto clears by deadline, so a momentary queue spike does not
-  // pin the mode.
+  // encoder restart or a full-screen keyframe) or while the transport reported
+  // a refused send; those vetoes clear by deadline, so a momentary queue spike
+  // does not pin the mode. An encoder over its frame budget only bars
+  // *entering* the stream: leaving it is the repair, and vetoing that pinned a
+  // slow encoder in "streaming" long after the screen settled.
   const bool dragging =
       pointer_down_.load() || now < drag_until_ms_.load();
   const bool congested = now < switch_inhibit_until_ms_.load();
@@ -479,7 +480,8 @@ av1_stream_encoder* capture_base::stream_for_frame_moving(
       vp9_stream_allowed_.load() || vp8_stream_allowed_.load();
   const bool cooldown_before = stream_policy_.in_cooldown(now);
   const bool allow_switch =
-      !dragging && !congested && !encoder_blocked && any_stream_codec;
+      stream_switch_allowed(dragging, congested, any_stream_codec,
+                            stream_policy_.streaming, encoder_blocked);
   bool mode_changed = false;
   if (forced || secure_desktop) {
     stream_policy_.armed = true;
