@@ -1,6 +1,6 @@
 # 发布检查清单
 
-当前状态：**桌面 0.10.0（标签 `v0.10.0`）+ 服务端 0.2.2（独立仓库 `molink-server`）+
+当前状态：**桌面 0.10.6（标签 `v0.10.6`）+ 服务端 0.2.2（独立仓库 `molink-server`）+
 Windows 7 x86（同一个 Release 的 `win7-x86` job）。桌面端已验证
 Linux/Windows/macOS 发布矩阵、简洁模式/头像/域组码与 Win7 GDI 采集；服务端目录、
 TLS、域组码和迁移在独立仓库验证。** 历史条目（0.6.14 及以下）保留在下方作为回归
@@ -11,6 +11,7 @@ TLS、域组码和迁移在独立仓库验证。** 历史条目（0.6.14 及以�
 | 项目 | 命令 / 方法 | 结果 |
 |---|---|---|
 | 协议编解码 | `ctest --test-dir backend/build` | 36/36 |
+| 版本同步 | `backend/src/version.h`、`frontend/package.json`、`packaging/*`、`.github/workflows/release-desktop.yml` 的 `PKG_VERSION` 回退值、`shell/windows/ui_kit_demo.cpp` 的 `kNativeVersion` | 0.10.6 一致 |
 | 后台构建 | `cmake -S backend -B backend/build && cmake --build backend/build` | 通过 |
 | 前端 | `pnpm lint && pnpm typecheck && pnpm build` | 通过 |
 | HTTP/鉴权 | `uvp_verify`（health、`/api/*` 401、`/`） | verified |

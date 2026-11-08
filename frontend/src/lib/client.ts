@@ -13,6 +13,7 @@ import {
   type Frame,
 } from './protocol'
 import { formatHost } from './net'
+import { logDiag } from './diag-log'
 import { H264StreamDecoder, h264StreamSupported } from './h264-stream'
 import {
   VpxStreamDecoder,
@@ -412,6 +413,7 @@ const kHelloAttempts = 5
 const kPingIntervalMs = 3000
 const kPingMissLimit = 6
 
+
 /// Unanswered frame requests before the host is treated as unresponsive. The
 /// request is retried every second by requestFrame().
 const kFrameMissLimit = 15
@@ -423,6 +425,33 @@ const kFrameMissLimit = 15
 /// A skipped tile frame is repaired by the host's tile clock; a skipped stream
 /// frame breaks the reference chain and is answered with a keyframe request.
 const kMaxQueuedDecodes = 4
+
+/// A low-delay stream is stateful: every delta must decode on the picture the
+/// host encoded it against. Frames normally arrive in capture order, but the
+/// P2P upgrade sends deltas over UDP while keyframes stay on the reliable
+/// relay, and UDP itself reorders. Hold a frame that arrived with a hole
+/// before it for this long so the missing predecessor can catch up; only
+/// after that is the reference chain really broken.
+const kStreamReorderWaitMs = 120
+/// Never hold more than this many frames; a longer hole is a real loss.
+const kStreamReorderMax = 6
+
+/// How long a live session may keep receiving stream deltas without any
+/// keyframe before the P2P path is declared broken. Deltas and keyframes take
+/// different paths (P2P vs relay); when the relay dies, every delta arrives
+/// and every keyframe is swallowed, so the picture freezes forever. Six
+/// seconds is far longer than a lost keyframe needs to be re-requested.
+const kStreamKeyframeWaitMs = 6000
+
+/// One decoded-stream frame held back by the reorder window.
+interface PendingStreamFrame {
+  frame: Frame
+  bytes: number
+  tsUs: number
+  keyframe: boolean
+  accessUnit: Uint8Array
+  streamCodecKey: string
+}
 
 export class MolinkClient {
   private ws: WebSocket | null = null
@@ -479,6 +508,9 @@ export class MolinkClient {
   private lastDecoderLog = 0
   /// Last time a tile decompression failure was forwarded (rate limit).
   private lastTileInflateLog = 0
+  /// Last time a block-clock map failed to inflate (rate limit). The map is
+  /// advisory, so this path logs and skips instead of surfacing an error.
+  private lastClockInflateLog = 0
   /// Mean brightness of the last decoded picture, for the black-frame probe.
   private lastFrameLuma = 0
   private lumaCanvas: HTMLCanvasElement | null = null
@@ -492,6 +524,22 @@ export class MolinkClient {
   /// from a keyframe yet.
   private lastStreamCodecKey = ''
   private streamHasImage = false
+  /// Stream frames held back because their predecessor has not arrived yet.
+  /// Sorted by capture sequence; only the head can be decoded on a drain.
+  private streamPending: PendingStreamFrame[] = []
+  private streamGapTimer: number | null = null
+  /// Bumped whenever a keyframe re-anchors the stream or the chain is given
+  /// up. A decode callback from an older chain must not paint or reset state.
+  private streamChain = 0
+  /// Capture timestamp of the newest accepted stream picture. A late keyframe
+  /// (older timestamp) must not rewind an already newer picture, while a
+  /// keyframe after a capture-source swap carries a fresh timestamp even when
+  /// its sequence restarted at a lower number.
+  private lastStreamTsUs = 0
+  /// When this session first asked for a stream keyframe it never received.
+  /// Deltas arriving during that wait mean the media path is alive while the
+  /// keyframe path is not (see kStreamKeyframeWaitMs).
+  private streamKeyframeWaitStarted = 0
   /// Rate limit for the stream-rejection diagnostic.
   private lastStreamRejectLog = 0
   /// The host's codec preference ("auto", a codec name, or "tiles").
@@ -643,6 +691,9 @@ export class MolinkClient {
   /// Manual reconnect from the disconnected overlay.
   reconnectNow(): void {
     if (this.lastConnect === null) return
+    logDiag('info', 'ws.reconnect', 'manual reconnect', {
+      target: `${this.lastConnect.host}:${this.lastConnect.port}`,
+    })
     this.stopRetryTimers()
     this.retryAttempts = 0
     this.closedByUser = false
@@ -684,6 +735,14 @@ export class MolinkClient {
     this.pendingTiles.clear()
     this.frameQueue = Promise.resolve()
     this.frameQueueDepth = 0
+    // A reorder timer from the previous socket must not fire into this one.
+    this.streamChain += 1
+    this.clearStreamGapWait()
+    this.streamPending = []
+    this.streamHasImage = false
+    this.lastStreamSeq = -1
+    this.lastStreamTsUs = 0
+    this.streamKeyframeWaitStarted = 0
 
     // Two devices on the same LAN should not pay the ICE signaling round
     // trips: the directory only hands out a private address to requesters
@@ -727,6 +786,20 @@ export class MolinkClient {
       : useDirectProxy
         ? directProxyUrl
         : `${directSecure ? 'wss' : 'ws'}://${formatHost(host)}:${port}/ws/session`
+    // Which door this attempt takes. The page-facing URL never carries the
+    // code, so it is safe to keep in the local diagnostics buffer.
+    const connectMode = useProxy
+      ? forceRelay
+        ? 'relay'
+        : 'proxy'
+      : useDirectProxy
+        ? 'direct-proxy'
+        : 'direct'
+    logDiag('info', 'ws.open', undefined, {
+      target: `${host}:${port}`,
+      mode: connectMode,
+      attempt: this.retryAttempts,
+    })
     this.handlers.onPhase?.('connecting')
 
     let ws: WebSocket
@@ -797,6 +870,17 @@ export class MolinkClient {
       // A socket that a stall recovery already replaced must not clear the
       // new one and schedule a second reconnect.
       if (this.ws !== ws) return
+      logDiag(
+        this.closedByUser ? 'info' : 'warn',
+        'ws.close',
+        event.reason || undefined,
+        {
+          target: `${host}:${port}`,
+          mode: connectMode,
+          code: event.code,
+          error: this.lastErrorCode || undefined,
+        },
+      )
       this.stopPing()
       this.stopHelloRetry()
       this.stopWatchingVisibility()
@@ -830,6 +914,12 @@ export class MolinkClient {
           this.lastErrorMessage = closeReason
         }
         this.lastErrorCode = this.lastErrorCode || 'unauthorized'
+        logDiag(
+          'error',
+          'session.rejected',
+          this.lastErrorMessage || closeReason || this.lastErrorCode,
+          { target: `${host}:${port}`, code: this.lastErrorCode },
+        )
         this.handlers.onPhase?.('error',
                                 this.lastErrorMessage || this.lastErrorCode)
         return
@@ -837,6 +927,10 @@ export class MolinkClient {
       if (this.usedDirectProxy && !this.closedByUser) {
         // The local proxy could not reach the host (or is unavailable in this
         // page); fall back to the host's own socket, without AV1.
+        logDiag('warn', 'transport.fallback', 'direct proxy failed', {
+          target: `${host}:${port}`,
+          to: 'direct',
+        })
         this.usedDirectProxy = false
         this.directProxyFailed = true
         this.openSocket()
@@ -844,6 +938,10 @@ export class MolinkClient {
       }
       if (preferDirect && !this.closedByUser) {
         // The same-LAN address did not answer: go through ICE instead.
+        logDiag('warn', 'transport.fallback', 'direct path failed', {
+          target: `${host}:${port}`,
+          to: 'proxy',
+        })
         this.directFailed = true
         this.openSocket()
         return
@@ -852,13 +950,23 @@ export class MolinkClient {
         // ICE failed or the proxy is unavailable: retry the direct path once.
         this.proxyFailed = true
         if (forceRelay) {
+          logDiag('error', 'connect.failed', 'the relay is unavailable', {
+            target: `${host}:${port}`,
+          })
           this.handlers.onPhase?.('error', 'the relay is unavailable')
           return
         }
         if (this.directFailed) {
+          logDiag('error', 'connect.failed', 'could not reach the device', {
+            target: `${host}:${port}`,
+          })
           this.handlers.onPhase?.('error', 'could not reach the device')
           return
         }
+        logDiag('warn', 'transport.fallback', 'proxy failed', {
+          target: `${host}:${port}`,
+          to: 'direct',
+        })
         this.openSocket()
         return
       }
@@ -883,6 +991,11 @@ export class MolinkClient {
     if (this.retryAttempts < 3) {
       const delay = this.retryAttempts === 0 ? 0 : 1000
       this.retryAttempts += 1
+      logDiag('warn', 'ws.retry', undefined, {
+        code,
+        attempt: this.retryAttempts,
+        delayMs: delay,
+      })
       this.handlers.onPhase?.('connecting')
       this.retryTimer = window.setTimeout(() => {
         this.retryTimer = null
@@ -891,6 +1004,10 @@ export class MolinkClient {
       return
     }
     const deadline = Date.now() + 60000
+    logDiag('warn', 'ws.retry', 'quick retries exhausted', {
+      code,
+      nextMs: 60000,
+    })
     this.handlers.onPhase?.('disconnected', `closed (${code})`)
     this.handlers.onRetryScheduled?.(deadline)
     this.autoRetryTimer = window.setTimeout(() => {
@@ -920,6 +1037,9 @@ export class MolinkClient {
     this.stopWatchingVisibility()
     this.pushSupported = false
     this.pushVideo = false
+    this.streamChain += 1
+    this.clearStreamGapWait()
+    this.streamPending = []
     const ws = this.ws
     this.ws = null
     if (ws && ws.readyState <= WebSocket.OPEN) {
@@ -1141,7 +1261,11 @@ export class MolinkClient {
 
   /** Asks for the next capture to be a full keyframe (resync after a loss). */
   requestKeyframe(): void {
-    this.sendJson({ type: 'request-keyframe' })
+    // Compensation messages are routed over the relay by the local core. Send
+    // this through the socket even when the WebRTC data channel is up: a
+    // request that goes over RTC never reaches the relay, and a relay that
+    // carries no traffic goes idle and swallows the keyframe it was asked for.
+    this.sendRelayText({ type: 'request-keyframe' })
   }
 
   /**
@@ -1539,9 +1663,11 @@ export class MolinkClient {
         const mode: 'tiles' | 'video' =
           message.mode === 'video' ? 'video' : 'tiles'
         this.lastStreamCodecKey = ''
-        this.lastStreamSeq = -1
-        this.streamHasImage = false
         this.streamCodecNotified = false
+        // Bump the stream chain through the official reset: a decode callback
+        // queued under the old epoch must not paint into this one, and pending
+        // reorder frames / gap timers have to be dropped with it.
+        this.resetStreamSequence()
         this.h264.close()
         for (const decoder of Object.values(this.vpxDecoders)) decoder?.close()
         this.vpxDecoders = {}
@@ -1615,9 +1741,10 @@ export class MolinkClient {
     this.frameQueue = this.frameQueue
       .then(work)
       .catch((error: unknown) => {
-        this.handlers.onError?.(
-          error instanceof Error ? error.message : 'frame decode failed',
-        )
+        const message =
+          error instanceof Error ? error.message : 'frame decode failed'
+        logDiag('error', 'frame.decode', message)
+        this.handlers.onError?.(message)
       })
       .finally(() => {
         this.frameQueueDepth -= 1
@@ -1674,7 +1801,32 @@ export class MolinkClient {
           // Clock maps are advisory: under backlog, skip one (the next arrives
           // in about 100 ms) rather than queueing behind a busy decoder.
           this.queueFrameWork(async () => {
-            const inflated = await inflateTile(payload)
+            let inflated: Uint8Array
+            try {
+              inflated = await inflateTile(payload)
+            } catch (error) {
+              // A truncated or badly wrapped clock map used to reject on the
+              // frame queue, which raised the whole session into the fatal
+              // error banner with the browser's raw
+              // "TypeError: Failed to Decode Data." text. The next map arrives
+              // shortly; record it and carry on.
+              const now = performance.now()
+              if (now - this.lastClockInflateLog >= 1000) {
+                this.lastClockInflateLog = now
+                const message =
+                  error instanceof Error ? error.message : String(error)
+                logDiag('warn', 'clock.inflate', message, {
+                  bytes: payload.byteLength,
+                })
+                this.sendJson({
+                  type: 'client-log',
+                  text:
+                    `clock inflate failed bytes=${payload.byteLength}: ` +
+                    message,
+                })
+              }
+              return
+            }
             if (epoch !== this.tileEpoch) return
             this.handleTileSeq(inflated)
           })
@@ -1709,8 +1861,7 @@ export class MolinkClient {
         // be a keyframe, or the deltas decode onto the previous codec's chain.
         if (streamCodecKey !== this.lastStreamCodecKey) {
           this.lastStreamCodecKey = streamCodecKey
-          this.lastStreamSeq = -1
-          this.streamHasImage = false
+          this.resetStreamSequence()
         }
         // A codec this WebView already proved it cannot decode: ignore its
         // frames until the host switches (it will, on the next hello).
@@ -1727,6 +1878,7 @@ export class MolinkClient {
         if (!this.hasImage) {
           this.rejectStream('no-image', frame, packet.tsUs)
           this.requestKeyframeThrottled()
+          this.noteMissingStreamKeyframe()
           return
         }
         if (this.frameAgeMs(packet.tsUs) > 1000) {
@@ -1735,14 +1887,6 @@ export class MolinkClient {
           return
         }
         this.handlers.onWireFrame?.()
-        const isKeyframe = (frame.flags & FrameFlag.keyframe) !== 0
-        // A keyframe is authoritative even after the capture sequence was
-        // reset by a source swap; without this the tile path would keep
-        // dropping the new, lower-numbered frames as stale.
-        if (frame.frameSeq > this.latestFrameSeq || isKeyframe) {
-          this.latestFrameSeq = frame.frameSeq
-        }
-        this.noteApplied(frame, packet.tsUs)
         if (!this.streamCodecNotified) {
           this.streamCodecNotified = true
           this.handlers.onStreamVideo?.(
@@ -1759,73 +1903,70 @@ export class MolinkClient {
         // A copy: WebCodecs keeps the buffer until the chunk is consumed, and
         // the packet's view belongs to the caller.
         const accessUnit = new Uint8Array(frame.tiles[0]!.data)
-        // Video rides unreliable datagrams on WebTransport and P2P, so a
-        // stream frame can go missing without any error. A delta decoded on a
-        // gap paints artifacts until the next keyframe, so a gap restarts the
-        // decoder and asks for one.
-        if (keyframe) this.streamHasImage = true
-        if (!this.streamHasImage) {
-          // Nothing painted for this codec yet: a delta has no reference what
-          // it can use. Wait for the keyframe the switch starts with.
+        const item: PendingStreamFrame = {
+          frame,
+          bytes: buffer.byteLength,
+          tsUs: packet.tsUs,
+          keyframe,
+          accessUnit,
+          streamCodecKey,
+        }
+
+        if (keyframe) {
+          // Keyframes ride the reliable relay, deltas the low-latency P2P
+          // path. The keyframe can therefore arrive after deltas that already
+          // advanced the picture: it is stale then and must not rewind the
+          // sequence, or every later delta looks like a gap.
+          if (
+            this.streamHasImage &&
+            this.lastStreamSeq >= 0 &&
+            frame.frameSeq < this.lastStreamSeq &&
+            packet.tsUs <= this.lastStreamTsUs
+          ) {
+            this.rejectStream('late-keyframe', frame, packet.tsUs)
+            return
+          }
+          this.streamChain += 1
+          this.clearStreamGapWait()
+          this.streamPending = []
+          // Rebuild the decoder from this keyframe: nothing from the old
+          // reference chain may survive into the new one.
+          this.streamDecoderFor(frame).close()
+          this.streamHasImage = true
+          this.lastStreamSeq = frame.frameSeq
+          this.latestFrameSeq = frame.frameSeq
+          this.streamKeyframeWaitStarted = 0
+          this.submitStreamFrame(item)
+          return
+        }
+
+        if (!this.streamHasImage || this.lastStreamSeq < 0) {
+          // Nothing painted for this codec yet: a delta has no reference it
+          // can use. Wait for the keyframe the switch starts with.
           this.rejectStream('no-keyframe', frame, packet.tsUs)
           this.requestKeyframeThrottled()
+          this.noteMissingStreamKeyframe()
           return
         }
-        const previousSeq = this.lastStreamSeq
-        this.lastStreamSeq = frame.frameSeq
-        // Strictly consecutive, or the reference chain is broken. The capture
-        // sequence also restarts when the host swaps its capture source (the
-        // secure desktop and back), so a decrease counts as a break too;
-        // checking only "greater" left the decoder painting artifacts until a
-        // keyframe happened to arrive.
-        const contiguous = previousSeq < 0 || frame.frameSeq === previousSeq + 1
-        if (!keyframe && !contiguous) {
-          this.rejectStream('gap', frame, packet.tsUs)
-          this.streamDecoderFor(frame).close()
-          this.requestKeyframeThrottled()
+        if (frame.frameSeq <= this.lastStreamSeq) {
+          // Late or duplicated: its picture is older than what is already on
+          // screen. Dropping it without touching the decoder is what keeps
+          // UDP reordering from forcing a keyframe every other frame.
+          this.rejectStream('late', frame, packet.tsUs)
           return
         }
-        // Feed the decoder without waiting for the previous picture. WebKit's
-        // decoder only emits a picture once the next chunk (or a flush)
-        // arrives, so awaiting each output before submitting the next chunk
-        // deadlocks after the first frame: one chunk goes in, nothing comes
-        // out, and the queue never moves again. Output order follows input
-        // order, so painting as promises resolve keeps the picture ordered.
-        const decoder = this.streamDecoderFor(frame)
-        // Submissions are cheap (the decoder holds the actual queue), but a
-        // backed-up chain still means the main thread is not keeping up. Drop
-        // this picture and re-anchor on a keyframe instead of building latency.
-        this.queueFrameWork(
-          async () => {
-            void decoder
-              .decode(accessUnit, keyframe)
-              .then((picture) => {
-                if (picture === null) {
-                  // Behind, broken, or a delta with no reference: only a
-                  // keyframe brings the stream back.
-                  if (!this.disabledStreamCodecs.has(streamCodecKey)) {
-                    this.requestKeyframeThrottled()
-                  }
-                  return
-                }
-                this.noteFrameLuma(picture, streamCodecKey, keyframe)
-                this.lastStreamPaintAt = performance.now()
-                try {
-                  this.handlers.onFrame?.(frame, buffer.byteLength, [picture])
-                } finally {
-                  picture.close()
-                }
-              })
-              .catch(() => undefined)
-          },
-          () => {
-            this.handlers.onFrameDropped?.()
-            this.streamHasImage = false
-            this.lastStreamSeq = -1
-            decoder.close()
-            this.requestKeyframeThrottled()
-          },
-        )
+        if (frame.frameSeq === this.lastStreamSeq + 1) {
+          this.lastStreamSeq = frame.frameSeq
+          if (frame.frameSeq > this.latestFrameSeq) {
+            this.latestFrameSeq = frame.frameSeq
+          }
+          this.submitStreamFrame(item)
+          this.drainStreamPending()
+          return
+        }
+        // A hole: hold this frame briefly so the missing predecessor can
+        // arrive (UDP reordering, or a keyframe still on the relay path).
+        this.bufferStreamFrame(item)
         return
       }
       if ((packet.flags & PacketFlag.tileRefresh) !== 0) {
@@ -1936,6 +2077,11 @@ export class MolinkClient {
       this.pendingFrame = false
       const message =
         error instanceof ProtocolError ? error.message : 'could not decode frame'
+      logDiag(
+        'error',
+        'frame.packet',
+        error instanceof Error ? error.message : message,
+      )
       this.handlers.onError?.(message)
     }
   }
@@ -2001,12 +2147,24 @@ export class MolinkClient {
       const now = performance.now()
       if (now - this.lastTileInflateLog >= 1000) {
         this.lastTileInflateLog = now
+        const message =
+          error instanceof Error ? error.message : String(error)
+        const bytes = frame.tiles.reduce(
+          (total, tile) => total + tile.data.byteLength,
+          0,
+        )
+        logDiag('warn', 'frame.inflate', message, {
+          codec: frame.codec,
+          tiles: frame.tiles.length,
+          seq: frame.frameSeq,
+          bytes,
+        })
         this.sendJson({
           type: 'client-log',
           text:
             `tile inflate failed codec=${frame.codec} ` +
             `tiles=${frame.tiles.length} seq=${frame.frameSeq}: ` +
-            (error instanceof Error ? error.message : String(error)),
+            message,
         })
       }
       return
@@ -2310,6 +2468,10 @@ export class MolinkClient {
         const now = performance.now()
         if (now - this.lastDecoderLog >= 1000) {
           this.lastDecoderLog = now
+          logDiag('error', 'stream.decode', message, {
+            codec,
+            failures,
+          })
           this.sendJson({ type: 'client-log', text: message })
         }
         // A codec that fails every keyframe cannot be streamed here: stop
@@ -2328,6 +2490,10 @@ export class MolinkClient {
   private disableStreamCodec(codec: VpxCodec): void {
     if (this.disabledStreamCodecs.has(codec)) return
     this.disabledStreamCodecs.add(codec)
+    logDiag('warn', 'stream.codec-disabled', undefined, {
+      codec,
+      failures: this.streamDecodeFailures.get(codec) ?? 0,
+    })
     this.streamDecodeFailures.delete(codec)
     if (codec === 'av1') this.av1NativeCapable = false
     else if (codec === 'vp9') this.vp9Capable = false
@@ -2345,6 +2511,7 @@ export class MolinkClient {
         if (!ok || !this.disabledStreamCodecs.has(codec)) return
         this.disabledStreamCodecs.delete(codec)
         this.streamDecodeFailures.delete(codec)
+        logDiag('info', 'stream.codec-enabled', 'probe passed again', { codec })
         if (codec === 'av1') this.av1NativeCapable = true
         else if (codec === 'vp9') this.vp9Capable = true
         else if (codec === 'vp8') this.vp8Capable = true
@@ -2380,6 +2547,12 @@ export class MolinkClient {
       const previous = this.lastFrameLuma
       this.lastFrameLuma = mean
       if (mean < 8 && previous > 40) {
+        logDiag('warn', 'frame.black', undefined, {
+          codec,
+          key: keyframe ? 1 : 0,
+          mean: Number(mean.toFixed(1)),
+          before: Number(previous.toFixed(1)),
+        })
         this.sendJson({
           type: 'client-log',
           text:
@@ -2393,16 +2566,189 @@ export class MolinkClient {
   }
 
   /// Why a stream frame was not painted (rate-limited, for diagnosis).
+  /// Forget the current stream reference chain. Pending frames are dropped and
+  /// any decode callback still in flight becomes a no-op.
+  private resetStreamSequence(): void {
+    this.streamChain += 1
+    this.streamPending = []
+    this.clearStreamGapWait()
+    this.lastStreamSeq = -1
+    this.streamHasImage = false
+    this.streamKeyframeWaitStarted = 0
+  }
+
+  /// A live session keeps receiving deltas but never a keyframe: the P2P path
+  /// is up while the relay path that carries keyframes is gone. Retry pinned
+  /// to the relay so every video packet shares one ordered, reliable path;
+  /// the resume token keeps the host session itself.
+  private noteMissingStreamKeyframe(): void {
+    const now = Date.now()
+    if (this.streamKeyframeWaitStarted === 0) {
+      this.streamKeyframeWaitStarted = now
+      return
+    }
+    if (now - this.streamKeyframeWaitStarted < kStreamKeyframeWaitMs) return
+    this.streamKeyframeWaitStarted = 0
+    if (this.lastConnect === null || this.lastConnect.forceRelay) return
+    logDiag(
+      'warn',
+      'transport.p2p-stuck',
+      'keyframes stopped on p2p; retrying on the relay',
+      { target: `${this.lastConnect.host}:${this.lastConnect.port}` },
+    )
+    this.lastConnect.forceRelay = true
+    this.recoverStalledSession('keyframes stopped on p2p')
+  }
+
+  private clearStreamGapWait(): void {
+    if (this.streamGapTimer === null) return
+    window.clearTimeout(this.streamGapTimer)
+    this.streamGapTimer = null
+  }
+
+  /// Hold a delta whose predecessor is missing. If the predecessor arrives
+  /// within the window the queue is drained in order; otherwise the chain is
+  /// given up and a keyframe re-anchors it.
+  private bufferStreamFrame(item: PendingStreamFrame): void {
+    if (
+      this.streamPending.some(
+        (pending) => pending.frame.frameSeq === item.frame.frameSeq,
+      )
+    ) {
+      return
+    }
+    this.rejectStream('reorder', item.frame, item.tsUs)
+    if (this.streamPending.length >= kStreamReorderMax) {
+      this.giveUpStreamChain(item, 'gap')
+      return
+    }
+    this.streamPending.push(item)
+    this.streamPending.sort(
+      (left, right) => left.frame.frameSeq - right.frame.frameSeq,
+    )
+    if (this.streamGapTimer !== null) return
+    this.streamGapTimer = window.setTimeout(() => {
+      this.streamGapTimer = null
+      const first = this.streamPending[0]
+      this.streamPending = []
+      if (first !== undefined) this.giveUpStreamChain(first, 'gap')
+    }, kStreamReorderWaitMs)
+  }
+
+  /// Drop the whole chain and ask for a keyframe. Frames already buffered are
+  /// useless: each of them references the missing picture.
+  private giveUpStreamChain(
+    item: PendingStreamFrame,
+    reason: string,
+  ): void {
+    this.clearStreamGapWait()
+    this.streamPending = []
+    this.streamChain += 1
+    this.rejectStream(reason, item.frame, item.tsUs)
+    this.streamHasImage = false
+    this.lastStreamSeq = -1
+    this.streamDecoderFor(item.frame).close()
+    this.requestKeyframeThrottled()
+  }
+
+  /// Decode every buffered frame that is now contiguous with the accepted
+  /// sequence, in order.
+  private drainStreamPending(): void {
+    for (;;) {
+      const index = this.streamPending.findIndex(
+        (item) => item.frame.frameSeq === this.lastStreamSeq + 1,
+      )
+      if (index < 0) break
+      const item = this.streamPending.splice(index, 1)[0]!
+      this.lastStreamSeq = item.frame.frameSeq
+      if (item.frame.frameSeq > this.latestFrameSeq) {
+        this.latestFrameSeq = item.frame.frameSeq
+      }
+      this.submitStreamFrame(item)
+    }
+    // Anything at or below the accepted sequence is a duplicate/late frame.
+    this.streamPending = this.streamPending.filter(
+      (item) => item.frame.frameSeq > this.lastStreamSeq,
+    )
+    if (this.streamPending.length === 0) this.clearStreamGapWait()
+  }
+
+  /// Feed one accepted stream frame to WebCodecs. Frames are submitted in
+  /// capture order; WebKit only emits a picture once the next chunk (or a
+  /// flush) arrives, so waiting for each output before submitting the next
+  /// would deadlock, and painting as promises resolve keeps them ordered.
+  private submitStreamFrame(item: PendingStreamFrame): void {
+    const { frame, bytes, keyframe, accessUnit, streamCodecKey } = item
+    // Only pixels actually handed to the decoder count as applied; a buffered
+    // frame can still be given up on.
+    this.noteApplied(frame, item.tsUs)
+    this.lastStreamTsUs = item.tsUs
+    const decoder = this.streamDecoderFor(frame)
+    const chain = this.streamChain
+    this.queueFrameWork(
+      async () => {
+        void decoder
+          .decode(accessUnit, keyframe)
+          .then((picture) => {
+            if (picture === null) {
+              // Behind, broken, or a delta with no reference: only a keyframe
+              // brings the stream back. A newer chain must not be reset by an
+              // old callback.
+              if (
+                chain === this.streamChain &&
+                !this.disabledStreamCodecs.has(streamCodecKey)
+              ) {
+                this.streamHasImage = false
+                this.lastStreamSeq = -1
+                this.streamPending = []
+                this.requestKeyframeThrottled()
+              }
+              return
+            }
+            if (chain !== this.streamChain) {
+              picture.close()
+              return
+            }
+            this.noteFrameLuma(picture, streamCodecKey, keyframe)
+            this.lastStreamPaintAt = performance.now()
+            try {
+              this.handlers.onFrame?.(frame, bytes, [picture])
+            } finally {
+              picture.close()
+            }
+          })
+          .catch(() => undefined)
+      },
+      () => {
+        if (chain !== this.streamChain) return
+        this.handlers.onFrameDropped?.()
+        this.streamHasImage = false
+        this.lastStreamSeq = -1
+        this.streamPending = []
+        this.streamChain += 1
+        decoder.close()
+        this.requestKeyframeThrottled()
+      },
+    )
+  }
+
   private rejectStream(reason: string, frame: Frame, tsUs = 0): void {
     const now = performance.now()
     if (now - this.lastStreamRejectLog < 1000) return
     this.lastStreamRejectLog = now
+    const age = Math.round(this.frameAgeMs(tsUs))
+    logDiag('warn', 'stream.reject', reason, {
+      codec: frame.codec,
+      key: (frame.flags & FrameFlag.keyframe) !== 0 ? 1 : 0,
+      seq: frame.frameSeq,
+      ageMs: age,
+    })
     this.sendJson({
       type: 'client-log',
       text:
         `stream reject ${reason} codec=${frame.codec} key=` +
         `${(frame.flags & FrameFlag.keyframe) !== 0 ? 1 : 0} ` +
-        `seq=${frame.frameSeq} age=${Math.round(this.frameAgeMs(tsUs))}`,
+        `seq=${frame.frameSeq} age=${age}`,
     })
   }
 
@@ -2442,6 +2788,17 @@ export class MolinkClient {
     }
     this.pendingPingAt = 0
     this.missedPongs = 0
+  }
+
+  /// Control that must pass through the local core's relay routing. The RTC
+  /// data channel and WebTransport bypass it; the WebSocket does not (the
+  /// core classifies repair requests and sends them over the relay).
+  private sendRelayText(payload: Record<string, unknown>): void {
+    if (this.ws !== null && this.ws.readyState === WebSocket.OPEN) {
+      this.sendJson(payload, true)
+      return
+    }
+    this.sendJson(payload)
   }
 
   /// The session looks live but nothing is coming back. Drop the socket and
@@ -2544,6 +2901,10 @@ export class MolinkClient {
   private fallBackToSocket(reason: string): void {
     if (this.closedByUser) return
     if (this.wt === null && !this.wtPending) return
+    logDiag('warn', 'transport.fallback', reason, {
+      to: 'websocket',
+      pending: this.wtPending,
+    })
     const transport = this.wt
     const wasPending = this.wtPending
     this.wt = null
