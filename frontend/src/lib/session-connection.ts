@@ -339,6 +339,13 @@ export class SessionConnection {
         }, 10000)
       },
       onStreamVideo: (codec) => this.sink.onPatch({ streamCodec: codec }),
+      onStreamEpoch: (_epoch, _mode) => {
+        // The host starts the new encoding epoch with a keyframe. Dropping the
+        // composited picture guarantees no tile or video delta from the
+        // previous mode survives; the canvas stays empty until that keyframe.
+        forgetSessionScreenBuffer(this.sessionKey)
+        noteSessionFrame(this.sessionKey)
+      },
       onCodecOptions: (options) => this.sink.onPatch({ codecOptions: options }),
       onCodecPreference: (value) =>
         this.sink.onPatch({ codecPreference: value }),

@@ -848,6 +848,17 @@ void send_capture_frame(session_transport* transport,
         tile_count = 0;
       }
     }
+    // stream_epoch_id: sent before the first frame of a new mode so the
+    // viewer drops its old tile image / video reference queue and waits for
+    // the keyframe that starts the epoch.
+    if (frame->stream_epoch != session->stream_epoch) {
+      session->stream_epoch = frame->stream_epoch;
+      uvcpp_json epoch_msg;
+      epoch_msg["type"] = "stream-epoch";
+      epoch_msg["epoch"] = frame->stream_epoch;
+      epoch_msg["mode"] = frame->av1_only ? "video" : "tiles";
+      send_json(transport, epoch_msg);
+    }
     if (!send_frame_with_av1(transport, session, *frame)) {
       // The transport refused the frame: its channel is full, or the session
       // is gone. Advancing anyway would tell the next tick that the viewer is
@@ -870,6 +881,7 @@ void send_capture_frame(session_transport* transport,
           refused = 0;
         }
       }
+      if (opt.capture) opt.capture->set_switch_inhibited(true);
       session->has_image = false;
       session->last_capture_seq = -1;
       ask_keyframe();
@@ -2549,6 +2561,22 @@ void session_controller::on_text(const std::string& text) {
   }
 
   if (type == "input") {
+    if (std::getenv("MOLINK_STREAM_LOG") != nullptr) {
+      const auto events = j.find("events");
+      if (events != j.end() && events->is_array()) {
+        for (const auto& event : *events) {
+          const std::string kind = string_field(event, "k");
+          if (kind != "move") {
+            std::fprintf(stderr, "host: input k=%s\n", kind.c_str());
+          }
+        }
+      } else {
+        const std::string kind = string_field(j, "k");
+        if (kind != "move") {
+          std::fprintf(stderr, "host: input k=%s\n", kind.c_str());
+        }
+      }
+    }
     if (!options_.input || !options_.input->available()) {
       uvcpp_json e;
       e["type"] = "error";
@@ -2562,6 +2590,28 @@ void session_controller::on_text(const std::string& text) {
     std::string input_error;
     bool rejected = false;
     bool failed = false;
+    // A pressed primary button freezes the tile <-> stream decision: a drag
+    // must not pay an encoder restart or a full-screen keyframe, and a release
+    // keeps the veto for a short settle window. This reuses the existing input
+    // channel; no new event stream is introduced.
+    const auto note_pointer = [&](const uvcpp_json& event) {
+      if (!options_.capture) return;
+      const std::string kind = string_field(event, "k");
+      if (kind == "move") {
+        options_.capture->note_pointer(false, true, now_ms());
+        return;
+      }
+      if (kind != "button") return;
+      double button = 1;
+      number_field(event, "button", button);
+      if (static_cast<int>(button) != 1) return;
+      const bool down = bool_field(event, "down", true);
+      if (std::getenv("MOLINK_STREAM_LOG") != nullptr) {
+        std::fprintf(stderr, "host: input primary button=%s\n",
+                     down ? "down" : "up");
+      }
+      options_.capture->note_pointer(down, false, now_ms());
+    };
     auto apply = [&](const uvcpp_json& event) {
       const input_injector::status status =
           inject_one(*options_.input, event, input_error);
@@ -2581,9 +2631,10 @@ void session_controller::on_text(const std::string& text) {
       }
       for (const auto& event : *events) {
         if (!apply(event)) break;
+        note_pointer(event);
       }
-    } else {
-      apply(j);
+    } else if (apply(j)) {
+      note_pointer(j);
     }
     if (rejected) {
       send_error(transport.get(), "bad_input", input_error);

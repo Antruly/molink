@@ -63,6 +63,12 @@ void capture_switch::replay_settings(capture_source& source) const {
   const uint64_t now = monotonic_ms();
   const uint64_t until = stream_nudge_until_.load();
   if (until > now) source.request_stream(until - now);
+  // The adaptive-switch vetoes are state, not one-shot commands: a drag in
+  // flight or a still-backing-up send must survive a desktop swap.
+  if (switch_inhibit_until_ms_.load() > now) {
+    source.set_switch_inhibited(true);
+  }
+  if (pointer_down_.load()) source.note_pointer(true, false, now);
   av1_encoding_settings settings;
   {
     std::lock_guard<std::mutex> lock(settings_mutex_);
@@ -200,6 +206,26 @@ void capture_switch::set_av1_stream_allowed(bool allowed) {
 void capture_switch::set_stream_enter_percent(int percent) {
   stream_enter_percent_.store(percent);
   with([percent](capture_source& s) { s.set_stream_enter_percent(percent); });
+}
+
+void capture_switch::set_switch_inhibited(bool inhibited) {
+  switch_inhibit_until_ms_.store(inhibited ? monotonic_ms() + 1500 : 0);
+  with([inhibited](capture_source& s) { s.set_switch_inhibited(inhibited); });
+}
+
+void capture_switch::note_pointer(bool button_down, bool moving,
+                                  uint64_t now_ms) {
+  if (button_down) {
+    pointer_down_.store(true);
+  } else if (!moving) {
+    pointer_down_.store(false);
+  }
+  with([&](capture_source& s) { s.note_pointer(button_down, moving, now_ms); });
+}
+
+uint32_t capture_switch::stream_epoch() const {
+  const std::shared_ptr<capture_source> source = inner();
+  return source != nullptr ? source->stream_epoch() : 0;
 }
 
 void capture_switch::set_h264_stream_allowed(bool allowed) {

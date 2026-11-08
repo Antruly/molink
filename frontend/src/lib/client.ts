@@ -214,6 +214,10 @@ export interface ClientHandlers {
   /// The host is sending its low-delay H.264 stream for this session. Fired
   /// once per connection so the UI can name the path instead of guessing.
   onStreamVideo?: (codec: string) => void
+  /// A tile <-> video encoding epoch started (stream_epoch_id changed). The
+  /// host begins every epoch with a keyframe, so the view may drop the old
+  /// tile image and video reference queue here.
+  onStreamEpoch?: (epoch: number, mode: 'tiles' | 'video') => void
   /// Stream codecs the host can encode *and* this page can decode: what the
   /// session toolbar may offer.
   onCodecOptions?: (options: string[]) => void
@@ -296,6 +300,9 @@ interface ControlMessage {
   wire_rate?: number
   from?: string
   ts?: number
+  /// stream_epoch_id of a `stream-epoch` message; `mode` says which path the
+  /// new epoch uses.
+  epoch?: number
   name?: string
   size?: number
   dir?: string
@@ -1523,6 +1530,40 @@ export class MolinkClient {
           this.handlers.onCodecPreference?.(message.value)
         }
         break
+      case 'stream-epoch': {
+        // A tile <-> video switch. The previous mode's references are dropped
+        // here: no tile image or delta chain from the old epoch may be mixed
+        // into the new one.
+        const epoch =
+          typeof message.epoch === 'number' ? message.epoch : 0
+        const mode: 'tiles' | 'video' =
+          message.mode === 'video' ? 'video' : 'tiles'
+        this.lastStreamCodecKey = ''
+        this.lastStreamSeq = -1
+        this.streamHasImage = false
+        this.streamCodecNotified = false
+        this.h264.close()
+        for (const decoder of Object.values(this.vpxDecoders)) decoder?.close()
+        this.vpxDecoders = {}
+        if (mode === 'tiles') {
+          // The host forces a full tile keyframe when it hands the picture
+          // back. Lifting the "ignore stray tiles while streaming" window is
+          // mandatory here: otherwise every tile delta after the hand-over
+          // was swallowed for 15 s (and a reordered epoch message could wipe
+          // the already-painted keyframe), leaving a frozen picture while
+          // input kept working. Keep the current image until that keyframe
+          // replaces every tile, and ask for one as a belt-and-braces repair
+          // if the reordered/lost hand-over frame never arrives.
+          this.lastStreamPaintAt = 0
+          this.requestKeyframeThrottled()
+        } else {
+          // Video: nothing may paint before the epoch's keyframe, so drop the
+          // old picture and wait for it.
+          this.hasImage = false
+          this.handlers.onStreamEpoch?.(epoch, mode)
+        }
+        break
+      }
       case 'transport':
         if (typeof message.mode === 'string') {
           this.handlers.onTransport?.(
@@ -1803,6 +1844,7 @@ export class MolinkClient {
             performance.now() - this.lastStreamPaintAt < 15000) {
           return
         }
+        if (refreshKeyframe) this.lastStreamPaintAt = 0
         this.forgetStreamPicture()
         if ((frame.flags & FrameFlag.keyframe) !== 0) this.hasImage = true
         if (!this.hasImage) {
@@ -1844,6 +1886,7 @@ export class MolinkClient {
       // as the one used before the tiles. Without this the page decoded the
       // first deltas on the old reference chain and smeared the picture until
       // a keyframe happened to arrive.
+      if (tileKeyframe) this.lastStreamPaintAt = 0
       this.forgetStreamPicture()
       const keyframe = (frame.flags & FrameFlag.keyframe) !== 0
       // A frame that spent more than a second in flight is worse than a
