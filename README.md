@@ -176,6 +176,49 @@ x86_64-w64-mingw32-g++ -std=c++20 -D_WIN32_WINNT=0x0A00 -DMOLINK_HAVE_WEBP \
 `-DMOLINK_HAVE_WEBP` 用于解码主机头像（WebP）；不定义时退回首字母头像。Windows
 x64 的 core 需带 OpenSSL 编译（TLS / 中继 / HTTP3）。
 
+启动参数可直接连接，无需在界面里输入：
+
+```bash
+# 设备 ID + 验证码：由本机 core 通过 ID 服务器解析，自动走 P2P/中继
+./moLink-native.exe --session <设备ID> --code <验证码>
+# 直连地址与端口
+./moLink-native.exe --session 192.168.1.8:28418 --code <验证码>
+```
+
+### MinGW-w64 x64 构建（MSVCRT）
+
+发布流程里 Windows 的 core 用 MSVC、两个壳用 MinGW。也可以用**同一套
+MSVCRT MinGW-w64 工具链**编全部组件：产出的二进制只依赖系统自带的
+`msvcrt.dll`，Windows 7 SP1 无需安装 UCRT 更新；同时与 libuvcpp 的
+`mingw-x64` 预编译包 ABI 一致（该包链接 `msvcrt.dll`）。注意用 MSYS2 的
+`mingw64` 仓库，**不要**用 `ucrt64`，否则同一个进程里会有两套 CRT 和堆。
+
+```bash
+# MSYS2 mingw64 仓库（MSVCRT）
+pacman -S --needed mingw-w64-x86_64-gcc mingw-w64-x86_64-openssl \
+  mingw-w64-x86_64-zlib mingw-w64-x86_64-libvpx mingw-w64-x86_64-dav1d \
+  mingw-w64-x86_64-svt-av1 mingw-w64-x86_64-usrsctp \
+  mingw-w64-x86_64-nlohmann-json mingw-w64-x86_64-libwebp
+
+./packaging/fetch-uvcpp.sh mingw-x64 1.9.1 build/uvcpp-1.9.1-mingw
+
+export MOLINK_MINGW64_PREFIX=C:/msys64/mingw64
+cmake -S backend -B build-mingw64 -G Ninja \
+  -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/mingw64-msvcrt.cmake \
+  -DMOLINK_UVCPP_PREFIX=build/uvcpp-1.9.1-mingw \
+  -DCMAKE_PREFIX_PATH="C:/msys64/mingw64" \
+  -DOPENSSL_ROOT_DIR="C:/msys64/mingw64" \
+  -DMOLINK_ENABLE_AV1=ON -DMOLINK_ENABLE_VPX=ON \
+  -DMOLINK_REQUIRE_VPX=ON -DMOLINK_REQUIRE_DAV1D=ON
+cmake --build build-mingw64 --parallel
+```
+
+AV1（SVT-AV1 + dav1d）与 VP9/VP8（libvpx）来自上面的 MSYS2 包。WebRTC 需要
+libdatachannel：MSYS2 的 `mingw64` 仓库没有 `libsrtp`，可以像 CI 的 Linux
+构建一样从源码编 libdatachannel（它会用自带 submodule 编好 libsrtp、
+usrsctp 与 libjuice），再把安装前缀加进 `CMAKE_PREFIX_PATH` 并传
+`-DMOLINK_ENABLE_WEBRTC=ON`。
+
 ## 界面
 
 - **设备页**：展示本机设备 ID 与验证码（默认以 `•` 隐藏，可显示/复制），以及抓屏、输入、剪贴板能力状态。

@@ -8170,14 +8170,22 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
       if (!create_resources(window)) return -1;
       if (g.rename_test && !g.recents.empty()) open_rename_dialog(0);
       if (!g.surface_path.empty()) surface_open(g.surface_path);
-      if (!g.session_host.empty() && g.session_port > 0) {
+      if (!g.session_host.empty()) {
         // --session: go through the normal connect path so the CLI gets the
         // same local-core/surface handling (and stream codecs) as a click.
-        g.address_text =
-            std::wstring(g.session_host.begin(), g.session_host.end()) + L":" +
-            std::to_wstring(g.session_port);
-        g.code_text.assign(g.session_code.begin(), g.session_code.end());
-        PostMessageW(window, WM_APP_START_CONNECT, 0, 0);
+        // A device ID needs no port: `--session <id> --code <code>`
+        // connects through the local core's directory lookup, the same path
+        // the web page takes.
+        const std::wstring target(g.session_host.begin(),
+                                  g.session_host.end());
+        if (g.session_port > 0 || looks_like_device_id(target)) {
+          g.address_text = g.session_port > 0
+                               ? target + L":" +
+                                     std::to_wstring(g.session_port)
+                               : target;
+          g.code_text.assign(g.session_code.begin(), g.session_code.end());
+          PostMessageW(window, WM_APP_START_CONNECT, 0, 0);
+        }
       }
       load_saved_avatar();
       DragAcceptFiles(window, TRUE);
@@ -9791,7 +9799,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   load_host_settings();
   load_device_identity();
 
-  if (g.session_port > 0 || !g.surface_path.empty() || g.tab == 1) {
+  if (g.session_port > 0 || !g.session_host.empty() ||
+      !g.surface_path.empty() || g.tab == 1) {
     g.session_open = true;
   }
   load_recents();

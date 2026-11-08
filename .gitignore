@@ -8,6 +8,7 @@ backend/build/
 backend/build-*/
 squashfs-root/
 shell/*/build/
+shell/*/build-*/
 squashfs-root/
 build/
 squashfs-root/
