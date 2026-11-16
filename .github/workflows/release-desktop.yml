@@ -376,7 +376,17 @@ jobs:
           if ($haveWebp) { Write-Host '== libwebp found' } else { Write-Warning 'libwebp unavailable; building without WebP avatars' }
           $mingwInc = Join-Path $mingw 'include'
           $mingwLib = Join-Path $mingw 'lib'
-          & $windres -O coff -I . shell/windows/ui_kit_demo.rc -o "$env:RUNNER_TEMP\native-res.o"
+          # MSYS2's windres asks PATH for a `gcc` preprocessor. On the GCC 16
+          # image the MSYS-native gcc can win and has no windows.h, which fails
+          # as "windres: preprocessing failed" with no detail. Name the cross
+          # compiler explicitly (windres does not add -E itself) and keep its
+          # include directory on the path.
+          $mingwGcc = Join-Path $mingw 'bin\x86_64-w64-mingw32-gcc.exe'
+          $env:PATH = "$(Join-Path $mingw 'bin');$env:PATH"
+          & $windres "--preprocessor=$mingwGcc" "--preprocessor-arg=-E" `
+            "--preprocessor-arg=-x" "--preprocessor-arg=c-header" `
+            -O coff -I . -I $mingwInc shell/windows/ui_kit_demo.rc `
+            -o "$env:RUNNER_TEMP\native-res.o"
           if ($LASTEXITCODE -ne 0) { throw 'native resources failed' }
           $common = @(
             '-std=c++20', '-D_WIN32_WINNT=0x0601', '-O2', '-mwindows', '-municode', '-static',
