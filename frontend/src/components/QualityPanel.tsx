@@ -152,6 +152,7 @@ export function QualityPanel({
         ? createPortal(
             <div
               ref={surface}
+              data-toolbar-menu="true"
               className="fixed z-50 flex flex-col gap-2 rounded-lg border border-line bg-surface p-2.5 shadow-xl"
               style={{ left: spot.left, top: spot.top, width }}
               role="dialog"

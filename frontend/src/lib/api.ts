@@ -322,7 +322,7 @@ export interface Av1Settings {
   /// "auto" keeps the hardware-first ladder; a pinned codec wins when every
   /// viewer can decode it.
   codec_preference?: string
-  /// Video path: stream / mixed / tiles.
+  /// Video path: stream / tiles (no adaptive mixing).
   video_mode?: string
   devices: Av1Device[]
   active_quality?: string

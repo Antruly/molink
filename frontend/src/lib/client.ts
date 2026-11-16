@@ -429,6 +429,13 @@ const kStreamReorderWaitMs = 120
 /// Never hold more than this many frames; a longer hole is a real loss.
 const kStreamReorderMax = 6
 
+/// Host session tokens, keyed by "target|code". A token is a reconnect
+/// credential, not connection state: every connect still builds its own
+/// MolinkClient/WebSocket, but a new tab (or a manual disconnect followed by a
+/// connect) can present the token instead of spending another use of the
+/// host's temporary code. Cleared when the host rejects it. In-memory only.
+const resumeTokens = new Map<string, string>()
+
 /// How long a live session may keep receiving stream deltas without any
 /// keyframe before the P2P path is declared broken. Deltas and keyframes take
 /// different paths (P2P vs relay); when the relay dies, every delta arrives
@@ -594,6 +601,9 @@ export class MolinkClient {
   /// Session token from the last welcome. Reconnecting with it does not spend
   /// another use of the host's temporary verification code.
   private resumeToken = ''
+  /// Key the token is stored under, so a connect to another target/code never
+  /// inherits this credential.
+  private resumeKey = ''
   /// The hello sent on this socket, kept for retries over a lossy ICE path.
   private helloPayload: Record<string, unknown> | null = null
   private helloTimer: number | null = null
@@ -671,7 +681,11 @@ export class MolinkClient {
     this.directProxyFailed = false
     this.lastErrorCode = ''
     this.lastErrorMessage = ''
-    this.resumeToken = ''
+    // Reuse the host session token for the same target+code, even in a fresh
+    // tab: a single-use code is already spent by the time it reconnects.
+    this.resumeKey = targetId !== '' ? `id:${targetId}|${token}`
+                                     : `${host}:${port}|${token}`
+    this.resumeToken = resumeTokens.get(this.resumeKey) ?? ''
     this.frameClockOffset = 0
     this.frameClockSamples = []
     this.cellReceivedSeq.clear()
@@ -679,6 +693,13 @@ export class MolinkClient {
     this.lastConnect = { host, port, token, requestAccess, targetId,
                         forceRelay, clientName, clientId }
     this.openSocket()
+  }
+
+  /// Drops the resume credential for this target+code after the host rejected
+  /// it, so the next connect falls back to the code or an access request.
+  private forgetResumeToken(): void {
+    this.resumeToken = ''
+    if (this.resumeKey !== '') resumeTokens.delete(this.resumeKey)
   }
 
   /// Manual reconnect from the disconnected overlay.
@@ -902,7 +923,16 @@ export class MolinkClient {
           this.lastErrorCode === 'ip_banned' ||
           this.lastErrorCode === 'access_denied';
       if (policyError) {
-        this.resumeToken = ''
+        // A credential the host rejected must not be presented forever. Keep
+        // the stored token for a lock or a denied request (the code is still
+        // valid and the host honours recent tokens), drop it for a bad code.
+        if (reasonAuth || this.lastErrorCode === 'unauthorized' ||
+            this.lastErrorCode === 'ip_banned' ||
+            this.lastErrorCode === 'too_many_attempts') {
+          this.forgetResumeToken()
+        } else {
+          this.resumeToken = ''
+        }
         if (!this.lastErrorMessage && closeReason) {
           this.lastErrorMessage = closeReason
         }
@@ -1448,6 +1478,9 @@ export class MolinkClient {
         if (typeof welcome.session_token === 'string' &&
             welcome.session_token !== '') {
           this.resumeToken = welcome.session_token
+          if (this.resumeKey !== '') {
+            resumeTokens.set(this.resumeKey, this.resumeToken)
+          }
         }
         this.stopHelloRetry()
         // A host that answered `video_push` sends frames on its own clock
@@ -1662,7 +1695,7 @@ export class MolinkClient {
         // fresh code will arrive from the UI, so drop the stale resume token.
         if (code === 'unauthorized' || code === 'ip_banned' ||
             code === 'too_many_attempts') {
-          this.resumeToken = ''
+          this.forgetResumeToken()
         }
         this.lastErrorCode = code
         this.lastErrorMessage =

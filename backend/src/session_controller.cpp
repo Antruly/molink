@@ -999,11 +999,11 @@ void send_welcome(session_transport* transport, const session_info& session,
     // through the local core's proxy, so `av1_stream` is the proxy's answer.)
     // Toolbar order follows the preference order: AV1 > VP9 > VP8 > H.264.
     //
-    // "tiles" is the explicit "never stream" choice. It is offered in the
-    // mixed mode (stream moving content, tiles a still screen) and is the only
-    // entry in the tiles-only mode; the stream mode never shows it.
+    // "tiles" is the explicit "never stream" choice. It is the only entry in
+    // tiles mode; stream mode never shows it. There is no adaptive middle
+    // mode any more.
     const std::string video_mode =
-        opt.auth ? opt.auth->settings().video_mode : std::string("mixed");
+        opt.auth ? opt.auth->settings().video_mode : std::string("tiles");
     j["stream_codecs"] = uvcpp_json::array();
     if (video_mode != "tiles") {
       if (av1 && session.av1_stream) j["stream_codecs"].push_back("av1");
@@ -1015,10 +1015,10 @@ void send_welcome(session_transport* transport, const session_info& session,
   }
   j["codec_preference"] =
       opt.auth ? opt.auth->settings().stream_codec : std::string("auto");
-  // Host-global video path (stream / mixed / tiles). The native shell shows
-  // the same three-way switch the web's preferences panel offers.
+  // Host-global video path (stream / tiles). The native shell shows the same
+  // switch the web's preferences panel offers.
   j["video_mode"] =
-      opt.auth ? opt.auth->settings().video_mode : std::string("mixed");
+      opt.auth ? opt.auth->settings().video_mode : std::string("tiles");
   // The host's own avatar (a `preset:*` key or a small data URL), so a native
   // viewer can show the same picture the directory does.
   j["avatar"] = opt.auth ? opt.auth->settings().avatar : std::string();
@@ -2298,17 +2298,20 @@ void session_controller::on_text(const std::string& text) {
     const std::string value = string_field(j, "value");
     if (!options_.auth || !options_.auth->set_video_mode(value)) {
       send_error(transport.get(), "bad_video_mode",
-                 "expected stream, mixed or tiles");
+                 "expected stream or tiles");
       return;
     }
+    // An older client may still send "mixed"; auth_state stores it as tiles.
+    // Broadcast the mode the host actually runs, not the legacy spelling.
+    const std::string mode = value == "stream" ? "stream" : "tiles";
     if (options_.capture) {
-      // "stream" pins the video path; the supervisor's next tick applies
-      // mixed/tiles and re-evaluates every viewer's capabilities.
-      options_.capture->set_stream_always(value == "stream");
+      // "stream" pins the video path; "tiles" disables it entirely. The
+      // supervisor applies the rest on its next tick.
+      options_.capture->set_stream_always(mode == "stream");
     }
     uvcpp_json shared;
     shared["type"] = "video-mode";
-    shared["value"] = value;
+    shared["value"] = mode;
     shared["scope"] = "global";
     for (const session_info& peer : registry_->snapshot()) {
       if (!peer.authenticated || !peer.transport) continue;
@@ -3039,7 +3042,7 @@ void session_supervisor::run() {
         pinned = stream_choice::vp8;
       }
       const std::string video_mode =
-          options_.auth ? options_.auth->settings().video_mode : "mixed";
+          options_.auth ? options_.auth->settings().video_mode : "tiles";
       if (options_.capture) {
         options_.capture->set_stream_always(video_mode == "stream");
         // How much of the screen must move before the stream takes over; the

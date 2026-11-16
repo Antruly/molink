@@ -1,7 +1,7 @@
 ; moLink Windows installer (Inno Setup 6).
 ;
 ; Build with:
-;   ISCC.exe /DAppVersion=0.10.6 \
+;   ISCC.exe /DAppVersion=0.11.0 \
 ;            /DPkgDir=C:\path\to\staged\pkg \
 ;            /DOutputDir=C:\path\to\build\package \
 ;            installer.iss
@@ -14,7 +14,7 @@
 ; add a rule; Windows prompts on first LAN listen instead.
 
 #ifndef AppVersion
-  #define AppVersion "0.10.6"
+  #define AppVersion "0.11.0"
 #endif
 #ifndef PkgDir
   #error PkgDir must point at the staged package directory
@@ -42,8 +42,10 @@
 #define AppId "{{B2D9F7D4-6C38-4E7A-9A4B-0B5E8C3F1A72}"
 
 ; Native / Win7 builds pass:
-;   /DAppExeName=moLink-native.exe /DArchAllowed=x86 /DNoInstall64Mode=1
+;   /DAppExeName=moLink-native.exe /DArchAllowed=x86compatible /DNoInstall64Mode=1
 ;   /DOutputName=moLink-<ver>-native-setup-x86 /DNoService=1
+; x86compatible (not x86) is deliberate: the 32-bit Win7 package runs under
+; WoW64 on Windows 7 x64 and Windows 10/11 x64, and must be installable there.
 #ifndef Install64Mode
   #define Install64Mode "x64"
 #endif
@@ -61,7 +63,15 @@ DefaultDirName={autopf}\moLink
 DefaultGroupName=moLink
 DisableProgramGroupPage=yes
 PrivilegesRequired=admin
+; The x64 packages are built against the MSVC/UCRT runtime and import Win8+
+; APIs (CreateFile2), so they refuse Windows 7 with a clear message instead of
+; installing and then failing with "entry point not found". Windows 7 (x86 and
+; x64) uses the x86 native package, which is msvcrt-based and target 6.1.
+#ifndef NoInstall64Mode
+MinVersion=6.2
+#else
 MinVersion=6.1sp1
+#endif
 #ifndef ArchAllowed
   #define ArchAllowed "x64"
 #endif
