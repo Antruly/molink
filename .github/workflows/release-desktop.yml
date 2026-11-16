@@ -26,10 +26,51 @@ env:
 # UVCPP_REPO repository variable. Then the core, frontend and platform shell
 # are built and attached to the release.
 jobs:
+  versions:
+    # One gate for the copy of the version that lives in the core header, the
+    # web package, the native shell and every packaging default. A tag whose
+    # name disagrees with any of them must not build.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Version sources agree with the tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          fail() { echo "::error title=version-mismatch::$*"; exit 1; }
+          core=$(sed -n 's/^#define MOLINK_VERSION "\(.*\)"/\1/p' backend/src/version.h)
+          [ -n "$core" ] || fail "backend/src/version.h has no MOLINK_VERSION"
+          frontend=$(python3 -c 'import json; print(json.load(open("frontend/package.json"))["version"])')
+          [ "$frontend" = "$core" ] || fail "frontend/package.json=$frontend, version.h=$core"
+          native=$(sed -n 's/.*kNativeVersion\[\] = L"\(.*\)";/\1/p' shell/windows/ui_kit_demo.cpp)
+          [ "$native" = "$core" ] || fail "kNativeVersion=$native, version.h=$core"
+          for f in packaging/linux/build-deb.sh packaging/linux/build-rpm.sh \
+                   packaging/linux/build-appimage.sh packaging/macos/build-dmg.sh; do
+            got=$(sed -n 's/.*VERSION:-\([0-9][0-9.]*\).*/\1/p' "$f" | head -1)
+            [ "$got" = "$core" ] || fail "$f default VERSION=$got, version.h=$core"
+          done
+          for f in packaging/windows/installer.iss packaging/windows/win7-x86-installer.iss; do
+            got=$(sed -n 's/^  #define AppVersion "\(.*\)"/\1/p' "$f" | head -1)
+            [ "$got" = "$core" ] || fail "$f AppVersion=$got, version.h=$core"
+          done
+          got=$(sed -n 's/^  !define VERSION "\(.*\)"/\1/p' packaging/windows/portable.nsi | head -1)
+          [ "$got" = "$core" ] || fail "portable.nsi VERSION=$got, version.h=$core"
+          got=$(sed -n 's/.*\[string\]\$Version = "\(.*\)".*/\1/p' packaging/windows/build-win7-x86.ps1 | head -1)
+          [ "$got" = "$core" ] || fail "build-win7-x86.ps1 default Version=$got, version.h=$core"
+          got=$(grep -oE "ref_name \|\| '[0-9]+\.[0-9]+\.[0-9]+'" .github/workflows/release-desktop.yml \
+                | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | head -1)
+          [ "$got" = "$core" ] || fail "PKG_VERSION fallback=$got, version.h=$core"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            tag="${GITHUB_REF_NAME#v}"
+            [ "$tag" = "$core" ] || fail "tag $GITHUB_REF_NAME does not match version $core"
+          fi
+          echo "version sources agree: $core"
+
   linux:
     # workflow_dispatch may skip the two slow Unix jobs while iterating on a
     # Windows fix; tag builds never set the input and always run everything.
     if: ${{ inputs.skip_slow != true }}
+    needs: versions
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -147,17 +188,8 @@ jobs:
             build/package/*.AppImage
             build/package/*.rpm
 
-      - uses: softprops/action-gh-release@v2
-        if: github.ref_type == 'tag'
-        with:
-          name: moLink ${{ github.ref_name }}
-          body: 'Linux packages: .deb, .AppImage and .rpm.'
-          files: |
-            build/package/*.deb
-            build/package/*.AppImage
-            build/package/*.rpm
-
   windows:
+    needs: versions
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -489,16 +521,10 @@ jobs:
           if-no-files-found: error
           path: build/package/*.exe
 
-      - uses: softprops/action-gh-release@v2
-        if: github.ref_type == 'tag'
-        with:
-          name: moLink ${{ github.ref_name }}
-          body: 'Windows installer (Inno Setup) and portable executable (x64).'
-          files: build/package/*.exe
-
   # Temporarily disabled during the test phase (macOS runners are scarce).
   macos:
     if: ${{ inputs.skip_slow != true }}
+    needs: versions
     strategy:
       fail-fast: false
       matrix:
@@ -581,13 +607,6 @@ jobs:
           if-no-files-found: error
           path: build/package/*.dmg
 
-      - uses: softprops/action-gh-release@v2
-        if: github.ref_type == 'tag'
-        with:
-          name: moLink ${{ github.ref_name }}
-          body: 'macOS disk image.'
-          files: build/package/*.dmg
-
   # Windows 7 x86 ships in the same release as the other platforms.
   # Cross-built i686 codec libraries for the Win7 x86 core. The kit's toolchain
   # is MinGW/MSVCRT, so they are built on Linux with the matching mingw-w64
@@ -656,7 +675,7 @@ jobs:
   win7-x86:
     # The codec artifact must exist before this job starts; without `needs`
     # download-artifact runs immediately and fails with "Artifact not found".
-    needs: win7-codecs
+    needs: [win7-codecs, versions]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -781,11 +800,29 @@ jobs:
             build/package/*native-portable-x86.zip
             build/package/*native-setup-x86.exe
 
-      - name: Attach to the shared release
-        uses: softprops/action-gh-release@v2
-        if: github.ref_type == 'tag'
+  release:
+    # Publish once, after every builder succeeded. Each job used to attach its
+    # own files, so a failed platform still left a partially populated release
+    # behind (and the tag could ship without the missing assets).
+    if: github.ref_type == 'tag'
+    needs: [linux, windows, macos, win7-x86]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
         with:
-          overwrite_files: true
-          files: |
-            build/package/*native-portable-x86.zip
-            build/package/*native-setup-x86.exe
+          # Every release artifact is named moLink-*; the intermediate
+          # win7-codecs artifact is deliberately not published.
+          pattern: moLink-*
+          path: artifacts
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: moLink ${{ github.ref_name }}
+          body: |
+            moLink ${{ github.ref_name }}
+
+            See the changelog: https://github.com/Antruly/molink/blob/main/CHANGELOG.md
+
+            Windows 7 (x86 and x64): use the **native-setup-x86.exe** package.
+          files: artifacts/*
+          fail_on_unmatched_files: true

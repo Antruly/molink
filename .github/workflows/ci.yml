@@ -7,6 +7,42 @@ on:
     branches: [main]
 
 jobs:
+  versions:
+    # The version is copied into the core header, the web package, the native
+    # shell and every packaging default. A missed copy made local Windows
+    # artifacts say 0.10.6 after the source had already moved to 0.11.0.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Version sources agree
+        shell: bash
+        run: |
+          set -euo pipefail
+          fail() { echo "::error title=version-mismatch::$*"; exit 1; }
+          core=$(sed -n 's/^#define MOLINK_VERSION "\(.*\)"/\1/p' backend/src/version.h)
+          [ -n "$core" ] || fail "backend/src/version.h has no MOLINK_VERSION"
+          frontend=$(python3 -c 'import json; print(json.load(open("frontend/package.json"))["version"])')
+          [ "$frontend" = "$core" ] || fail "frontend/package.json=$frontend, version.h=$core"
+          native=$(sed -n 's/.*kNativeVersion\[\] = L"\(.*\)";/\1/p' shell/windows/ui_kit_demo.cpp)
+          [ "$native" = "$core" ] || fail "kNativeVersion=$native, version.h=$core"
+          for f in packaging/linux/build-deb.sh packaging/linux/build-rpm.sh \
+                   packaging/linux/build-appimage.sh packaging/macos/build-dmg.sh; do
+            got=$(sed -n 's/.*VERSION:-\([0-9][0-9.]*\).*/\1/p' "$f" | head -1)
+            [ "$got" = "$core" ] || fail "$f default VERSION=$got, version.h=$core"
+          done
+          for f in packaging/windows/installer.iss packaging/windows/win7-x86-installer.iss; do
+            got=$(sed -n 's/^  #define AppVersion "\(.*\)"/\1/p' "$f" | head -1)
+            [ "$got" = "$core" ] || fail "$f AppVersion=$got, version.h=$core"
+          done
+          got=$(sed -n 's/^  !define VERSION "\(.*\)"/\1/p' packaging/windows/portable.nsi | head -1)
+          [ "$got" = "$core" ] || fail "portable.nsi VERSION=$got, version.h=$core"
+          got=$(sed -n 's/.*\[string\]\$Version = "\(.*\)".*/\1/p' packaging/windows/build-win7-x86.ps1 | head -1)
+          [ "$got" = "$core" ] || fail "build-win7-x86.ps1 default Version=$got, version.h=$core"
+          got=$(grep -oE "ref_name \|\| '[0-9]+\.[0-9]+\.[0-9]+'" .github/workflows/release-desktop.yml \
+                | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | head -1)
+          [ "$got" = "$core" ] || fail "release-desktop PKG_VERSION fallback=$got, version.h=$core"
+          echo "version sources agree: $core"
+
   frontend:
     runs-on: ubuntu-latest
     defaults:
@@ -97,9 +133,9 @@ jobs:
 
   windows-core:
     # Builds molink-core with MSVC against the prebuilt libuvcpp release, so
-    # the Windows capture, input and clipboard backends are compiled on every
-    # main push without waiting for a libuvcpp source build.
-    if: github.event_name != 'pull_request'
+    # the Windows capture, input, transport and session backends are compiled
+    # on every push and pull request. This is the only job that compiles those
+    # sources; when it was main-only, a PR could change them with a green CI.
     runs-on: windows-latest
     env:
       UVCPP_VERSION: ${{ vars.UVCPP_VERSION }}
