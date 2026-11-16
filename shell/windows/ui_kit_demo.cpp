@@ -232,9 +232,9 @@ struct app_state {
   bool disp_remote_cursor = false;
   bool server_enabled = true;
   /// Host-global video path, mirroring the web's preferences panel:
-  /// 0 stream, 1 mixed, 2 tiles (static).
+  /// 0 stream, 1 tiles. There is no adaptive middle mode.
   int video_mode = 1;
-  D2D1_RECT_F hit_seg_video[3]{};
+  D2D1_RECT_F hit_seg_video[2]{};
   int settings_quality = 0;
   std::wstring set_device_name = L"INTERNET-REMOTE";
   std::wstring set_tcp = L"28418";
@@ -266,6 +266,13 @@ struct app_state {
   int code_uses = 0;
   bool code_budget_known = false;
   bool connecting = false;
+  /// Reconnect state. A new session_client object (and socket) is created for
+  /// every connection; only the host's resume token is carried across, keyed
+  /// by the target+code it was issued for. A spent single-use code therefore
+  /// still reconnects, and a different host never inherits the credential.
+  std::string resume_token;
+  std::string resume_target;
+  std::string resume_code;
   /// Auto-reconnect state: attempt counter and the next try (0 = idle).
   bool reconnecting = false;
   /// The current tab has completed a `welcome` at least once, so a later
@@ -1189,7 +1196,7 @@ void native_log(const std::wstring& text) {
 
 /// Version of this native shell (shipped together with the core). Bump it in
 /// the same commit that tags a release.
-constexpr wchar_t kNativeVersion[] = L"0.10.6";
+constexpr wchar_t kNativeVersion[] = L"0.11.0";
 constexpr wchar_t kReleasesApi[] =
     L"https://api.github.com/repos/Antruly/molink/releases/latest";
 
@@ -1563,9 +1570,10 @@ void load_host_settings() {
   if (local_api_request(L"GET", L"/api/encoding", &encoding, &status) &&
       !encoding.empty()) {
     const std::string mode = json_text(encoding, "video_mode");
+    // An older config may still say "mixed"; the backend migrates it to
+    // tiles, so the switch here mirrors that.
     if (mode == "stream") g.video_mode = 0;
-    else if (mode == "mixed") g.video_mode = 1;
-    else if (mode == "tiles") g.video_mode = 2;
+    else if (mode == "tiles" || mode == "mixed") g.video_mode = 1;
   }
 }
 
@@ -1783,14 +1791,22 @@ void start_connect(const std::wstring& target, const std::wstring& code) {
     }
   }
   const std::string token = utf8_of(code);
+  // Only hand the previous session's credential to this connection when it is
+  // the same target and code. The credential itself is not a connection
+  // object: the worker still builds a fresh session_client and socket.
+  const std::string resume =
+      (target_utf8 == g.resume_target && token == g.resume_code)
+          ? g.resume_token
+          : std::string();
   const bool proxy = g.proxy_mode;
   // A running core with a published surface decodes streams; always talk to
   // it (never dial the host directly) so the surface gets the picture.
   const bool surface_mode =
       !g.surface_path.empty() && std::getenv("MOLINK_CORE_TOKEN") != nullptr;
   std::thread([host, port, token, proxy, target_is_id, target_utf8,
-               generation, surface_mode] {
+               generation, surface_mode, resume] {
     auto* client = new molink::net::session_client();
+    client->set_resume_token(resume);
     molink::net::session_endpoint endpoint;
     endpoint.host = host;
     endpoint.port = port;
@@ -1908,6 +1924,7 @@ void start_connect(const std::wstring& target, const std::wstring& code) {
           // the tab instead of being swallowed by the core's relay switch.
           delete client;
           client = new molink::net::session_client();
+          client->set_resume_token(resume);
           result->client = client;
           client->set_stream_decoding(false);
           client->set_request_tiles(true);
@@ -1961,6 +1978,7 @@ void start_connect(const std::wstring& target, const std::wstring& code) {
         } else {
           delete client;
           client = new molink::net::session_client();
+          client->set_resume_token(resume);
           result->client = client;
           // The core decodes the stream and publishes the shared surface, so
           // the hello must advertise those decoders: without this the host
@@ -4338,17 +4356,10 @@ bool session_click(float x, float y) {
     return true;
   }
   if (inside(g.hit_disconnect, x, y)) {
-    g.tab = 0;
-    g.session_open = false;
-    g.immersive = false;
-    g.bar_dx = g.bar_dy = 0;
-    release_remote_buttons();
-    mark_recent_offline(g.connect_target);
-    if (g.session != nullptr) {
-      g.session->stop();
-      g.session.reset();
-      g.session_was_live = false;
-    }
+    // Use the same teardown as the tab's close button: it bumps the connect
+    // generation and clears the reconnect flags, so a connect worker that is
+    // still in flight cannot reopen the session the user just dropped.
+    close_session_tab();
     return true;
   }
   if (inside(g.hit_bar, x, y)) {
@@ -6477,7 +6488,7 @@ void draw_settings_modal(float w, float h) {
   }
   for (int i = 0; i < 3; ++i) g.hit_disp_toggle[i] = D2D1::RectF(0, 0, 0, 0);
   for (int i = 0; i < 6; ++i) g.hit_sec_toggle[i] = D2D1::RectF(0, 0, 0, 0);
-  for (int i = 0; i < 3; ++i) g.hit_seg_video[i] = D2D1::RectF(0, 0, 0, 0);
+  for (int i = 0; i < 2; ++i) g.hit_seg_video[i] = D2D1::RectF(0, 0, 0, 0);
   for (int i = 0; i < 8; ++i) g.hit_quality_card[i] = D2D1::RectF(0, 0, 0, 0);
   for (int i = 0; i < 5; ++i) g.hit_service_btn[i] = D2D1::RectF(0, 0, 0, 0);
   g.hit_lock_field = g.hit_fps_field = D2D1::RectF(0, 0, 0, 0);
@@ -6561,20 +6572,20 @@ void draw_settings_modal(float w, float h) {
         g.sec_encrypt_lan, hv_set_toggle7, &g.hit_sec_toggle[5]);
     y = card.bottom + 20;
 
-    // 视频模式: the web's PreferencesControls three-way switch. Tiles keeps a
-    // still desktop near zero traffic (only changed cells move); stream is for
-    // big fast motion; mixed is the default.
+    // 视频模式: the web's PreferencesControls switch. Tiles keeps a still
+    // desktop near zero traffic (only changed cells move); stream is for big
+    // fast motion. One path per session, no adaptive middle mode.
     text(g.target, g.small_left, L"视频模式",
          D2D1::RectF(x, y, x + cw, y + 16), g.theme->muted);
     y += 18;
-    static const wchar_t* video_labels[3] = {L"视频流", L"混合", L"瓦片（静态）"};
-    settings_segment(x, y, cw, video_labels, nullptr, 3, g.video_mode,
+    static const wchar_t* video_labels[2] = {L"视频流", L"瓦片（静态）"};
+    settings_segment(x, y, cw, video_labels, nullptr, 2, g.video_mode,
                      g.hit_seg_video, hv_set_video0);
     y += 38;
     y = settings_hint(
             x, y, cw,
             L"瓦片只传变化的格子，静止桌面几乎不耗流量；视频流适合全屏快速"
-            L"运动；混合按画面变化自动切换。主机全局生效。") +
+            L"运动，但始终占用编码和带宽。二选一，不会中途混用。主机全局生效。") +
         14;
 
     text(g.target, g.small_left, L"STUN 服务器",
@@ -7000,16 +7011,15 @@ void settings_click(float x, float y) {
       }
       break;
     case 1:
-      for (int i = 0; i < 3; ++i) {
+      for (int i = 0; i < 2; ++i) {
         if (inside(g.hit_seg_video[i], x, y)) {
-          static const char* modes[] = {"stream", "mixed", "tiles"};
+          static const char* modes[] = {"stream", "tiles"};
           if (g.session == nullptr || !g.session->live()) {
             show_toast(L"请先连接会话再切换视频模式");
           } else if (g.session->send_video_mode(modes[i])) {
             g.video_mode = i;
-            show_toast(i == 2 ? L"已切换到瓦片（静态）模式"
-                              : (i == 0 ? L"已切换到视频流模式"
-                                        : L"已切换到混合模式"));
+            show_toast(i == 1 ? L"已切换到瓦片（静态）模式"
+                              : L"已切换到视频流模式");
           } else {
             show_toast(L"视频模式切换失败");
           }
@@ -8069,7 +8079,7 @@ LPCWSTR cursor_at(float x, float y) {
         if (in(g.hit_lock_field)) return IDC_HAND;
         break;
       case 1:
-        for (int i = 0; i < 3; ++i) {
+        for (int i = 0; i < 2; ++i) {
           if (in(g.hit_seg_video[i])) return IDC_HAND;
         }
         for (int i = 0; i < 6; ++i) {
@@ -8458,6 +8468,14 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
         const std::wstring& host_error = g.session->last_error();
         if (!host_error.empty() && host_error != g.seen_session_error) {
           g.seen_session_error = host_error;
+          // A rejected resume token must not be presented forever: drop it
+          // so the next retry can fall back to a code or an access request,
+          // matching the web client's invalid_code handling.
+          if (auth_error_code(g.session->last_error_code())) {
+            g.resume_token.clear();
+            g.resume_target.clear();
+            g.resume_code.clear();
+          }
           const std::wstring text = friendly_session_error(
               g.session->last_error_code(), host_error);
           g.connect_error = text;
@@ -8466,13 +8484,18 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
         }
         if (g.session->authenticated()) {
           g.session_accepted = true;
+          // Keep the host's reconnect credential with the target+code it was
+          // issued for. The next start_connect() builds a new session object
+          // and hands it only this token.
+          g.resume_token = g.session->resume_token();
+          g.resume_target = utf8_of(g.connect_target);
+          g.resume_code = utf8_of(g.connect_code);
           {
             // The video path is host-global; the settings switch mirrors the
             // mode the host actually runs (another viewer may have changed it).
             const std::wstring& mode = g.session->video_mode();
             if (mode == L"stream") g.video_mode = 0;
-            else if (mode == L"mixed") g.video_mode = 1;
-            else if (mode == L"tiles") g.video_mode = 2;
+            else if (mode == L"tiles" || mode == L"mixed") g.video_mode = 1;
           }
           {
             // Cache the host's avatar for this device. Uploaded pictures are

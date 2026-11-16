@@ -343,9 +343,12 @@ code_view auth_state::set_temp(const std::string& mode, int uses,
 }
 
 bool auth_state::set_video_mode(const std::string& mode) {
+  // "mixed" is accepted from an older client and folded into tiles: the
+  // adaptive path no longer exists, and rejecting the message would leave
+  // that viewer's toolbar showing a mode the host is not running.
   if (mode != "stream" && mode != "mixed" && mode != "tiles") return false;
   std::lock_guard<std::mutex> lock(mutex_);
-  settings_.video_mode = mode;
+  settings_.video_mode = mode == "stream" ? "stream" : "tiles";
   persist_locked();
   return true;
 }

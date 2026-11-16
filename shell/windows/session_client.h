@@ -89,8 +89,16 @@ class session_client {
   /// Last host `error` (code: message), empty when none.
   const std::wstring& last_error() const { return last_error_; }
   /// Host-global video path from `welcome` / `video-mode`:
-  /// stream, mixed or tiles (empty until the host says).
+  /// stream or tiles (empty until the host says).
   const std::wstring& video_mode() const { return video_mode_; }
+  /// Reconnect credential from the host's `welcome` (`session_token`). The
+  /// shell keeps it per target+code and hands it to the *next* session object,
+  /// so a reconnect does not spend another use of a single-use code. Empty
+  /// until the first welcome.
+  const std::string& resume_token() const { return resume_token_; }
+  /// Sets the resume credential before `start()`. Each connection still owns
+  /// its own session_client and socket; only the token is carried over.
+  void set_resume_token(const std::string& token) { resume_token_ = token; }
   /// Host avatar from `welcome`: "preset:<colour>" or a data URL (may be
   /// empty). The shell caches it per recent device.
   const std::wstring& avatar() const { return avatar_; }
@@ -287,6 +295,7 @@ class session_client {
   std::wstring last_error_;
   std::wstring last_error_code_;
   std::wstring video_mode_;
+  std::string resume_token_;
   std::wstring avatar_;
   std::atomic<uint8_t> live_codec_{0};
   std::wstring close_detail_;

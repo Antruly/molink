@@ -113,6 +113,18 @@ molink-core.exe --host 0.0.0.0 --port 28418 --print-ready
 目录/证书配置与 64 位客户端一致：`settings` 里的 `server_url`、`server_ca`。
 Win7 上如果服务端使用自签证书，需要把 CA PEM 放到本机并在 `server_ca` 指定。
 
+## Windows 7 x64 / Windows 10 x64
+
+Win7 x86 原生包是 32 位 **msvcrt** 构建（不依赖 UCRT 更新），通过 WoW64 可以
+直接运行在 Win7 x64 以及 Win10/11 x64。原生安装器的 `ArchitecturesAllowed`
+为 `x86compatible`（不是 `x86`），因此 Win7 x64 上也能安装，不再只允许 32 位
+系统。
+
+x64 包（WebView2 与 native）基于 MSVC/UCRT，`molink-core.exe` 和
+`msvcp140.dll` 会静态导入 `CreateFile2`、`GetSystemTimePreciseAsFileTime`
+等 Windows 8+ API，Win7 启动时会报“无法定位程序输入点”。因此 x64 安装器
+要求 Windows 8+；Win7（x86 或 x64）请安装 x86 原生包。
+
 ## UI 与安装包
 
 - 现有 `shell/windows` 是 Win32 + WebView2。Win7 需要 **WebView2 Runtime 109**
@@ -156,7 +168,10 @@ core、shell、service/helper、打包、Inno Setup）：
 
 ## 已知问题
 
-1. **kit 自带 GCC 8.1 的 `std::filesystem` 不可用**：`std::filesystem::path` 在
+1. **Win7 x64 上的 x64 包无法启动**：x64 核心使用 MSVC/UCRT，导入
+   `CreateFile2`（Windows 8+）。Win7 x64 请安装 x86 原生包（WoW64）；x64
+   安装器从 0.11.0 起要求 Windows 8+，不会再“装完才报错”。
+2. **kit 自带 GCC 8.1 的 `std::filesystem` 不可用**：`std::filesystem::path` 在
    处理 `wstring` / 比较时触发 libstdc++ 8 的已知缺陷（`__is_encoded_char`
    specialization after instantiation、`u8path` 等）。moLink 必须用 GCC 9+；
    本文使用 GCC 13.2。

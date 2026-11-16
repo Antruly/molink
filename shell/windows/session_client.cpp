@@ -484,9 +484,13 @@ bool session_client::start(const std::string& core_host, int core_port,
   }
   hello_resends_ = 0;
   access_request_ = endpoint.token.empty();
-  if (access_request_) {
-    // No code: the host shows an approval dialog to the person at the
-    // machine. The session stays unauthenticated until they accept.
+  // A resume token is a stronger credential than the code: present it even
+  // when the user left the code empty, so an approved (or code-authenticated)
+  // session reconnects without another approval or code use.
+  if (access_request_ && resume_token_.empty()) {
+    // No code and no resume token: the host shows an approval dialog to the
+    // person at the machine. The session stays unauthenticated until they
+    // accept.
     access_pending_ = true;
     hello_text_ =
         "{\"type\":\"request-access\",\"name\":\"moLink native\","
@@ -501,10 +505,21 @@ bool session_client::start(const std::string& core_host, int core_port,
     const char* stream_cap = stream_decoding_ ? "true" : "false";
     hello_text_ =
         "{\"type\":\"hello\",\"client\":\"molink-native\",\"token\":\"" +
-        endpoint.token +
-        "\",\"seq_clock\":true,\"video_push\":true,\"h264_stream\":false,"
-        "\"vp9_stream\":" + stream_cap + ",\"vp8_stream\":" + stream_cap +
-        ",\"av1_native\":" + stream_cap + "}";
+        endpoint.token + "\"";
+    if (!resume_token_.empty()) {
+      // Host session tokens are generated hex; still escape defensively so a
+      // malformed token cannot break the hello frame.
+      hello_text_ += ",\"session\":\"";
+      for (const char c : resume_token_) {
+        if (c == '"' || c == '\\') hello_text_.push_back('\\');
+        hello_text_.push_back(c);
+      }
+      hello_text_ += "\"";
+    }
+    hello_text_ +=
+        ",\"seq_clock\":true,\"video_push\":true,\"h264_stream\":false,"
+        "\"vp9_stream\":" + std::string(stream_cap) + ",\"vp8_stream\":" +
+        stream_cap + ",\"av1_native\":" + stream_cap + "}";
   }
   hello_sent_at_ = GetTickCount64();
   return ws_.send_text(hello_text_);
@@ -1305,6 +1320,11 @@ void session_client::handle_text(const std::string& text) {
     if (find_string(text, "video_mode", &video_mode) && !video_mode.empty()) {
       video_mode_ = wide_of(video_mode);
     }
+    std::string session_token;
+    if (find_string(text, "session_token", &session_token) &&
+        !session_token.empty()) {
+      resume_token_ = session_token;
+    }
     std::string avatar;
     if (find_string(text, "avatar", &avatar) && !avatar.empty()) {
       avatar_ = wide_of(avatar);
@@ -1601,9 +1621,12 @@ std::wstring session_client::live_codec_name() const {
 
 bool session_client::send_video_mode(const std::string& mode) {
   if (!ws_.is_open()) return false;
-  if (mode != "stream" && mode != "mixed" && mode != "tiles") return false;
-  video_mode_ = wide_of(mode);
-  return ws_.send_text("{\"type\":\"video-mode\",\"value\":\"" + mode + "\"}");
+  // Only the two deterministic paths remain; an old caller asking for the
+  // removed adaptive mode is sent as tiles.
+  const std::string value = mode == "stream" ? "stream" : "tiles";
+  if (mode != "stream" && mode != "tiles" && mode != "mixed") return false;
+  video_mode_ = wide_of(value);
+  return ws_.send_text("{\"type\":\"video-mode\",\"value\":\"" + value + "\"}");
 }
 
 void session_client::stop() { ws_.close(); }

@@ -30,7 +30,7 @@ param(
   # Win7 x86).
   [switch]$NativeOnly = $false,
   [string]$Repo = "",
-  [string]$Version = "0.10.6",
+  [string]$Version = "0.11.0",
   [string]$Out = ""
 )
 
@@ -358,7 +358,7 @@ if ($iscc) {
   & $iscc "/DAppVersion=$Version" "/DPkgDir=$pkg" "/DOutputDir=$Out" `
     "/DLangFile=$lang" "/DAppExeName=moLink-native.exe" `
     "/DOutputName=moLink-$Version-native-setup-x86" `
-    '/DArchAllowed=x86' '/DNoInstall64Mode=1' '/DNoService=1' $iss
+    '/DArchAllowed=x86compatible' '/DNoInstall64Mode=1' '/DNoService=1' $iss
   if ($LASTEXITCODE -ne 0) { throw 'Inno Setup compile failed (native x86)' }
   Write-Host "native setup: $(Join-Path $Out "moLink-$Version-native-setup-x86.exe")"
 } else {

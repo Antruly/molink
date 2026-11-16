@@ -268,12 +268,9 @@
     "codecPreferenceHint": "自动按硬件优先协商：AV1 → VP9 → VP8 → H.264 → 瓦片。手动指定后，只有在所有观看端都能解码、且本机能编码时才使用，否则回到自动。",
     "codecAuto": "自动（硬件优先）",
     "videoMode": "视频编码模式",
-    "videoModeHint": "决定画面走视频编码还是瓦片。默认“视频编码 + 瓦片压缩”：画面动起来用视频流，静止时用瓦片，省带宽。",
-    "streamEnter": "切流阈值（%）",
-    "streamEnterHint": "屏幕有多少比例在动时切到视频流，默认 15%。低于它继续用瓦片；画面静止 10 秒后切回瓦片。",
-    "videoModeStream": "视频编码（全部走视频流）",
-    "videoModeMixed": "视频编码 + 瓦片压缩（静态画面）",
-    "videoModeTiles": "瓦片压缩（建议仅局域网）"
+    "videoModeHint": "画面只走视频流或只走瓦片，二选一，不会中途混用。默认瓦片：只传变化的格子，静止桌面几乎不耗流量；视频流适合全屏运动，但始终占用编码和带宽。",
+    "videoModeStream": "视频流（始终使用视频编码）",
+    "videoModeTiles": "瓦片（只传变化的格子）"
   },
   "session": {
     "connecting": "连接中…",

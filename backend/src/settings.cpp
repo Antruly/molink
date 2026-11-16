@@ -202,8 +202,12 @@ app_settings load_settings() {
     } else if (key == "stream_enter_percent") {
       settings.stream_enter_percent = parse_int(value, 15);
     } else if (key == "video_mode") {
-      if (value == "stream" || value == "mixed" || value == "tiles") {
-        settings.video_mode = value;
+      // The adaptive "mixed" path is gone. Migrate an existing config to
+      // tiles instead of silently keeping a mode the UI no longer offers.
+      if (value == "stream") {
+        settings.video_mode = "stream";
+      } else if (value == "tiles" || value == "mixed") {
+        settings.video_mode = "tiles";
       }
     } else if (key == "stream_qp") {
       settings.stream_qp = parse_int(value, 0);

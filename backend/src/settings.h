@@ -74,9 +74,11 @@ struct app_settings {
   /// and this host can encode it.
   std::string stream_codec = "auto";
   /// Video path preference: "stream" always uses the low-delay stream,
-  /// "mixed" streams moving content and tiles a still screen, "tiles" never
-  /// streams (a LAN-only, lossless-but-heavy option).
-  std::string video_mode = "mixed";
+  /// "tiles" never streams. There is deliberately no adaptive middle mode:
+  /// mixing the two mid-session made the picture switch under the user and
+  /// reset the decoder; a connection now uses one path from start to finish.
+  /// An old config that still says "mixed" loads as "tiles".
+  std::string video_mode = "tiles";
   /// Percentage of the screen that must keep moving before the capture
   /// switches from tiles to a low-delay stream. 1..100, default 15. The exit
   /// threshold follows it, so a still screen drops back after the dwell.

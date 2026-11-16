@@ -268,12 +268,9 @@
     "codecPreferenceHint": "Auto picks the best compression every viewer can decode: AV1 → VP9 → VP8 → H.264 → tiles. A pinned codec is used only when every viewer can decode it and this host can encode it; otherwise auto applies.",
     "codecAuto": "Auto (hardware first)",
     "videoMode": "Video path",
-    "videoModeHint": "Whether the picture uses the video stream or tiles. The default, \"video + tiles\", streams moving content and tiles a still screen to save bandwidth.",
-    "streamEnter": "Stream threshold (%)",
-    "streamEnterHint": "How much of the screen must move before switching to the video stream (default 15%). Below it the tiles stay; the picture returns to tiles after 10 s still.",
+    "videoModeHint": "The picture uses either the video stream or tiles, never both in one session. Tiles (the default) send only changed cells, so a still desktop costs almost nothing; the video stream suits fast full-screen motion but always costs encode time and bandwidth.",
     "videoModeStream": "Video only (always the stream)",
-    "videoModeMixed": "Video + tiles (still screen)",
-    "videoModeTiles": "Tiles only (LAN recommended)"
+    "videoModeTiles": "Tiles only (changed cells)"
   },
   "session": {
     "connecting": "Connecting…",

@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.11.0] — 2026-11-16
+
+### Changed
+
+- **视频模式改为二选一，默认瓦片**：去掉“视频流 + 瓦片（自适应混合）”模式。
+  设置和数据通道只保留 `stream`（始终视频流）与 `tiles`（始终瓦片），默认
+  `tiles`；连接建立后不再中途切换编码路径，也不会因切换重置解码器。旧配置里
+  的 `video_mode=mixed` 在加载时迁移为 `tiles`。Web 设置面板、原生壳设置页和
+  `/api/encoding` 同步，切流阈值输入已移除。
+
+### Fixed
+
+- **原生客户端断开后无法重连**：主机在 `welcome` 里下发 `session_token`，Web
+  端一直用它续连，原生壳没有发送。使用单次/有限次验证码时，第一次断开后验证
+  码已耗尽，再次连接直接失败。现在原生壳按“目标 + 验证码”保存该 token，并随
+  hello 的 `session` 字段发送；重连不再消耗新的验证码。每次连接仍然创建独立的
+  `session_client` 与 socket，token 是唯一跨连接携带的状态。
+- **原生壳手动断开后可能被在途连接重新打开**：工具栏断开按钮改用与关闭标签页
+  相同的清理路径（递增连接代际、清除 `connecting`/`reconnecting`/接受状态），
+  在途 worker 的结果会被丢弃。
+- **悬浮工具栏的画质弹层无法操作/关闭**：`QualityPanel` 的 portal 缺少
+  `data-toolbar-menu`，点击弹层里任意控件会先被工具栏的 outside-click 处理器
+  当作“点了外面”，整个悬浮栏折叠、面板随之卸载。现在与其它工具栏菜单一致，
+  点击外部或关闭按钮都能正常关闭。
+
+### Windows
+
+- **Win7 x86 原生包可在 Win7 x64 / Win10 x64 安装**：原生 x86 安装器由
+  `ArchitecturesAllowed=x86` 改为 `x86compatible`，32 位 msvcrt 包通过 WoW64
+  运行，不再被限制为只能在 32 位系统安装。
+- **Win7 x64 的“无法定位程序输入点”**：现有 x64 包基于 MSVC/UCRT，
+  `molink-core.exe` / `msvcp140.dll` 会导入 `CreateFile2`、
+  `GetSystemTimePreciseAsFileTime` 等 Windows 8+ API，无法在 Win7 启动。x64
+  安装器从本版起要求 Windows 8+ 并给出明确提示；Win7（x86/x64）请使用 x86
+  原生包。
+- x64 原生壳改为按 `_WIN32_WINNT=0x0601` 编译，不再静态依赖 Win10 API
+  （Win10 专有 DPI 接口本来就按需动态解析）。
+
 ## [0.10.6] — 2026-11-09
 
 ### Fixed
