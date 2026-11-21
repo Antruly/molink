@@ -32,6 +32,9 @@ import type {
   FileMessage,
 } from '../lib/client'
 import type { SessionConnection } from '../lib/session-connection'
+import { acceptDownloadChunk, downloadComplete } from '../lib/download-state'
+
+const downloadTimeoutMs = 30_000
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
@@ -144,7 +147,7 @@ export function FileTransferPanel({
   )
 
   const queueRef = useRef<{ key: number; file: File; path: string }[]>([])
-  const activeRef = useRef<{ key: number; file: File; path: string } | null>(
+  const activeRef = useRef<{ key: number; file: File; path: string; id?: number } | null>(
     null,
   )
   // The remote folder uploads land in. Empty means the host default
@@ -160,7 +163,9 @@ export function FileTransferPanel({
     name: string
     size: number
     received: number
+    eofSeen: boolean
     chunks: Uint8Array[]
+    timer: number
   } | null>(null)
   const nextKey = useRef(1)
   const lastPaint = useRef(0)
@@ -185,9 +190,44 @@ export function FileTransferPanel({
     return false
   }, [])
 
+  const finishDownload = useCallback((failure?: string) => {
+    const current = downloadRef.current
+    if (!current) return
+    window.clearTimeout(current.timer)
+    downloadRef.current = null
+    setDownload(null)
+    if (failure !== undefined) {
+      setError(failure)
+      connectionRef.current?.sendFileAction('cancel', { id: current.id })
+    } else {
+      const blob = new Blob(current.chunks as BlobPart[])
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = current.name
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      window.setTimeout(() => URL.revokeObjectURL(url), 30_000)
+    }
+    nextDownload()
+  }, [nextDownload])
+
+  const armDownloadTimeout = useCallback(() => {
+    const current = downloadRef.current
+    if (!current) return
+    window.clearTimeout(current.timer)
+    current.timer = window.setTimeout(() => {
+      if (downloadRef.current === current) finishDownload(t('files.incomplete'))
+    }, downloadTimeoutMs)
+  }, [finishDownload, t])
+
   useEffect(() => {
     connectionRef.current = connection
     return () => {
+      if (downloadRef.current) window.clearTimeout(downloadRef.current.timer)
+      downloadRef.current = null
+      downloadQueue.current = []
       connectionRef.current = null
     }
   }, [connection])
@@ -277,7 +317,8 @@ export function FileTransferPanel({
             `upload accept id=${message.id ?? 0} chunk=${message.chunk ?? 0} ` +
               `active=${active ? 1 : 0}`,
           )
-          if (!active || !message.id) return
+          if (!active || !message.id || active.id !== undefined) return
+          active.id = message.id
           void sendChunks(
             active.key,
             active.file,
@@ -312,14 +353,25 @@ export function FileTransferPanel({
           }
           break
         case 'sending': {
-          if (!message.id) return
+          const size = message.size
+          if (message.ok === false || !message.id || typeof size !== 'number' ||
+              !Number.isSafeInteger(size) || size < 0) {
+            setError(message.message ?? t('files.error'))
+            nextDownload()
+            return
+          }
+          if (downloadRef.current) return
+          setError(null)
           downloadRef.current = {
             id: message.id,
             name: message.name ?? 'file',
             size: message.size ?? 0,
             received: 0,
+            eofSeen: false,
             chunks: [],
+            timer: 0,
           }
+          armDownloadTimeout()
           setDownload({
             id: message.id,
             name: message.name ?? 'file',
@@ -332,18 +384,12 @@ export function FileTransferPanel({
         case 'eof': {
           const current = downloadRef.current
           if (!current || (message.id && current.id !== message.id)) return
-          const blob = new Blob(current.chunks as BlobPart[])
-          const url = URL.createObjectURL(blob)
-          const anchor = document.createElement('a')
-          anchor.href = url
-          anchor.download = current.name
-          document.body.appendChild(anchor)
-          anchor.click()
-          anchor.remove()
-          window.setTimeout(() => URL.revokeObjectURL(url), 30_000)
-          downloadRef.current = null
-          setDownload(null)
-          nextDownload()
+          if (message.ok === false) {
+            finishDownload(message.message ?? t('files.error'))
+            break
+          }
+          current.eofSeen = true
+          if (downloadComplete(current)) finishDownload()
           break
         }
         case 'clipboard':
@@ -357,7 +403,9 @@ export function FileTransferPanel({
           }
           break
         case 'cancelled':
-          finishActive('error', undefined, t('files.cancelled'))
+          if (message.id && activeRef.current?.id === message.id) {
+            finishActive('error', undefined, t('files.cancelled'))
+          }
           break
         case 'error':
           setError(message.message ?? t('files.error'))
@@ -365,9 +413,8 @@ export function FileTransferPanel({
             downloadRef.current &&
             (!message.id || message.id === downloadRef.current.id)
           ) {
-            downloadRef.current = null
-            setDownload(null)
-            nextDownload()
+            finishDownload(message.message ?? t('files.error'))
+            break
           }
           if (message.id) finishActive('error', undefined, message.message)
           break
@@ -375,7 +422,7 @@ export function FileTransferPanel({
           break
       }
     },
-    [finishActive, nextDownload, sendChunks, t],
+    [armDownloadTimeout, finishActive, finishDownload, nextDownload, sendChunks, t],
   )
 
   useEffect(() => {
@@ -392,17 +439,27 @@ export function FileTransferPanel({
       if (event.kind !== 'file-chunk') return
       const current = downloadRef.current
       if (!current || current.id !== event.id) return
+      if (!acceptDownloadChunk(current, event.offset, event.data.byteLength)) {
+        finishDownload(t('files.incomplete'))
+        return
+      }
       current.chunks.push(event.data)
-      current.received += event.data.byteLength
+      if (downloadComplete(current)) {
+        finishDownload()
+        return
+      }
+      armDownloadTimeout()
       setDownload({
         id: current.id,
         name: current.name,
         size: current.size,
         received: current.received,
       })
-      connectionRef.current?.sendFileAction('pull', { id: current.id })
+      if (current.received < current.size && !current.eofSeen) {
+        connectionRef.current?.sendFileAction('pull', { id: current.id })
+      }
     })
-  }, [connection, handleMessage])
+  }, [armDownloadTimeout, connection, finishDownload, handleMessage, t])
 
   const browse = (path: string) => {
     setLoading(true)

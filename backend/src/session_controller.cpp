@@ -17,6 +17,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include <handle/uvcpp_timer.h>
 #include <web/uvcpp_ws_connection.h>
 #include <webapp/uvcpp_web_app.h>
 #include <webapp/uvcpp_web_json.h>
@@ -31,6 +32,7 @@
 #endif
 #include "protocol/frame_packet.h"
 #include "service_control.h"
+#include "transport/switchable_transport.h"
 #include "transport/ws_transport.h"
 #include "util.h"
 #include "version.h"
@@ -1171,6 +1173,32 @@ session_controller::session_controller(
     : registry_(std::move(registry)),
       transport_(transport),
       options_(std::move(options)) {}
+
+session_controller::~session_controller() = default;
+
+void session_controller::update_file_retry_timer() {
+  if (!files_->has_pending()) {
+    if (file_retry_timer_) file_retry_timer_->stop();
+    return;
+  }
+  if (file_retry_timer_) {
+    if (file_retry_timer_->is_active()) return;
+  } else if (options_.loop) {
+    auto timer = std::make_unique<uvcpp::uvcpp_timer>(options_.loop);
+    if (timer->init() == 0) file_retry_timer_ = std::move(timer);
+  }
+  auto weak = weak_from_this();
+  constexpr auto interval = file_transfer::kRetryIntervalMs;
+  if (!file_retry_timer_ || file_retry_timer_->start(
+          [weak](uvcpp::uvcpp_timer* timer) {
+            if (auto self = weak.lock()) {
+              self->files_->retry_pending();
+              if (!self->files_->has_pending()) timer->stop();
+            }
+          }, interval, interval) != 0) {
+    files_->fail_pending();
+  }
+}
 
 bool session_controller::start(const std::string* initial_token) {
   std::shared_ptr<session_transport> transport = transport_.lock();
@@ -2515,14 +2543,17 @@ void session_controller::on_text(const std::string& text) {
                     string_field(j, "dest"));
     } else if (action == "complete") {
       files_->complete(id);
+      update_file_retry_timer();
     } else if (action == "cancel") {
       files_->cancel(id);
+      update_file_retry_timer();
     } else if (action == "browse") {
       files_->browse(string_field(j, "path"));
     } else if (action == "request") {
       files_->request(string_field(j, "path"));
     } else if (action == "pull") {
       files_->pull(id);
+      update_file_retry_timer();
     } else if (action == "clipboard-set") {
       // RDP-style paste: put the referenced remote files on the host's
       // clipboard so Explorer can paste them.
@@ -2710,6 +2741,7 @@ void session_controller::on_close(int code, const std::string& reason) {
   }
   if (options_.call) options_.call->hangup(session->id);
   stop_voice();
+  if (file_retry_timer_) file_retry_timer_->stop();
   if (files_) files_->close_all();
   if (session->access_request_id != 0 && options_.access_requests) {
     options_.access_requests->remove(session->access_request_id);

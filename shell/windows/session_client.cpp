@@ -1013,7 +1013,9 @@ void session_client::pump_files() {
       }
       if (it == downloads_.end()) continue;
       download_state& download = it->second;
-      if (download.state != 1 || event.offset != download.received) {
+      if (download.state != 1) continue;
+      if (event.offset != download.received || download.received > download.size ||
+          event.chunk_data.size() > download.size - download.received) {
         download.out.close();
         if (!download.path.empty()) DeleteFileW(download.path.c_str());
         download.state = 3;
@@ -1023,6 +1025,7 @@ void session_client::pump_files() {
           reinterpret_cast<const char*>(event.chunk_data.data()),
           static_cast<std::streamsize>(event.chunk_data.size()));
       download.received += event.chunk_data.size();
+      if (!event.chunk_data.empty()) download.last_progress_at = GetTickCount64();
       if (!download.out) {
         download.out.close();
         DeleteFileW(download.path.c_str());
@@ -1100,6 +1103,7 @@ void session_client::pump_files() {
       download.name = event.name.empty() ? L"file" : event.name;
       download.size = event.size;
       download.state = 1;
+      download.last_progress_at = GetTickCount64();
       if (download_dir_.empty()) {
         wchar_t profile[MAX_PATH] = {};
         if (GetEnvironmentVariableW(L"USERPROFILE", profile, MAX_PATH) > 0) {
@@ -1137,8 +1141,18 @@ void session_client::pump_files() {
                          ? 0ull
                          : static_cast<unsigned long long>(it->second.size));
       }
-      if (it != downloads_.end()) {
+      if (it != downloads_.end() && it->second.state == 1) {
         download_state& download = it->second;
+        if (!event.ok) {
+          download.out.close();
+          DeleteFileW(download.path.c_str());
+          download.state = 3;
+          event.action = L"error";
+          event.name = download.name;
+          if (event.message.empty()) event.message = L"文件接收失败";
+          shell_file_events_.push_back(std::move(event));
+          continue;
+        }
         // The host may send `eof` on the control path before the last binary
         // frame is delivered. Remember it and finish once the bytes catch up.
         download.eof_seen = true;
@@ -1150,13 +1164,15 @@ void session_client::pump_files() {
     shell_file_events_.push_back(std::move(event));
   }
 
-  // A missing final chunk after `eof` must not leave the row spinning forever.
+  // A missing chunk or end marker must not leave the row spinning forever.
   const uint64_t now_ms = GetTickCount64();
   for (auto& [download_id, download] : downloads_) {
-    if (download.state != 1 || !download.eof_seen ||
-        now_ms - download.eof_at <= 3000) {
-      continue;
-    }
+    if (download.state != 1) continue;
+    const bool timed_out = download.eof_seen
+        ? now_ms - download.eof_at > 3000
+        : now_ms - download.last_progress_at > 30000;
+    if (!timed_out) continue;
+    send_file_action("cancel", download_id, "");
     download.out.close();
     DeleteFileW(download.path.c_str());
     download.state = 3;

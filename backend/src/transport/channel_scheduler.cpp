@@ -64,23 +64,12 @@ bool channel_scheduler::evict_video_for(std::size_t required,
   // deltas, which could not be decoded before it anyway.
   if (video_.messages.empty()) return true;
 
-  while (true) {
-    // A held oversized frame leaves no room at all, and the subtraction must
-    // not wrap.
-    const std::size_t available =
-        video_.bytes >= video_.limit ? 0 : video_.limit - video_.bytes;
-    if (required <= available) return true;
-    auto candidate = video_.messages.end();
-    for (auto it = video_.messages.begin(); it != video_.messages.end(); ++it) {
-      if (!it->keyframe) {
-        candidate = it;
-        break;
-      }
-    }
-    if (candidate == video_.messages.end()) return false;
-    video_.bytes -= candidate->data.size();
-    video_.messages.erase(candidate);
-  }
+  // Refuse the incoming delta instead of silently deleting an accepted one.
+  // Both stream and tile deltas may depend on every preceding frame. A false
+  // result reaches the capture replay path, which requests a fresh baseline.
+  const std::size_t available =
+      video_.bytes >= video_.limit ? 0 : video_.limit - video_.bytes;
+  return required <= available;
 }
 
 bool channel_scheduler::enqueue(transport_channel channel, const uint8_t* data,

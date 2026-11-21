@@ -265,6 +265,29 @@ void test_single_video_frame_larger_than_budget() {
          "small frames queue again after the oversized frame drains");
 }
 
+void test_video_pressure_preserves_accepted_reference_chain() {
+  molink::channel_scheduler::limits limits;
+  limits.video_bytes = 12;
+  molink::channel_scheduler scheduler(limits);
+  const auto key = bytes(4, 1);
+  const auto first = bytes(4, 2);
+  const auto second = bytes(4, 3);
+  const auto rejected = bytes(4, 4);
+  scheduler.enqueue(molink::transport_channel::video, key.data(), key.size(), true);
+  scheduler.enqueue(molink::transport_channel::video, first.data(), first.size());
+  scheduler.enqueue(molink::transport_channel::video, second.data(), second.size());
+  expect(!scheduler.enqueue(molink::transport_channel::video,
+                            rejected.data(), rejected.size()),
+         "video pressure is reported to the sender instead of evicting a dependency");
+  std::vector<uint8_t> sequence;
+  scheduler.drain([&](const molink::channel_scheduler::message& message) {
+    sequence.push_back(message.data.front());
+    return true;
+  });
+  expect(sequence == std::vector<uint8_t>({1, 2, 3}),
+         "every accepted reference frame is preserved in order");
+}
+
 void test_control_holds_a_large_clipboard_message() {
   // The default control budget has to clear the 192 KiB clipboard-sync cap
   // plus JSON framing, and a second one on top must apply backpressure rather
@@ -292,6 +315,7 @@ int main() {
   test_sustained_file_backpressure_preserves_backlog_and_control();
   test_drain_isolates_channel_backpressure();
   test_single_video_frame_larger_than_budget();
+  test_video_pressure_preserves_accepted_reference_chain();
   test_control_holds_a_large_clipboard_message();
   std::printf("%d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;

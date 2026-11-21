@@ -517,6 +517,7 @@
     "refresh": "刷新",
     "empty": "此文件夹为空",
     "error": "传输失败",
+    "incomplete": "文件未完整接收，未保存。",
     "cancelled": "传输已取消",
     "clipboardTitle": "远程剪贴板",
     "clipboardHint": "远程资源管理器里复制的文件；接收后会下载到本机。",

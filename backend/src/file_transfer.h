@@ -1,6 +1,8 @@
 #pragma once
 
+#include <chrono>
 #include <cstdint>
+#include <optional>
 #include <fstream>
 #include <functional>
 #include <map>
@@ -22,6 +24,7 @@ class file_transfer {
       std::function<bool(uint32_t id, uint64_t offset, const uint8_t* data,
                          std::size_t len)>;
 
+  using clock = std::chrono::steady_clock;
   static constexpr std::size_t kChunkBytes = 256 * 1024;
   static constexpr uint64_t kMaxFileBytes = 8ull * 1024 * 1024 * 1024;
 
@@ -35,13 +38,18 @@ class file_transfer {
              const std::string& destination);
   void chunk(uint32_t id, uint64_t offset, const uint8_t* data,
              std::size_t len);
-  void complete(uint32_t id);
+  void complete(uint32_t id, clock::time_point now = clock::now());
   void cancel(uint32_t id);
 
   /// Empty `path` means the home directory. Paths outside home are rejected.
   void browse(const std::string& path);
   void request(const std::string& path);
-  void pull(uint32_t id);
+  static constexpr int kRetryIntervalMs = 100;
+  static constexpr auto kRetryTimeout = std::chrono::seconds(20);
+  void pull(uint32_t id, clock::time_point now = clock::now());
+  void retry_pending(clock::time_point now = clock::now());
+  bool has_pending() const;
+  void fail_pending();
 
   /// Drop partial uploads when the session closes.
   void close_all();
@@ -60,6 +68,7 @@ class file_transfer {
     uint64_t size = 0;
     uint64_t received = 0;
     std::ofstream out;
+    std::optional<clock::time_point> complete_deadline;
   };
 
   struct download {
@@ -69,7 +78,12 @@ class file_transfer {
     uint64_t size = 0;
     uint64_t sent = 0;
     std::ifstream in;
+    std::vector<uint8_t> pending_chunk;
+    std::optional<clock::time_point> retry_deadline;
   };
+
+  // Returns true when the pull is complete or failed and the item is done.
+  bool send_next(download& item, clock::time_point now);
 
   void fail(const std::string& action, uint32_t id, const std::string& why);
   void send_simple(const std::string& action, uint32_t id = 0);

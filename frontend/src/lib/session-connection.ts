@@ -685,6 +685,7 @@ export class SessionConnection {
   setForeground(active: boolean): void {
     if (this.foreground === active) return
     this.foreground = active
+    this.client.setForeground(active)
     if (active) {
       this.stopBackgroundPull()
       // The full-rate pull loop is owned by SessionView. The session buffer

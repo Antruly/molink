@@ -436,11 +436,8 @@ const kStreamReorderMax = 6
 /// host's temporary code. Cleared when the host rejects it. In-memory only.
 const resumeTokens = new Map<string, string>()
 
-/// How long a live session may keep receiving stream deltas without any
-/// keyframe before the P2P path is declared broken. Deltas and keyframes take
-/// different paths (P2P vs relay); when the relay dies, every delta arrives
-/// and every keyframe is swallowed, so the picture freezes forever. Six
-/// seconds is far longer than a lost keyframe needs to be re-requested.
+/// Allow time for keyframe repair before falling back from a stalled P2P path.
+/// Use the same interval before probing video on an otherwise quiet session.
 const kStreamKeyframeWaitMs = 6000
 
 /// One decoded-stream frame held back by the reorder window.
@@ -485,6 +482,10 @@ export class MolinkClient {
   private pushSupported = false
   /** The clock is on right now: the page is visible and pulling is off. */
   private pushVideo = false
+  private foreground = true
+  private transportPath = ''
+  private lastFrameResponseAt = 0
+  private videoProbeAt = 0
   /** Re-evaluates the clock whenever the page is shown or hidden. */
   private visibilityListener: (() => void) | null = null
   /// When the unanswered frame request was sent, for the retry timeout.
@@ -735,6 +736,9 @@ export class MolinkClient {
     } = args
     this.closedByUser = false
     this.hasImage = false
+    this.transportPath = ''
+    this.lastFrameResponseAt = performance.now()
+    this.videoProbeAt = 0
     this.stopWatchingVisibility()
     this.pushSupported = false
     this.pushVideo = false
@@ -747,8 +751,7 @@ export class MolinkClient {
     this.stopHelloRetry()
     this.tileAppliedAt.clear()
     this.pendingTiles.clear()
-    this.frameQueue = Promise.resolve()
-    this.frameQueueDepth = 0
+    this.resetFrameQueue()
     // A reorder timer from the previous socket must not fire into this one.
     this.streamChain += 1
     this.clearStreamGapWait()
@@ -827,6 +830,7 @@ export class MolinkClient {
     this.ws = ws
 
     ws.onopen = () => {
+      if (this.ws !== ws) return
       if (requestAccess || token === '') {
         // No code: ask the host user to approve this session.
         this.sendJson({
@@ -847,7 +851,7 @@ export class MolinkClient {
           // Ask the host to drive the frame clock instead of answering a
           // request per frame. The host confirms in `welcome`; until then the
           // pull loop keeps running.
-          video_push: true,
+          video_push: this.wantsVideoPush(),
           // This browser can decode the host's H.264 stream through WebCodecs;
           // the host picks it when AV1 is not decodable by every viewer.
           h264_stream: this.h264Capable,
@@ -868,6 +872,7 @@ export class MolinkClient {
     }
 
     ws.onmessage = (event: MessageEvent) => {
+      if (this.ws !== ws) return
       if (typeof event.data === 'string') {
         this.handleText(event.data)
       } else if (event.data instanceof ArrayBuffer) {
@@ -900,6 +905,8 @@ export class MolinkClient {
       this.stopWatchingVisibility()
       this.pushSupported = false
       this.pushVideo = false
+      this.resetFrameQueue()
+      this.resetStreamSequence()
       this.h264.close()
       for (const decoder of Object.values(this.vpxDecoders)) decoder?.close()
       this.vpxDecoders = {}
@@ -945,6 +952,13 @@ export class MolinkClient {
         )
         this.handlers.onPhase?.('error',
                                 this.lastErrorMessage || this.lastErrorCode)
+        return
+      }
+      if (this.transportPath === 'p2p' && closeReason === 'ICE path failed' &&
+          this.lastConnect?.targetId && !forceRelay && !this.closedByUser) {
+        this.lastConnect.forceRelay = true
+        this.proxyFailed = false
+        this.openSocket()
         return
       }
       if (this.usedDirectProxy && !this.closedByUser) {
@@ -1060,9 +1074,12 @@ export class MolinkClient {
     this.stopWatchingVisibility()
     this.pushSupported = false
     this.pushVideo = false
-    this.streamChain += 1
-    this.clearStreamGapWait()
-    this.streamPending = []
+    this.resetFrameQueue()
+    this.resetStreamSequence()
+    this.h264.close()
+    for (const decoder of Object.values(this.vpxDecoders)) decoder?.close()
+    this.vpxDecoders = {}
+    this.closeRtc()
     const ws = this.ws
     this.ws = null
     if (ws && ws.readyState <= WebSocket.OPEN) {
@@ -1112,6 +1129,7 @@ export class MolinkClient {
     // afterwards. Refresh the capability flags so a re-send after a probe (or
     // after a codec turned out undecodable) reaches the host instead of
     // replaying the snapshot taken at connect time.
+    this.helloPayload.video_push = this.wantsVideoPush()
     this.helloPayload.h264_stream = this.h264Capable
     this.helloPayload.vp9_stream = this.vp9Capable
     this.helloPayload.vp8_stream = this.vp8Capable
@@ -1144,17 +1162,30 @@ export class MolinkClient {
   /// used to drop the session to a 1 Hz pull; a pushed session would otherwise
   /// keep receiving full-rate frames for a page nobody is looking at. Turning
   /// the clock off hands the session back to its own slow pull instead.
+  setForeground(active: boolean): void {
+    this.foreground = active
+    this.visibilityListener?.()
+  }
+
+  private wantsVideoPush(): boolean {
+    return this.foreground && document.visibilityState === 'visible'
+  }
+
   private watchVisibility(): void {
-    if (this.visibilityListener !== null) return
-    const apply = () => {
-      const on = this.pushSupported && document.visibilityState === 'visible'
-      if (on === this.pushVideo) return
-      this.pushVideo = on
-      if (this.pushSupported) this.sendJson({ type: 'video-push', on })
+    if (this.visibilityListener === null) {
+      const apply = () => {
+        this.lastFrameResponseAt = performance.now()
+        this.videoProbeAt = 0
+        this.streamKeyframeWaitStarted = 0
+        const on = this.pushSupported && this.wantsVideoPush()
+        if (on === this.pushVideo) return
+        this.pushVideo = on
+        if (this.pushSupported) this.sendJson({ type: 'video-push', on })
+      }
+      this.visibilityListener = apply
+      document.addEventListener('visibilitychange', apply)
     }
-    this.visibilityListener = apply
-    document.addEventListener('visibilitychange', apply)
-    apply()
+    this.visibilityListener()
   }
 
   private stopWatchingVisibility(): void {
@@ -1197,7 +1228,7 @@ export class MolinkClient {
     })
     this.rtc = pc
     pc.onicecandidate = (event) => {
-      if (event.candidate === null) return
+      if (this.rtc !== pc || event.candidate === null) return
       this.sendJson(
         {
           type: 'rtc-ice',
@@ -1208,6 +1239,7 @@ export class MolinkClient {
       )
     }
     pc.ontrack = (event) => {
+      if (this.rtc !== pc) return
       const stream = event.streams[0] ?? new MediaStream([event.track])
       // The sink paints this into the session buffer; a detached element is
       // enough and never fights the canvas for layout.
@@ -1223,6 +1255,7 @@ export class MolinkClient {
       this.handlers.onVideoPath?.('webrtc')
     }
     pc.ondatachannel = (event) => {
+      if (this.rtc !== pc) return
       // The host opens two channels: "molink" for control and "audio" for the
       // realtime audio packets, which are unreliable and therefore kept off
       // the control channel.
@@ -1230,19 +1263,23 @@ export class MolinkClient {
         // File transfers have their own reliable channel, so they never sit
         // in front of control messages.
         event.channel.onmessage = (message: MessageEvent) => {
-          if (message.data instanceof ArrayBuffer) this.handleBinary(message.data)
+          if (this.rtc === pc && message.data instanceof ArrayBuffer) {
+            this.handleBinary(message.data)
+          }
         }
         return
       }
       if (event.channel.label === 'audio') {
         event.channel.onmessage = (message: MessageEvent) => {
-          if (message.data instanceof ArrayBuffer) this.handleBinary(message.data)
+          if (this.rtc === pc && message.data instanceof ArrayBuffer) {
+            this.handleBinary(message.data)
+          }
         }
         return
       }
       this.rtcChannel = event.channel
       event.channel.onmessage = (message: MessageEvent) => {
-        if (typeof message.data === 'string') this.handleText(message.data)
+        if (this.rtc === pc && typeof message.data === 'string') this.handleText(message.data)
       }
       event.channel.onclose = () => {
         if (this.rtcChannel === event.channel) this.rtcChannel = null
@@ -1252,9 +1289,11 @@ export class MolinkClient {
       await pc.setRemoteDescription({ type: 'offer', sdp })
       const answer = await pc.createAnswer()
       await pc.setLocalDescription(answer)
-      this.sendJson({ type: 'rtc-answer', sdp: answer.sdp ?? '' }, true)
+      if (this.rtc === pc) {
+        this.sendJson({ type: 'rtc-answer', sdp: answer.sdp ?? '' }, true)
+      }
     } catch {
-      this.closeRtc()
+      if (this.rtc === pc) this.closeRtc()
     }
   }
 
@@ -1284,10 +1323,7 @@ export class MolinkClient {
 
   /** Asks for the next capture to be a full keyframe (resync after a loss). */
   requestKeyframe(): void {
-    // Compensation messages are routed over the relay by the local core. Send
-    // this through the socket even when the WebRTC data channel is up: a
-    // request that goes over RTC never reaches the relay, and a relay that
-    // carries no traffic goes idle and swallows the keyframe it was asked for.
+    // Route the repair through the local core even if RTC control is open.
     this.sendRelayText({ type: 'request-keyframe' })
   }
 
@@ -1483,6 +1519,9 @@ export class MolinkClient {
           }
         }
         this.stopHelloRetry()
+        if (typeof welcome.transport_path === 'string' && this.transportPath === '') {
+          this.transportPath = welcome.transport_path
+        }
         // A host that answered `video_push` sends frames on its own clock
         // while this page is the one being looked at; the pull loop stays
         // quiet meanwhile so frames are not sent twice.
@@ -1682,6 +1721,26 @@ export class MolinkClient {
         break
       case 'transport':
         if (typeof message.mode === 'string') {
+          const path = typeof message.path === 'string' ? message.path : message.mode
+          if (path !== this.transportPath) {
+            const previousPath = this.transportPath
+            this.transportPath = path
+            this.lastFrameResponseAt = performance.now()
+            this.videoProbeAt = 0
+            this.streamKeyframeWaitStarted = 0
+            if (previousPath === 'relay' && path === 'p2p' && this.pingTimer !== null) {
+              // Keep the displayed picture until a fresh baseline arrives.
+              // Work queued on the relay must not paint over that baseline.
+              this.resetFrameQueue()
+              this.resetStreamSequence()
+              this.hasImage = false
+              this.pendingFrame = false
+              this.tileAppliedAt.clear()
+              this.pendingTiles.clear()
+              this.requestKeyframeThrottled()
+              if (this.wantsVideoPush()) this.sendRelayText({ type: 'request-frame' })
+            }
+          }
           this.handlers.onTransport?.(
             message.mode,
             typeof message.path === 'string' ? message.path : undefined,
@@ -1716,6 +1775,15 @@ export class MolinkClient {
     }
   }
 
+  private frameQueueGeneration = 0
+
+  private resetFrameQueue(): void {
+    this.frameQueueGeneration += 1
+    this.tileEpoch += 1
+    this.frameQueue = Promise.resolve()
+    this.frameQueueDepth = 0
+  }
+
   /// Chains asynchronous frame work with a hard depth bound. Returns false
   /// when the frame was dropped; `onOverflow` lets the caller ask for a repair
   /// or a keyframe instead of letting latency accumulate.
@@ -1727,17 +1795,21 @@ export class MolinkClient {
       onOverflow?.()
       return false
     }
+    const generation = this.frameQueueGeneration
     this.frameQueueDepth += 1
     this.frameQueue = this.frameQueue
-      .then(work)
+      .then(() => {
+        if (generation === this.frameQueueGeneration) return work()
+      })
       .catch((error: unknown) => {
+        if (generation !== this.frameQueueGeneration) return
         const message =
           error instanceof Error ? error.message : 'frame decode failed'
         logDiag('error', 'frame.decode', message)
         this.handlers.onError?.(message)
       })
       .finally(() => {
-        this.frameQueueDepth -= 1
+        if (generation === this.frameQueueGeneration) this.frameQueueDepth -= 1
       })
     return true
   }
@@ -1795,6 +1867,7 @@ export class MolinkClient {
             try {
               inflated = await inflateTile(payload)
             } catch (error) {
+              if (epoch !== this.tileEpoch) return
               // A truncated or badly wrapped clock map used to reject on the
               // frame queue, which raised the whole session into the fatal
               // error banner with the browser's raw
@@ -1829,6 +1902,8 @@ export class MolinkClient {
       this.pendingFrame = false
       this.missedFrameResponses = 0
       const frame = parseFramePayload(packet.payload)
+      this.lastFrameResponseAt = performance.now()
+      this.videoProbeAt = 0
       this.noteFrameClock(packet.tsUs)
       this.noteReceived(frame, (packet.flags & PacketFlag.tileRefresh) !== 0)
       this.reconcileQualityPreset(frame)
@@ -2113,6 +2188,7 @@ export class MolinkClient {
     }
     const bytesPerPixel = codecBytesPerPixel(frame.codec)
     if (bytesPerPixel === 0) throw new Error('unsupported deflate codec')
+    const epoch = this.tileEpoch
     let tiles: Frame['tiles']
     try {
       tiles = await Promise.all(
@@ -2125,6 +2201,7 @@ export class MolinkClient {
         }),
       )
     } catch (error) {
+      if (epoch !== this.tileEpoch) return
       // A lost/truncated tile is a transport problem, not a fatal session
       // error. The old path threw this into the UI as
       // "TypeError: Failed to Decode Data." even though the next keyframe or
@@ -2157,6 +2234,7 @@ export class MolinkClient {
       }
       return
     }
+    if (epoch !== this.tileEpoch) return
     this.deliver({ ...frame, tiles }, byteLength, tsUs, refresh)
   }
 
@@ -2165,6 +2243,7 @@ export class MolinkClient {
     if (!refresh) {
       if ((frame.flags & FrameFlag.keyframe) !== 0) {
         this.hasImage = true
+        if (frame.tiles.length !== 0) this.streamKeyframeWaitStarted = 0
       } else if (!this.hasImage) {
         // A delta cannot be drawn over an image that does not exist yet. The
         // server requests a keyframe on our behalf; the next frames will carry
@@ -2396,6 +2475,7 @@ export class MolinkClient {
     this.stopPing()
     const ping = () => {
       if (!this.isLive()) return
+      if (this.checkP2pVideo()) return
       if (this.pendingPingAt !== 0) {
         this.missedPongs += 1
         if (this.missedPongs >= kPingMissLimit) {
@@ -2565,27 +2645,45 @@ export class MolinkClient {
     this.streamKeyframeWaitStarted = 0
   }
 
-  /// A live session keeps receiving deltas but never a keyframe: the P2P path
-  /// is up while the relay path that carries keyframes is gone. Retry pinned
-  /// to the relay so every video packet shares one ordered, reliable path;
-  /// the resume token keeps the host session itself.
+  /// Start a monotonic deadline; the timer checks it even if no more frames arrive.
   private noteMissingStreamKeyframe(): void {
-    const now = Date.now()
     if (this.streamKeyframeWaitStarted === 0) {
-      this.streamKeyframeWaitStarted = now
-      return
+      this.streamKeyframeWaitStarted = performance.now()
     }
-    if (now - this.streamKeyframeWaitStarted < kStreamKeyframeWaitMs) return
-    this.streamKeyframeWaitStarted = 0
-    if (this.lastConnect === null || this.lastConnect.forceRelay) return
-    logDiag(
-      'warn',
-      'transport.p2p-stuck',
-      'keyframes stopped on p2p; retrying on the relay',
-      { target: `${this.lastConnect.host}:${this.lastConnect.port}` },
-    )
+  }
+
+  private retryP2pOnRelay(reason: string): boolean {
+    if (this.transportPath !== 'p2p' || this.closedByUser ||
+        this.lastConnect === null || this.lastConnect.forceRelay ||
+        !this.lastConnect.targetId || this.ws === null || !this.isLive()) return false
+    logDiag('warn', 'transport.p2p-stuck', reason, {
+      target: `${this.lastConnect.host}:${this.lastConnect.port}`,
+    })
     this.lastConnect.forceRelay = true
-    this.recoverStalledSession('keyframes stopped on p2p')
+    this.proxyFailed = false
+    this.recoverStalledSession(reason)
+    return true
+  }
+
+  /// Probe a quiet pushed session explicitly. A static desktop can answer
+  /// with an empty frame, while control messages alone do not prove video works.
+  private checkP2pVideo(): boolean {
+    if (this.transportPath !== 'p2p' || !this.foreground ||
+        document.visibilityState !== 'visible' || this.wt?.isOpen) return false
+    const now = performance.now()
+    if (this.streamKeyframeWaitStarted !== 0 &&
+        now - this.streamKeyframeWaitStarted >= kStreamKeyframeWaitMs) {
+      return this.retryP2pOnRelay('keyframes stopped on p2p')
+    }
+    if (now - this.lastFrameResponseAt < kStreamKeyframeWaitMs) return false
+    if (this.videoProbeAt === 0) {
+      this.videoProbeAt = now
+      if (!this.hasImage) this.requestKeyframeThrottled()
+      this.sendRelayText({ type: 'request-frame' })
+      return false
+    }
+    return now - this.videoProbeAt >= kPingIntervalMs &&
+      this.retryP2pOnRelay('video probes stopped on p2p')
   }
 
   private clearStreamGapWait(): void {
@@ -2636,6 +2734,7 @@ export class MolinkClient {
     this.streamHasImage = false
     this.lastStreamSeq = -1
     this.streamDecoderFor(item.frame).close()
+    this.noteMissingStreamKeyframe()
     this.requestKeyframeThrottled()
   }
 
@@ -2675,6 +2774,7 @@ export class MolinkClient {
     const chain = this.streamChain
     this.queueFrameWork(
       async () => {
+        if (chain !== this.streamChain) return
         void decoder
           .decode(accessUnit, keyframe)
           .then((picture) => {
@@ -2778,9 +2878,8 @@ export class MolinkClient {
     this.missedPongs = 0
   }
 
-  /// Control that must pass through the local core's relay routing. The RTC
-  /// data channel and WebTransport bypass it; the WebSocket does not (the
-  /// core classifies repair requests and sends them over the relay).
+  /// Control that must pass through the local core's path routing. The RTC
+  /// data channel and WebTransport bypass it; the WebSocket does not.
   private sendRelayText(payload: Record<string, unknown>): void {
     if (this.ws !== null && this.ws.readyState === WebSocket.OPEN) {
       this.sendJson(payload, true)
@@ -2800,6 +2899,7 @@ export class MolinkClient {
     this.directProxyFailed = false
     const ws = this.ws
     this.ws = null
+    this.closeRtc()
     this.stopPing()
     this.stopHelloRetry()
     this.pendingFrame = false
@@ -2865,7 +2965,7 @@ export class MolinkClient {
       type: 'hello',
       token,
       seq_clock: true,
-      video_push: true,
+      video_push: this.wantsVideoPush(),
       h264_stream: this.h264Capable,
       vp9_stream: this.vp9Capable,
       vp8_stream: this.vp8Capable,

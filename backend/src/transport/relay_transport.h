@@ -73,10 +73,8 @@ class relay_transport final : public relay_session {
   std::atomic<bool> stop_requested_{false};
   std::atomic<bool> close_delivered_{false};
 
-  /// Bytes handed to the WebSocket client whose write has not completed yet.
-  /// libuvcpp queues frames without a bound, so this is the only place the
-  /// relay can learn that a receiver is not keeping up.
-  static constexpr std::size_t kMaxInflightBytes = 8 * 1024 * 1024;
+  /// Count bytes awaiting write completion; relay_write_budget.h applies
+  /// the shared window while reserving room for control and audio.
 
   std::mutex send_mutex_;
   channel_scheduler sends_;

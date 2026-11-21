@@ -26,6 +26,8 @@
 
 namespace uvcpp {
 class uvcpp_web_app;
+class uvcpp_loop;
+class uvcpp_timer;
 }
 
 namespace molink {
@@ -74,6 +76,7 @@ struct session_options {
   /// Hop a callback onto the app loop (used for clipboard results, which are
   /// produced on the clipboard thread).
   std::function<void(std::function<void()>)> post;
+  uvcpp::uvcpp_loop* loop = nullptr;
 };
 
 /// Transport-independent session state machine: hello, frame pulls, input,
@@ -86,6 +89,7 @@ class session_controller final
   session_controller(std::shared_ptr<session_registry> registry,
                      std::shared_ptr<session_transport> transport,
                      session_options options);
+  ~session_controller();
 
   /// Registers the session and installs transport handlers. Returns false when
   /// the peer is blocked/banned or its initial token is rejected (the
@@ -116,6 +120,7 @@ class session_controller final
   void start_voice();
   void stop_voice();
   void send_voice(std::vector<uint8_t> pcm);
+  void update_file_retry_timer();
   void send_json_string(const std::string& text);
   bool send_file_chunk(uint32_t id, uint64_t offset, const uint8_t* data,
                        std::size_t len);
@@ -134,6 +139,7 @@ class session_controller final
   /// which case the client falls back to its verification code.
   std::string resume_token_;
   std::unique_ptr<file_transfer> files_;
+  std::unique_ptr<uvcpp::uvcpp_timer> file_retry_timer_;
   int chat_subscription_ = 0;
   int audio_subscription_ = 0;
   int call_subscription_ = 0;

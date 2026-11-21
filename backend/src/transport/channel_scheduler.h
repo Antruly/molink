@@ -15,8 +15,8 @@ namespace molink {
 ///
 /// The scheduler owns queued bytes and never blocks the caller. Control,
 /// audio, and file messages are rejected when their channel budget is full.
-/// Video is latency-sensitive: stale non-keyframes are discarded to make room
-/// for a newer frame, while queued keyframes are retained.
+/// Video deltas are rejected at their budget so callers can rebuild the
+/// reference chain; a new keyframe supersedes the queued video baseline.
 class channel_scheduler final {
  public:
   struct limits {
@@ -39,8 +39,8 @@ class channel_scheduler final {
   channel_scheduler();
   explicit channel_scheduler(limits configured);
 
-  /// Enqueue a message. Returns false when a reliable channel is over budget
-  /// or when a video keyframe cannot fit without evicting another keyframe.
+  /// Enqueue a message. Returns false at the channel's byte budget. A single
+  /// video frame can exceed that budget when the video queue is empty.
   bool enqueue(transport_channel channel, const uint8_t* data, std::size_t len,
                bool keyframe = false);
   bool enqueue_text(const std::string& text);

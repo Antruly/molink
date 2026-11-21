@@ -51,20 +51,70 @@ void test_download_retries_same_offset_after_backpressure() {
       });
   transfer.request("payload.bin");
   expect(!json.empty(), "request announces the download");
-  transfer.pull(1);
-  expect(attempts == 1, "first chunk send is attempted");
-  transfer.pull(1);
-  expect(attempts == 2 && offsets.size() == 2 && offsets[0] == 0 &&
-             offsets[1] == 0,
-         "failed enqueue retries from the unchanged offset");
+  const auto start = molink::file_transfer::clock::now();
+  transfer.pull(1, start);
+  expect(attempts == 1 && transfer.has_pending(), "rejected pull stays pending");
+  transfer.pull(1, start);
+  expect(attempts == 1, "duplicate pull does not advance a pending request");
+  transfer.retry_pending(start + std::chrono::milliseconds(100));
+  expect(attempts == 2 && offsets[0] == 0 && offsets[1] == 0,
+         "retry tick attempts the same offset");
   accept_send = true;
-  transfer.pull(1);
-  expect(attempts == 3 && offsets.back() == 0,
-         "chunk is resent from offset zero after backpressure clears");
+  transfer.retry_pending(start + std::chrono::milliseconds(200));
+  expect(attempts == 3 && offsets.back() == 0 && !transfer.has_pending(),
+         "the first block is delivered without another client pull");
+  transfer.retry_pending(start + std::chrono::milliseconds(300));
+  expect(attempts == 3, "the next block still needs a new pull");
   transfer.pull(1);
   expect(attempts == 4 && offsets.back() == molink::file_transfer::kChunkBytes,
          "next chunk starts only after accepted data");
+
+  accept_send = false;
+  transfer.request("payload.bin");
+  transfer.pull(2, start);
+  transfer.cancel(2);
+  transfer.retry_pending(start + std::chrono::milliseconds(100));
+  expect(attempts == 5 && !transfer.has_pending(), "cancel clears the retry");
+
+  transfer.request("payload.bin");
+  transfer.pull(3, start);
+  transfer.retry_pending(start + std::chrono::seconds(19));
+  const auto before_timeout = json.size();
+  transfer.retry_pending(start + molink::file_transfer::kRetryTimeout);
+  expect(attempts == 7 && !transfer.has_pending() &&
+             json.size() == before_timeout + 1 &&
+             json.back().find("did not become writable") != std::string::npos,
+         "retry deadline reports failure without sending another block");
+
+  transfer.request("payload.bin");
+  transfer.pull(4, start);
   transfer.close_all();
+  transfer.retry_pending(start + std::chrono::milliseconds(100));
+  expect(attempts == 8 && !transfer.has_pending(), "close clears the retry");
+
+  transfer.offer("upload.bin", 4, home.string());
+  const auto before_complete = json.size();
+  transfer.complete(5, start);
+  expect(transfer.has_pending() && json.size() == before_complete &&
+             !fs::exists(home / "upload.bin"),
+         "early complete does not publish an incomplete upload");
+  const std::array<uint8_t, 4> content{'t', 'e', 's', 't'};
+  transfer.chunk(5, 0, content.data(), content.size());
+  std::ifstream uploaded(home / "upload.bin", std::ios::binary);
+  std::array<char, 4> received{};
+  uploaded.read(received.data(), received.size());
+  expect(!transfer.has_pending() && json.size() == before_complete + 1 &&
+             std::string(received.data(), received.size()) == "test",
+         "an upload with early complete is saved only after all bytes arrive");
+  uploaded.close();
+
+  transfer.offer("short.bin", 4, home.string());
+  transfer.complete(6, start);
+  transfer.retry_pending(start + molink::file_transfer::kRetryTimeout);
+  expect(!transfer.has_pending() && !fs::exists(home / "short.bin") &&
+             !fs::exists(home / ".upload-6.part") &&
+             json.back().find("file ended early") != std::string::npos,
+         "incomplete upload times out and its temporary file is removed");
   fs::remove_all(home, ec);
 }
 }  // namespace

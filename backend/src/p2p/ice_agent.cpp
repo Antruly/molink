@@ -193,7 +193,14 @@ void ice_agent::receive_datagram(const uint8_t* data, std::size_t len,
 }
 
 void ice_agent::tick() {
-  if (agent_ != nullptr) juice_agent_tick(agent_);
+  if (agent_ == nullptr) return;
+  juice_agent_tick(agent_);
+  if (agent_ == nullptr || !session_state_) return;
+  const int current = state();
+  if (current == JUICE_STATE_FAILED || current == JUICE_STATE_DISCONNECTED) {
+    auto notify = std::move(session_state_);
+    notify(current);
+  }
 }
 
 void ice_agent::deliver_data(const uint8_t* data, std::size_t len) {
@@ -281,6 +288,7 @@ void ice_agent::close() {
   candidate_ = nullptr;
   gathering_ = nullptr;
   state_ = nullptr;
+  session_state_ = nullptr;
   data_ = nullptr;
 }
 

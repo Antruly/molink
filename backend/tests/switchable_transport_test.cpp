@@ -14,6 +14,7 @@
 
 #include "protocol/frame_packet.h"
 #include "transport/switchable_transport.h"
+#include "transport/relay_write_budget.h"
 
 namespace {
 
@@ -45,6 +46,7 @@ class fake_transport final : public session_transport {
     return value;
   }
   bool send_text(const std::string& text) override {
+    if (peer) peer->receive_text(text);
     sent_text.push_back(text);
     return open_;
   }
@@ -76,7 +78,12 @@ class fake_transport final : public session_transport {
   void receive_binary(const std::vector<uint8_t>& bytes) {
     if (binary_) binary_(bytes.data(), bytes.size());
   }
+  void receive_close() {
+    open_ = false;
+    if (close_) close_(1001, "link closed");
+  }
 
+  fake_transport* peer = nullptr;
   std::vector<std::string> sent_text;
   std::vector<std::vector<uint8_t>> sent_binary;
   std::vector<transport_channel> sent_text_channels;
@@ -209,14 +216,19 @@ void test_relay_split() {
   expect(binaries.size() == 5,
          "keyframe/AV1/refresh/clock/file data are accepted from the relay");
 
-  // Ordinary control messages and deltas stay on ICE.
+  // Deltas stay on ICE, while relay control queued before switching is valid.
   texts.clear();
   binaries.clear();
   relay->receive_text("{\"type\":\"ping\"}");
+  relay->receive_text("{ \"tiles\": [], \"type\" : \"request-tiles\" }");
+  relay->receive_text("{ \"type\" : \"request-keyframe\" }");
+  relay->receive_text("{ \"type\": \"file\", \"action\": \"eof\", \"id\": 1 }");
+  relay->receive_text("{ \"type\": \"input\", \"kind\": \"key\" }");
   relay->receive_binary(delta_packet());
-  expect(texts.empty() && binaries.empty(),
-         "relay drops deltas and ordinary text after the switch");
+  expect(texts.size() == 5 && binaries.empty(),
+         "late relay control and spaced legacy JSON survive an asymmetric switch");
 
+  texts.clear();
   ice->receive_text("{\"type\":\"ping\"}");
   ice->receive_binary(delta_packet());
   expect(texts.size() == 1 && binaries.size() == 1,
@@ -262,10 +274,82 @@ void test_relay_split() {
          "explicit control channel uses active transport");
 }
 
+void test_relay_loss_does_not_send_files_on_ice() {
+  auto relay = std::make_shared<fake_transport>("relay");
+  auto ice = std::make_shared<fake_transport>("ice");
+  auto switcher = std::make_shared<switchable_transport>(relay);
+  int closes = 0;
+  switcher->set_handlers({}, {}, [&closes](int, const std::string&) { ++closes; });
+  switcher->set_ice(ice);
+  relay->receive_close();
+  const auto file = file_data_packet();
+  expect(!switcher->send_binary(file.data(), file.size()) &&
+             !switcher->send_binary(transport_channel::file, file.data(), file.size()) &&
+             ice->sent_binary.empty(),
+         "neither send API puts file data on ICE after relay loss");
+  expect(switcher->is_open() && closes == 0,
+         "relay loss does not end the active ICE session");
+  ice->receive_close();
+  ice->receive_close();
+  expect(!switcher->is_open() && closes == 1, "ICE close is propagated once");
+  switcher.reset();
+  ice->receive_close();
+  expect(closes == 1, "late link callbacks are ignored after wrapper destruction");
+}
+
+void test_asymmetric_peer_switch_preserves_control_once() {
+  auto left_relay = std::make_shared<fake_transport>("relay");
+  auto right_relay = std::make_shared<fake_transport>("relay");
+  auto left_ice = std::make_shared<fake_transport>("ice");
+  auto right_ice = std::make_shared<fake_transport>("ice");
+  left_relay->peer = right_relay.get();
+  right_relay->peer = left_relay.get();
+  left_ice->peer = right_ice.get();
+  right_ice->peer = left_ice.get();
+  auto left = std::make_shared<switchable_transport>(left_relay);
+  auto right = std::make_shared<switchable_transport>(right_relay);
+  std::vector<std::string> received;
+  left->set_handlers([&](const std::string& text) { received.push_back(text); }, {}, {});
+  right->set_handlers({}, {}, {});
+  left->set_ice(left_ice);
+  right->send_text("{\"type\":\"input\",\"key\":\"a\"}");
+  expect(received.size() == 1, "a peer still on relay can deliver input after local switch");
+  right->set_ice(right_ice);
+  right->send_text("{\"type\":\"input\",\"key\":\"b\"}");
+  expect(received.size() == 2 && right_relay->sent_text.size() == 1 &&
+             right_ice->sent_text.size() == 1,
+         "switching sends each control action on exactly one path");
+}
+
+void test_relay_write_budget_reserves_control_space() {
+  using molink::transport_channel;
+  expect(molink::relay_write_fits(transport_channel::control, 1024, 0),
+         "control text fits the write window");
+  expect(!molink::relay_write_fits(transport_channel::control, 1024,
+                                   1024 * 1024),
+         "control text is refused when the window is full");
+  expect(!molink::relay_write_fits(transport_channel::file, 1024,
+                                   768 * 1024),
+         "file writes leave reserved space for control and audio");
+  expect(molink::relay_write_fits(transport_channel::control, 1024,
+                                  768 * 1024),
+         "control writes can use the space reserved from bulk traffic");
+  expect(molink::relay_write_fits(transport_channel::video, 2 * 1024 * 1024, 0),
+         "an oversized video frame is allowed when nothing else is pending");
+  expect(!molink::relay_write_fits(transport_channel::video, 2 * 1024 * 1024,
+                                   4096),
+         "an oversized video frame is refused once the queue has other data");
+  expect(molink::relay_write_fits(transport_channel::file, 512 * 1024, 0),
+         "a file block fits the reserved share");
+}
+
 }  // namespace
 
 int main() {
   test_relay_split();
+  test_relay_loss_does_not_send_files_on_ice();
+  test_asymmetric_peer_switch_preserves_control_once();
+  test_relay_write_budget_reserves_control_space();
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
 }
