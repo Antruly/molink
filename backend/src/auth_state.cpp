@@ -14,6 +14,7 @@
 
 #include "config.h"
 #include "identity.h"
+#include "video_mode.h"
 
 namespace molink {
 namespace {
@@ -343,12 +344,15 @@ code_view auth_state::set_temp(const std::string& mode, int uses,
 }
 
 bool auth_state::set_video_mode(const std::string& mode) {
-  // "mixed" is accepted from an older client and folded into tiles: the
-  // adaptive path no longer exists, and rejecting the message would leave
-  // that viewer's toolbar showing a mode the host is not running.
-  if (mode != "stream" && mode != "mixed" && mode != "tiles") return false;
+  // "auto" selects the adaptive path; "mixed" is the same request from an
+  // older client. Both are stored as auto so the welcome and the toolbar
+  // report the mode the host actually runs.
+  if (mode != "auto" && mode != "stream" && mode != "mixed" &&
+      mode != "tiles") {
+    return false;
+  }
   std::lock_guard<std::mutex> lock(mutex_);
-  settings_.video_mode = mode == "stream" ? "stream" : "tiles";
+  settings_.video_mode = normalize_video_mode(mode);
   persist_locked();
   return true;
 }

@@ -706,6 +706,15 @@ set_target_properties(molink-core-stream-policy-test PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 add_test(NAME stream_policy COMMAND molink-core-stream-policy-test)
 
+# Video path selection: auto / tiles / stream, and what the welcome offers.
+add_executable(molink-core-video-mode-test
+  tests/video_mode_test.cpp
+)
+target_include_directories(molink-core-video-mode-test PRIVATE src)
+set_target_properties(molink-core-video-mode-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME video_mode COMMAND molink-core-video-mode-test)
+
 # The weight-based QoS controller: viewer feedback in, budget scale out.
 add_executable(molink-core-stream-qos-test
   tests/stream_qos_test.cpp

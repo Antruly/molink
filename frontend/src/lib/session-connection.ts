@@ -403,6 +403,17 @@ export class SessionConnection {
         })
         this.sink.onPatch({ streamCodec: codec })
       },
+      onStreamEpoch: (_epoch, mode) => {
+        // Only a video epoch clears the picture: the host starts it with a
+        // keyframe and nothing from the previous mode may show through. A
+        // tiles epoch must keep the current image until the forced full tile
+        // keyframe replaces every tile; clearing it here blanked the picture,
+        // and the 15 s "ignore tiles while streaming" window then froze it.
+        if (mode === 'video') {
+          forgetSessionScreenBuffer(this.sessionKey)
+          noteSessionFrame(this.sessionKey)
+        }
+      },
       onCodecOptions: (options) => this.sink.onPatch({ codecOptions: options }),
       onCodecPreference: (value) => {
         logDiag('info', 'session.preferred-codec', undefined, {
