@@ -117,10 +117,121 @@ void test_download_retries_same_offset_after_backpressure() {
          "incomplete upload times out and its temporary file is removed");
   fs::remove_all(home, ec);
 }
+void test_download_and_upload_slots_are_reclaimed() {
+  namespace fs = std::filesystem;
+  const fs::path home =
+      fs::temp_directory_path() / "molink-file-transfer-idle-test";
+  std::error_code ec;
+  fs::remove_all(home, ec);
+  fs::create_directories(home, ec);
+#if defined(_WIN32)
+  _putenv_s("USERPROFILE", home.string().c_str());
+#else
+  setenv("HOME", home.string().c_str(), 1);
+#endif
+  const fs::path source = home / "payload.bin";
+  {
+    std::ofstream file(source, std::ios::binary);
+    file << std::string(64, 'x');
+  }
+
+  std::vector<std::string> json;
+  const auto accept_chunk = [](uint32_t, uint64_t, const uint8_t*,
+                               std::size_t) { return true; };
+  molink::file_transfer transfer(
+      [&json](std::string value) { json.push_back(std::move(value)); },
+      accept_chunk);
+  const auto start = molink::file_transfer::clock::now();
+
+  // The fixed slot bound: eight open downloads, the ninth is refused.
+  for (int index = 0; index < 8; ++index) {
+    transfer.request("payload.bin", start);
+  }
+  expect(json.size() == 8, "eight downloads are accepted");
+  transfer.request("payload.bin", start);
+  expect(json.size() == 9 &&
+             json.back().find("too many active downloads") != std::string::npos,
+         "the ninth download is refused while eight are open");
+  expect(transfer.has_transfers() && !transfer.has_pending(),
+         "an idle download keeps the retry timer alive without a retry deadline");
+
+  // cancel releases the slot immediately.
+  transfer.cancel(3);
+  transfer.request("payload.bin", start);
+  expect(json.size() == 11 &&
+             json.back().find("too many active downloads") ==
+                 std::string::npos,
+         "cancel releases a download slot for the next request");
+
+  // An abandoned download (panel closed without cancel) ages out after the
+  // idle timeout. Only the old one is reclaimed: the seconds-older requests
+  // keep the queue full, so the slot count is back at eight.
+  std::vector<std::string> idle_json;
+  molink::file_transfer idle(
+      [&idle_json](std::string value) {
+        idle_json.push_back(std::move(value));
+      },
+      accept_chunk);
+  const auto idle_start = molink::file_transfer::clock::now();
+  idle.request("payload.bin", idle_start);
+  const auto later = idle_start + molink::file_transfer::kIdleTimeout / 2;
+  for (int index = 0; index < 7; ++index) {
+    idle.request("payload.bin", later);
+  }
+  idle.request("payload.bin", later);
+  expect(idle_json.back().find("too many active downloads") !=
+             std::string::npos,
+         "idle queue is full before the reclaim");
+  idle.retry_pending(idle_start + molink::file_transfer::kIdleTimeout +
+                     std::chrono::milliseconds(1));
+  idle.request("payload.bin",
+               idle_start + molink::file_transfer::kIdleTimeout +
+                   std::chrono::milliseconds(1));
+  expect(idle_json.back().find("too many active downloads") ==
+             std::string::npos,
+         "one idle download times out and frees its slot");
+  idle.request("payload.bin",
+               idle_start + molink::file_transfer::kIdleTimeout +
+                   std::chrono::milliseconds(1));
+  expect(idle_json.back().find("too many active downloads") !=
+             std::string::npos,
+         "exactly one slot was reclaimed, not the whole queue");
+
+  // Abandoned uploads are reclaimed the same way, and their partial file is
+  // removed.
+  std::vector<std::string> upload_json;
+  molink::file_transfer uploads(
+      [&upload_json](std::string value) {
+        upload_json.push_back(std::move(value));
+      },
+      accept_chunk);
+  const auto upload_start = molink::file_transfer::clock::now();
+  for (int index = 0; index < 8; ++index) {
+    uploads.offer("upload.bin", 0, home.string());
+  }
+  uploads.offer("upload.bin", 0, home.string());
+  expect(upload_json.back().find("too many active uploads") !=
+             std::string::npos,
+         "the ninth upload is refused while eight are open");
+  expect(fs::exists(home / ".upload-1.part"),
+         "an open upload owns its partial file");
+  uploads.retry_pending(upload_start + molink::file_transfer::kIdleTimeout +
+                        std::chrono::milliseconds(1));
+  expect(!fs::exists(home / ".upload-1.part"),
+         "an idle upload's partial file is removed on reclaim");
+  uploads.offer("upload.bin", 0, home.string());
+  expect(upload_json.back().find("too many active uploads") ==
+             std::string::npos,
+         "the reclaimed upload slot can be reused");
+
+  fs::remove_all(home, ec);
+}
+
 }  // namespace
 
 int main() {
   test_download_retries_same_offset_after_backpressure();
+  test_download_and_upload_slots_are_reclaimed();
   std::printf("%d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;
 }

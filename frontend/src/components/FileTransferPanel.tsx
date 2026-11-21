@@ -225,7 +225,14 @@ export function FileTransferPanel({
   useEffect(() => {
     connectionRef.current = connection
     return () => {
-      if (downloadRef.current) window.clearTimeout(downloadRef.current.timer)
+      const current = downloadRef.current
+      if (current) {
+        window.clearTimeout(current.timer)
+        // Unmounting or switching sessions abandons the transfer. Tell the
+        // host so its fixed download slot is released now; without this the
+        // slot lingers until the host's idle reclaim.
+        connection?.sendFileAction('cancel', { id: current.id })
+      }
       downloadRef.current = null
       downloadQueue.current = []
       connectionRef.current = null

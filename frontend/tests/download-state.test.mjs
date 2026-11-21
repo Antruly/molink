@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { acceptDownloadChunk, downloadComplete } from '../src/lib/download-state.ts'
+import {
+  acceptDownloadChunk,
+  cancelDownload,
+  downloadComplete,
+} from '../src/lib/download-state.ts'
 
 test('an early EOF waits for the final file bytes', () => {
   const progress = { size: 8, received: 4, eofSeen: true }
@@ -25,4 +29,14 @@ test('duplicates, gaps and oversized chunks do not advance the offset', () => {
     assert.equal(progress.received, 4)
     assert.equal(downloadComplete(progress), false)
   }
+})
+
+test('cancelling a download rejects chunks still in flight', () => {
+  const progress = { size: 8, received: 4, eofSeen: false }
+  cancelDownload(progress)
+  assert.equal(acceptDownloadChunk(progress, 4, 4), false)
+  assert.equal(progress.received, 4)
+  assert.equal(downloadComplete(progress), false)
+  progress.eofSeen = true
+  assert.equal(downloadComplete(progress), false)
 })

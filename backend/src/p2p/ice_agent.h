@@ -13,6 +13,8 @@
 #include <handle/uvcpp_udp.h>
 #include <juice/juice.h>
 
+#include "p2p/ice_grace.h"
+
 namespace molink {
 
 /// One ICE agent with an application-owned UDP socket.
@@ -85,6 +87,9 @@ class ice_agent {
   uint16_t bind_port_ = 0;
   bool started_ = false;
   bool closed_ = false;
+  /// DISCONNECTED is recoverable; only a grace-period expiry closes the
+  /// session. FAILED still closes immediately.
+  ice_disconnect_grace grace_;
 
   candidate_handler candidate_;
   gathering_handler gathering_;

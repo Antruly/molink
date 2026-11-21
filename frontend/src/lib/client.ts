@@ -13,6 +13,10 @@ import {
   type Frame,
 } from './protocol'
 import { formatHost } from './net'
+import {
+  assessP2pVideo,
+  kBackpressureGapFreshMs,
+} from './p2p-video-health'
 import { logDiag } from './diag-log'
 import { H264StreamDecoder, h264StreamSupported } from './h264-stream'
 import {
@@ -282,6 +286,8 @@ interface ControlMessage {
   format?: string
   /// Wire protocol in a `transport` message (websocket | quic | udp | tcp).
   protocol?: string
+  /// Why a `stream-gap` notice was sent (currently "backpressure").
+  reason?: string
   index?: number
   action?: string
   ok?: boolean
@@ -541,6 +547,10 @@ export class MolinkClient {
   /// Deltas arriving during that wait mean the media path is alive while the
   /// keyframe path is not (see kStreamKeyframeWaitMs).
   private streamKeyframeWaitStarted = 0
+  /// Last host `stream-gap` notice (its send queue dropped a frame). A missing
+  /// reference explained by local backpressure must not be blamed on the P2P
+  /// path; see assessP2pVideo.
+  private lastBackpressureGapAt = 0
   /// Rate limit for the stream-rejection diagnostic.
   private lastStreamRejectLog = 0
   /// The host's codec preference ("auto", a codec name, or "tiles").
@@ -760,6 +770,7 @@ export class MolinkClient {
     this.lastStreamSeq = -1
     this.lastStreamTsUs = 0
     this.streamKeyframeWaitStarted = 0
+    this.lastBackpressureGapAt = 0
 
     // Two devices on the same LAN should not pay the ICE signaling round
     // trips: the directory only hands out a private address to requesters
@@ -1719,6 +1730,16 @@ export class MolinkClient {
           this.handlers.onCodecPreference?.(message.value)
         }
         break
+      case 'stream-gap':
+        if (message.reason === 'backpressure') {
+          // The host dropped a frame from its own send queue. This is a local
+          // backlog, not a broken P2P path: remember it so a missing reference
+          // cannot arm the relay fallback, and clear any wait armed before the
+          // notice arrived.
+          this.lastBackpressureGapAt = performance.now()
+          this.streamKeyframeWaitStarted = 0
+        }
+        break
       case 'transport':
         if (typeof message.mode === 'string') {
           const path = typeof message.path === 'string' ? message.path : message.mode
@@ -2646,7 +2667,15 @@ export class MolinkClient {
   }
 
   /// Start a monotonic deadline; the timer checks it even if no more frames arrive.
+  /// A recent host backpressure notice explains the gap locally, so it must not
+  /// start the P2P fallback countdown.
   private noteMissingStreamKeyframe(): void {
+    if (
+      this.lastBackpressureGapAt !== 0 &&
+      performance.now() - this.lastBackpressureGapAt <= kBackpressureGapFreshMs
+    ) {
+      return
+    }
     if (this.streamKeyframeWaitStarted === 0) {
       this.streamKeyframeWaitStarted = performance.now()
     }
@@ -2671,19 +2700,29 @@ export class MolinkClient {
     if (this.transportPath !== 'p2p' || !this.foreground ||
         document.visibilityState !== 'visible' || this.wt?.isOpen) return false
     const now = performance.now()
-    if (this.streamKeyframeWaitStarted !== 0 &&
-        now - this.streamKeyframeWaitStarted >= kStreamKeyframeWaitMs) {
-      return this.retryP2pOnRelay('keyframes stopped on p2p')
+    const assessment = assessP2pVideo({
+      now,
+      transportPath: this.transportPath,
+      streamKeyframeWaitStarted: this.streamKeyframeWaitStarted,
+      lastBackpressureGapAt: this.lastBackpressureGapAt,
+      lastFrameResponseAt: this.lastFrameResponseAt,
+      videoProbeAt: this.videoProbeAt,
+      keyframeWaitMs: kStreamKeyframeWaitMs,
+      probeIntervalMs: kPingIntervalMs,
+    })
+    if (assessment.action === 'fallback') {
+      return this.retryP2pOnRelay(
+        assessment.reason === 'keyframes'
+          ? 'keyframes stopped on p2p'
+          : 'video probes stopped on p2p',
+      )
     }
-    if (now - this.lastFrameResponseAt < kStreamKeyframeWaitMs) return false
-    if (this.videoProbeAt === 0) {
+    if (assessment.action === 'probe') {
       this.videoProbeAt = now
       if (!this.hasImage) this.requestKeyframeThrottled()
       this.sendRelayText({ type: 'request-frame' })
-      return false
     }
-    return now - this.videoProbeAt >= kPingIntervalMs &&
-      this.retryP2pOnRelay('video probes stopped on p2p')
+    return false
   }
 
   private clearStreamGapWait(): void {

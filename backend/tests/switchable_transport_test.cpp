@@ -12,6 +12,7 @@
 #include <utility>
 #include <vector>
 
+#include "p2p/ice_grace.h"
 #include "protocol/frame_packet.h"
 #include "transport/switchable_transport.h"
 #include "transport/relay_write_budget.h"
@@ -274,6 +275,57 @@ void test_relay_split() {
          "explicit control channel uses active transport");
 }
 
+void test_ice_disconnect_grace_debounces_recovery() {
+  using molink::ice_disconnect_grace;
+  ice_disconnect_grace grace;
+  int closes = 0;
+  const auto observe = [&grace, &closes](bool failed, bool disconnected,
+                                         uint64_t now) {
+    if (grace.observe(failed, disconnected, now) ==
+        ice_disconnect_grace::result::close_now) {
+      ++closes;
+    }
+  };
+
+  // A one-second blip that recovers to CONNECTED/COMPLETED must not end the
+  // session: libjuice reports DISCONNECTED for a consent failure or a roam.
+  observe(false, true, 1000);
+  expect(grace.waiting(), "DISCONNECTED starts the grace period");
+  observe(false, true, 2000);
+  observe(false, false, 2100);
+  expect(closes == 0 && !grace.waiting(),
+         "a recovered DISCONNECTED never notifies a close");
+
+  // A second blip starts a fresh window rather than inheriting the first.
+  observe(false, true, 10000);
+  observe(false, true, 14999);
+  expect(closes == 0, "the grace period runs for the full five seconds");
+  observe(false, true, 15000);
+  expect(closes == 1, "a persistent DISCONNECTED closes after the grace period");
+
+  // The callback is one-shot: later ticks and a FAILED cannot close again.
+  observe(false, true, 20000);
+  observe(true, false, 20001);
+  expect(closes == 1, "the close notification fires at most once");
+
+  // FAILED is terminal immediately, without waiting for the grace period.
+  ice_disconnect_grace failed_grace;
+  int failed_closes = 0;
+  const auto observe_failed = [&failed_grace, &failed_closes](
+                                  bool failed, bool disconnected,
+                                  uint64_t now) {
+    if (failed_grace.observe(failed, disconnected, now) ==
+        ice_disconnect_grace::result::close_now) {
+      ++failed_closes;
+    }
+  };
+  observe_failed(true, false, 100);
+  expect(failed_closes == 1, "FAILED closes immediately");
+  observe_failed(true, false, 101);
+  observe_failed(false, true, 102);
+  expect(failed_closes == 1, "FAILED closes exactly once");
+}
+
 void test_relay_loss_does_not_send_files_on_ice() {
   auto relay = std::make_shared<fake_transport>("relay");
   auto ice = std::make_shared<fake_transport>("ice");
@@ -347,6 +399,7 @@ void test_relay_write_budget_reserves_control_space() {
 
 int main() {
   test_relay_split();
+  test_ice_disconnect_grace_debounces_recovery();
   test_relay_loss_does_not_send_files_on_ice();
   test_asymmetric_peer_switch_preserves_control_once();
   test_relay_write_budget_reserves_control_space();

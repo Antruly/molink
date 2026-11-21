@@ -43,12 +43,21 @@ class file_transfer {
 
   /// Empty `path` means the home directory. Paths outside home are rejected.
   void browse(const std::string& path);
-  void request(const std::string& path);
+  void request(const std::string& path,
+               clock::time_point now = clock::now());
   static constexpr int kRetryIntervalMs = 100;
   static constexpr auto kRetryTimeout = std::chrono::seconds(20);
+  /// An abandoned download or upload holds one of the eight slots and a file
+  /// descriptor. Reclaim it when no pull (download) or chunk (upload) has
+  /// moved for this long; the viewer that left never sends `cancel`.
+  static constexpr auto kIdleTimeout = std::chrono::seconds(120);
   void pull(uint32_t id, clock::time_point now = clock::now());
   void retry_pending(clock::time_point now = clock::now());
   bool has_pending() const;
+  /// True while any download or upload is open, including one that is merely
+  /// waiting for the viewer's next pull. Keeps the retry timer alive so the
+  /// idle reclaim above cannot be starved.
+  bool has_transfers() const;
   void fail_pending();
 
   /// Drop partial uploads when the session closes.
@@ -69,6 +78,7 @@ class file_transfer {
     uint64_t received = 0;
     std::ofstream out;
     std::optional<clock::time_point> complete_deadline;
+    clock::time_point last_activity = clock::now();
   };
 
   struct download {
@@ -80,6 +90,7 @@ class file_transfer {
     std::ifstream in;
     std::vector<uint8_t> pending_chunk;
     std::optional<clock::time_point> retry_deadline;
+    clock::time_point last_activity = clock::now();
   };
 
   // Returns true when the pull is complete or failed and the item is done.

@@ -278,6 +278,7 @@ void file_transfer::offer(const std::string& name, uint64_t size,
     fail("reject", 0, "could not create the file");
     return;
   }
+  item.last_activity = clock::now();
   uploads_.emplace(id, std::move(item));
   uvcpp_json j;
   j["type"] = "file";
@@ -307,6 +308,7 @@ void file_transfer::chunk(uint32_t id, uint64_t offset, const uint8_t* data,
     return;
   }
   item.received += len;
+  item.last_activity = clock::now();
   if (item.complete_deadline && item.received == item.size) complete(id);
 }
 
@@ -412,7 +414,8 @@ void file_transfer::browse(const std::string& path) {
   send_json_(dump_json(j));
 }
 
-void file_transfer::request(const std::string& path) {
+void file_transfer::request(const std::string& path,
+                            clock::time_point now) {
   // Bound both open files and the work done by a retry tick.
   if (downloads_.size() >= 8) {
     fail("sending", 0, "too many active downloads");
@@ -442,6 +445,7 @@ void file_transfer::request(const std::string& path) {
   item.name = resolved->filename().string();
   item.path = resolved->string();
   item.size = size;
+  item.last_activity = now;
   item.in.open(item.path, std::ios::binary);
   if (!item.in) {
     fail("sending", 0, "could not open the file");
@@ -465,6 +469,8 @@ void file_transfer::pull(uint32_t id, clock::time_point now) {
     fail("eof", id, "unknown transfer");
     return;
   }
+  // Every pull is proof that the viewer is still consuming this download.
+  it->second.last_activity = now;
   // The wire request has no offset, so retain only one outstanding pull.
   if (!it->second.retry_deadline && send_next(it->second, now)) {
     downloads_.erase(it);
@@ -524,6 +530,26 @@ void file_transfer::retry_pending(clock::time_point now) {
       ++it;
     }
   }
+  // Reclaim transfers the viewer abandoned without a `cancel` (the file panel
+  // was closed or the tab went away). Without this the eight fixed slots fill
+  // up and every later download is refused. An idle upload's partial file is
+  // removed with the entry; a download only owns a read handle.
+  for (auto it = uploads_.begin(); it != uploads_.end();) {
+    if (now - it->second.last_activity >= kIdleTimeout) {
+      const uint32_t id = it->first;
+      ++it;
+      drop_upload(id, true);
+    } else {
+      ++it;
+    }
+  }
+  for (auto it = downloads_.begin(); it != downloads_.end();) {
+    if (now - it->second.last_activity >= kIdleTimeout) {
+      it = downloads_.erase(it);
+    } else {
+      ++it;
+    }
+  }
 }
 
 bool file_transfer::has_pending() const {
@@ -532,6 +558,10 @@ bool file_transfer::has_pending() const {
   }) || std::any_of(uploads_.begin(), uploads_.end(), [](const auto& entry) {
     return entry.second.complete_deadline.has_value();
   });
+}
+
+bool file_transfer::has_transfers() const {
+  return !downloads_.empty() || !uploads_.empty();
 }
 
 void file_transfer::fail_pending() {

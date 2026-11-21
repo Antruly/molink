@@ -141,6 +141,17 @@ void send_error(session_transport* transport, const char* code,
   send_json(transport, j);
 }
 
+/// Tells the viewer that a frame was dropped by the host's local send queue.
+/// This is deliberately not an `error`: the path is healthy and the host is
+/// already rebuilding the reference chain, so the client must not report a
+/// session error or fall back from P2P on it.
+void send_stream_gap(session_transport* transport) {
+  uvcpp_json j;
+  j["type"] = "stream-gap";
+  j["reason"] = "backpressure";
+  send_json(transport, j);
+}
+
 void send_pong(session_transport* transport, const uvcpp_json& request) {
   uvcpp_json j;
   j["type"] = "pong";
@@ -231,7 +242,8 @@ input_injector::status inject_one(input_injector& input, const uvcpp_json& event
 bool send_frame_payload(session_transport* transport,
                         const std::shared_ptr<session_info>& session,
                         uint16_t flags, uint64_t ts_us,
-                        const std::vector<uint8_t>& payload) {
+                        const std::vector<uint8_t>& payload,
+                        const session_options* opt = nullptr) {
   std::vector<uint8_t> bytes;
   std::string err;
   const uint32_t seq = session->out_seq++;
@@ -241,11 +253,25 @@ bool send_frame_payload(session_transport* transport,
     send_error(transport, "frame_build_failed", err);
     return false;
   }
-  if (!transport->send_binary(transport_channel::video, bytes.data(),
-                              bytes.size())) {
-    send_error(transport, "send_failed", "could not queue frame");
-    return false;
-  }
+  const bool accepted = transport->send_binary(transport_channel::video,
+                                               bytes.data(), bytes.size());
+  const uint64_t now = now_ms();
+  const video_send_status status = handle_video_send_result(
+      accepted, transport->is_open(), now, session->video_drop,
+      // A dropped frame leaves the viewer without a reference it needs. Ask
+      // the capture for a new baseline, but not on every frame of a burst.
+      [&session, opt, now] {
+        if (!opt || !opt->capture) return;
+        // Keep the capture-side throttle in sync so the caller's own recovery
+        // path does not ask for the same keyframe again in this tick.
+        session->last_keyframe_request_ms = now;
+        opt->capture->request_keyframe();
+      },
+      [transport, opt] {
+        if (opt) send_stream_gap(transport);
+      },
+      [transport] { send_error(transport, "send_failed", "could not queue frame"); });
+  if (status != video_send_status::sent) return false;
   ++session->frames_sent;
   return true;
 }
@@ -325,7 +351,8 @@ bool send_realtime_file(const std::weak_ptr<session_info>& weak_session,
 
 bool send_frame_with_av1(session_transport* transport,
                          const std::shared_ptr<session_info>& session,
-                         const captured_frame& frame) {
+                         const captured_frame& frame,
+                         const session_options* opt = nullptr) {
   if (frame.av1_only) {
     if (!can_decode_stream(session, frame.av1_payload)) return false;
 #if MOLINK_HAVE_WEBRTC
@@ -352,16 +379,16 @@ bool send_frame_with_av1(session_transport* transport,
     return send_frame_payload(
         transport, session,
         frame.keyframe ? protocol::kPacketFlagKeyframe : 0, frame.ts_us,
-        frame.av1_payload);
+        frame.av1_payload, opt);
   }
   if (!send_frame_payload(transport, session,
                           frame.keyframe ? protocol::kPacketFlagKeyframe : 0,
-                          frame.ts_us, frame.payload)) {
+                          frame.ts_us, frame.payload, opt)) {
     return false;
   }
   if (session->av1 && !frame.av1_payload.empty()) {
     send_frame_payload(transport, session, protocol::kPacketFlagTileRefresh,
-                       frame.ts_us, frame.av1_payload);
+                       frame.ts_us, frame.av1_payload, opt);
   }
   return true;
 }
@@ -489,7 +516,7 @@ bool send_tile_refresh(session_transport* transport,
   }
   if (!send_frame_payload(transport, session,
                           protocol::kPacketFlagTileRefresh, epoch_us(),
-                          payload)) {
+                          payload, &opt)) {
     return false;
   }
   // The full-screen refresh above was flagged as a keyframe, so it counts as
@@ -850,7 +877,7 @@ void send_capture_frame(session_transport* transport,
         tile_count = 0;
       }
     }
-    if (!send_frame_with_av1(transport, session, *frame)) {
+    if (!send_frame_with_av1(transport, session, *frame, &opt)) {
       // The transport refused the frame: its channel is full, or the session
       // is gone. Advancing anyway would tell the next tick that the viewer is
       // up to date when it is now one delta behind, and every later frame
@@ -1177,7 +1204,10 @@ session_controller::session_controller(
 session_controller::~session_controller() = default;
 
 void session_controller::update_file_retry_timer() {
-  if (!files_->has_pending()) {
+  // `has_transfers` keeps the tick alive for a transfer that is simply waiting
+  // for the viewer's next pull; otherwise an abandoned download would never
+  // reach the idle reclaim in retry_pending().
+  if (!files_->has_pending() && !files_->has_transfers()) {
     if (file_retry_timer_) file_retry_timer_->stop();
     return;
   }
@@ -1193,7 +1223,10 @@ void session_controller::update_file_retry_timer() {
           [weak](uvcpp::uvcpp_timer* timer) {
             if (auto self = weak.lock()) {
               self->files_->retry_pending();
-              if (!self->files_->has_pending()) timer->stop();
+              if (!self->files_->has_pending() &&
+                  !self->files_->has_transfers()) {
+                timer->stop();
+              }
             }
           }, interval, interval) != 0) {
     files_->fail_pending();
@@ -2541,6 +2574,7 @@ void session_controller::on_text(const std::string& text) {
       }
       files_->offer(string_field(j, "name"), size,
                     string_field(j, "dest"));
+      update_file_retry_timer();
     } else if (action == "complete") {
       files_->complete(id);
       update_file_retry_timer();
@@ -2551,6 +2585,7 @@ void session_controller::on_text(const std::string& text) {
       files_->browse(string_field(j, "path"));
     } else if (action == "request") {
       files_->request(string_field(j, "path"));
+      update_file_retry_timer();
     } else if (action == "pull") {
       files_->pull(id);
       update_file_retry_timer();
