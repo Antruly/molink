@@ -265,6 +265,78 @@ void test_single_video_frame_larger_than_budget() {
          "small frames queue again after the oversized frame drains");
 }
 
+void test_video_pressure_preserves_accepted_reference_chain() {
+  molink::channel_scheduler::limits limits;
+  limits.video_bytes = 12;
+  molink::channel_scheduler scheduler(limits);
+  const auto key = bytes(4, 1);
+  const auto first = bytes(4, 2);
+  const auto second = bytes(4, 3);
+  const auto rejected = bytes(4, 4);
+  scheduler.enqueue(molink::transport_channel::video, key.data(), key.size(), true);
+  scheduler.enqueue(molink::transport_channel::video, first.data(), first.size());
+  scheduler.enqueue(molink::transport_channel::video, second.data(), second.size());
+  expect(!scheduler.enqueue(molink::transport_channel::video,
+                            rejected.data(), rejected.size()),
+         "video pressure is reported to the sender instead of evicting a dependency");
+  std::vector<uint8_t> sequence;
+  scheduler.drain([&](const molink::channel_scheduler::message& message) {
+    sequence.push_back(message.data.front());
+    return true;
+  });
+  expect(sequence == std::vector<uint8_t>({1, 2, 3}),
+         "every accepted reference frame is preserved in order");
+}
+
+void test_video_backpressure_is_silent_and_throttled() {
+  molink::channel_scheduler::limits limits;
+  limits.video_bytes = 8;
+  molink::channel_scheduler scheduler(limits);
+  const auto keyframe = bytes(8, 0x11);
+  const auto delta = bytes(4, 0x22);
+  expect(scheduler.enqueue(molink::transport_channel::video, keyframe.data(),
+                           keyframe.size(), true),
+         "a keyframe fills the bounded video queue");
+
+  int errors = 0;
+  int keyframe_requests = 0;
+  int gap_notices = 0;
+  molink::video_drop_throttle throttle;
+  const auto attempt = [&](uint64_t now) {
+    const bool accepted = scheduler.enqueue(molink::transport_channel::video,
+                                            delta.data(), delta.size());
+    return molink::handle_video_send_result(
+        accepted, /*transport_open=*/true, now, throttle,
+        [&] { ++keyframe_requests; }, [&] { ++gap_notices; },
+        [&] { ++errors; });
+  };
+
+  expect(attempt(1000) == molink::video_send_status::dropped,
+         "a full queue reports local backpressure");
+  expect(errors == 0, "backpressure does not produce an error payload");
+  expect(keyframe_requests == 1 && gap_notices == 1,
+         "the first drop asks for one keyframe and one stream-gap notice");
+
+  expect(attempt(1200) == molink::video_send_status::dropped &&
+             attempt(1499) == molink::video_send_status::dropped,
+         "more drops inside the interval stay silent");
+  expect(errors == 0 && keyframe_requests == 1 && gap_notices == 1,
+         "500 ms throttling collapses a burst into one request");
+
+  expect(attempt(1500) == molink::video_send_status::dropped &&
+             keyframe_requests == 2 && gap_notices == 2,
+         "the recovery action is due again at 500 ms");
+
+  // A transport that is no longer open is a real send failure and keeps the
+  // error path, unlike local queue backpressure.
+  expect(molink::handle_video_send_result(
+             false, /*transport_open=*/false, 2000, throttle,
+             [&] { ++keyframe_requests; }, [&] { ++gap_notices; },
+             [&] { ++errors; }) == molink::video_send_status::failed &&
+             errors == 1 && keyframe_requests == 2 && gap_notices == 2,
+         "a closed transport still reports the send failure");
+}
+
 void test_control_holds_a_large_clipboard_message() {
   // The default control budget has to clear the 192 KiB clipboard-sync cap
   // plus JSON framing, and a second one on top must apply backpressure rather
@@ -292,6 +364,8 @@ int main() {
   test_sustained_file_backpressure_preserves_backlog_and_control();
   test_drain_isolates_channel_backpressure();
   test_single_video_frame_larger_than_budget();
+  test_video_pressure_preserves_accepted_reference_chain();
+  test_video_backpressure_is_silent_and_throttled();
   test_control_holds_a_large_clipboard_message();
   std::printf("%d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;

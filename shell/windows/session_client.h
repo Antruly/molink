@@ -200,6 +200,7 @@ class session_client {
     int state = 0;
     bool eof_seen = false;
     uint64_t eof_at = 0;
+    uint64_t last_progress_at = 0;
     std::ofstream out;
   };
   void handle_text(const std::string& text);

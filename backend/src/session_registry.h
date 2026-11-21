@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "transport/channel_scheduler.h"
 #include "transport/session_transport.h"
 
 namespace molink {
@@ -76,6 +77,9 @@ struct session_info {
   /// enough to recover and stops it from turning each tick into a full-screen
   /// encode that also advances every cell of the tile clock.
   uint64_t last_keyframe_request_ms = 0;
+  /// Rate limit for the recovery actions taken when the video queue drops a
+  /// frame (one keyframe request and one `stream-gap` notice per interval).
+  video_drop_throttle video_drop;
   /// Cursor state last sent to this session. 0xffffffff forces a shape send.
   uint32_t cursor_serial = 0xffffffffu;
   int cursor_x = INT32_MIN;

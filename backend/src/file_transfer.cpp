@@ -234,6 +234,10 @@ void file_transfer::send_simple(const std::string& action, uint32_t id) {
 
 void file_transfer::offer(const std::string& name, uint64_t size,
                           const std::string& destination) {
+  if (uploads_.size() >= 8) {
+    fail("reject", 0, "too many active uploads");
+    return;
+  }
   if (size > kMaxFileBytes) {
     fail("reject", 0, "file is larger than 8 GiB");
     return;
@@ -274,6 +278,7 @@ void file_transfer::offer(const std::string& name, uint64_t size,
     fail("reject", 0, "could not create the file");
     return;
   }
+  item.last_activity = clock::now();
   uploads_.emplace(id, std::move(item));
   uvcpp_json j;
   j["type"] = "file";
@@ -303,9 +308,11 @@ void file_transfer::chunk(uint32_t id, uint64_t offset, const uint8_t* data,
     return;
   }
   item.received += len;
+  item.last_activity = clock::now();
+  if (item.complete_deadline && item.received == item.size) complete(id);
 }
 
-void file_transfer::complete(uint32_t id) {
+void file_transfer::complete(uint32_t id, clock::time_point now) {
   auto it = uploads_.find(id);
   if (it == uploads_.end()) {
     fail("done", id, "unknown transfer");
@@ -313,11 +320,15 @@ void file_transfer::complete(uint32_t id) {
   }
   upload& item = it->second;
   if (item.received != item.size) {
-    fail("done", id, "file ended early");
-    drop_upload(id, true);
+    if (!item.complete_deadline) item.complete_deadline = now + kRetryTimeout;
     return;
   }
   item.out.close();
+  if (!item.out) {
+    fail("done", id, "could not write the file");
+    drop_upload(id, true);
+    return;
+  }
   const std::string final_path =
       unique_path_in(fs::path(item.final_dir), item.name);
   std::error_code ec;
@@ -403,7 +414,13 @@ void file_transfer::browse(const std::string& path) {
   send_json_(dump_json(j));
 }
 
-void file_transfer::request(const std::string& path) {
+void file_transfer::request(const std::string& path,
+                            clock::time_point now) {
+  // Bound both open files and the work done by a retry tick.
+  if (downloads_.size() >= 8) {
+    fail("sending", 0, "too many active downloads");
+    return;
+  }
   const std::optional<fs::path> resolved = resolve_path(path);
   if (!resolved) {
     fail("sending", 0, "path is outside the home folder");
@@ -428,6 +445,7 @@ void file_transfer::request(const std::string& path) {
   item.name = resolved->filename().string();
   item.path = resolved->string();
   item.size = size;
+  item.last_activity = now;
   item.in.open(item.path, std::ios::binary);
   if (!item.in) {
     fail("sending", 0, "could not open the file");
@@ -445,41 +463,123 @@ void file_transfer::request(const std::string& path) {
   send_json_(dump_json(j));
 }
 
-void file_transfer::pull(uint32_t id) {
+void file_transfer::pull(uint32_t id, clock::time_point now) {
   auto it = downloads_.find(id);
   if (it == downloads_.end()) {
     fail("eof", id, "unknown transfer");
     return;
   }
-  download& item = it->second;
+  // Every pull is proof that the viewer is still consuming this download.
+  it->second.last_activity = now;
+  // The wire request has no offset, so retain only one outstanding pull.
+  if (!it->second.retry_deadline && send_next(it->second, now)) {
+    downloads_.erase(it);
+  }
+}
+
+bool file_transfer::send_next(download& item, clock::time_point now) {
+  if (item.retry_deadline && now >= *item.retry_deadline) {
+    fail("eof", item.id, "file send queue did not become writable");
+    return true;
+  }
   if (item.sent >= item.size) {
-    send_simple("eof", id);
-    downloads_.erase(it);
-    return;
+    send_simple("eof", item.id);
+    return true;
   }
-  const std::size_t want = static_cast<std::size_t>(
-      std::min<uint64_t>(kChunkBytes, item.size - item.sent));
-  std::vector<uint8_t> buffer(want);
-  item.in.read(reinterpret_cast<char*>(buffer.data()),
-               static_cast<std::streamsize>(want));
-  const std::streamsize got = item.in.gcount();
-  if (got <= 0) {
-    fail("eof", id, "could not read the file");
-    downloads_.erase(it);
-    return;
+  if (item.pending_chunk.empty()) {
+    const std::size_t want = static_cast<std::size_t>(
+        std::min<uint64_t>(kChunkBytes, item.size - item.sent));
+    item.pending_chunk.resize(want);
+    item.in.read(reinterpret_cast<char*>(item.pending_chunk.data()),
+                 static_cast<std::streamsize>(want));
+    if (item.in.gcount() != static_cast<std::streamsize>(want)) {
+      fail("eof", item.id, "could not read the file");
+      return true;
+    }
   }
-  if (!send_chunk_(id, item.sent, buffer.data(),
-                   static_cast<std::size_t>(got))) {
-    // Keep the offset unchanged so the client can retry after transport
-    // backpressure clears. The file stream has consumed the bytes, so rewind.
-    item.in.clear();
-    item.in.seekg(static_cast<std::streamoff>(item.sent), std::ios::beg);
-    return;
+  if (!send_chunk_(item.id, item.sent, item.pending_chunk.data(),
+                   item.pending_chunk.size())) {
+    // Keep the exact bytes for this pull; do not read again or advance.
+    if (!item.retry_deadline) item.retry_deadline = now + kRetryTimeout;
+    return false;
   }
-  item.sent += static_cast<uint64_t>(got);
-  if (item.sent >= item.size) {
-    send_simple("eof", id);
-    downloads_.erase(it);
+  item.retry_deadline.reset();
+  item.sent += item.pending_chunk.size();
+  item.pending_chunk.clear();
+  if (item.sent == item.size) {
+    send_simple("eof", item.id);
+    return true;
+  }
+  return false;
+}
+
+void file_transfer::retry_pending(clock::time_point now) {
+  for (auto it = uploads_.begin(); it != uploads_.end();) {
+    auto current = it++;
+    if (current->second.complete_deadline &&
+        now >= *current->second.complete_deadline) {
+      const auto id = current->first;
+      fail("done", id, "file ended early");
+      drop_upload(id, true);
+    }
+  }
+  for (auto it = downloads_.begin(); it != downloads_.end();) {
+    if (it->second.retry_deadline && send_next(it->second, now)) {
+      it = downloads_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  // Reclaim transfers the viewer abandoned without a `cancel` (the file panel
+  // was closed or the tab went away). Without this the eight fixed slots fill
+  // up and every later download is refused. An idle upload's partial file is
+  // removed with the entry; a download only owns a read handle.
+  for (auto it = uploads_.begin(); it != uploads_.end();) {
+    if (now - it->second.last_activity >= kIdleTimeout) {
+      const uint32_t id = it->first;
+      ++it;
+      drop_upload(id, true);
+    } else {
+      ++it;
+    }
+  }
+  for (auto it = downloads_.begin(); it != downloads_.end();) {
+    if (now - it->second.last_activity >= kIdleTimeout) {
+      it = downloads_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
+
+bool file_transfer::has_pending() const {
+  return std::any_of(downloads_.begin(), downloads_.end(), [](const auto& entry) {
+    return entry.second.retry_deadline.has_value();
+  }) || std::any_of(uploads_.begin(), uploads_.end(), [](const auto& entry) {
+    return entry.second.complete_deadline.has_value();
+  });
+}
+
+bool file_transfer::has_transfers() const {
+  return !downloads_.empty() || !uploads_.empty();
+}
+
+void file_transfer::fail_pending() {
+  for (auto it = uploads_.begin(); it != uploads_.end();) {
+    auto current = it++;
+    if (current->second.complete_deadline) {
+      const auto id = current->first;
+      fail("done", id, "could not schedule file receive timeout");
+      drop_upload(id, true);
+    }
+  }
+  for (auto it = downloads_.begin(); it != downloads_.end();) {
+    if (it->second.retry_deadline) {
+      fail("eof", it->first, "could not schedule file send retry");
+      it = downloads_.erase(it);
+    } else {
+      ++it;
+    }
   }
 }
 

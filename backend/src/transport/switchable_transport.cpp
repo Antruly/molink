@@ -44,13 +44,6 @@ bool is_tile_refresh(const uint8_t* data, std::size_t len) {
          (data[6] & static_cast<uint8_t>(protocol::kPacketFlagTileRefresh)) != 0;
 }
 
-/// Repair requests must reach the host. They follow the same rule as the
-/// repairs they ask for: relay before the switch, ICE afterwards.
-bool is_compensation_text(const std::string& text) {
-  return text.find("\"type\":\"request-tiles\"") != std::string::npos ||
-         text.find("\"type\":\"request-keyframe\"") != std::string::npos;
-}
-
 /// The tile clock is the host's side of the same repair loop. It is one small
 /// packet per second and follows the video path, together with the repairs it
 /// schedules.
@@ -95,9 +88,7 @@ bool is_video_repair(const uint8_t* data, std::size_t len) {
 
 switchable_transport::switchable_transport(
     std::shared_ptr<session_transport> initial)
-    : active_(std::move(initial)), relay_(active_) {
-  wire(relay_);
-}
+    : active_(std::move(initial)), relay_(active_) {}
 
 const char* switchable_transport::name() const {
   return active_ ? active_->name() : "websocket";
@@ -134,26 +125,19 @@ bool switchable_transport::ice_active() const {
 }
 
 bool switchable_transport::send_text(const std::string& text) {
-  // Repair requests are part of the video path. Once ICE is up they must not
-  // be left to a relay that may already be half-open: the host would never
-  // learn that the viewer needs a keyframe.
-  if (is_compensation_text(text) && !ice_active() && relay_ &&
-      relay_->is_open()) {
-    return relay_->send_text(text);
-  }
-  return active_ && active_->send_text(text);
+  return !closed_ && active_ && active_->send_text(text);
 }
 
 bool switchable_transport::send_text(transport_channel channel,
                                      const std::string& text) {
-  if (channel == transport_channel::control && is_compensation_text(text) &&
-      !ice_active() && relay_ && relay_->is_open()) {
-    return relay_->send_text(channel, text);
-  }
-  return active_ && active_->send_text(channel, text);
+  return !closed_ && active_ && active_->send_text(channel, text);
 }
 
 bool switchable_transport::send_binary(const uint8_t* data, std::size_t len) {
+  if (closed_) return false;
+  if (is_file_data(data, len)) {
+    return relay_ && relay_->is_open() && relay_->send_binary(data, len);
+  }
   if (is_video_repair(data, len) && ice_active()) {
     return active_ && active_->send_binary(data, len);
   }
@@ -166,8 +150,10 @@ bool switchable_transport::send_binary(const uint8_t* data, std::size_t len) {
 bool switchable_transport::send_binary(transport_channel channel,
                                        const uint8_t* data,
                                        std::size_t len) {
-  if (channel == transport_channel::file && relay_ && relay_->is_open()) {
-    return relay_->send_binary(channel, data, len);
+  if (closed_) return false;
+  if (channel == transport_channel::file || is_file_data(data, len)) {
+    return relay_ && relay_->is_open() &&
+           relay_->send_binary(transport_channel::file, data, len);
   }
   if (channel == transport_channel::video && is_video_repair(data, len) &&
       ice_active()) {
@@ -202,26 +188,32 @@ void switchable_transport::wire(
     const std::shared_ptr<session_transport>& transport) {
   if (!transport) return;
   auto source = transport.get();
+  auto weak = weak_from_this();
   transport->set_handlers(
-      [this, source](const std::string& text) {
-        if (closed_ || !text_) return;
-        // After the P2P switch the relay carries file data and AV1 patches.
-        // This build sends video repairs with the video on ICE, but still
-        // accept relay-borne keyframes, refreshes and repair requests: the
-        // peer may be an older build, and dropping them would freeze its
-        // picture. Everything else arrives on the active transport.
-        if (active_.get() != source && !is_compensation_text(text)) return;
-        text_(text);
+      [weak, source](const std::string& text) {
+        auto self = weak.lock();
+        if (!self || self->closed_ || !self->text_) return;
+        // A peer can still be sending on relay while its ICE checks finish.
+        // Each message is sent once; accepting both owned paths preserves
+        // queued input, hello and file control without duplicating execution.
+        // JSON parsing remains the session controller's responsibility.
+        if (self->active_.get() != source && self->relay_.get() != source) return;
+        self->text_(text);
       },
-      [this, source](const uint8_t* data, std::size_t len) {
-        if (closed_ || !binary_) return;
-        if (active_.get() != source && !rides_relay(data, len)) return;
-        binary_(data, len);
+      [weak, source](const uint8_t* data, std::size_t len) {
+        auto self = weak.lock();
+        if (!self || self->closed_ || !self->binary_) return;
+        if (self->active_.get() != source && !rides_relay(data, len)) return;
+        self->binary_(data, len);
       },
-      [this, source](int code, const std::string& reason) {
-        if (closed_ || active_.get() != source || !close_) return;
-        closed_ = true;
-        close_(code, reason);
+      [weak, source](int code, const std::string& reason) {
+        auto self = weak.lock();
+        if (!self || self->closed_ || self->active_.get() != source) return;
+        self->closed_ = true;
+        if (self->relay_ && self->relay_.get() != source) {
+          self->relay_->close(code, reason);
+        }
+        if (self->close_) self->close_(code, reason);
       });
 }
 
@@ -236,10 +228,8 @@ void switchable_transport::set_ice(
   wire(ice_);
   switched_ = true;
   active_ = ice_;
-  // Keep the relay connected for file_data (see is_file_data): control,
-  // frames and voice use ICE, files stay on reliable TCP. The relay close
-  // handler ignores events while it is not active, so losing the relay only
-  // drops file transfers back to UDP instead of killing the session.
+  // Keep the relay connected for reliable file data. Losing it rejects new
+  // file blocks without closing the ICE session or sending them unreliably.
   if (switch_handler_) switch_handler_();
 }
 

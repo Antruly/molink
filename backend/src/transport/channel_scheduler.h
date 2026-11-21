@@ -11,12 +11,53 @@
 
 namespace molink {
 
+/// Outcome of offering one video frame to a transport.
+enum class video_send_status {
+  /// The transport accepted the frame.
+  sent,
+  /// The transport is alive but its queue is full. This is local backpressure:
+  /// the frame is dropped silently and the reference chain is rebuilt.
+  dropped,
+  /// The transport is gone or the payload could not be sent at all.
+  failed,
+};
+
+/// Rate-limits the recovery actions taken when the video queue refuses a
+/// frame. A keyframe costs a full-screen encode and the peer notice rides the
+/// control channel, so one burst of dropped frames asks at most once per
+/// interval.
+class video_drop_throttle final {
+ public:
+  static constexpr uint64_t interval_ms = 500;
+
+  /// Returns true when a recovery action is due, and opens the interval.
+  bool due(uint64_t now_ms);
+  void reset();
+
+ private:
+  uint64_t last_ms_ = 0;
+  bool armed_ = false;
+};
+
+/// Applies the video backpressure policy after `accepted` refused a frame.
+///
+/// Backpressure on a live transport is expected and recoverable: no error is
+/// reported to the peer, and the keyframe request plus `stream-gap` notice are
+/// fire-and-forget and throttled. A closed transport is a genuine send failure
+/// and keeps reporting the error.
+video_send_status handle_video_send_result(
+    bool accepted, bool transport_open, uint64_t now_ms,
+    video_drop_throttle& throttle,
+    const std::function<void()>& request_keyframe,
+    const std::function<void()>& notify_gap,
+    const std::function<void()>& report_error);
+
 /// A bounded, single-threaded egress scheduler for session channels.
 ///
 /// The scheduler owns queued bytes and never blocks the caller. Control,
 /// audio, and file messages are rejected when their channel budget is full.
-/// Video is latency-sensitive: stale non-keyframes are discarded to make room
-/// for a newer frame, while queued keyframes are retained.
+/// Video deltas are rejected at their budget so callers can rebuild the
+/// reference chain; a new keyframe supersedes the queued video baseline.
 class channel_scheduler final {
  public:
   struct limits {
@@ -39,8 +80,8 @@ class channel_scheduler final {
   channel_scheduler();
   explicit channel_scheduler(limits configured);
 
-  /// Enqueue a message. Returns false when a reliable channel is over budget
-  /// or when a video keyframe cannot fit without evicting another keyframe.
+  /// Enqueue a message. Returns false at the channel's byte budget. A single
+  /// video frame can exceed that budget when the video queue is empty.
   bool enqueue(transport_channel channel, const uint8_t* data, std::size_t len,
                bool keyframe = false);
   bool enqueue_text(const std::string& text);

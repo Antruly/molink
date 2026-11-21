@@ -646,6 +646,7 @@ int main(int argc, char** argv) {
 
   uvcpp::uvcpp_web_app app;
   session_opts.post = [&app](std::function<void()> fn) { app.post(std::move(fn)); };
+  session_opts.loop = app.loop();
   app.set_host(cfg.host)
       .set_port(cfg.port)
       .set_server_header(std::string(MOLINK_PRODUCT_NAME) + "/" + MOLINK_VERSION)

@@ -11,6 +11,39 @@ bool is_video(transport_channel channel) {
 
 }  // namespace
 
+bool video_drop_throttle::due(uint64_t now_ms) {
+  if (armed_ && now_ms - last_ms_ < interval_ms) return false;
+  armed_ = true;
+  last_ms_ = now_ms;
+  return true;
+}
+
+void video_drop_throttle::reset() {
+  last_ms_ = 0;
+  armed_ = false;
+}
+
+video_send_status handle_video_send_result(
+    bool accepted, bool transport_open, uint64_t now_ms,
+    video_drop_throttle& throttle,
+    const std::function<void()>& request_keyframe,
+    const std::function<void()>& notify_gap,
+    const std::function<void()>& report_error) {
+  if (accepted) return video_send_status::sent;
+  if (!transport_open) {
+    if (report_error) report_error();
+    return video_send_status::failed;
+  }
+  // The link is alive, so the frame was refused by its local queue. Stay
+  // silent towards the peer's error banner; ask for a fresh baseline and tell
+  // it why, but only once per interval.
+  if (throttle.due(now_ms)) {
+    if (request_keyframe) request_keyframe();
+    if (notify_gap) notify_gap();
+  }
+  return video_send_status::dropped;
+}
+
 channel_scheduler::channel_scheduler() : channel_scheduler(limits()) {}
 
 channel_scheduler::channel_scheduler(limits configured) {
@@ -64,23 +97,12 @@ bool channel_scheduler::evict_video_for(std::size_t required,
   // deltas, which could not be decoded before it anyway.
   if (video_.messages.empty()) return true;
 
-  while (true) {
-    // A held oversized frame leaves no room at all, and the subtraction must
-    // not wrap.
-    const std::size_t available =
-        video_.bytes >= video_.limit ? 0 : video_.limit - video_.bytes;
-    if (required <= available) return true;
-    auto candidate = video_.messages.end();
-    for (auto it = video_.messages.begin(); it != video_.messages.end(); ++it) {
-      if (!it->keyframe) {
-        candidate = it;
-        break;
-      }
-    }
-    if (candidate == video_.messages.end()) return false;
-    video_.bytes -= candidate->data.size();
-    video_.messages.erase(candidate);
-  }
+  // Refuse the incoming delta instead of silently deleting an accepted one.
+  // Both stream and tile deltas may depend on every preceding frame. A false
+  // result reaches the capture replay path, which requests a fresh baseline.
+  const std::size_t available =
+      video_.bytes >= video_.limit ? 0 : video_.limit - video_.bytes;
+  return required <= available;
 }
 
 bool channel_scheduler::enqueue(transport_channel channel, const uint8_t* data,

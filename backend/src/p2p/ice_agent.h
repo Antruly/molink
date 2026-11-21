@@ -5,12 +5,15 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <handle/uvcpp_loop.h>
 #include <handle/uvcpp_timer.h>
 #include <handle/uvcpp_udp.h>
 #include <juice/juice.h>
+
+#include "p2p/ice_grace.h"
 
 namespace molink {
 
@@ -44,6 +47,10 @@ class ice_agent {
   void set_handlers(candidate_handler candidate, gathering_handler gathering,
                     state_handler state, data_handler data);
   void set_data_handler(data_handler data);
+  // Runs on the app loop after libjuice returns, so it may close the agent.
+  void set_session_state_handler(state_handler state) {
+    session_state_ = std::move(state);
+  }
 
   bool apply_remote_offer(const std::string& sdp,
                           const std::vector<std::string>& candidates);
@@ -80,10 +87,14 @@ class ice_agent {
   uint16_t bind_port_ = 0;
   bool started_ = false;
   bool closed_ = false;
+  /// DISCONNECTED is recoverable; only a grace-period expiry closes the
+  /// session. FAILED still closes immediately.
+  ice_disconnect_grace grace_;
 
   candidate_handler candidate_;
   gathering_handler gathering_;
   state_handler state_;
+  state_handler session_state_;
   data_handler data_;
 };
 

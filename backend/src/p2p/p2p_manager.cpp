@@ -50,6 +50,18 @@ void plog(const std::string& message) {
 
 constexpr std::size_t kLanTcpBacklogBytes = 8u * 1024u * 1024u;
 
+std::shared_ptr<juice_transport> make_live_ice(
+    const std::shared_ptr<ice_agent>& agent, const std::string& ip,
+    unsigned int port) {
+  auto transport = std::make_shared<juice_transport>(agent, ip, port);
+  agent->set_session_state_handler([weak = std::weak_ptr<juice_transport>(transport)](int) {
+    if (auto live = weak.lock()) {
+      live->notify_closed(transport_close::going_away, "ICE path failed");
+    }
+  });
+  return transport;
+}
+
 }  // namespace
 
 /// One same-NAT direct attempt: QUIC first, TCP as the second rung. The
@@ -274,6 +286,8 @@ void p2p_manager::connect(const std::string& target, bool relay_only,
     error("target device id is empty");
     return;
   }
+  const char* compat = std::getenv("MOLINK_RELAY_ONLY");
+  relay_only = relay_only || (compat && std::strcmp(compat, "1") == 0);
   const uint64_t id = next_outgoing_++;
   plog("connecting to " + target + (relay_only ? " (relay only)" : ""));
   outgoing entry;
@@ -869,8 +883,7 @@ void p2p_manager::deliver_outgoing(uint64_t id) {
   if (entry.ice_completed || !entry.agent) return;
   entry.ice_completed = true;
   const auto endpoint = parse_endpoint(entry.agent->selected_remote());
-  auto ice = std::make_shared<juice_transport>(entry.agent, endpoint.first,
-                                               endpoint.second);
+  auto ice = make_live_ice(entry.agent, endpoint.first, endpoint.second);
 
   if (entry.delivered && entry.switcher) {
     // The session is already live on the relay; move it to the direct path.
@@ -942,7 +955,9 @@ void p2p_manager::start_incoming(const signal_session_info& session) {
   incoming entry;
   entry.connect_id = session.connect_id;
   entry.created_ms = now_ms();
-  auto agent = make_agent();
+  // The relay-only initiator sends a placeholder SDP, not an ICE offer.
+  // Do not let a failed ICE attempt erase this entry before the relay pairs.
+  auto agent = session.offer == "v=0" ? nullptr : make_agent();
   entry.agent = agent;
   incoming_.emplace(session.connect_id, std::move(entry));
 
@@ -960,6 +975,7 @@ void p2p_manager::start_incoming(const signal_session_info& session) {
     });
   });
 
+  if (!agent) return;
   agent->set_handlers(
       [this, id = session.connect_id](const std::string& sdp) {
         auto it = incoming_.find(id);
@@ -1036,8 +1052,7 @@ void p2p_manager::deliver_incoming(const std::string& connect_id) {
   entry.ice_delivered = true;
   plog("incoming " + connect_id + " ICE completed");
   const auto endpoint = parse_endpoint(entry.agent->selected_remote());
-  auto transport = std::make_shared<juice_transport>(
-      entry.agent, endpoint.first, endpoint.second);
+  auto transport = make_live_ice(entry.agent, endpoint.first, endpoint.second);
 
   if (entry.relay_delivered && entry.switcher) {
     plog("incoming " + connect_id + " switching to p2p");

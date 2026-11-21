@@ -517,6 +517,7 @@
     "refresh": "Refresh",
     "empty": "This folder is empty",
     "error": "Transfer failed",
+    "incomplete": "The download was incomplete and was not saved.",
     "cancelled": "Transfer cancelled",
     "clipboardTitle": "Remote clipboard",
     "clipboardHint": "Files copied in the remote Explorer. Receiving downloads them to this machine.",

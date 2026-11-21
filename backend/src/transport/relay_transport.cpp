@@ -12,6 +12,7 @@
 #endif
 
 #include "protocol/frame_packet.h"
+#include "transport/relay_write_budget.h"
 
 namespace molink {
 namespace {
@@ -38,8 +39,8 @@ transport_channel channel_for(const uint8_t* data, std::size_t len) {
 
 relay_transport::relay_transport(std::string url, std::string ca_path,
                                  post_fn post, bool relay_protocol)
-    : url_(std::move(url)), ca_path_(std::move(ca_path)), post_(std::move(post)),
-      relay_protocol_(relay_protocol) {}
+    : url_(std::move(url)), ca_path_(std::move(ca_path)),
+      relay_protocol_(relay_protocol), post_(std::move(post)) {}
 
 relay_transport::~relay_transport() { close(transport_close::normal, "gone"); }
 
@@ -94,6 +95,7 @@ bool relay_transport::send_binary(const uint8_t* data, std::size_t len) {
 bool relay_transport::send_binary(transport_channel channel,
                                   const uint8_t* data, std::size_t len) {
   if (data == nullptr && len > 0) return false;
+  if (!relay_write_fits(channel, len, 0)) return false;
   // A keyframe is the only queued frame whose loss costs a full refresh, so
   // tell the scheduler which video messages must not be evicted.
   const bool keyframe =
@@ -283,8 +285,8 @@ void relay_transport::thread_main() {
             // queue. Count the bytes until the write completes and stop
             // handing over messages past the cap: that is what lets
             // backpressure reach the scheduler and the file transfer offset.
-            if (inflight_bytes_.load(std::memory_order_relaxed) + size >
-                kMaxInflightBytes) {
+            if (!relay_write_fits(message.channel, size,
+                    inflight_bytes_.load(std::memory_order_relaxed))) {
               return false;
             }
             auto settle = [this, size](int) {

@@ -8,6 +8,8 @@
 #include <req/uvcpp_udp_send.h>
 #include <uvcpp/uvcpp_buf.h>
 
+#include "util.h"
+
 namespace molink {
 namespace {
 
@@ -193,7 +195,20 @@ void ice_agent::receive_datagram(const uint8_t* data, std::size_t len,
 }
 
 void ice_agent::tick() {
-  if (agent_ != nullptr) juice_agent_tick(agent_);
+  if (agent_ == nullptr) return;
+  juice_agent_tick(agent_);
+  if (agent_ == nullptr || !session_state_) return;
+  const int current = state();
+  // FAILED is terminal. DISCONNECTED is not: a consent failure, a Wi-Fi roam
+  // or a NAT rebinding recovers on its own, so give it a grace period and only
+  // close if the pair never comes back. The moved-from handler means the
+  // callback fires at most once, and close()/destruction clears it entirely.
+  const ice_disconnect_grace::result result = grace_.observe(
+      current == JUICE_STATE_FAILED,
+      current == JUICE_STATE_DISCONNECTED, now_ms());
+  if (result != ice_disconnect_grace::result::close_now) return;
+  auto notify = std::move(session_state_);
+  notify(current);
 }
 
 void ice_agent::deliver_data(const uint8_t* data, std::size_t len) {
@@ -281,6 +296,7 @@ void ice_agent::close() {
   candidate_ = nullptr;
   gathering_ = nullptr;
   state_ = nullptr;
+  session_state_ = nullptr;
   data_ = nullptr;
 }
 

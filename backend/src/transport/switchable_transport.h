@@ -16,7 +16,9 @@ namespace molink {
 /// happened: a relay
 /// that goes half-open after the upgrade would swallow exactly those packets
 /// while deltas keep arriving, leaving a permanently frozen picture.
-class switchable_transport final : public session_transport {
+class switchable_transport final
+    : public session_transport,
+      public std::enable_shared_from_this<switchable_transport> {
  public:
   explicit switchable_transport(std::shared_ptr<session_transport> initial);
 
