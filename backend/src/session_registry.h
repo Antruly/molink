@@ -71,6 +71,10 @@ struct session_info {
   /// usable base image yet.
   int64_t last_capture_seq = -1;
   bool has_image = false;
+  /// stream_epoch_id of the last mode the viewer was told about (0xffffffff
+  /// forces the first frame to carry it). The client drops the previous
+  /// mode's references when this changes.
+  uint32_t stream_epoch = 0xffffffffu;
   /// Last time this session asked the capture for a keyframe. A viewer that
   /// can never get a picture asks on every push tick; one request a second is
   /// enough to recover and stops it from turning each tick into a full-screen

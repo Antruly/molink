@@ -63,6 +63,9 @@ class capture_switch final : public capture_source {
                         uint64_t now_ms) override;
   void set_av1_stream_allowed(bool allowed) override;
   void set_stream_enter_percent(int percent) override;
+  void set_switch_inhibited(bool inhibited) override;
+  void note_pointer(bool button_down, bool moving, uint64_t now_ms) override;
+  uint32_t stream_epoch() const override;
   void set_h264_stream_allowed(bool allowed) override;
   void request_stream(uint64_t ms) override;
   bool stream_on() const override;
@@ -112,6 +115,10 @@ class capture_switch final : public capture_source {
   std::atomic<int> stream_enter_percent_{15};
   /// Deadline of a request_stream() window, so a source swap does not lose it.
   std::atomic<uint64_t> stream_nudge_until_{0};
+  /// Adaptive-switch vetoes, cached so a desktop swap keeps the drag latch and
+  /// the send-backpressure window.
+  std::atomic<uint64_t> switch_inhibit_until_ms_{0};
+  std::atomic<bool> pointer_down_{false};
   av1_encoding_settings av1_settings_;
   mutable std::mutex settings_mutex_;
 };
