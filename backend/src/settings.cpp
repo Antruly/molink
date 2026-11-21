@@ -13,6 +13,7 @@
 
 #include "identity.h"
 #include "version.h"
+#include "video_mode.h"
 
 namespace molink {
 namespace {
@@ -202,13 +203,9 @@ app_settings load_settings() {
     } else if (key == "stream_enter_percent") {
       settings.stream_enter_percent = parse_int(value, 15);
     } else if (key == "video_mode") {
-      // The adaptive "mixed" path is gone. Migrate an existing config to
-      // tiles instead of silently keeping a mode the UI no longer offers.
-      if (value == "stream") {
-        settings.video_mode = "stream";
-      } else if (value == "tiles" || value == "mixed") {
-        settings.video_mode = "tiles";
-      }
+      // "auto", the legacy "mixed" spelling and an unknown value all mean the
+      // adaptive path. Only "stream" and "tiles" pin a fixed one.
+      settings.video_mode = normalize_video_mode(value);
     } else if (key == "stream_qp") {
       settings.stream_qp = parse_int(value, 0);
     } else if (key == "stream_bitrate_kbps") {

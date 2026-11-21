@@ -73,12 +73,13 @@ struct app_settings {
   /// ladder; anything else pins that codec when every viewer can decode it
   /// and this host can encode it.
   std::string stream_codec = "auto";
-  /// Video path preference: "stream" always uses the low-delay stream,
-  /// "tiles" never streams. There is deliberately no adaptive middle mode:
-  /// mixing the two mid-session made the picture switch under the user and
-  /// reset the decoder; a connection now uses one path from start to finish.
-  /// An old config that still says "mixed" loads as "tiles".
-  std::string video_mode = "tiles";
+  /// Video path preference: "auto" (the default) lets capture's
+  /// stream_policy follow the content -- tiles while the screen is still, the
+  /// low-delay stream once enough of it keeps moving. "stream" always uses the
+  /// stream and "tiles" never does. The hysteresis in stream_policy prevents
+  /// the old mid-session ping-pong; an old config that still says "mixed"
+  /// loads as "auto".
+  std::string video_mode = "auto";
   /// Percentage of the screen that must keep moving before the capture
   /// switches from tiles to a low-delay stream. 1..100, default 15. The exit
   /// threshold follows it, so a still screen drops back after the dwell.

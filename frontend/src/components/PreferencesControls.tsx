@@ -21,6 +21,12 @@ import {
   type ServerState,
 } from '../lib/api'
 import { FPS_CHOICES, parseFpsSetting } from '../lib/frame-rate'
+import {
+  DEFAULT_VIDEO_MODE,
+  VIDEO_MODE_OPTIONS,
+  normalizeVideoMode,
+  type VideoMode,
+} from '../lib/video-mode'
 import { useAppStore, type QualityMode, type Theme } from '../store/app'
 import { ServicePanel } from './ServicePanel'
 import { WindowsSessionsPanel } from './WindowsSessionsPanel'
@@ -238,7 +244,7 @@ const AV1_SPEEDS: { value: Av1Settings['speed']; label: string }[] = [
 function Av1Controls({ token }: { token: string }) {
   const { t } = useTranslation()
   const [data, setData] = useState<Av1Settings | null>(null)
-  const [videoMode, setVideoMode] = useState('tiles')
+  const [videoMode, setVideoMode] = useState<VideoMode>(DEFAULT_VIDEO_MODE)
   const [device, setDevice] = useState('auto')
   const [speed, setSpeed] = useState<Av1Settings['speed']>('auto')
   const [autoParams, setAutoParams] = useState(true)
@@ -252,7 +258,7 @@ function Av1Controls({ token }: { token: string }) {
 
   const apply = (next: Av1Settings) => {
     setData(next)
-    setVideoMode(next.video_mode === 'stream' ? 'stream' : 'tiles')
+    setVideoMode(normalizeVideoMode(next.video_mode))
     setDevice(next.device)
     setSpeed(next.speed)
     const automatic =
@@ -365,11 +371,16 @@ function Av1Controls({ token }: { token: string }) {
         </p>
         <select
           value={videoMode}
-          onChange={(event) => setVideoMode(event.target.value)}
+          onChange={(event) =>
+            setVideoMode(normalizeVideoMode(event.target.value))
+          }
           className="field"
         >
-          <option value="stream">{t('settings.videoModeStream')}</option>
-          <option value="tiles">{t('settings.videoModeTiles')}</option>
+          {VIDEO_MODE_OPTIONS.map((mode) => (
+            <option key={mode} value={mode}>
+              {t(`settings.videoMode${mode[0].toUpperCase()}${mode.slice(1)}`)}
+            </option>
+          ))}
         </select>
       </label>
 

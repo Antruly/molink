@@ -36,6 +36,7 @@
 #include "transport/ws_transport.h"
 #include "util.h"
 #include "version.h"
+#include "video_mode.h"
 
 namespace molink {
 namespace {
@@ -1040,19 +1041,27 @@ void send_welcome(session_transport* transport, const session_info& session,
     // through the local core's proxy, so `av1_stream` is the proxy's answer.)
     // Toolbar order follows the preference order: AV1 > VP9 > VP8 > H.264.
     //
-    // "tiles" is the explicit "never stream" choice. It is the only entry in
-    // tiles mode; stream mode never shows it. There is no adaptive middle
-    // mode any more.
+    // "tiles" is the explicit "never stream" choice and is the only entry in
+    // tiles mode. Stream mode never shows it. Auto advertises both: the
+    // stream encoders it may switch to and "tiles" for the still-screen
+    // fallback.
     const std::string video_mode =
         opt.auth ? opt.auth->settings().video_mode : std::string("tiles");
+    stream_codec_capabilities host_caps;
+    host_caps.av1 = av1;
+    host_caps.vp9 = vp9;
+    host_caps.vp8 = vp8;
+    host_caps.h264 = h264;
+    stream_codec_capabilities viewer_caps;
+    viewer_caps.av1 = session.av1_stream;
+    viewer_caps.vp9 = session.vp9_stream;
+    viewer_caps.vp8 = session.vp8_stream;
+    viewer_caps.h264 = session.h264_stream;
     j["stream_codecs"] = uvcpp_json::array();
-    if (video_mode != "tiles") {
-      if (av1 && session.av1_stream) j["stream_codecs"].push_back("av1");
-      if (vp9 && session.vp9_stream) j["stream_codecs"].push_back("vp9");
-      if (vp8 && session.vp8_stream) j["stream_codecs"].push_back("vp8");
-      if (h264 && session.h264_stream) j["stream_codecs"].push_back("h264");
+    for (const std::string& codec :
+         advertised_stream_codecs(video_mode, host_caps, viewer_caps)) {
+      j["stream_codecs"].push_back(codec);
     }
-    if (video_mode != "stream") j["stream_codecs"].push_back("tiles");
   }
   j["codec_preference"] =
       opt.auth ? opt.auth->settings().stream_codec : std::string("auto");
@@ -2371,16 +2380,17 @@ void session_controller::on_text(const std::string& text) {
     const std::string value = string_field(j, "value");
     if (!options_.auth || !options_.auth->set_video_mode(value)) {
       send_error(transport.get(), "bad_video_mode",
-                 "expected stream or tiles");
+                 "expected auto, stream or tiles");
       return;
     }
-    // An older client may still send "mixed"; auth_state stores it as tiles.
-    // Broadcast the mode the host actually runs, not the legacy spelling.
-    const std::string mode = value == "stream" ? "stream" : "tiles";
+    // Broadcast the normalised mode: an older client may still send "mixed",
+    // which is the adaptive path now.
+    const std::string mode = normalize_video_mode(value);
     if (options_.capture) {
-      // "stream" pins the video path; "tiles" disables it entirely. The
+      // "stream" pins the video path and "tiles" disables it; "auto" leaves
+      // stream_always_ false so the supervisor's stream_policy decides. The
       // supervisor applies the rest on its next tick.
-      options_.capture->set_stream_always(mode == "stream");
+      options_.capture->set_stream_always(stream_always_for_video_mode(mode));
     }
     uvcpp_json shared;
     shared["type"] = "video-mode";
@@ -3162,11 +3172,11 @@ void session_supervisor::run() {
       const std::string video_mode =
           options_.auth ? options_.auth->settings().video_mode : "tiles";
       if (options_.capture) {
-        options_.capture->set_stream_always(video_mode == "stream");
-        // How much of the screen must move before the stream takes over; the
-        // capture applies it on its own thread.
-        options_.capture->set_stream_enter_percent(
-            options_.auth ? options_.auth->settings().stream_enter_percent : 15);
+        // "stream" forces the stream; "auto" and "tiles" release it, and the
+        // capture's stream_policy decides from the movement average.
+        const int enter_percent =
+            options_.auth ? options_.auth->settings().stream_enter_percent : 15;
+        apply_video_mode(*options_.capture, video_mode, enter_percent);
       }
       // The secure desktop cannot use tiles: it is captured through the
       // helper at a few frames per second, so a pinned "tiles" is ignored
