@@ -219,6 +219,10 @@ export interface ClientHandlers {
   /// The host is sending its low-delay H.264 stream for this session. Fired
   /// once per connection so the UI can name the path instead of guessing.
   onStreamVideo?: (codec: string) => void
+  /// A tile <-> video encoding epoch started (stream_epoch_id changed). The
+  /// host begins every epoch with a keyframe, so the view may drop the old
+  /// tile image and video reference queue here.
+  onStreamEpoch?: (epoch: number, mode: 'tiles' | 'video') => void
   /// Stream codecs the host can encode *and* this page can decode: what the
   /// session toolbar may offer.
   onCodecOptions?: (options: string[]) => void
@@ -303,6 +307,9 @@ interface ControlMessage {
   wire_rate?: number
   from?: string
   ts?: number
+  /// stream_epoch_id of a `stream-epoch` message; `mode` says which path the
+  /// new epoch uses.
+  epoch?: number
   name?: string
   size?: number
   dir?: string
@@ -446,6 +453,10 @@ const resumeTokens = new Map<string, string>()
 /// Use the same interval before probing video on an otherwise quiet session.
 const kStreamKeyframeWaitMs = 6000
 
+/// A tile <-> video switch starts with a keyframe. Until that keyframe (or
+/// this grace) passes, a gap is the hand-over, not a path failure.
+const kStreamEpochKeyframeGraceMs = 6000
+
 /// One decoded-stream frame held back by the reorder window.
 interface PendingStreamFrame {
   frame: Frame
@@ -551,6 +562,11 @@ export class MolinkClient {
   /// reference explained by local backpressure must not be blamed on the P2P
   /// path; see assessP2pVideo.
   private lastBackpressureGapAt = 0
+  /// When the host announced a video epoch whose opening keyframe has not
+  /// arrived yet. The switch itself explains the gap, so it must not arm the
+  /// relay fallback; the hand-over is expected to finish within
+  /// kStreamEpochKeyframeGraceMs.
+  private epochKeyframePendingAt = 0
   /// Rate limit for the stream-rejection diagnostic.
   private lastStreamRejectLog = 0
   /// The host's codec preference ("auto", a codec name, or "tiles").
@@ -771,6 +787,7 @@ export class MolinkClient {
     this.lastStreamTsUs = 0
     this.streamKeyframeWaitStarted = 0
     this.lastBackpressureGapAt = 0
+    this.epochKeyframePendingAt = 0
 
     // Two devices on the same LAN should not pay the ICE signaling round
     // trips: the directory only hands out a private address to requesters
@@ -1740,6 +1757,44 @@ export class MolinkClient {
           this.streamKeyframeWaitStarted = 0
         }
         break
+      case 'stream-epoch': {
+        // A tile <-> video switch. The previous mode's references are dropped
+        // here: no tile image or delta chain from the old epoch may be mixed
+        // into the new one.
+        const epoch =
+          typeof message.epoch === 'number' ? message.epoch : 0
+        const mode: 'tiles' | 'video' =
+          message.mode === 'video' ? 'video' : 'tiles'
+        this.lastStreamCodecKey = ''
+        this.streamCodecNotified = false
+        // Bump the stream chain through the official reset: a decode callback
+        // queued under the old epoch must not paint into this one, and pending
+        // reorder frames / gap timers have to be dropped with it.
+        this.resetStreamSequence()
+        this.h264.close()
+        for (const decoder of Object.values(this.vpxDecoders)) decoder?.close()
+        this.vpxDecoders = {}
+        if (mode === 'tiles') {
+          // The host forces a full tile keyframe when it hands the picture
+          // back. Lifting the "ignore stray tiles while streaming" window is
+          // mandatory here: otherwise every tile delta after the hand-over
+          // was swallowed for 15 s (and a reordered epoch message could wipe
+          // the already-painted keyframe), leaving a frozen picture while
+          // input kept working. Keep the current image until that keyframe
+          // replaces every tile, and ask for one as a belt-and-braces repair
+          // if the reordered/lost hand-over frame never arrives.
+          this.lastStreamPaintAt = 0
+          this.requestKeyframeThrottled()
+        } else {
+          // Video: nothing may paint before the epoch's keyframe, so drop the
+          // old picture and wait for it. Remember the hand-over so a missing
+          // reference during it is not blamed on the P2P path.
+          this.hasImage = false
+          this.epochKeyframePendingAt = performance.now()
+          this.handlers.onStreamEpoch?.(epoch, mode)
+        }
+        break
+      }
       case 'transport':
         if (typeof message.mode === 'string') {
           const path = typeof message.path === 'string' ? message.path : message.mode
@@ -2022,6 +2077,7 @@ export class MolinkClient {
           this.lastStreamSeq = frame.frameSeq
           this.latestFrameSeq = frame.frameSeq
           this.streamKeyframeWaitStarted = 0
+          this.epochKeyframePendingAt = 0
           this.submitStreamFrame(item)
           return
         }
@@ -2071,6 +2127,7 @@ export class MolinkClient {
             performance.now() - this.lastStreamPaintAt < 15000) {
           return
         }
+        if (refreshKeyframe) this.lastStreamPaintAt = 0
         this.forgetStreamPicture()
         if ((frame.flags & FrameFlag.keyframe) !== 0) this.hasImage = true
         if (!this.hasImage) {
@@ -2112,6 +2169,7 @@ export class MolinkClient {
       // as the one used before the tiles. Without this the page decoded the
       // first deltas on the old reference chain and smeared the picture until
       // a keyframe happened to arrive.
+      if (tileKeyframe) this.lastStreamPaintAt = 0
       this.forgetStreamPicture()
       const keyframe = (frame.flags & FrameFlag.keyframe) !== 0
       // A frame that spent more than a second in flight is worse than a
@@ -2664,20 +2722,30 @@ export class MolinkClient {
     this.lastStreamSeq = -1
     this.streamHasImage = false
     this.streamKeyframeWaitStarted = 0
+    this.epochKeyframePendingAt = 0
   }
 
   /// Start a monotonic deadline; the timer checks it even if no more frames arrive.
   /// A recent host backpressure notice explains the gap locally, so it must not
-  /// start the P2P fallback countdown.
+  /// start the P2P fallback countdown. So must a fresh epoch hand-over: the
+  /// host begins every new mode with a keyframe, and a gap before it arrives is
+  /// the switch, not a broken path.
   private noteMissingStreamKeyframe(): void {
+    const now = performance.now()
     if (
       this.lastBackpressureGapAt !== 0 &&
-      performance.now() - this.lastBackpressureGapAt <= kBackpressureGapFreshMs
+      now - this.lastBackpressureGapAt <= kBackpressureGapFreshMs
+    ) {
+      return
+    }
+    if (
+      this.epochKeyframePendingAt !== 0 &&
+      now - this.epochKeyframePendingAt <= kStreamEpochKeyframeGraceMs
     ) {
       return
     }
     if (this.streamKeyframeWaitStarted === 0) {
-      this.streamKeyframeWaitStarted = performance.now()
+      this.streamKeyframeWaitStarted = now
     }
   }
 
