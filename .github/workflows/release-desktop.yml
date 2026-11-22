@@ -92,10 +92,33 @@ jobs:
           # it mid-download.
           APT_OPTS="-o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=5"
           sudo timeout 900 apt-get update $APT_OPTS
+
+          # Package names move between Ubuntu releases: 26.04 dropped the
+          # 22.04-era libsvtav1-dev and carries libsvtav1enc-dev instead.
+          # Pick the first name the configured suites actually provide and
+          # fail loudly when none does; falling back with `|| true` would
+          # silently produce a tiles-only build.
+          pick_pkg() {
+            local name
+            for name in "$@"; do
+              if apt-cache show "$name" >/dev/null 2>&1 &&
+                 ! apt-cache policy "$name" 2>/dev/null | grep -q 'Candidate: (none)'; then
+                echo "$name"
+                return 0
+              fi
+            done
+            echo "::error title=missing-apt-package::none of [$*] is installable here" >&2
+            return 1
+          }
+          av1_pkg=$(pick_pkg libsvtav1enc-dev libsvtav1-dev)
+          dav1d_pkg=$(pick_pkg libdav1d-dev)
+          jpeg_pkg=$(pick_pkg libjpeg-turbo8-dev libjpeg-dev)
+          vpx_pkg=$(pick_pkg libvpx-dev)
+
           sudo timeout 2400 apt-get install -y $APT_OPTS cmake libgtk-3-dev \
             libwebkit2gtk-4.1-dev librsvg2-dev patchelf libuv1-dev libssl-dev \
-            zlib1g-dev curl rpm libsvtav1-dev libdav1d-dev libjpeg-turbo8-dev \
-            libvpx-dev
+            zlib1g-dev curl rpm "$av1_pkg" "$dav1d_pkg" "$jpeg_pkg" \
+            "$vpx_pkg"
 
       - uses: pnpm/action-setup@v4
         with:
@@ -271,7 +294,15 @@ jobs:
           # libuvcpp 1.9 supplies WebTransport/HTTP3 here: its archive ships
           # http3/uvcpp_h3_wt_session.h with UVCPP_HTTP3_ENABLE=1, so the core
           # enables its WebTransport transport on Windows too.
+          #
+          # dav1d is overlaid to 1.5.5: the runner's builtin 1.5.4 cannot be
+          # compiled by its MSVC (C7780 on __has_include_next in the MSVC
+          # compat header). 1.5.5 is where upstream defines that builtin;
+          # 1.4.3 has the same broken guard, so a downgrade would not help.
+          # The overlay is a normal port (no manifest/registry baseline), so
+          # classic mode keeps working.
           "$VCPKG_INSTALLATION_ROOT/vcpkg.exe" install \
+            --overlay-ports="$(cygpath -w "$GITHUB_WORKSPACE/packaging/vcpkg-overlays")" \
             svt-av1:x64-windows dav1d:x64-windows libjpeg-turbo:x64-windows \
             libvpx:x64-windows "libdatachannel[srtp]:x64-windows"
 
@@ -637,8 +668,30 @@ jobs:
         run: |
           python3 -m pip install --user meson ninja
           export PATH="$HOME/.local/bin:$PATH"
-          curl -sSL --retry 5 -o dav1d.tar.gz \
+          # code.videolan.org is not reliably reachable from the runners (the
+          # 0.12.0 run failed to connect after 220 ms while libvpx downloaded
+          # from github.com in the same job). Try it first, then the GitHub
+          # mirror; only give up when both fail. The two tarballs extract to
+          # the same dav1d-1.4.3/ directory.
+          mirrors=(
             https://code.videolan.org/videolan/dav1d/-/archive/1.4.3/dav1d-1.4.3.tar.gz
+            https://github.com/videolan/dav1d/archive/refs/tags/1.4.3.tar.gz
+          )
+          fetched=0
+          for url in "${mirrors[@]}"; do
+            echo "dav1d: trying $url"
+            if curl -fsSL --retry 5 --retry-delay 5 --retry-connrefused \
+                 --connect-timeout 20 -o dav1d.tar.gz "$url"; then
+              fetched=1
+              break
+            fi
+            echo "::warning title=dav1d-download::failed to download $url"
+            rm -f dav1d.tar.gz
+          done
+          if [ "$fetched" -ne 1 ]; then
+            echo "::error title=dav1d-download::no dav1d 1.4.3 mirror was reachable"
+            exit 1
+          fi
           tar xzf dav1d.tar.gz
           cat > i686-cross.txt <<'EOF'
           [binaries]
