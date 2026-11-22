@@ -275,6 +275,7 @@ export type TransferBlock =
   | 'no-target'
   | 'no-source'
   | 'busy'
+  | 'unsupported'
 
 /// "Send over" needs a local selection, a picked local source and a remote
 /// folder that has answered a listing.
@@ -291,16 +292,86 @@ export function uploadBlockReason(args: {
   return null
 }
 
-/// "Receive back" needs a remote selection. The local destination is either a
-/// folder handle the user already picked or the picker opened by the click;
-/// with neither, the panel still falls back to per-file Save buttons.
+/// "Receive back" needs a remote selection and a writable local folder.
+/// `mode` and `hasTarget` are optional so callers that only know the selection
+/// (and the existing tests) keep the original behaviour; the panel passes
+/// both, which is what disables the button in a files-only browser and when no
+/// local folder handle has been picked yet.
 export function downloadBlockReason(args: {
   selected: number
   busy: boolean
+  mode?: DownloadMode
+  hasTarget?: boolean
 }): TransferBlock | null {
   if (args.busy) return 'busy'
   if (args.selected === 0) return 'no-selection'
+  if (args.mode === 'files-only') return 'unsupported'
+  if (args.hasTarget === false) return 'no-target'
   return null
+}
+
+/// A host that predates folder uploads / a custom destination answers an
+/// unknown file action with an `error` frame instead of a `file` frame. The
+/// client forwards those codes as a synthetic file error so the panel can warn
+/// and keep sending the files it can.
+export function isUnsupportedAction(
+  code?: string | null,
+  message?: string | null,
+): boolean {
+  if (code === 'bad_file_action' || code === 'bad_action' ||
+      code === 'unknown_action') {
+    return true
+  }
+  return /unknown (file )?action|unsupported (file )?action/i.test(
+    message ?? '')
+}
+
+/// One finished task's counters. `skipped` covers selection entries that were
+/// refused before a transfer started (unsafe names, files that vanished).
+export interface TaskSummary {
+  done: number
+  failed: number
+  cancelled: number
+  skipped: number
+  total: number
+}
+
+export function summarizeTask(
+  children: ProgressChild[],
+  skipped = 0,
+): TaskSummary {
+  let done = 0
+  let failed = 0
+  let cancelled = 0
+  for (const child of children) {
+    if (child.status === 'done') done += 1
+    else if (child.status === 'error') failed += 1
+    else if (child.status === 'cancelled') cancelled += 1
+  }
+  return {
+    done,
+    failed,
+    cancelled,
+    skipped,
+    total: children.length + skipped,
+  }
+}
+
+/// Maps an absolute remote path (Windows or POSIX) to the slash-separated
+/// path below `base`. Returns null when `path` is not inside `base`, and `''`
+/// for `base` itself, so callers can build a local tree without ever joining
+/// an absolute path or a `..`.
+export function relativeUnder(base: string, path: string): string | null {
+  const clean = (value: string) => value.replace(/\\/g, '/').replace(/\/+$/, '')
+  const root = clean(base)
+  const full = clean(path)
+  if (root === '') return full
+  const caseInsensitive = /^[A-Za-z]:/.test(root) || root.startsWith('//')
+  const left = caseInsensitive ? root.toLowerCase() : root
+  const right = caseInsensitive ? full.toLowerCase() : full
+  if (right === left) return ''
+  if (!right.startsWith(left + '/')) return null
+  return full.slice(root.length + 1)
 }
 
 export type DownloadMode = 'directory' | 'files-only'

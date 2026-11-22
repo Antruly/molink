@@ -157,6 +157,10 @@ export interface ClipboardFileEntry {
 export interface FileMessage {
   action: string
   ok?: boolean
+  /// Present on the synthetic file event built from an `error` frame, so the
+  /// transfer panel can tell an old host's `bad_file_action` apart from a
+  /// genuine failure.
+  code?: string
   id?: number
   name?: string
   size?: number
@@ -1826,6 +1830,20 @@ export class MolinkClient {
         break
       case 'error': {
         const code = typeof message.code === 'string' ? message.code : ''
+        const text =
+            typeof message.message === 'string' ? message.message : ''
+        // A host that predates folder uploads or a custom destination answers
+        // an unknown file action with an error frame. It belongs to the file
+        // panel, not the session banner, so forward it as a file event and
+        // leave the connection healthy.
+        if (code === 'bad_file_action' || code === 'bad_action' ||
+            code === 'unknown_action' || /unknown file action/i.test(text)) {
+          this.handlers.onSessionEvent?.({
+            kind: 'file',
+            message: { action: 'error', code, message: text },
+          })
+          break
+        }
         // The host rejected our credentials (wrong or exhausted code); a
         // fresh code will arrive from the UI, so drop the stale resume token.
         if (code === 'unauthorized' || code === 'ip_banned' ||

@@ -7,10 +7,13 @@ import {
   downloadModeFor,
   isReservedName,
   isSafeRelativePath,
+  isUnsupportedAction,
   localEntriesAt,
   normalizeRelativePath,
+  relativeUnder,
   safeTargetSegments,
   sourceFromInputFiles,
+  summarizeTask,
   taskStatusFromChildren,
   uploadBlockReason,
 } from '../src/lib/file-transfer.ts'
@@ -200,6 +203,101 @@ test('a remote page without the directory picker drops the structure', () => {
   assert.equal(downloadModeFor(secure), 'directory')
   assert.equal(downloadModeFor({ ...secure, isSecureContext: false }), 'files-only')
   assert.equal(downloadModeFor({ isSecureContext: true }), 'files-only')
+})
+
+test('the receive button knows about the browser and the local target', () => {
+  assert.equal(
+    downloadBlockReason({
+      selected: 1, busy: false, mode: 'files-only', hasTarget: true,
+    }),
+    'unsupported',
+  )
+  assert.equal(
+    downloadBlockReason({
+      selected: 1, busy: false, mode: 'directory', hasTarget: false,
+    }),
+    'no-target',
+  )
+  assert.equal(
+    downloadBlockReason({
+      selected: 1, busy: false, mode: 'directory', hasTarget: true,
+    }),
+    null,
+  )
+  assert.equal(
+    downloadBlockReason({
+      selected: 0, busy: false, mode: 'files-only', hasTarget: false,
+    }),
+    'no-selection',
+  )
+  assert.equal(
+    downloadBlockReason({
+      selected: 1, busy: true, mode: 'directory', hasTarget: true,
+    }),
+    'busy',
+  )
+})
+
+test('a remote path maps to a relative local tree on both separators', () => {
+  assert.equal(
+    relativeUnder('/home/u/mLT', '/home/u/mLT/sub1/a.txt'),
+    'sub1/a.txt',
+  )
+  assert.equal(
+    relativeUnder('C:\\Users\\A\\mLT', 'C:\\Users\\A\\mLT\\sub1\\a.txt'),
+    'sub1/a.txt',
+  )
+  assert.equal(
+    relativeUnder('C:\\Users\\A\\mLT', 'c:\\users\\a\\mlt\\sub1\\a.txt'),
+    'sub1/a.txt',
+  )
+  assert.equal(relativeUnder('/home/u/mLT', '/home/u/mLT'), '')
+  assert.equal(relativeUnder('/home/u/mLT', '/home/u/other.txt'), null)
+  assert.equal(relativeUnder('/home/u/mLT', '/home/u/mLT2/a.txt'), null)
+  assert.equal(relativeUnder('', '/home/u/a.txt'), '/home/u/a.txt')
+})
+
+test('an old host is recognised from its file-action error', () => {
+  assert.equal(isUnsupportedAction('bad_file_action', ''), true)
+  assert.equal(isUnsupportedAction('', 'unknown file action: mkdir'), true)
+  assert.equal(isUnsupportedAction('bad_action', ''), true)
+  assert.equal(isUnsupportedAction('', 'could not create the folder'), false)
+  assert.equal(isUnsupportedAction(undefined, undefined), false)
+})
+
+test('task summaries keep failures, cancellations and skips apart', () => {
+  const summary = summarizeTask([
+    { size: 10, progress: 10, status: 'done' },
+    { size: 10, progress: 4, status: 'error' },
+    { size: 10, progress: 0, status: 'cancelled' },
+    { size: 10, progress: 2, status: 'running' },
+  ], 2)
+  assert.deepEqual(summary, {
+    done: 1,
+    failed: 1,
+    cancelled: 1,
+    skipped: 2,
+    total: 6,
+  })
+  assert.deepEqual(summarizeTask([], 0), {
+    done: 0,
+    failed: 0,
+    cancelled: 0,
+    skipped: 0,
+    total: 0,
+  })
+})
+
+test('a selected remote folder keeps its own name in the local target', () => {
+  const base = 'C:\\Users\\A\\mLT'
+  const selected = { name: 'sub1', path: `${base}\\sub1` }
+  const child = `${selected.path}\\sub2\\照片.jpg`
+  const rel = relativeUnder(base, child)
+  assert.equal(rel, 'sub1/sub2/照片.jpg')
+  assert.deepEqual(safeTargetSegments(rel, 'file'), [
+    'sub1', 'sub2', '照片.jpg',
+  ])
+  assert.equal(relativeUnder(base, selected.path), 'sub1')
 })
 
 test('remote names are sanitized into safe local path segments', () => {
