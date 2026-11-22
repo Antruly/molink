@@ -174,6 +174,9 @@ interface AppState {
   qualityWatermark: boolean
   /// Play the remote machine's sound as soon as a session is live.
   autoAudio: boolean
+  /// Remote Explorer file clipboard -> this machine's clipboard. Off by
+  /// default: enabling it transfers the whole file selection over the session.
+  remoteClipboardFiles: boolean
   /// What the window's close button does while a session tab is open:
   /// ask once, hide to the tray, or close the session tab.
   windowCloseBehavior: 'ask' | 'tray' | 'tab'
@@ -216,6 +219,7 @@ interface AppState {
   toggleTheme: () => void
   setQualityWatermark: (enabled: boolean) => void
   setAutoAudio: (enabled: boolean) => void
+  setRemoteClipboardFiles: (enabled: boolean) => void
   setWindowCloseBehavior: (behavior: 'ask' | 'tray' | 'tab') => void
   setQualityMode: (mode: QualityMode) => void
   setFrameRate: (fps: FpsSetting) => void
@@ -300,6 +304,7 @@ interface AppState {
 const THEME_KEY = 'molink.theme'
 const QUALITY_KEY = 'molink.quality'
 const AUTO_AUDIO_KEY = 'molink.autoAudio'
+const REMOTE_CLIPBOARD_FILES_KEY = 'molink.remoteClipboardFiles'
 const CLOSE_BEHAVIOR_KEY = 'molink.closeBehavior'
 const QUALITY_MODE_KEY = 'molink.qualityMode'
 const FRAME_RATE_KEY = 'molink.frameRate'
@@ -598,6 +603,7 @@ export const useAppStore = create<AppState>((set, get) => {
     theme: initialTheme(),
     qualityWatermark: readStorage(QUALITY_KEY) === '1',
     autoAudio: readStorage(AUTO_AUDIO_KEY) !== '0',
+    remoteClipboardFiles: readStorage(REMOTE_CLIPBOARD_FILES_KEY) === '1',
     windowCloseBehavior: (() => {
       const saved = readStorage(CLOSE_BEHAVIOR_KEY)
       return saved === 'tray' || saved === 'tab' ? saved : 'ask'
@@ -649,6 +655,14 @@ export const useAppStore = create<AppState>((set, get) => {
     setAutoAudio: (enabled) => {
       writeStorage(AUTO_AUDIO_KEY, enabled ? '1' : '0')
       set({ autoAudio: enabled })
+    },
+
+    setRemoteClipboardFiles: (enabled) => {
+      writeStorage(REMOTE_CLIPBOARD_FILES_KEY, enabled ? '1' : '0')
+      set({ remoteClipboardFiles: enabled })
+      for (const connection of runtimes.values()) {
+        connection.setRemoteClipboardEnabled(enabled)
+      }
     },
 
     setWindowCloseBehavior: (behavior) => {
@@ -1264,6 +1278,12 @@ export const useAppStore = create<AppState>((set, get) => {
         // Local files go to every remote; the local core's clipboard API is
         // only reachable when this UI is the local shell/browser.
         connection.enableClipboardFileSync(() => get().token)
+        // And the reverse: files copied on the remote can be staged into this
+        // machine's clipboard. The setting is off by default.
+        connection.enableRemoteClipboardSync(
+          () => get().token,
+          get().remoteClipboardFiles,
+        )
       }
 
       if (trimmedToken === '' && !requestAccess) {

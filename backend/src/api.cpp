@@ -34,6 +34,7 @@
 #include "capture/nvenc_av1_encoder.h"
 #endif
 
+#include "clipboard_stage.h"
 #include "config.h"
 #include "discovery.h"
 #include "identity.h"
@@ -184,9 +185,93 @@ uint64_t uptime_ms(uint64_t started) {
   return now > started ? now - started : 0;
 }
 
+int stage_status_code(stage_error error) {
+  switch (error) {
+    case stage_error::unavailable:
+      return 503;
+    case stage_error::bad_request:
+      return 400;
+    case stage_error::not_found:
+      return 404;
+    case stage_error::conflict:
+      return 409;
+    case stage_error::too_large:
+      return 413;
+    case stage_error::io_error:
+      return 500;
+    case stage_error::apply_failed:
+      return 409;
+    case stage_error::none:
+      break;
+  }
+  return 500;
+}
+
+const char* stage_error_code(stage_error error) {
+  switch (error) {
+    case stage_error::unavailable:
+      return "stage_unavailable";
+    case stage_error::bad_request:
+      return "bad_stage_request";
+    case stage_error::not_found:
+      return "unknown_stage";
+    case stage_error::conflict:
+      return "offset_mismatch";
+    case stage_error::too_large:
+      return "file_too_large";
+    case stage_error::io_error:
+      return "stage_io_error";
+    case stage_error::apply_failed:
+      return "clipboard_apply_failed";
+    case stage_error::none:
+      break;
+  }
+  return "stage_failed";
+}
+
+void send_stage_error(uvcpp_web_response& resp, stage_error error) {
+  uvcpp_json body;
+  body["code"] = stage_error_code(error);
+  resp.status(stage_status_code(error)).json(body);
+  resp.end();
+}
+
+/// Strict decimal parse: no sign, no whitespace, no trailing characters.
+bool parse_offset(const std::string& text, uint64_t& value) {
+  if (text.empty()) return false;
+  uint64_t out = 0;
+  for (const char c : text) {
+    if (c < '0' || c > '9') return false;
+    const uint64_t digit = static_cast<uint64_t>(c - '0');
+    if (out > (UINT64_MAX - digit) / 10) return false;
+    out = out * 10 + digit;
+  }
+  value = out;
+  return true;
+}
+
 }  // namespace
 
 void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
+  // Remote clipboard files are downloaded into the config directory first;
+  // only after the whole selection arrived does it become the OS clipboard
+  // (CF_HDROP / text/uri-list). The files stay behind because the clipboard
+  // references them, not because staging needs them.
+  std::string stage_directory;
+  {
+    const std::string config_dir = config_directory();
+    if (!config_dir.empty()) {
+      stage_directory =
+          (std::filesystem::path(config_dir) / "clipboard-inbox").string();
+    }
+  }
+  const auto staging = std::make_shared<clipboard_stage>(
+      stage_directory,
+      [clipboard = deps.clipboard](const std::vector<std::string>& paths) {
+        return clipboard && clipboard->available() &&
+               clipboard->set_files(paths);
+      });
+
   // ---- Remote access gate ---------------------------------------------
   // The listener is always on 0.0.0.0 for hot toggling; a connection accepted
   // before the switch was turned off is still rejected on every request.
@@ -308,7 +393,8 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
       resp.set_header("Access-Control-Allow-Methods",
                       "GET, POST, OPTIONS");
       resp.set_header("Access-Control-Allow-Headers",
-                      "Authorization, Content-Type, X-MoLink-Token");
+                      "Authorization, Content-Type, X-MoLink-Token, "
+                      "X-MoLink-Client");
       resp.set_header("Access-Control-Max-Age", "600");
     }
     resp.set_header("X-Content-Type-Options", "nosniff");
@@ -909,6 +995,154 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
                 .body(data, "application/octet-stream")
                 .end();
           });
+
+  // ---- Remote clipboard files -> this machine's clipboard ---------------
+  // Three loopback-only steps: declare a file, append its bytes in order, then
+  // apply the completed set. A remote web page cannot use these routes; its
+  // requests come from a non-loopback peer and are refused below.
+  app.post("/api/clipboard-stage",
+           [staging](uvcpp_web_request& req, uvcpp_web_response& resp,
+                     uvcpp_web_next) {
+             if (!is_loopback_peer(req.peer_ip())) {
+               resp.status(403).json_str(R"({"code":"loopback_only"})");
+               resp.end();
+               return;
+             }
+             uvcpp_json body;
+             try {
+               body = uvcpp_json::parse(req.body_str());
+             } catch (...) {
+               resp.status(400).json_str(
+                   R"({"code":"bad_stage_request"})");
+               resp.end();
+               return;
+             }
+             if (!body.is_object() || !body.contains("name") ||
+                 !body["name"].is_string() || !body.contains("size") ||
+                 !body["size"].is_number_integer()) {
+               resp.status(400).json_str(
+                   R"({"code":"bad_stage_request"})");
+               resp.end();
+               return;
+             }
+             uint64_t size = 0;
+             try {
+               size = body["size"].get<uint64_t>();
+             } catch (...) {
+               resp.status(400).json_str(
+                   R"({"code":"bad_stage_request"})");
+               resp.end();
+               return;
+             }
+             std::string id;
+             std::string path;
+             const stage_error error =
+                 staging->begin(body["name"].get<std::string>(), size, id,
+                                path);
+             if (error != stage_error::none) {
+               send_stage_error(resp, error);
+               return;
+             }
+             uvcpp_json out;
+             out["id"] = id;
+             out["path"] = path;
+             resp.set_header("Cache-Control", "no-store").json(out);
+             resp.end();
+           });
+
+  app.post("/api/clipboard-stage/:id",
+           [staging](uvcpp_web_request& req, uvcpp_web_response& resp,
+                     uvcpp_web_next) {
+             if (!is_loopback_peer(req.peer_ip())) {
+               resp.status(403).json_str(R"({"code":"loopback_only"})");
+               resp.end();
+               return;
+             }
+             const std::string* id = req.param("id");
+             const std::string* offset_text = req.query("offset");
+             uint64_t offset = 0;
+             if (id == nullptr || id->empty() || offset_text == nullptr ||
+                 !parse_offset(*offset_text, offset)) {
+               resp.status(400).json_str(
+                   R"({"code":"bad_stage_offset"})");
+               resp.end();
+               return;
+             }
+             uint64_t received = 0;
+             const stage_error error =
+                 staging->append(*id, offset, req.body_data(),
+                                 req.body_size(), received);
+             if (error != stage_error::none) {
+               send_stage_error(resp, error);
+               return;
+             }
+             uvcpp_json out;
+             out["ok"] = true;
+             out["received"] = received;
+             resp.set_header("Cache-Control", "no-store").json(out);
+             resp.end();
+           });
+
+  app.post("/api/clipboard-apply",
+           [staging, clipboard = deps.clipboard](
+               uvcpp_web_request& req, uvcpp_web_response& resp,
+               uvcpp_web_next) {
+             if (!is_loopback_peer(req.peer_ip())) {
+               resp.status(403).json_str(R"({"code":"loopback_only"})");
+               resp.end();
+               return;
+             }
+             uvcpp_json body;
+             try {
+               body = uvcpp_json::parse(req.body_str());
+             } catch (...) {
+               resp.status(400).json_str(
+                   R"({"code":"bad_stage_request"})");
+               resp.end();
+               return;
+             }
+             if (!body.is_object() || !body.contains("ids") ||
+                 !body["ids"].is_array()) {
+               resp.status(400).json_str(
+                   R"({"code":"bad_stage_request"})");
+               resp.end();
+               return;
+             }
+             std::vector<std::string> ids;
+             for (const auto& item : body["ids"]) {
+               if (!item.is_string()) {
+                 resp.status(400).json_str(
+                     R"({"code":"bad_stage_request"})");
+                 resp.end();
+                 return;
+               }
+               ids.push_back(item.get<std::string>());
+             }
+             if (ids.empty() || ids.size() > 256) {
+               resp.status(400).json_str(
+                   R"({"code":"bad_stage_request"})");
+               resp.end();
+               return;
+             }
+             std::size_t count = 0;
+             const stage_error error = staging->apply(ids, count);
+             if (error == stage_error::apply_failed &&
+                 (!clipboard || !clipboard->available())) {
+               resp.status(503).json_str(
+                   R"({"code":"clipboard_unavailable"})");
+               resp.end();
+               return;
+             }
+             if (error != stage_error::none) {
+               send_stage_error(resp, error);
+               return;
+             }
+             uvcpp_json out;
+             out["ok"] = true;
+             out["count"] = count;
+             resp.set_header("Cache-Control", "no-store").json(out);
+             resp.end();
+           });
 
   // Voice call control for the person at this machine (the host UI polls).
   app.get("/api/call",

@@ -9,6 +9,7 @@ import {
   FolderOpen,
   Home,
   RefreshCw,
+  Save,
   Upload,
   X,
 } from 'lucide-react'
@@ -21,6 +22,8 @@ import {
   type DragEvent,
 } from 'react'
 import { useTranslation } from 'react-i18next'
+import { coreBaseUrl } from '../lib/api'
+import { clipboardFilesMode } from '../lib/clipboard-local'
 import {
   collectDropEntries,
   onDroppedFiles,
@@ -32,7 +35,20 @@ import type {
   FileMessage,
 } from '../lib/client'
 import type { SessionConnection } from '../lib/session-connection'
-import { acceptDownloadChunk, downloadComplete } from '../lib/download-state'
+import {
+  acceptDownloadChunk,
+  downloadComplete,
+} from '../lib/download-state'
+import {
+  canPickDirectory,
+  canUseFileSystemAccess,
+  isPickerCancellation,
+  maySaveFromButton,
+  mustAbortStream,
+  suggestedFileName,
+  type SaveStrategy,
+} from '../lib/download-save'
+import { useAppStore } from '../store/app'
 
 const downloadTimeoutMs = 30_000
 
@@ -53,11 +69,93 @@ interface UploadItem {
   error?: string
 }
 
+type DownloadPhase = 'waiting' | 'transferring' | 'saving' | 'saved'
+
 interface DownloadItem {
+  key: number
   id: number
   name: string
   size: number
   received: number
+  phase: DownloadPhase
+}
+
+/// A download that finished into memory (the fallback path). It is saved only
+/// when the user presses the button, so `anchor.click()` runs inside a real
+/// user activation instead of the WebSocket callback.
+interface ReadySave {
+  key: number
+  name: string
+  size: number
+  blob: Blob
+}
+
+/// One queued download. The picker is opened synchronously from the click, so
+/// `target` is already pending before the transfer starts; the bytes flow only
+/// after `createWritable()` resolved.
+interface DownloadJob {
+  key: number
+  path: string
+  name: string
+  strategy: SaveStrategy
+  target: Promise<FileSystemWritableFileStream> | null
+  writable: FileSystemWritableFileStream | null
+  /// True between sending `request` and the host's `sending` answer. Only
+  /// this job may adopt that answer; another subsystem's transfer in flight
+  /// (remote clipboard staging) must not be mistaken for it.
+  requesting: boolean
+  id: number
+  size: number
+  received: number
+  eofSeen: boolean
+  cancelled: boolean
+  finishing: boolean
+  committed: boolean
+  chunks: Uint8Array[]
+  writeChain: Promise<void>
+  writeError: unknown
+  timer: number
+}
+
+/// Opens the save dialog while the click's transient activation is still
+/// live. The returned promise must not be awaited before `startDownload`
+/// returns, or Chrome rejects it with "must be handling a user gesture".
+function pickSaveTarget(name: string): {
+  strategy: SaveStrategy
+  target: Promise<FileSystemWritableFileStream> | null
+} {
+  if (!canUseFileSystemAccess(window)) return { strategy: 'button', target: null }
+  try {
+    const handle = window.showSaveFilePicker!({ suggestedName: name })
+    return {
+      strategy: 'picker',
+      target: handle.then((file) => file.createWritable()),
+    }
+  } catch {
+    // Missing activation or a browser that exposes the function but refuses
+    // it for this origin: fall back to the in-memory path.
+    return { strategy: 'button', target: null }
+  }
+}
+
+/// "Receive all" gets one directory choice instead of one dialog per file.
+/// Without a directory picker the files stay in memory and each gets a Save
+/// button; opening several save dialogs from one click is worse than that.
+function pickDirectoryTargets(
+  names: string[],
+): Promise<FileSystemWritableFileStream>[] | null {
+  if (!canPickDirectory(window) || names.length === 0) return null
+  try {
+    const directory = window.showDirectoryPicker!({ mode: 'readwrite' })
+    return names.map((name) =>
+      directory.then(async (dir) => {
+        const handle = await dir.getFileHandle(name, { create: true })
+        return handle.createWritable()
+      }),
+    )
+  } catch {
+    return null
+  }
 }
 
 function formatSize(bytes: number): string {
@@ -132,10 +230,19 @@ export function FileTransferPanel({
     entries: FileEntry[]
   } | null>(null)
   const [download, setDownload] = useState<DownloadItem | null>(null)
+  const [saveReady, setSaveReady] = useState<ReadySave[]>([])
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [clipboardFiles, setClipboardFiles] = useState<ClipboardFileEntry[]>([])
   const [clipboardNote, setClipboardNote] = useState<string | null>(null)
+  const localMode = useAppStore((state) => state.localMode)
+  const autoClipboardFiles = useAppStore((state) => state.remoteClipboardFiles)
+  const clipboardMode = clipboardFilesMode(
+    localMode,
+    window.location.origin,
+    coreBaseUrl(),
+    autoClipboardFiles,
+  )
   /// The breadcrumb turned into a text field (double click); a path that does
   /// not exist leaves the previous listing untouched and shows the error.
   const [editingPath, setEditingPath] = useState(false)
@@ -158,69 +265,250 @@ export function FileTransferPanel({
     destRef.current = dest
   }, [dest])
   const connectionRef = useRef<SessionConnection | null>(connection)
-  const downloadRef = useRef<{
-    id: number
-    name: string
-    size: number
-    received: number
-    eofSeen: boolean
-    chunks: Uint8Array[]
-    timer: number
-  } | null>(null)
+  const downloadRef = useRef<DownloadJob | null>(null)
+  const downloadQueue = useRef<DownloadJob[]>([])
+  /// `finishDownload` and the pump call each other; these refs break the
+  /// useCallback dependency cycle while keeping one stable listener.
+  const finishDownloadRef = useRef<(job: DownloadJob, failure?: string) => void>(
+    () => undefined,
+  )
+  const pumpDownloadsRef = useRef<() => void>(() => undefined)
+  const savedTimer = useRef<number | null>(null)
   const nextKey = useRef(1)
   const lastPaint = useRef(0)
   const inputRef = useRef<HTMLInputElement>(null)
-  const downloadQueue = useRef<string[]>([])
 
-  const startDownload = useCallback((path: string) => {
-    if (!path) return
-    if (downloadRef.current) {
-      downloadQueue.current.push(path)
-      return
-    }
-    connectionRef.current?.sendFileAction('request', { path })
+  const clearSavedSoon = useCallback((key: number) => {
+    if (savedTimer.current !== null) window.clearTimeout(savedTimer.current)
+    savedTimer.current = window.setTimeout(() => {
+      savedTimer.current = null
+      setDownload((current) => (current?.key === key ? null : current))
+    }, 2_500)
   }, [])
-
-  const nextDownload = useCallback(() => {
-    const next = downloadQueue.current.shift()
-    if (next) {
-      connectionRef.current?.sendFileAction('request', { path: next })
-      return true
-    }
-    return false
-  }, [])
-
-  const finishDownload = useCallback((failure?: string) => {
-    const current = downloadRef.current
-    if (!current) return
-    window.clearTimeout(current.timer)
-    downloadRef.current = null
-    setDownload(null)
-    if (failure !== undefined) {
-      setError(failure)
-      connectionRef.current?.sendFileAction('cancel', { id: current.id })
-    } else {
-      const blob = new Blob(current.chunks as BlobPart[])
-      const url = URL.createObjectURL(blob)
-      const anchor = document.createElement('a')
-      anchor.href = url
-      anchor.download = current.name
-      document.body.appendChild(anchor)
-      anchor.click()
-      anchor.remove()
-      window.setTimeout(() => URL.revokeObjectURL(url), 30_000)
-    }
-    nextDownload()
-  }, [nextDownload])
 
   const armDownloadTimeout = useCallback(() => {
-    const current = downloadRef.current
-    if (!current) return
-    window.clearTimeout(current.timer)
-    current.timer = window.setTimeout(() => {
-      if (downloadRef.current === current) finishDownload(t('files.incomplete'))
+    const job = downloadRef.current
+    if (!job) return
+    window.clearTimeout(job.timer)
+    job.timer = window.setTimeout(() => {
+      if (downloadRef.current === job) {
+        finishDownloadRef.current(job, t('files.incomplete'))
+      }
     }, downloadTimeoutMs)
-  }, [finishDownload, t])
+  }, [t])
+
+  /// Ends the active job. Success commits a streamed writable or hands the
+  /// Blob to the Save button; failure always aborts a streamed writable so no
+  /// half file is left behind.
+  const finishDownload = useCallback(
+    (job: DownloadJob, failure?: string) => {
+      if (job.finishing) return
+      job.finishing = true
+      window.clearTimeout(job.timer)
+      if (downloadRef.current === job) downloadRef.current = null
+
+      const finish = async () => {
+        if (failure !== undefined) {
+          if (mustAbortStream(job.strategy, job.committed) && job.writable) {
+            try {
+              await job.writable.abort()
+            } catch {
+              // The stream may already be closed by a failed write.
+            }
+          }
+          // Release the host's fixed download slot now instead of waiting for
+          // its idle reclaim.
+          if (job.id !== 0) {
+            connectionRef.current?.sendFileAction('cancel', { id: job.id })
+          }
+          setError(failure)
+          setDownload(null)
+        } else if (job.strategy === 'picker' && job.writable) {
+          setDownload((current) =>
+            current?.key === job.key
+              ? { ...current, phase: 'saving' }
+              : current,
+          )
+          try {
+            await job.writeChain
+            if (job.writeError !== undefined) throw job.writeError
+            await job.writable.close()
+            job.committed = true
+            setDownload((current) =>
+              current?.key === job.key
+                ? { ...current, phase: 'saved' }
+                : current,
+            )
+            clearSavedSoon(job.key)
+          } catch {
+            if (mustAbortStream(job.strategy, job.committed)) {
+              try {
+                await job.writable.abort()
+              } catch {
+                // Already closed.
+              }
+            }
+            setError(t('files.saveFailed'))
+            setDownload(null)
+          }
+        } else if (maySaveFromButton(job.strategy, job, false)) {
+          // No picker: keep the bytes in memory and let a click save them.
+          const blob = new Blob(job.chunks as BlobPart[])
+          setSaveReady((current) => [
+            ...current.slice(-7),
+            { key: job.key, name: job.name, size: job.size, blob },
+          ])
+          setDownload(null)
+        } else {
+          setError(t('files.incomplete'))
+          setDownload(null)
+        }
+        pumpDownloadsRef.current()
+      }
+      void finish()
+    },
+    [clearSavedSoon, t],
+  )
+  finishDownloadRef.current = finishDownload
+
+  /// Opens a picker immediately (still inside the click), then starts the
+  /// request once the writable exists. A cancelled picker never opens a host
+  /// transfer at all.
+  const pumpDownloads = useCallback(() => {
+    if (downloadRef.current) return
+    const job = downloadQueue.current.shift()
+    if (!job) return
+    downloadRef.current = job
+
+    const start = async () => {
+      if (job.target) {
+        try {
+          job.writable = await job.target
+        } catch (pickError) {
+          if (isPickerCancellation(pickError)) {
+            job.cancelled = true
+            job.finishing = true
+            window.clearTimeout(job.timer)
+            if (downloadRef.current === job) downloadRef.current = null
+            setDownload(null)
+            pumpDownloadsRef.current()
+            return
+          }
+          // The API exists but this origin/permission refused it; the memory
+          // path still delivers the file.
+          job.strategy = 'button'
+          job.target = null
+        }
+      }
+      if (job.cancelled || downloadRef.current !== job) {
+        if (job.writable) {
+          try {
+            await job.writable.abort()
+          } catch {
+            // Nothing was committed.
+          }
+        }
+        return
+      }
+      setDownload({
+        key: job.key,
+        id: 0,
+        name: job.name,
+        size: job.size,
+        received: 0,
+        phase: 'waiting',
+      })
+      job.requesting = true
+      connectionRef.current?.sendFileAction('request', { path: job.path })
+      armDownloadTimeout()
+    }
+    void start()
+  }, [armDownloadTimeout])
+  pumpDownloadsRef.current = pumpDownloads
+
+  const queueDownload = useCallback(
+    (
+      path: string,
+      name: string,
+      pick: {
+        strategy: SaveStrategy
+        target: Promise<FileSystemWritableFileStream> | null
+      },
+    ) => {
+      if (!path) return
+      const key = nextKey.current++
+      downloadQueue.current.push({
+        key,
+        path,
+        name,
+        strategy: pick.strategy,
+        target: pick.target,
+        writable: null,
+        requesting: false,
+        id: 0,
+        size: 0,
+        received: 0,
+        eofSeen: false,
+        cancelled: false,
+        finishing: false,
+        committed: false,
+        chunks: [],
+        writeChain: Promise.resolve(),
+        writeError: undefined,
+        timer: 0,
+      })
+      pumpDownloadsRef.current()
+    },
+    [],
+  )
+
+  const startDownload = useCallback(
+    (path: string, name?: string) => {
+      if (!path) return
+      const suggested = suggestedFileName(name ?? '', path)
+      // Must happen in the click handler: the picker needs user activation.
+      queueDownload(path, suggested, pickSaveTarget(suggested))
+    },
+    [queueDownload],
+  )
+
+  /// "Receive all": one directory choice for the whole batch when available.
+  /// Otherwise every file takes the in-memory path and gets its own Save
+  /// button, because several save dialogs from one click are blocked.
+  const startDownloadAll = useCallback(
+    (files: Array<{ path: string; name: string }>) => {
+      if (files.length === 0) return
+      const names = files.map((file) =>
+        suggestedFileName(file.name, file.path),
+      )
+      const targets = pickDirectoryTargets(names)
+      files.forEach((file, index) => {
+        const suggested = names[index]!
+        queueDownload(
+          file.path,
+          suggested,
+          targets
+            ? { strategy: 'picker', target: targets[index]! }
+            : { strategy: 'button', target: null },
+        )
+      })
+    },
+    [queueDownload],
+  )
+
+  const saveReadyFile = (item: ReadySave) => {
+    // Runs from the button's click: the download is user-confirmed even
+    // though the bytes arrived earlier.
+    const url = URL.createObjectURL(item.blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = suggestedFileName(item.name, item.name)
+    document.body.appendChild(anchor)
+    anchor.click()
+    anchor.remove()
+    window.setTimeout(() => URL.revokeObjectURL(url), 30_000)
+    setSaveReady((current) => current.filter((entry) => entry.key !== item.key))
+  }
 
   useEffect(() => {
     connectionRef.current = connection
@@ -228,14 +516,33 @@ export function FileTransferPanel({
       const current = downloadRef.current
       if (current) {
         window.clearTimeout(current.timer)
-        // Unmounting or switching sessions abandons the transfer. Tell the
-        // host so its fixed download slot is released now; without this the
-        // slot lingers until the host's idle reclaim.
-        connection?.sendFileAction('cancel', { id: current.id })
+        current.cancelled = true
+        // Unmounting or switching sessions abandons the transfer. Abort the
+        // writable (leaving a half file would otherwise be committed) and
+        // tell the host so its fixed download slot is released now.
+        if (mustAbortStream(current.strategy, current.committed) &&
+            current.writable) {
+          void current.writable.abort().catch(() => undefined)
+        }
+        if (current.id !== 0) {
+          connection?.sendFileAction('cancel', { id: current.id })
+        }
+      }
+      for (const queued of downloadQueue.current) {
+        queued.cancelled = true
+        if (queued.target) {
+          void queued.target
+            .then((writable) => writable.abort())
+            .catch(() => undefined)
+        }
       }
       downloadRef.current = null
       downloadQueue.current = []
       connectionRef.current = null
+      if (savedTimer.current !== null) {
+        window.clearTimeout(savedTimer.current)
+        savedTimer.current = null
+      }
     }
   }, [connection])
 
@@ -360,43 +667,55 @@ export function FileTransferPanel({
           }
           break
         case 'sending': {
+          const job = downloadRef.current
+          // Only an answer to this panel's own outstanding request may be
+          // adopted. Remote-clipboard staging uses the same channel.
+          if (!job || !job.requesting || job.id !== 0) return
+          job.requesting = false
           const size = message.size
           if (message.ok === false || !message.id || typeof size !== 'number' ||
               !Number.isSafeInteger(size) || size < 0) {
-            setError(message.message ?? t('files.error'))
-            nextDownload()
+            finishDownload(job, message.message ?? t('files.error'))
             return
           }
-          if (downloadRef.current) return
+          job.id = message.id
+          job.size = size
+          job.name = suggestedFileName(message.name ?? '', job.name)
           setError(null)
-          downloadRef.current = {
-            id: message.id,
-            name: message.name ?? 'file',
-            size: message.size ?? 0,
-            received: 0,
-            eofSeen: false,
-            chunks: [],
-            timer: 0,
-          }
           armDownloadTimeout()
           setDownload({
-            id: message.id,
-            name: message.name ?? 'file',
-            size: message.size ?? 0,
+            key: job.key,
+            id: job.id,
+            name: job.name,
+            size: job.size,
             received: 0,
+            phase: 'transferring',
           })
-          connectionRef.current?.sendFileAction('pull', { id: message.id })
+          connectionRef.current?.sendFileAction('pull', { id: job.id })
           break
         }
         case 'eof': {
-          const current = downloadRef.current
-          if (!current || (message.id && current.id !== message.id)) return
+          const job = downloadRef.current
+          if (!job || (message.id && job.id !== message.id)) return
           if (message.ok === false) {
-            finishDownload(message.message ?? t('files.error'))
+            finishDownload(job, message.message ?? t('files.error'))
             break
           }
-          current.eofSeen = true
-          if (downloadComplete(current)) finishDownload()
+          job.eofSeen = true
+          // The final chunk's write may still be queued. Decide only after it
+          // settles, so a short file is never committed.
+          void job.writeChain.then(() => {
+            if (job.cancelled || job.finishing) return
+            if (job.writeError !== undefined) {
+              finishDownloadRef.current(job, t('files.saveFailed'))
+              return
+            }
+            if (!downloadComplete(job)) {
+              finishDownloadRef.current(job, t('files.incomplete'))
+              return
+            }
+            finishDownloadRef.current(job)
+          })
           break
         }
         case 'clipboard':
@@ -413,15 +732,20 @@ export function FileTransferPanel({
           if (message.id && activeRef.current?.id === message.id) {
             finishActive('error', undefined, t('files.cancelled'))
           }
+          if (message.id && downloadRef.current?.id === message.id) {
+            const job = downloadRef.current
+            if (job) finishDownload(job, t('files.cancelled'))
+          }
           break
         case 'error':
           setError(message.message ?? t('files.error'))
-          if (
-            downloadRef.current &&
-            (!message.id || message.id === downloadRef.current.id)
-          ) {
-            finishDownload(message.message ?? t('files.error'))
-            break
+          {
+            const job = downloadRef.current
+            if (job && (job.requesting || !message.id ||
+                        message.id === job.id)) {
+              finishDownload(job, message.message ?? t('files.error'))
+              break
+            }
           }
           if (message.id) finishActive('error', undefined, message.message)
           break
@@ -429,7 +753,7 @@ export function FileTransferPanel({
           break
       }
     },
-    [armDownloadTimeout, finishActive, finishDownload, nextDownload, sendChunks, t],
+    [armDownloadTimeout, finishActive, finishDownload, sendChunks, t],
   )
 
   useEffect(() => {
@@ -444,29 +768,61 @@ export function FileTransferPanel({
         return
       }
       if (event.kind !== 'file-chunk') return
-      const current = downloadRef.current
-      if (!current || current.id !== event.id) return
-      if (!acceptDownloadChunk(current, event.offset, event.data.byteLength)) {
-        finishDownload(t('files.incomplete'))
+      const job = downloadRef.current
+      if (!job || job.id !== event.id) return
+      if (!acceptDownloadChunk(job, event.offset, event.data.byteLength)) {
+        finishDownloadRef.current(job, t('files.incomplete'))
         return
       }
-      current.chunks.push(event.data)
-      if (downloadComplete(current)) {
-        finishDownload()
-        return
+      if (job.writable) {
+        // Stream straight to disk, keeping the stream writes ordered. The
+        // next pull is sent only after the write settles, so a slow disk
+        // does not queue an unbounded amount of data in memory.
+        // Copy into a plain ArrayBuffer: the socket buffer may be reused, and
+        // FileSystemWritableFileStream rejects a SharedArrayBuffer-backed view.
+        const chunk = new Uint8Array(event.data).buffer
+        job.writeChain = job.writeChain.then(async () => {
+          if (job.cancelled) return
+          try {
+            await job.writable!.write(chunk)
+          } catch (error) {
+            job.writeError = error
+          }
+        })
+      } else {
+        job.chunks.push(event.data)
       }
       armDownloadTimeout()
       setDownload({
-        id: current.id,
-        name: current.name,
-        size: current.size,
-        received: current.received,
+        key: job.key,
+        id: job.id,
+        name: job.name,
+        size: job.size,
+        received: job.received,
+        phase: 'transferring',
       })
-      if (current.received < current.size && !current.eofSeen) {
-        connectionRef.current?.sendFileAction('pull', { id: current.id })
-      }
+      void job.writeChain.then(() => {
+        if (job.cancelled || job.finishing) return
+        if (job.writeError !== undefined) {
+          finishDownloadRef.current(job, t('files.saveFailed'))
+          return
+        }
+        if (downloadComplete(job)) {
+          finishDownloadRef.current(job)
+          return
+        }
+        if (job.eofSeen) {
+          finishDownloadRef.current(job, t('files.incomplete'))
+          return
+        }
+        // The last chunk already sets received === size; pulling again would
+        // hit a host transfer that has been erased.
+        if (job.received < job.size) {
+          connectionRef.current?.sendFileAction('pull', { id: job.id })
+        }
+      })
     })
-  }, [armDownloadTimeout, connection, finishDownload, handleMessage, t])
+  }, [armDownloadTimeout, connection, handleMessage, t])
 
   const browse = (path: string) => {
     setLoading(true)
@@ -843,23 +1199,25 @@ export function FileTransferPanel({
                 </span>
                 <button
                   type="button"
-                  onClick={() => {
-                    for (const file of clipboardFiles) startDownload(file.path)
-                  }}
+                  onClick={() => startDownloadAll(clipboardFiles)}
                   className="btn ml-auto h-6 px-2 text-[10px]"
                 >
                   {t('files.receiveAll')}
                 </button>
               </div>
               <div className="mt-1 text-[10px] leading-relaxed text-muted">
-                {t('files.clipboardHint')}
+                {clipboardMode === 'local-app'
+                  ? t('files.clipboardLocalApp')
+                  : clipboardMode === 'auto'
+                    ? t('files.clipboardAuto')
+                    : t('files.clipboardHint')}
               </div>
               <ul className="mt-1.5 max-h-28 space-y-0.5 overflow-y-auto">
                 {clipboardFiles.map((file) => (
                   <li key={file.path}>
                     <button
                       type="button"
-                      onClick={() => startDownload(file.path)}
+                      onClick={() => startDownload(file.path, file.name)}
                       className="flex w-full items-center gap-2 rounded-md px-1.5 py-1 text-left transition hover:bg-panel/60"
                     >
                       <FileIcon size={12} className="shrink-0 text-muted" />
@@ -884,7 +1242,11 @@ export function FileTransferPanel({
                   {download.name}
                 </span>
                 <span className="text-[10px] text-muted">
-                  {formatSize(download.received)} / {formatSize(download.size)}
+                  {download.phase === 'saved'
+                    ? t('files.saved')
+                    : download.phase === 'saving'
+                      ? t('files.saving')
+                      : `${formatSize(download.received)} / ${formatSize(download.size)}`}
                 </span>
               </div>
               <div className="mt-1 h-1 overflow-hidden rounded-full bg-line">
@@ -892,18 +1254,63 @@ export function FileTransferPanel({
                   className="h-full rounded-full bg-accent transition-all"
                   style={{
                     width: `${
-                      download.size > 0
-                        ? Math.min(
-                            100,
-                            Math.round(
-                              (download.received / download.size) * 100,
-                            ),
-                          )
-                        : 0
+                      download.phase === 'saved'
+                        ? 100
+                        : download.size > 0
+                          ? Math.min(
+                              100,
+                              Math.round(
+                                (download.received / download.size) * 100,
+                              ),
+                            )
+                          : 0
                     }%`,
                   }}
                 />
               </div>
+            </div>
+          ) : null}
+
+          {saveReady.length > 0 ? (
+            <div className="mx-2 mt-2 space-y-1">
+              {saveReady.map((item) => (
+                <div
+                  key={item.key}
+                  className="flex items-center gap-2 rounded-lg border border-line bg-panel/70 px-2.5 py-1.5"
+                >
+                  <FileIcon size={13} className="shrink-0 text-muted" />
+                  <span
+                    className="min-w-0 flex-1 truncate text-[11px] text-ink"
+                    title={item.name}
+                  >
+                    {item.name}
+                  </span>
+                  <span className="shrink-0 text-[9px] text-muted">
+                    {formatSize(item.size)}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => saveReadyFile(item)}
+                    className="btn btn-primary h-6 gap-1 px-2 text-[10px]"
+                  >
+                    <Save size={11} />
+                    {t('files.save')}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setSaveReady((current) =>
+                        current.filter((entry) => entry.key !== item.key),
+                      )
+                    }
+                    className="grid h-6 w-6 shrink-0 place-items-center rounded text-muted transition hover:bg-panel hover:text-ink"
+                    aria-label={t('files.dismiss')}
+                    title={t('files.dismiss')}
+                  >
+                    <X size={11} />
+                  </button>
+                </div>
+              ))}
             </div>
           ) : null}
 
@@ -928,7 +1335,7 @@ export function FileTransferPanel({
                         if (entry.dir) {
                           browse(path)
                         } else {
-                          startDownload(path)
+                          startDownload(path, entry.name)
                         }
                       }}
                       className="flex min-w-0 flex-1 items-center gap-2 rounded-lg px-2 py-1.5 text-left transition hover:bg-panel"
@@ -949,7 +1356,8 @@ export function FileTransferPanel({
                       <button
                         type="button"
                         onClick={() =>
-                          listing && startDownload(joinPath(listing.path, entry.name))
+                          listing &&
+                          startDownload(joinPath(listing.path, entry.name), entry.name)
                         }
                         className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-muted opacity-0 transition hover:bg-panel hover:text-accent group-hover:opacity-100"
                         aria-label={t('files.download')}

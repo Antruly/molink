@@ -1,6 +1,7 @@
 import {
   Activity,
   Check,
+  ClipboardCopy,
   Cpu,
   Gauge,
   Languages,
@@ -572,6 +573,13 @@ export function PreferencesControls({
   const setQuality = useAppStore((state) => state.setQualityWatermark)
   const autoAudio = useAppStore((state) => state.autoAudio)
   const setAutoAudio = useAppStore((state) => state.setAutoAudio)
+  const remoteClipboardFiles = useAppStore(
+    (state) => state.remoteClipboardFiles,
+  )
+  const setRemoteClipboardFiles = useAppStore(
+    (state) => state.setRemoteClipboardFiles,
+  )
+  const localMode = useAppStore((state) => state.localMode)
   const qualityMode = useAppStore((state) => state.qualityMode)
   const setQualityMode = useAppStore((state) => state.setQualityMode)
   const frameRate = useAppStore((state) => state.frameRate)
@@ -699,6 +707,25 @@ export function PreferencesControls({
               label={t('settings.autoAudio')}
             />
           </div>
+
+          {localMode ? (
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <div className="flex items-center gap-2 text-[12px] font-medium text-ink">
+                  <ClipboardCopy size={14} className="text-accent" />
+                  {t('settings.remoteClipboardFiles')}
+                </div>
+                <div className="mt-1 text-[11px] leading-relaxed text-muted">
+                  {t('settings.remoteClipboardFilesHint')}
+                </div>
+              </div>
+              <Toggle
+                checked={remoteClipboardFiles}
+                onChange={setRemoteClipboardFiles}
+                label={t('settings.remoteClipboardFiles')}
+              />
+            </div>
+          ) : null}
 
           <div className="space-y-2">
             <div className="flex items-center gap-2 text-[12px] font-medium text-ink">

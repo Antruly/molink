@@ -672,6 +672,69 @@ export async function fetchClipboardFile(
   return response.arrayBuffer()
 }
 
+/// One staged remote file. `path` is the final path it will have once applied;
+/// the bytes live in a private temp file until then.
+export interface StagedClipboardFile {
+  id: string
+  path: string
+}
+
+/// Declare a file that is about to be downloaded into the local staging area.
+/// Loopback only: the core refuses a remote page.
+export function stageClipboardFile(
+  token: string,
+  name: string,
+  size: number,
+): Promise<StagedClipboardFile> {
+  return request<StagedClipboardFile>(
+    '/api/clipboard-stage',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, size }),
+    },
+    token,
+  )
+}
+
+/// Append one contiguous chunk. The core answers 409 when `offset` is not the
+/// number of bytes already received and 413 when the chunk crosses the
+/// declared size.
+export function appendClipboardStage(
+  token: string,
+  id: string,
+  offset: number,
+  data: Uint8Array,
+): Promise<void> {
+  return request<void>(
+    `/api/clipboard-stage/${encodeURIComponent(id)}?offset=${offset}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      // Copy into an ArrayBuffer so fetch does not see a possibly shared
+      // backing store (Fetch BodyInit rejects SharedArrayBuffer views).
+      body: new Uint8Array(data).buffer,
+    },
+    token,
+  )
+}
+
+/// After every file is complete, hand the ordered ids to the local clipboard.
+export function applyClipboardStage(
+  token: string,
+  ids: string[],
+): Promise<{ ok: boolean; count: number }> {
+  return request<{ ok: boolean; count: number }>(
+    '/api/clipboard-apply',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids }),
+    },
+    token,
+  )
+}
+
 export interface CallState {
   state: 'idle' | 'ringing' | 'active'
   started_ms: number

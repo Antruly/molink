@@ -64,7 +64,12 @@ export class ClipboardFileSync {
       if (Date.now() - this.lastAttempt < RETRY_DELAY_MS) return
       this.lastAttempt = Date.now()
       const total = files.reduce((sum, file) => sum + file.size, 0)
-      if (total > MAX_CLIPBOARD_BYTES) {
+      // The local core caps one /api/clipboard-file response at 256 MiB, and
+      // the whole selection is fetched into memory, so check both. Without
+      // the per-file check a single oversized file made the poll retry the
+      // same 413 every few seconds instead of reporting it once.
+      if (total > MAX_CLIPBOARD_BYTES ||
+          files.some((file) => file.size > MAX_CLIPBOARD_BYTES)) {
         this.onError('clipboard_files_too_large')
         this.lastKey = key
         return

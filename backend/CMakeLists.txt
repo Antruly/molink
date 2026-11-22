@@ -221,6 +221,7 @@ set(MOLINK_CORE_SOURCES
   src/surface/surface_compositor.cpp
   src/clipboard/x11_clipboard.cpp
   src/clipboard/windows_clipboard.cpp
+  src/clipboard_stage.cpp
   src/access_requests.cpp
   src/auth_state.cpp
   src/compression.cpp
@@ -689,6 +690,18 @@ set_target_properties(molink-core-frame-budget-test PROPERTIES
 add_test(NAME frame_budget COMMAND molink-core-frame-budget-test)
 
 # Box averaging for large tile strips: pure pixel arithmetic.
+# Clipboard staging for "remote file -> local clipboard": file naming, offset
+# rules and the apply call. No libuvcpp or clipboard backend is linked; the
+# test supplies a fake clipboard_service.
+add_executable(molink-core-clipboard-stage-test
+  tests/clipboard_stage_test.cpp
+  src/clipboard_stage.cpp
+)
+target_include_directories(molink-core-clipboard-stage-test PRIVATE src)
+set_target_properties(molink-core-clipboard-stage-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME clipboard_stage COMMAND molink-core-clipboard-stage-test)
+
 add_executable(molink-core-tile-scale-test
   tests/tile_scale_test.cpp
 )

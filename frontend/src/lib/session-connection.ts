@@ -12,6 +12,7 @@ import { FrameFlag } from './protocol'
 import { logDiag } from './diag-log'
 import { PcmPlayer } from './audio'
 import { ClipboardFileSync } from './clipboard-sync'
+import { RemoteClipboardSync } from './remote-clipboard'
 import {
   applyFrameToSession,
   applyStreamFrameToSession,
@@ -145,6 +146,10 @@ export class SessionConnection {
   private fileSync: ClipboardFileSync | null = null
   private fileSyncTimer: number | null = null
   private fileSyncPaused = false
+  /// Remote clipboard files -> this machine's clipboard. Only created when
+  /// this page belongs to the local core; a remote browser has no loopback
+  /// route to the staging APIs.
+  private remoteClipboard: RemoteClipboardSync | null = null
   /// The last time frame metadata was pushed into the store, and its shape.
   /// The canvas repaints from session-repaint.ts; React only needs the frame
   /// for sizes/codec labels and the stats panel, so updating it per wire frame
@@ -478,7 +483,25 @@ export class SessionConnection {
         this.sink.onClipboard(text)
       },
       onSessionEvent: (event: SessionEvent) => {
-        if (event.kind === 'file') this.fileSync?.handleMessage(event.message)
+        if (event.kind === 'file') {
+          this.fileSync?.handleMessage(event.message)
+          // The remote clipboard staging owns some transfers on this same
+          // channel. A message it started must not reach the files panel,
+          // which would otherwise add it to its download state.
+          if (this.remoteClipboard?.handleMessage(event.message) === true) {
+            return
+          }
+        }
+        if (event.kind === 'file-chunk') {
+          if (this.remoteClipboard?.handleChunk(
+            event.id, event.offset, event.data,
+          ) === true) {
+            return
+          }
+        }
+        if (event.kind === 'clipboard-files') {
+          this.remoteClipboard?.handleFiles(event.files)
+        }
         if (event.kind === 'audio') {
           this.lastAudioAt = performance.now()
           this.player?.push(event.data)
@@ -522,10 +545,46 @@ export class SessionConnection {
     )
   }
 
-  /// The files panel uploads through the same ids; pause the automatic
-  /// clipboard sync while it is open so the two cannot race.
+  /// Remote files copied on the host, downloaded into the local core's
+  /// staging area and applied to this machine's clipboard. Only called when
+  /// the page and the core are on the same machine (localMode), and only takes
+  /// effect when the user enabled the setting.
+  enableRemoteClipboardSync(
+    token: () => string,
+    enabled: boolean,
+  ): void {
+    if (this.remoteClipboard !== null) {
+      this.remoteClipboard.setEnabled(enabled)
+      return
+    }
+    this.remoteClipboard = new RemoteClipboardSync(
+      () => this,
+      token,
+      (message) => {
+        logDiag('warn', 'clipboard.remote', message, {
+          target: this.target || undefined,
+        })
+        this.sink.onPatch({ error: message, errorCode: null })
+      },
+      (count) => {
+        logDiag('info', 'clipboard.remote', `applied ${count} file(s)`, {
+          target: this.target || undefined,
+        })
+      },
+    )
+    this.remoteClipboard.setEnabled(enabled)
+  }
+
+  setRemoteClipboardEnabled(enabled: boolean): void {
+    this.remoteClipboard?.setEnabled(enabled)
+  }
+
+  /// The files panel uploads through the same ids, and its downloads use the
+  /// same `sending`/`eof` messages; pause both automatic clipboard syncs while
+  /// it is open so the consumers cannot race.
   setFilePanelOpen(open: boolean): void {
     this.fileSyncPaused = open
+    this.remoteClipboard?.setPaused(open)
   }
 
   /// Files dropped onto the remote picture: upload them, put them on the
@@ -563,6 +622,7 @@ export class SessionConnection {
       this.fileSyncTimer = null
     }
     this.fileSync?.reset()
+    this.remoteClipboard?.reset()
   }
 
   /// Once a second, tell the host how this viewer is actually doing. The host
