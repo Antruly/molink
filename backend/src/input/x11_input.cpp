@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "util.h"
+#include "input/key_alias.h"
 
 namespace molink {
 namespace {
@@ -36,7 +37,8 @@ bool starts_with(const std::string& s, const char* prefix) {
 /// Map a browser KeyboardEvent.code to an X keysym name. The browser sends the
 /// physical key, so the base (unshifted) symbol is correct: modifiers are
 /// injected as separate key events, and the X server applies them.
-std::string keysym_name(const std::string& code) {
+std::string keysym_name(const std::string& raw_code) {
+  const std::string code = canonical_key_code(raw_code);
   if (code.size() == 4 && starts_with(code, "Key")) {
     return std::string(1, static_cast<char>(code[3] - 'A' + 'a'));
   }

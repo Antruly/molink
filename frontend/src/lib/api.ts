@@ -817,6 +817,31 @@ export function saveAvatar(token: string, avatar: string): Promise<{ avatar: str
   )
 }
 
+export interface FsEntry {
+  name: string
+  dir: boolean
+  size: number
+}
+
+/// A folder listing from the *local* core (`/api/fs/list`). It exists so the
+/// desktop client can navigate a path typed by hand, which the browser's File
+/// System Access API cannot do. Only valid when `/api/state` reported
+/// `local: true`; a remote page must never call it.
+export interface FsListing {
+  path: string
+  root: string
+  parent: string
+  entries: FsEntry[]
+}
+
+export function fetchLocalDirectory(
+  token: string,
+  path: string,
+): Promise<FsListing> {
+  const query = new URLSearchParams({ path })
+  return request<FsListing>(`/api/fs/list?${query.toString()}`, {}, token)
+}
+
 /// Ask the directory to join a shared code, or to issue a fresh one for this
 /// device (which revokes the code it owned).
 export function postDomain(

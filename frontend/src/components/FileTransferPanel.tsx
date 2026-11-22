@@ -25,7 +25,7 @@ import {
 } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { TFunction } from 'i18next'
-import { coreBaseUrl } from '../lib/api'
+import { coreBaseUrl, fetchLocalDirectory, type FsEntry } from '../lib/api'
 import { clipboardFilesMode } from '../lib/clipboard-local'
 import {
   collectDropEntries,
@@ -48,6 +48,7 @@ import {
   isPickerCancellation,
   maySaveFromButton,
   suggestedFileName,
+  supportsDirectoryInput,
   type SaveStrategy,
 } from '../lib/download-save'
 import {
@@ -59,6 +60,7 @@ import {
   localEntriesAt,
   normalizeRelativePath,
   relativeUnder,
+  resolveRemotePath,
   safeTargetSegments,
   sourceFromInputFiles,
   summarizeTask,
@@ -126,6 +128,19 @@ function parentPath(path: string, root: string): string {
   return parent
 }
 
+/// A path the user intends as an absolute home path rather than a subfolder
+/// of the currently picked source: POSIX `/x`, Windows `C:\x`, UNC `\\x`, or
+/// a `~`-relative home path.
+function looksAbsolutePath(text: string): boolean {
+  return (
+    text === '~' ||
+    /^~[\\/]/.test(text) ||
+    text.startsWith('/') ||
+    /^[\\/]{2}/.test(text) ||
+    /^[A-Za-z]:[\\/]/.test(text)
+  )
+}
+
 function errorText(error: unknown): string {
   if (error instanceof Error && error.message !== '') return error.message
   return typeof error === 'string' ? error : ''
@@ -163,6 +178,14 @@ type LocalSource =
       files: LocalFile[]
       dirs: string[]
       label: string
+    }
+  | {
+      /// A folder listed by the local core (`/api/fs/list`). The browser can
+      /// navigate it but cannot read its files, so uploads still need a picker.
+      kind: 'fs'
+      path: string
+      parent: string
+      root: string
     }
 
 interface HandleEntry {
@@ -427,6 +450,7 @@ export function FileTransferPanel({
 }) {
   const { t } = useTranslation()
   const localMode = useAppStore((state) => state.localMode)
+  const token = useAppStore((state) => state.token)
   const autoClipboardFiles = useAppStore((state) => state.remoteClipboardFiles)
   const clipboardMode = clipboardFilesMode(
     localMode,
@@ -611,16 +635,11 @@ export function FileTransferPanel({
   )
   const [localLoading, setLocalLoading] = useState(false)
   const [localNote, setLocalNote] = useState<string | null>(null)
+  /// Rows listed through the local core's `/api/fs/list`.
+  const [fsEntries, setFsEntries] = useState<FsEntry[]>([])
   const localLoadToken = useRef(0)
   const directoryInputRef = useRef<HTMLInputElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
-
-  useEffect(() => {
-    const input = directoryInputRef.current
-    if (!input) return
-    input.setAttribute('webkitdirectory', '')
-    input.setAttribute('directory', '')
-  }, [open])
 
   // ------------------------------------------------------ remote pane state
   const [listing, setListing] = useState<RemoteListing | null>(null)
@@ -733,12 +752,22 @@ export function FileTransferPanel({
     (path: string) => {
       setLoading(true)
       setError(null)
-      void requestListing(path.trim() === '' ? '' : path, true).catch(
+      void requestListing(path.trim() === '' ? '' : path.trim(), true).catch(
         () => undefined,
       )
     },
     [requestListing],
   )
+
+  /// Resolve the path bar the same way a file manager does: absolute paths
+  /// and `~` go to the host as typed, relative paths and `..` are resolved
+  /// against the folder currently shown. The host then canonicalises again and
+  /// refuses anything outside the user's home.
+  const openRemotePath = useCallback(() => {
+    browseRemote(
+      resolveRemotePath(remoteInput, listing?.path ?? '', listing?.root ?? ''),
+    )
+  }, [browseRemote, listing, remoteInput])
 
   // ---------------------------------------------------------- upload waiter
   const uploadWaiter = useRef<UploadWaiter | null>(null)
@@ -1490,9 +1519,11 @@ export function FileTransferPanel({
   // ------------------------------------------------------- local navigation
   const localLabel = source?.kind === 'handle'
     ? [source.rootName, ...handleLevels.map((level) => level.name)].join('/')
-    : source?.kind === 'snapshot'
-      ? snapshotPath || source.rootName || source.label
-      : ''
+    : source?.kind === 'fs'
+      ? source.path
+      : source?.kind === 'snapshot'
+        ? snapshotPath || source.rootName || source.label
+        : ''
 
   const rememberLocal = useCallback((label: string) => {
     setLocalInput(label)
@@ -1528,10 +1559,57 @@ export function FileTransferPanel({
     [rememberLocal, t],
   )
 
+  /// List a folder on this machine through the local core. Only usable when
+  /// the page itself is served by the local core (desktop client): a remote
+  /// browser must not enumerate the host it is controlling.
+  const loadLocalDirectory = useCallback(
+    async (path: string) => {
+      if (!localMode || token === '') {
+        setError(t('files.localPathNeedsClient'))
+        return
+      }
+      const loadToken = ++localLoadToken.current
+      setLocalLoading(true)
+      try {
+        const result = await fetchLocalDirectory(token, path)
+        if (loadToken !== localLoadToken.current) return
+        setSource({
+          kind: 'fs',
+          path: result.path,
+          parent: result.parent,
+          root: result.root,
+        })
+        setFsEntries(result.entries)
+        setHandleEntries([])
+        setHandleLevels([])
+        setSnapshotPath('')
+        setLocalSelection(new Set())
+        setLocalInput(result.path)
+        storePath(LOCAL_PATH_KEY, result.path)
+        setLocalNote(t('files.fsListHint'))
+        setError(null)
+      } catch {
+        if (loadToken === localLoadToken.current) {
+          setError(t('files.localPathMissing'))
+        }
+      } finally {
+        if (loadToken === localLoadToken.current) setLocalLoading(false)
+      }
+    },
+    [localMode, token, t],
+  )
+
   const chooseLocalDirectory = useCallback(() => {
     setError(null)
     if (!canPickDirectory(window)) {
-      directoryInputRef.current?.click()
+      const input = directoryInputRef.current
+      // `webkitdirectory` is an attribute, not a JS-only flag. If the browser
+      // ignored it the control silently becomes a file picker, which loses
+      // the folder shape -- say so instead of pretending a folder was chosen.
+      if (!supportsDirectoryInput(document)) {
+        setLocalNote(t('files.dirPickerUnsupported'))
+      }
+      input?.click()
       return
     }
     void (async () => {
@@ -1539,6 +1617,7 @@ export function FileTransferPanel({
         const dir = await window.showDirectoryPicker!({ mode: 'readwrite' })
         setSource({ kind: 'handle', root: dir, rootName: dir.name })
         setSnapshotPath('')
+        setFsEntries([])
         setHandleEntries([])
         setHandleLevels([])
         setLocalNote(null)
@@ -1570,6 +1649,7 @@ export function FileTransferPanel({
       })
       setHandleEntries([])
       setHandleLevels([])
+      setFsEntries([])
       setLocalLoading(false)
       setSnapshotPath(startPath)
       setLocalSelection(new Set())
@@ -1585,8 +1665,28 @@ export function FileTransferPanel({
     (files: FileList | null, fromDirectory: boolean) => {
       if (!files || files.length === 0) return
       if (fromDirectory) {
+        const picked = Array.from(files)
+        // A browser that does not implement `webkitdirectory` treats the same
+        // control as a plain file picker. `webkitRelativePath` is the reliable
+        // signal; without it the flat names are all we have, so explain that
+        // the folder structure was not available.
+        if (picked.every((file) => file.webkitRelativePath === '')) {
+          applySnapshot(
+            '',
+            picked.map((file) => ({
+              path: file.name,
+              size: file.size,
+              file,
+            })),
+            [],
+            t('files.pickedFiles'),
+            '',
+          )
+          setLocalNote(t('files.dirPickerUnsupported'))
+          return
+        }
         const built = sourceFromInputFiles(
-          Array.from(files).map((file) => ({
+          picked.map((file) => ({
             file,
             path: file.webkitRelativePath || file.name,
           })),
@@ -1660,6 +1760,17 @@ export function FileTransferPanel({
         file: null,
       }))
     }
+    if (source?.kind === 'fs') {
+      return fsEntries.map((entry) => ({
+        key: entry.name,
+        name: entry.name,
+        rel: entry.name,
+        dir: entry.dir,
+        size: entry.size,
+        handle: null,
+        file: null,
+      }))
+    }
     if (source?.kind === 'snapshot') {
       const fileByPath = new Map(
         source.files.map((file) => [file.path, file]),
@@ -1684,7 +1795,7 @@ export function FileTransferPanel({
       )
     }
     return []
-  }, [handleEntries, snapshotPath, source])
+  }, [fsEntries, handleEntries, snapshotPath, source])
 
   const currentHandle = source?.kind === 'handle'
     ? handleLevels.length > 0
@@ -1705,12 +1816,22 @@ export function FileTransferPanel({
         void loadHandleDirectory(source.rootName, directory, levels)
         return
       }
+      if (source.kind === 'fs') {
+        void loadLocalDirectory(joinPath(source.path, row.name))
+        return
+      }
       setSnapshotPath(
         snapshotPath === '' ? row.rel : `${snapshotPath}/${row.rel}`,
       )
       setLocalSelection(new Set())
     },
-    [handleLevels, loadHandleDirectory, snapshotPath, source],
+    [
+      handleLevels,
+      loadHandleDirectory,
+      loadLocalDirectory,
+      snapshotPath,
+      source,
+    ],
   )
 
   const localUp = useCallback(() => {
@@ -1724,6 +1845,11 @@ export function FileTransferPanel({
       void loadHandleDirectory(source.rootName, dir, levels)
       return
     }
+    if (source.kind === 'fs') {
+      if (source.parent === '' || source.parent === source.path) return
+      void loadLocalDirectory(source.parent)
+      return
+    }
     if (snapshotPath === source.basePath) return
     const cut = snapshotPath.lastIndexOf('/')
     const parent = cut >= 0 ? snapshotPath.slice(0, cut) : source.basePath
@@ -1733,7 +1859,14 @@ export function FileTransferPanel({
     setSnapshotPath(target)
     rememberLocal(target || source.label)
     setLocalSelection(new Set())
-  }, [handleLevels, loadHandleDirectory, rememberLocal, snapshotPath, source])
+  }, [
+    handleLevels,
+    loadHandleDirectory,
+    loadLocalDirectory,
+    rememberLocal,
+    snapshotPath,
+    source,
+  ])
 
   const localHome = useCallback(() => {
     if (!source) return
@@ -1742,25 +1875,53 @@ export function FileTransferPanel({
       void loadHandleDirectory(source.rootName, source.root, [])
       return
     }
+    if (source.kind === 'fs') {
+      void loadLocalDirectory(source.root)
+      return
+    }
     setSnapshotPath(source.basePath)
     rememberLocal(source.basePath || source.label)
     setLocalSelection(new Set())
-  }, [loadHandleDirectory, rememberLocal, source])
+  }, [loadHandleDirectory, loadLocalDirectory, rememberLocal, source])
 
   const refreshLocal = useCallback(() => {
     if (!source) return
     if (source.kind === 'handle' && currentHandle) {
       void loadHandleDirectory(source.rootName, currentHandle, handleLevels)
+    } else if (source.kind === 'fs') {
+      void loadLocalDirectory(source.path)
     } else {
       setLocalNote(t('files.snapshotHint'))
     }
-  }, [currentHandle, handleLevels, loadHandleDirectory, source, t])
+  }, [
+    currentHandle,
+    handleLevels,
+    loadHandleDirectory,
+    loadLocalDirectory,
+    source,
+    t,
+  ])
 
   const openLocalPath = useCallback(() => {
     setError(null)
     const text = localInput.trim()
-    if (!source) {
+    const canListLocal = localMode && token !== ''
+    // A path typed from scratch, or an absolute path, cannot be resolved by
+    // the browser's File System Access handle. The local core can list it;
+    // a page served by a remote host cannot, and must say so instead of
+    // silently doing nothing.
+    if (!source && text === '') {
       chooseLocalDirectory()
+      return
+    }
+    if (!source || source.kind === 'fs' || looksAbsolutePath(text)) {
+      if (canListLocal) {
+        void loadLocalDirectory(
+          source?.kind === 'fs' && text === '' ? source.path : text,
+        )
+      } else {
+        setError(t('files.localPathNeedsClient'))
+      }
       return
     }
     if (source.kind === 'handle') {
@@ -1771,7 +1932,11 @@ export function FileTransferPanel({
       else if (normalized.startsWith(rootName + '/')) {
         rest = normalized.slice(rootName.length + 1)
       } else if (normalized !== '') {
-        setError(t('files.localUnsupportedPath'))
+        if (canListLocal) {
+          void loadLocalDirectory(text)
+        } else {
+          setError(t('files.localUnsupportedPath'))
+        }
         return
       }
       if (rest === '') {
@@ -1784,7 +1949,11 @@ export function FileTransferPanel({
         const levels: HandleLevel[] = []
         for (const segment of rest.split('/')) {
           if (segment === '' || segment === '.' || segment === '..') {
-            setError(t('files.localPathMissing'))
+            if (canListLocal) {
+              void loadLocalDirectory(text)
+            } else {
+              setError(t('files.localPathMissing'))
+            }
             return
           }
           try {
@@ -1792,7 +1961,11 @@ export function FileTransferPanel({
             levels.push({ name: segment, handle: next })
             dir = next
           } catch {
-            setError(t('files.localPathMissing'))
+            if (canListLocal) {
+              void loadLocalDirectory(text)
+            } else {
+              setError(t('files.localPathMissing'))
+            }
             return
           }
         }
@@ -1815,14 +1988,28 @@ export function FileTransferPanel({
       target.startsWith(base + '/')
     const known = target === base || source.dirs.includes(target)
     if (!known || !withinBase) {
-      setError(t('files.localPathMissing'))
+      if (canListLocal) {
+        void loadLocalDirectory(text)
+      } else {
+        setError(t('files.localPathMissing'))
+      }
       return
     }
     setSnapshotPath(target)
     setLocalNote(t('files.snapshotHint'))
     rememberLocal(target || source.label)
     setLocalSelection(new Set())
-  }, [chooseLocalDirectory, loadHandleDirectory, localInput, rememberLocal, source, t])
+  }, [
+    chooseLocalDirectory,
+    loadHandleDirectory,
+    loadLocalDirectory,
+    localInput,
+    localMode,
+    rememberLocal,
+    source,
+    t,
+    token,
+  ])
 
   const toggleLocal = useCallback((key: string) => {
     setLocalSelection((current) => {
@@ -1904,6 +2091,13 @@ export function FileTransferPanel({
   // ------------------------------------------------------------- upload run
   const sendOver = useCallback(async () => {
     if (!source || listing === null || localSelection.size === 0) return
+    // A `/api/fs/list` pane knows names only; the browser still has no read
+    // access to those bytes. Say how to actually send them instead of
+    // starting a transfer that cannot produce a single file.
+    if (source.kind === 'fs') {
+      setError(t('files.fsListHint'))
+      return
+    }
     const dest = listing.path
     setError(null)
     setUploadBusy(true)
@@ -2467,7 +2661,8 @@ export function FileTransferPanel({
     mode: directionMode,
     hasTarget: canReceive,
   })
-  const uploadDisabled = uploadBlock !== null
+  const fsSource = source?.kind === 'fs'
+  const uploadDisabled = uploadBlock !== null || fsSource
   const downloadDisabled = downloadBlock !== null
   const allLocalSelected =
     localRows.length > 0 && localSelection.size === localRows.length
@@ -2578,23 +2773,35 @@ export function FileTransferPanel({
             <button
               type="button"
               onClick={chooseLocalDirectory}
-              className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-muted transition hover:bg-panel hover:text-accent"
+              className="flex h-7 shrink-0 items-center gap-1 rounded-md px-1.5 text-[9px] text-muted transition hover:bg-panel hover:text-accent"
               aria-label={t('files.selectDir')}
               title={t('files.selectDir')}
             >
-              <FolderOpen size={13} />
+              <FolderOpen size={12} />
+              {t('files.selectDirShort')}
             </button>
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
-              className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-muted transition hover:bg-panel hover:text-accent"
+              className="flex h-7 shrink-0 items-center gap-1 rounded-md px-1.5 text-[9px] text-muted transition hover:bg-panel hover:text-accent"
               aria-label={t('files.selectFiles')}
               title={t('files.selectFiles')}
             >
-              <FileIcon size={13} />
+              <FileIcon size={12} />
+              {t('files.selectFilesShort')}
             </button>
             <input
-              ref={directoryInputRef}
+              // A ref callback sets the attribute when the node actually
+              // mounts. The old `useEffect(..., [open])` ran once before the
+              // input existed (the panel returns null while closed), so the
+              // control silently stayed a file picker.
+              ref={(node) => {
+                directoryInputRef.current = node
+                if (node !== null) {
+                  node.setAttribute('webkitdirectory', '')
+                  node.setAttribute('directory', '')
+                }
+              }}
               type="file"
               multiple
               className="hidden"
@@ -2717,9 +2924,11 @@ export function FileTransferPanel({
             onClick={() => void sendOver()}
             disabled={uploadDisabled}
             title={
-              uploadBlock
-                ? blockText(t, uploadBlock, 'up')
-                : t('files.sendToHint')
+              fsSource
+                ? t('files.fsListHint')
+                : uploadBlock
+                  ? blockText(t, uploadBlock, 'up')
+                  : t('files.sendToHint')
             }
             className="btn btn-primary flex h-12 flex-col items-center justify-center gap-0.5 px-1 text-[10px] leading-tight"
           >
@@ -2786,7 +2995,7 @@ export function FileTransferPanel({
               onKeyDown={(event) => {
                 if (event.key === 'Enter') {
                   event.preventDefault()
-                  browseRemote(remoteInput)
+                  openRemotePath()
                 } else if (event.key === 'Escape') {
                   setRemoteInput(listing?.path ?? '')
                 }
@@ -2797,7 +3006,7 @@ export function FileTransferPanel({
             />
             <button
               type="button"
-              onClick={() => browseRemote(remoteInput)}
+              onClick={openRemotePath}
               className="btn h-7 gap-1 px-2 text-[10px]"
             >
               <FolderOpen size={12} />

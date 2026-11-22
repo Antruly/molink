@@ -27,6 +27,7 @@
 #include "compression.h"
 #include "capture/replay_policy.h"
 #include "capture/video_push.h"
+#include "input/input_event.h"
 #if MOLINK_HAVE_WEBRTC
 #include "webrtc/rtc_session.h"
 #endif
@@ -184,69 +185,79 @@ bool clipboard_stream_capable(const uvcpp_json& j) {
   return bool_field(j, "clipboard_stream", false);
 }
 
-input_injector::status inject_one(input_injector& input, const uvcpp_json& event,
-                                  std::string& err) {
-  if (!event.is_object()) {
+/// Decodes the JSON wire form into the platform-neutral `input_event` the
+/// injector test covers. Validation errors are filled in here so `inject_one`
+/// never reports an empty `bad_input`.
+bool decode_input_event(const uvcpp_json& j, input_event& out,
+                        std::string& err) {
+  if (!j.is_object()) {
     err = "input event must be an object";
-    return input_injector::status::rejected;
+    return false;
   }
-  const std::string kind = string_field(event, "k");
-
+  out = input_event{};
+  const std::string kind = string_field(j, "k");
+  out.kind_name = kind;
   if (kind == "sas") {
-    // Ctrl+Alt+Del cannot be synthesized with SendInput; the SYSTEM service
-    // generates it (SoftwareSASGeneration policy).
-    std::string sas_error;
-    if (!send_secure_attention(sas_error)) {
-      err = sas_error;
-      return input_injector::status::rejected;
-    }
-    return input_injector::status::ok;
+    out.type = input_event::kind::sas;
+    return true;
   }
-
   if (kind == "move") {
-    double x = 0;
-    double y = 0;
-    if (!number_field(event, "x", x) || !number_field(event, "y", y)) {
+    out.type = input_event::kind::move;
+    if (!number_field(j, "x", out.x) || !number_field(j, "y", out.y)) {
       err = "move needs normalized x and y";
-      return input_injector::status::rejected;
+      return false;
     }
-    return input.move(x, y);
+    out.has_xy = true;
+    return true;
   }
   if (kind == "button") {
+    out.type = input_event::kind::button;
     double button = 1;
-    if (!number_field(event, "button", button)) {
+    if (!number_field(j, "button", button)) {
       err = "button needs a button number";
-      return input_injector::status::rejected;
+      return false;
     }
-    return input.button(static_cast<int>(button),
-                        bool_field(event, "down", true));
+    out.button = static_cast<int>(button);
+    out.has_button = true;
+    out.down = bool_field(j, "down", true);
+    return true;
   }
   if (kind == "wheel") {
-    double dx = 0;
-    double dy = 0;
-    number_field(event, "dx", dx);
-    number_field(event, "dy", dy);
-    return input.wheel(static_cast<int>(dx), static_cast<int>(dy));
+    out.type = input_event::kind::wheel;
+    number_field(j, "dx", out.dx);
+    number_field(j, "dy", out.dy);
+    return true;
   }
   if (kind == "key") {
-    const std::string code = string_field(event, "code");
-    if (code.empty()) {
+    out.type = input_event::kind::key;
+    out.code = string_field(j, "code");
+    if (out.code.empty()) {
       err = "key needs a code";
-      return input_injector::status::rejected;
+      return false;
     }
-    return input.key(code, bool_field(event, "down", true));
+    out.down = bool_field(j, "down", true);
+    return true;
   }
   if (kind == "text") {
-    const std::string value = string_field(event, "text");
-    if (value.empty() || value.size() > 4096) {
+    out.type = input_event::kind::text;
+    out.text = string_field(j, "text");
+    if (out.text.empty() || out.text.size() > 4096) {
       err = "text must be 1..4096 bytes";
-      return input_injector::status::rejected;
+      return false;
     }
-    return input.text(value);
+    return true;
   }
-
   err = "unknown input event kind: " + kind;
-  return input_injector::status::rejected;
+  return false;
+}
+
+input_injector::status inject_one(input_injector& input, const uvcpp_json& event,
+                                  std::string& err) {
+  input_event decoded;
+  if (!decode_input_event(event, decoded, err)) {
+    return input_injector::status::rejected;
+  }
+  return inject_input_event(input, decoded, err, &send_secure_attention);
 }
 
 bool send_frame_payload(session_transport* transport,
@@ -3001,7 +3012,12 @@ void session_controller::on_text(const std::string& text) {
       note_pointer(j);
     }
     if (rejected) {
-      send_error(transport.get(), "bad_input", input_error);
+      // Injection failures used to leave this empty, so the page could only
+      // show the raw `bad_input` code. The injector now names the value, but
+      // keep a last-resort message for an older or future backend.
+      send_error(transport.get(), "bad_input",
+                 input_error.empty() ? "input event was rejected"
+                                     : input_error);
     } else if (failed) {
       // SendInput fails silently on the secure desktop and for elevated
       // windows; tell the client instead of dropping every event without a

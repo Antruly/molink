@@ -1,4 +1,5 @@
 #include "input/windows_secure_input.h"
+#include "input/key_alias.h"
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -47,7 +48,10 @@ bool send_command(const std::string& command, std::string* reply = nullptr) {
   return false;
 }
 
-int vk_from_code(const std::string& code) {
+int vk_from_code(const std::string& raw_code) {
+  // The lock/UAC desktop goes through the same alias rules as the normal
+  // backend, so a combo sent by an older client works there too.
+  const std::string code = canonical_key_code(raw_code);
   if (code.size() == 4 && code.compare(0, 3, "Key") == 0) {
     return std::toupper(static_cast<unsigned char>(code[3]));
   }
@@ -79,7 +83,18 @@ int vk_from_code(const std::string& code) {
       {"Backslash", VK_OEM_5},      {"Semicolon", VK_OEM_1},
       {"Quote", VK_OEM_7},          {"Backquote", VK_OEM_3},
       {"Comma", VK_OEM_COMMA},      {"Period", VK_OEM_PERIOD},
-      {"Slash", VK_OEM_2},
+      {"Slash", VK_OEM_2},          {"Numpad0", VK_NUMPAD0},
+      {"Numpad1", VK_NUMPAD1},      {"Numpad2", VK_NUMPAD2},
+      {"Numpad3", VK_NUMPAD3},      {"Numpad4", VK_NUMPAD4},
+      {"Numpad5", VK_NUMPAD5},      {"Numpad6", VK_NUMPAD6},
+      {"Numpad7", VK_NUMPAD7},      {"Numpad8", VK_NUMPAD8},
+      {"Numpad9", VK_NUMPAD9},      {"NumpadDecimal", VK_DECIMAL},
+      {"NumpadAdd", VK_ADD},        {"NumpadSubtract", VK_SUBTRACT},
+      {"NumpadMultiply", VK_MULTIPLY},
+      {"NumpadDivide", VK_DIVIDE},  {"NumpadComma", VK_SEPARATOR},
+      {"NumpadEqual", VK_OEM_NEC_EQUAL},
+      {"IntlBackslash", VK_OEM_102}, {"IntlRo", VK_OEM_102},
+      {"IntlYen", VK_OEM_5},
   };
   for (const auto& key : keys) {
     if (code == key.code) return key.vk;

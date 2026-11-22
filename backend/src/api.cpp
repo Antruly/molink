@@ -102,6 +102,36 @@ std::shared_ptr<clipboard_echo_marks> clipboard_echoes() {
   return marks;
 }
 
+namespace fs = std::filesystem;
+
+std::string local_home_directory() {
+#if defined(_WIN32)
+  const char* profile = std::getenv("USERPROFILE");
+  if (profile != nullptr && *profile != '\0') return profile;
+  const char* drive = std::getenv("HOMEDRIVE");
+  const char* path = std::getenv("HOMEPATH");
+  if (drive != nullptr && path != nullptr) return std::string(drive) + path;
+  return "C:\\";
+#else
+  const char* home = std::getenv("HOME");
+  return home != nullptr && *home != '\0' ? home : "/";
+#endif
+}
+
+/// Resolve a path typed into the local pane. Empty and `~` name the user's
+/// home; `~/x` is home-relative; anything else is taken as typed (a relative
+/// path is relative to home). The local UI is loopback-only, so unlike the
+/// remote file channel this deliberately allows paths outside home.
+fs::path resolve_local_fs_path(const std::string& raw) {
+  const fs::path home = local_home_directory();
+  if (raw.empty() || raw == "~") return home;
+  if (raw.rfind("~/", 0) == 0 || raw.rfind("~\\", 0) == 0) {
+    return home / raw.substr(2);
+  }
+  const fs::path requested(raw);
+  return requested.is_relative() ? home / requested : requested;
+}
+
 void remember_clipboard_echoes(const std::vector<std::string>& paths) {
   const auto marks = clipboard_echoes();
   const uint64_t now = now_ms();
@@ -968,6 +998,79 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
              deps.chat->post("host", text, host_name, deps.device_id, 0);
              resp.status(204).end();
            });
+
+  // The local pane lists a folder the browser itself cannot read. Loopback
+  // only: a page served by a remote core must never enumerate this machine's
+  // filesystem. The page calls this only when /api/state reported
+  // `local: true`, so the listing describes the browser's own machine.
+  app.get("/api/fs/list",
+          [](uvcpp_web_request& req, uvcpp_web_response& resp,
+             uvcpp_web_next) {
+            if (!is_loopback_peer(req.peer_ip())) {
+              resp.status(403).json_str(R"({"code":"loopback_only"})");
+              resp.end();
+              return;
+            }
+            const std::string* requested = req.query("path");
+            const std::string raw = requested != nullptr ? *requested : "";
+            const fs::path target = resolve_local_fs_path(raw);
+            std::error_code ec;
+            const fs::path canonical = fs::weakly_canonical(target, ec);
+            if (ec || !fs::is_directory(canonical, ec) || ec) {
+              resp.status(400).json_str(
+                  R"({"code":"bad_path","message":"not a readable folder"})");
+              resp.end();
+              return;
+            }
+            uvcpp_json entries = uvcpp_json::array();
+            std::size_t count = 0;
+            fs::directory_iterator it(
+                canonical, fs::directory_options::skip_permission_denied, ec);
+            if (!ec) {
+              for (const fs::directory_entry& entry : it) {
+                if (count >= 2000) break;
+                std::error_code entry_ec;
+                const bool dir = entry.is_directory(entry_ec);
+                if (entry_ec) continue;
+                uvcpp_json item;
+                item["name"] = entry.path().filename().string();
+                item["dir"] = dir;
+                item["size"] =
+                    dir ? 0 : static_cast<uint64_t>(
+                                  entry.file_size(entry_ec));
+                entries.push_back(std::move(item));
+                ++count;
+              }
+            }
+            std::sort(entries.begin(), entries.end(),
+                      [](const uvcpp_json& a, const uvcpp_json& b) {
+                        const bool ad = a.value("dir", false);
+                        const bool bd = b.value("dir", false);
+                        if (ad != bd) return ad;
+                        std::string an = a.value("name", std::string());
+                        std::string bn = b.value("name", std::string());
+                        std::transform(
+                            an.begin(), an.end(), an.begin(),
+                            [](unsigned char c) {
+                              return static_cast<char>(std::tolower(c));
+                            });
+                        std::transform(
+                            bn.begin(), bn.end(), bn.begin(),
+                            [](unsigned char c) {
+                              return static_cast<char>(std::tolower(c));
+                            });
+                        return an < bn;
+                      });
+            const fs::path parent = canonical.parent_path();
+            uvcpp_json j;
+            j["path"] = canonical.string();
+            j["root"] = local_home_directory();
+            j["parent"] =
+                parent.empty() || parent == canonical ? "" : parent.string();
+            j["entries"] = std::move(entries);
+            resp.set_header("Cache-Control", "no-store").json(j);
+            resp.end();
+          });
 
   // The local shell watches its own clipboard for files. The page cannot
   // touch the OS clipboard's file list, so it polls this snapshot and then

@@ -24,8 +24,28 @@ export function canUseFileSystemAccess(scope: FileSystemAccessScope): boolean {
 }
 
 export function canPickDirectory(scope: FileSystemAccessScope): boolean {
-  return canUseFileSystemAccess(scope) &&
+  // The File System Access API is secure-context only; on a plain
+  // `http://192.168.x.x` page `showDirectoryPicker` either is absent or throws
+  // SecurityError when called. Check both so the caller falls back to the
+  // `webkitdirectory` input instead of opening a picker that cannot work.
+  return scope.isSecureContext === true &&
     typeof scope.showDirectoryPicker === 'function'
+}
+
+/// Whether a hidden `<input type="file">` can be made into a folder picker.
+/// `webkitdirectory` is not standard, so a browser that ignores it silently
+/// falls back to a plain file picker; callers should warn in that case.
+export interface DirectoryInputScope {
+  createElement?: (tag: string) => object
+}
+
+export function supportsDirectoryInput(scope: DirectoryInputScope): boolean {
+  try {
+    if (typeof scope.createElement !== 'function') return false
+    return 'webkitdirectory' in scope.createElement('input')
+  } catch {
+    return false
+  }
 }
 
 export function saveStrategyFor(scope: FileSystemAccessScope): SaveStrategy {

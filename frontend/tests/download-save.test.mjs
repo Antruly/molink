@@ -22,20 +22,13 @@ test('the picker is only chosen on a secure context that exposes it', () => {
   assert.equal(saveStrategyFor({ isSecureContext: true }), 'button')
 })
 
-test('the directory picker needs the file picker first', () => {
+test('a directory picker needs a secure context and the API itself', () => {
+  const picker = { showDirectoryPicker: () => undefined }
+  assert.equal(canPickDirectory({ ...picker, isSecureContext: true }), true)
+  assert.equal(canPickDirectory({ ...picker, isSecureContext: false }), false)
+  assert.equal(canPickDirectory({ isSecureContext: true }), false)
   assert.equal(
-    canPickDirectory({
-      ...api,
-      showDirectoryPicker: () => undefined,
-      isSecureContext: true,
-    }),
-    true,
-  )
-  assert.equal(
-    canPickDirectory({
-      showDirectoryPicker: () => undefined,
-      isSecureContext: true,
-    }),
+    canPickDirectory({ showDirectoryPicker: 'yes', isSecureContext: true }),
     false,
   )
 })

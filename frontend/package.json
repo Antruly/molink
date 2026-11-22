@@ -7,7 +7,7 @@
     "dev": "vite --port 1420 --strictPort",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "test": "node --test src/lib/clipboard-lazy.test.mjs",
+    "test": "node --test src/lib/*.test.mjs tests/*.test.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "eslint ."
   },

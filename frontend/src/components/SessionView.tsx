@@ -58,6 +58,7 @@ import {
   shouldForwardKeys,
   type KeyCombo,
 } from '../lib/key-combos'
+import { keyToCode, normalizeKeyCode } from '../lib/key-code'
 import { Codec, codecName } from '../lib/protocol'
 import { collectDropEntries, stageDroppedFiles } from '../lib/file-drop'
 import { shellInfo, windowAction } from '../lib/shell'
@@ -138,48 +139,6 @@ function unlockScreenOrientation(): void {
   } catch {
     // Ignore.
   }
-}
-
-/// `KeyboardEvent.code` is reliable on physical keyboards but mobile virtual
-/// keyboards often report `Unidentified`; fall back to the printable key.
-function keyToCode(key: string): string {
-  if (key.length === 1) {
-    if (key >= 'a' && key <= 'z') return 'Key' + key.toUpperCase()
-    if (key >= 'A' && key <= 'Z') return 'Key' + key
-    if (key >= '0' && key <= '9') return 'Digit' + key
-    const punctuation: Record<string, string> = {
-      ' ': 'Space',
-      '\n': 'Enter',
-      '-': 'Minus',
-      '=': 'Equal',
-      '[': 'BracketLeft',
-      ']': 'BracketRight',
-      '\\': 'Backslash',
-      ';': 'Semicolon',
-      "'": 'Quote',
-      '`': 'Backquote',
-      ',': 'Comma',
-      '.': 'Period',
-      '/': 'Slash',
-    }
-    return punctuation[key] ?? ''
-  }
-  const named: Record<string, string> = {
-    Enter: 'Enter',
-    Backspace: 'Backspace',
-    Tab: 'Tab',
-    Escape: 'Escape',
-    Delete: 'Delete',
-    Home: 'Home',
-    End: 'End',
-    PageUp: 'PageUp',
-    PageDown: 'PageDown',
-    ArrowLeft: 'ArrowLeft',
-    ArrowRight: 'ArrowRight',
-    ArrowUp: 'ArrowUp',
-    ArrowDown: 'ArrowDown',
-  }
-  return named[key] ?? ''
 }
 
 function formatCallTime(seconds: number): string {
@@ -409,6 +368,10 @@ export function SessionView({
   const pressedButtons = useRef<Set<number>>(new Set())
   const [surfaceSize, setSurfaceSize] = useState({ width: 0, height: 0 })
   const [actionError, setActionError] = useState<string | null>(null)
+  // A rejected input event is transient: show the host's reason (the key code
+  // it did not understand) for a few seconds without touching the session.
+  const [inputNotice, setInputNotice] = useState<string | null>(null)
+  const inputNoticeTimer = useRef<number | null>(null)
   const [retryCode, setRetryCode] = useState('')
   const touchDevice = touchPrimary()
   const [virtualMouse, setVirtualMouse] = useState(false)
@@ -825,9 +788,27 @@ export function SessionView({
         voiceRef.current?.pushRemote(event.data)
       } else if (event.kind === 'call') {
         handleCallEvent(event)
+      } else if (event.kind === 'notice') {
+        setInputNotice(event.message)
+        if (inputNoticeTimer.current !== null) {
+          window.clearTimeout(inputNoticeTimer.current)
+        }
+        inputNoticeTimer.current = window.setTimeout(() => {
+          inputNoticeTimer.current = null
+          setInputNotice(null)
+        }, 5000)
       }
     })
   }, [connection])
+
+  useEffect(() => {
+    return () => {
+      if (inputNoticeTimer.current !== null) {
+        window.clearTimeout(inputNoticeTimer.current)
+        inputNoticeTimer.current = null
+      }
+    }
+  }, [])
 
   // The automatic file clipboard sync lives in the connection so background
   // tabs (and popouts) keep mirroring local files too; only the files panel
@@ -1913,9 +1894,11 @@ export function SessionView({
     const keys = pressedKeys.current
     const buttons = pressedButtons.current
     const codeFor = (event: KeyboardEvent) =>
-      event.code && event.code !== 'Unidentified'
-        ? event.code
-        : keyToCode(event.key)
+      normalizeKeyCode(
+        event.code && event.code !== 'Unidentified'
+          ? event.code
+          : keyToCode(event.key),
+      )
     // Only the window that owns the pointer/keyboard may drive the host: a
     // hidden tab or an unfocused window keeps every key local. Local form
     // fields and open dialogs keep the existing local behaviour.
@@ -2217,6 +2200,24 @@ export function SessionView({
               {t('session.requestAccess')}
             </button>
           ) : null}
+        </div>
+      ) : null}
+
+      {inputNotice && !isFullscreen ? (
+        <div className="flex flex-wrap items-center gap-2 border-b border-accent/30 bg-accent-soft/80 px-4 py-1.5 text-[12px] text-accent">
+          <Keyboard size={13} className="shrink-0" />
+          <span className="min-w-0 flex-1 break-words">
+            {t('session.inputRejected', { message: inputNotice })}
+          </span>
+          <button
+            type="button"
+            onClick={() => setInputNotice(null)}
+            className="rounded px-1.5 text-[11px] text-accent/80 hover:text-accent"
+            aria-label={t('error.dismiss')}
+            title={t('error.dismiss')}
+          >
+            <X size={12} />
+          </button>
         </div>
       ) : null}
 

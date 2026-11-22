@@ -50,6 +50,58 @@ export function normalizeRelativePath(raw: string): string {
     .replace(/\/+$/, '')
 }
 
+/// Lexically normalise a path that may be absolute, keeping its drive/UNC
+/// prefix. `..` cannot climb above the root. Output always uses `/`; the host
+/// accepts that on Windows too.
+export function normalizeRemotePath(raw: string): string {
+  const forward = raw.replace(/\\/g, '/')
+  const drive = /^[A-Za-z]:/.exec(forward)?.[0] ?? ''
+  const rest = drive === '' ? forward : forward.slice(2)
+  const unc = rest.startsWith('//')
+  const absolute = rest.startsWith('/')
+  const parts: string[] = []
+  for (const segment of rest.split('/')) {
+    if (segment === '' || segment === '.') continue
+    if (segment === '..') {
+      if (parts.length > 0 && parts[parts.length - 1] !== '..') parts.pop()
+      else if (!absolute && !unc) parts.push('..')
+      continue
+    }
+    parts.push(segment)
+  }
+  const prefix = drive + (unc ? '//' : absolute ? '/' : '')
+  const out = prefix + parts.join('/')
+  return out === '' ? '.' : out
+}
+
+/// Resolve what the user typed into the remote path box.
+///
+/// Empty means the host's home. `~` / `~/x` are expanded against @p root, the
+/// host's reported home; the host itself does not expand a tilde. Absolute
+/// paths (POSIX, Windows drive or UNC) are normalised as-is; relative paths
+/// and `.`/`..` are resolved against the currently displayed folder, which is
+/// what a user expects when editing the path bar.
+export function resolveRemotePath(
+  text: string,
+  base: string,
+  root = '',
+): string {
+  const raw = text.trim()
+  if (raw === '') return root
+  const home = root.trim()
+  if (raw === '~') return home
+  if (raw.startsWith('~/') || raw.startsWith('~\\')) {
+    const rest = raw.slice(2)
+    const joined = home === '' ? rest : `${home}/${rest}`
+    return normalizeRemotePath(joined)
+  }
+  const drive = /^[A-Za-z]:[\\/]/.test(raw)
+  const unc = /^[\\/]{2}/.test(raw)
+  const absolute = raw.startsWith('/') || drive || unc
+  if (!absolute && base === '') return normalizeRemotePath(raw)
+  return normalizeRemotePath(absolute ? raw : `${base}/${raw}`)
+}
+
 /// Whether a path may be sent to the host as an upload name. Absolute paths
 /// (POSIX or UNC), Windows drive letters, traversal and reserved names are
 /// refused, exactly like `file_transfer::parse_relative_path` on the host.

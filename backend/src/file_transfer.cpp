@@ -64,13 +64,20 @@ fs::path home_root() {
   return ec ? fs::path(home_directory()) : root;
 }
 
-/// Resolve a peer-supplied path. Relative paths are relative to home; an empty
-/// path is home itself. Anything that escapes home is rejected, including
-/// through a symlink.
+/// Resolve a peer-supplied path. `~` and `~/x` are the host user's home;
+/// relative paths are relative to home; an empty path is home itself. Anything
+/// that escapes home is rejected, including through a symlink.
 std::optional<fs::path> resolve_path(const std::string& raw) {
   const fs::path root = home_root();
-  fs::path requested = raw.empty() ? root : fs::path(raw);
-  if (requested.is_relative()) requested = root / requested;
+  fs::path requested;
+  if (raw.empty() || raw == "~") {
+    requested = root;
+  } else if (raw.rfind("~/", 0) == 0 || raw.rfind("~\\", 0) == 0) {
+    requested = root / raw.substr(2);
+  } else {
+    requested = fs::path(raw);
+    if (requested.is_relative()) requested = root / requested;
+  }
   std::error_code ec;
   const fs::path canonical = fs::weakly_canonical(requested, ec);
   if (ec || !within_root(root, canonical)) return std::nullopt;

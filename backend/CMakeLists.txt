@@ -233,6 +233,8 @@ set(MOLINK_CORE_SOURCES
   src/input/windows_input.cpp
   src/input/windows_secure_input.cpp
   src/input/macos_input.cpp
+  src/input/input_event.cpp
+  src/input/key_alias.cpp
   src/config.cpp
   src/identity.cpp
   src/tls_identity.cpp
@@ -689,6 +691,23 @@ target_include_directories(molink-core-frame-budget-test PRIVATE src)
 set_target_properties(molink-core-frame-budget-test PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 add_test(NAME frame_budget COMMAND molink-core-frame-budget-test)
+
+# Input event validation and the legacy key aliases. Pure platform-neutral
+# code: a fake injector checks every rejected path still carries a message.
+add_executable(molink-core-input-event-test
+  tests/input_event_test.cpp
+  src/input/input_event.cpp
+  src/input/key_alias.cpp
+)
+target_include_directories(molink-core-input-event-test PRIVATE src)
+set_target_properties(molink-core-input-event-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
+  string(TOUPPER "${uvp_config}" uvp_config_upper)
+  set_target_properties(molink-core-input-event-test PROPERTIES
+    "RUNTIME_OUTPUT_DIRECTORY_${uvp_config_upper}" "${CMAKE_BINARY_DIR}")
+endforeach()
+add_test(NAME input_event COMMAND molink-core-input-event-test)
 
 # Box averaging for large tile strips: pure pixel arithmetic.
 # Clipboard staging for "remote file -> local clipboard": file naming, offset

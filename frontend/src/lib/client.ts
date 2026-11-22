@@ -18,6 +18,7 @@ import {
   kBackpressureGapFreshMs,
 } from './p2p-video-health'
 import { logDiag } from './diag-log'
+import { isInputErrorCode, redactDiagnosticText } from './input-errors'
 import { H264StreamDecoder, h264StreamSupported } from './h264-stream'
 import {
   VpxStreamDecoder,
@@ -213,6 +214,9 @@ export type SessionEvent =
       message?: string
     }
   | { kind: 'voice'; data: Uint8Array }
+  /// A short-lived, non-fatal message for the view (for example one input
+  /// event the host rejected). It must not change the session phase.
+  | { kind: 'notice'; message: string }
 
 export type SessionEventListener = (event: SessionEvent) => void
 
@@ -298,6 +302,9 @@ interface ControlMessage {
   value?: string
   id?: number
   code?: string
+  /// Which subsystem an `error` frame belongs to (the host sets "input" for
+  /// a `not_implemented` input backend).
+  what?: string
   message?: string
   session?: string
   serial?: number
@@ -646,6 +653,15 @@ export class MolinkClient {
   /// host) must not be mistaken for an ICE failure and retried.
   private lastErrorCode = ''
   private lastErrorMessage = ''
+  /// Last time an input error was shown to the user. Rejected key/mouse events
+  /// are not session errors, but a broken client could otherwise flood the UI.
+  private lastInputNoticeAt = 0
+  /// Throttle for the high-rate pointer-move diagnostic entries.
+  private lastMoveLogAt = 0
+  /// Non-pointer payloads sent since the last input error. A host that
+  /// predates the detailed `unknown key code` message still lets the page
+  /// name the keys it just sent.
+  private recentInputPayloads: string[] = []
   /// Estimated local-minus-host wall-clock difference plus the fastest network
   /// transit, in milliseconds, measured from frame capture timestamps. Frame
   /// freshness must not assume the two machines have synchronized clocks: a
@@ -1383,6 +1399,32 @@ export class MolinkClient {
   }
 
   sendInput(payload: Record<string, unknown>): void {
+    // Record what actually left the page. Without this a `bad_input` reply
+    // cannot be traced back to the key that caused it -- the diagnostic log is
+    // the only console a WebView user can export. Pointer moves arrive at the
+    // frame rate, so only one sample per five seconds is kept; typing is
+    // summarised by length rather than stored verbatim.
+    const kind = typeof payload.k === 'string' ? payload.k : ''
+    if (kind === 'move') {
+      const now = performance.now()
+      if (now - this.lastMoveLogAt >= 5000) {
+        this.lastMoveLogAt = now
+        logDiag('info', 'input.send', undefined, {
+          load: JSON.stringify({ type: 'input', ...payload }),
+        })
+      }
+    } else {
+      const record: Record<string, unknown> = { type: 'input', ...payload }
+      if (kind === 'text' && typeof record.text === 'string') {
+        record.text = `<${record.text.length} chars>`
+      }
+      const load = JSON.stringify(record)
+      logDiag('info', 'input.send', undefined, { load })
+      // Keep the last few events so a legacy `bad_input` reply can still say
+      // which codes were in flight.
+      this.recentInputPayloads.push(JSON.stringify(payload))
+      if (this.recentInputPayloads.length > 12) this.recentInputPayloads.shift()
+    }
     this.sendJson({ type: 'input', ...payload })
   }
 
@@ -1903,6 +1945,48 @@ export class MolinkClient {
             kind: 'file',
             message: { action: 'error', code, message: text },
           })
+          break
+        }
+        // An input event the host refused (an unknown key code, a pointer
+        // already released, SendInput unavailable) says nothing about the
+        // session. Never turn it into a session error: that used to raise the
+        // red banner with a Reconnect button while the link was healthy.
+        if (isInputErrorCode(code) ||
+            (code === 'not_implemented' && message.what === 'input')) {
+          const sent = this.recentInputPayloads
+          const keys: string[] = []
+          for (const raw of sent) {
+            try {
+              const event = JSON.parse(raw) as { code?: unknown; k?: unknown }
+              const key = typeof event.code === 'string'
+                ? event.code
+                : typeof event.k === 'string' ? event.k : ''
+              if (key !== '' && !keys.includes(key)) keys.push(key)
+            } catch {
+              // A malformed record only weakens the hint, never the session.
+            }
+          }
+          this.recentInputPayloads = []
+          // New hosts name the exact key ("unknown key code: MetaLeft").
+          // Older ones send an empty message, so fall back to the codes that
+          // were just sent instead of showing a bare `bad_input`.
+          const named = text !== '' && text !== code
+            ? text
+            : `${code || 'bad_input'}${keys.length > 0 ? ` (${keys.join(', ')})` : ''}`
+          const detail = redactDiagnosticText(named)
+          logDiag('warn', 'input.rejected', detail, {
+            code: code || undefined,
+            keys: keys.join(',') || undefined,
+            sent: sent.join(' ') || undefined,
+          })
+          const now = Date.now()
+          if (now - this.lastInputNoticeAt >= 5000) {
+            this.lastInputNoticeAt = now
+            this.handlers.onSessionEvent?.({
+              kind: 'notice',
+              message: detail,
+            })
+          }
           break
         }
         // The host rejected our credentials (wrong or exhausted code); a
