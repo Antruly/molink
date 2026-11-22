@@ -37,3 +37,6 @@ cer/
 
 # 本机测试机记录（含凭据，不要提交）
 docs/testing.local.md
+
+# Local release staging (installers must not enter the repo)
+dist-*
