@@ -25,6 +25,9 @@ const {
   DEFAULT_SESSION_PRESET,
   PRESET_PLANS,
   SESSION_PRESETS,
+  codecExitsTruecolor,
+  effectivePresetChroma,
+  isExplicitStreamCodec,
   normalizePresetId,
   parseStoredPreset,
   presetMessage,
@@ -144,4 +147,19 @@ test('a host reply never moves the viewer selector', () => {
   )
   assert.equal(viewerPresetAfterReply(selected, null), selected)
   assert.equal(viewerPresetAfterReply(selected, {}), selected)
+})
+
+test('an explicit encoder locks the stream and forces 4:2:0', () => {
+  for (const codec of ['av1', 'h264', 'vp9', 'vp8']) {
+    assert.equal(isExplicitStreamCodec(codec), true)
+    assert.equal(effectivePresetChroma('444', codec), '420')
+    assert.equal(codecExitsTruecolor('truecolor', codec), true)
+  }
+  assert.equal(isExplicitStreamCodec('auto'), false)
+  assert.equal(isExplicitStreamCodec('tiles'), false)
+  // Auto/tiles keep the tier's own chroma and never warn about truecolour.
+  assert.equal(effectivePresetChroma('444', 'auto'), '444')
+  assert.equal(effectivePresetChroma('420', 'auto'), '420')
+  assert.equal(codecExitsTruecolor('truecolor', 'auto'), false)
+  assert.equal(codecExitsTruecolor('balanced', 'vp9'), false)
 })

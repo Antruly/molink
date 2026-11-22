@@ -287,8 +287,15 @@ av1_stream_encoder* capture_base::stream_for_frame_moving(
   const bool allow_switch =
       stream_switch_allowed(dragging, congested, any_stream_codec,
                             stream_policy_.streaming, encoder_blocked);
+  // An explicit encoder (settings "VP9" and friends) locks the stream path:
+  // the movement heuristic, the drag veto, the send-backpressure veto and the
+  // slow-encoder veto may not drop back to tiles. Only a codec change clears
+  // the lock.
+  const bool locked = stream_locked_.load();
+  const bool explicit_stream =
+      stream_always_.load() || now < stream_nudge_until_.load();
   bool mode_changed = false;
-  if (forced || secure_desktop) {
+  if (forced || secure_desktop || locked) {
     stream_policy_.armed = true;
     mode_changed = stream_policy_.force(true, now);
   } else {
@@ -298,8 +305,6 @@ av1_stream_encoder* capture_base::stream_for_frame_moving(
     // stay warm, but it may not switch: letting the heuristic exit during the
     // join window and the nudge immediately force it back produced a
     // stream -> tile -> stream cycle every few seconds.
-    const bool explicit_stream =
-        stream_always_.load() || now < stream_nudge_until_.load();
     const bool starved = rate_starved_.load();
     const bool hold_stream = !dragging && !congested && any_stream_codec &&
                              (explicit_stream || starved);
@@ -334,8 +339,11 @@ av1_stream_encoder* capture_base::stream_for_frame_moving(
     stream_epoch_.store(stream_policy_.epoch());
     stream_live_.store(false);
     std::fprintf(stderr,
-                 "host: stream switch rollback (%s) epoch=%u\n", reason,
-                 stream_policy_.epoch());
+                 "host: stream switch rollback (%s) epoch=%u budget=%dkbps "
+                 "build_us=%llu fps=%d\n",
+                 reason, stream_policy_.epoch(), applied_budget_kbps_,
+                 static_cast<unsigned long long>(build_time_us_.load()),
+                 target_fps_.load());
   };
   // Mirror the mode for other threads: a session that joins now uses it to
   // wait for the stream keyframe instead of replaying a tile keyframe.
@@ -352,17 +360,38 @@ av1_stream_encoder* capture_base::stream_for_frame_moving(
   if (mode_changed && std::getenv("MOLINK_STREAM_LOG") != nullptr) {
     static thread_local uint64_t log_origin = 0;
     if (log_origin == 0) log_origin = now;
+    // Say why the mode moved. A tile switch is the interesting case: it means
+    // the user-visible path changed even though the content may look active.
+    const char* reason = "movement_above_enter";
+    if (!stream_policy_.streaming) {
+      reason = "movement_below_exit";
+    } else if (locked) {
+      reason = "explicit_codec_lock";
+    } else if (forced) {
+      reason = "forced_stream";
+    } else if (secure_desktop) {
+      reason = "secure_desktop";
+    } else if (explicit_stream) {
+      reason = "explicit_stream";
+    } else if (rate_starved_.load()) {
+      reason = "starved_tile_path";
+    }
     std::fprintf(stderr,
-                 "host: stream %s t=+%llums epoch=%u avg=%.1f%% enter=%.1f%% "
-                 "exit=%.1f%% dragging=%d congested=%d encoder_blocked=%d "
-                 "in_cooldown=%d viewers av1=%d h264=%d vp9=%d vp8=%d\n",
+                 "host: stream %s t=+%llums epoch=%u reason=%s avg=%.1f%% "
+                 "enter=%.1f%% exit=%.1f%% dragging=%d congested=%d "
+                 "encoder_blocked=%d locked=%d in_cooldown=%d "
+                 "budget=%dkbps build_us=%llu fps=%d "
+                 "viewers av1=%d h264=%d vp9=%d vp8=%d\n",
                  stream_policy_.streaming ? "on" : "off",
                  static_cast<unsigned long long>(now - log_origin),
-                 stream_policy_.epoch(), stream_policy_.average() * 100.0,
+                 stream_policy_.epoch(), reason,
+                 stream_policy_.average() * 100.0,
                  stream_policy_.enter_fraction * 100.0,
                  stream_policy_.exit_fraction * 100.0, dragging ? 1 : 0,
-                 congested ? 1 : 0, encoder_blocked ? 1 : 0,
-                 cooldown_before ? 1 : 0,
+                 congested ? 1 : 0, encoder_blocked ? 1 : 0, locked ? 1 : 0,
+                 cooldown_before ? 1 : 0, applied_budget_kbps_,
+                 static_cast<unsigned long long>(build_time_us_.load()),
+                 target_fps_.load(),
                  av1_stream_allowed_.load() ? 1 : 0,
                  h264_stream_allowed_.load() ? 1 : 0,
                  vp9_stream_allowed_.load() ? 1 : 0,

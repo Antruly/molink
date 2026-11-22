@@ -71,6 +71,7 @@ class capture_switch final : public capture_source {
   bool stream_on() const override;
   std::string stream_codec_name() const override;
   void set_stream_always(bool always) override;
+  void set_stream_locked(bool locked) override;
   void set_vp9_stream_allowed(bool allowed) override;
   void set_vp8_stream_allowed(bool allowed) override;
   std::vector<display_info> displays() const override;
@@ -113,6 +114,7 @@ class capture_switch final : public capture_source {
   std::atomic<bool> vp9_stream_allowed_{false};
   std::atomic<bool> vp8_stream_allowed_{false};
   std::atomic<bool> stream_always_{false};
+  std::atomic<bool> stream_locked_{false};
   std::atomic<int> stream_enter_percent_{15};
   /// Deadline of a request_stream() window, so a source swap does not lose it.
   std::atomic<uint64_t> stream_nudge_until_{0};

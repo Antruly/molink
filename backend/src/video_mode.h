@@ -19,16 +19,49 @@ inline std::string normalize_video_mode(const std::string& value) {
   return "auto";
 }
 
+/// True for the four real stream encoders. "auto" and "tiles" are modes, not
+/// encoders: "auto" lets the adaptive policy choose, "tiles" is the explicit
+/// never-stream choice.
+inline bool is_explicit_stream_codec(const std::string& value) {
+  return value == "av1" || value == "h264" || value == "vp9" ||
+         value == "vp8";
+}
+
 /// Whether the host should force the stream rather than feed the adaptive
 /// policy. A "stream" video mode does that, unless the viewer explicitly
 /// picked "tiles" in the toolbar: that choice is a manual override, not an
 /// automatic switch, so it must win over the default mode. Auto and tiles
 /// leave stream_always_ false, so capture.cpp feeds every frame to
 /// stream_policy_.note() and the hysteresis decides.
+///
+/// An explicitly chosen encoder is stronger than either: the user asked for
+/// VP9 (or AV1/H.264/VP8), so the adaptive policy may not hand the picture
+/// back to tiles just because the screen went still, a drag is in flight or
+/// the send queue is backed up. That is what makes the settings choice stick.
 inline bool stream_always_for(const std::string& video_mode,
                               const std::string& preference) {
-  return normalize_video_mode(video_mode) == "stream" &&
-         preference != "tiles";
+  if (is_explicit_stream_codec(preference)) return true;
+  if (preference == "tiles") return false;
+  return normalize_video_mode(video_mode) == "stream";
+}
+
+/// True when the explicit encoder locks the stream path: no automatic exit
+/// to tiles, regardless of movement, dragging, back-pressure or an encoder
+/// that misses its frame budget.
+inline bool stream_locked_for(const std::string& preference) {
+  return is_explicit_stream_codec(preference);
+}
+
+/// Every stream encoder in this tree produces 4:2:0. Picking one therefore
+/// wins over a 4:4:4 (truecolour) request: the colour depth is reduced to
+/// 4:2:0 instead of silently dropping the video stream.
+inline bool stream_codec_forces_420(const std::string& preference) {
+  return is_explicit_stream_codec(preference);
+}
+
+inline bool effective_no_subsampling(bool requested,
+                                     const std::string& preference) {
+  return requested && !is_explicit_stream_codec(preference);
 }
 
 /// Which codecs a host can encode and a viewer can decode.
@@ -65,13 +98,18 @@ inline std::vector<std::string> advertised_stream_codecs(
 /// stream_always_ unless the viewer chose tiles by hand; auto and tiles both
 /// release the forced mode so the adaptive switch owns the decision.
 /// `force_stream` is for the secure desktop, which cannot be captured as
-/// tiles and therefore ignores a tiles preference.
+/// tiles and therefore ignores a tiles preference. `codec_available` lets the
+/// supervisor keep the lock off while the pinned encoder cannot be built
+/// (wrong build, no VP9 backend): the UI reports that case instead of
+/// pretending the stream is running.
 template <typename Capture>
 inline void apply_video_mode(Capture& capture, const std::string& video_mode,
                              const std::string& preference, int enter_percent,
-                             bool force_stream = false) {
+                             bool force_stream = false,
+                             bool codec_available = true) {
   capture.set_stream_always(force_stream ||
                             stream_always_for(video_mode, preference));
+  capture.set_stream_locked(codec_available && stream_locked_for(preference));
   capture.set_stream_enter_percent(enter_percent);
 }
 

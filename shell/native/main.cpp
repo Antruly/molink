@@ -1458,6 +1458,79 @@ void start_drag_out(JSCContext* context, const std::string& json) {
              state->uris.size());
 }
 
+/// JSON-quotes an arbitrary filesystem path for an evaluate_javascript()
+/// payload. A path may contain quotes, backslashes or control characters;
+/// building the script with raw %s would break the page's JS.
+std::string json_string(const std::string& text) {
+  std::string out;
+  out.reserve(text.size() + 2);
+  out.push_back('"');
+  for (const unsigned char ch : text) {
+    switch (ch) {
+      case '"': out += "\\\""; break;
+      case '\\': out += "\\\\"; break;
+      case '\b': out += "\\b"; break;
+      case '\f': out += "\\f"; break;
+      case '\n': out += "\\n"; break;
+      case '\r': out += "\\r"; break;
+      case '\t': out += "\\t"; break;
+      default:
+        if (ch < 0x20) {
+          char escaped[8];
+          std::snprintf(escaped, sizeof escaped, "\\u%04x", ch);
+          out += escaped;
+        } else {
+          out.push_back(static_cast<char>(ch));
+        }
+    }
+  }
+  out.push_back('"');
+  return out;
+}
+
+/// Sends the folder the native chooser picked back to the page. Cancelling
+/// dispatches nothing, so the page never sees an empty path.
+gboolean on_directory_chosen(GtkDialog* dialog, gint response, gpointer) {
+  if (response == GTK_RESPONSE_ACCEPT) {
+    gchar* folder = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog));
+    if (folder != nullptr && *folder != '\0') {
+      const std::string quoted = json_string(folder);
+      gchar* script = g_strdup_printf(
+          "window.dispatchEvent(new CustomEvent('molink-directory',"
+          "{detail:%s}))",
+          quoted.c_str());
+      shell_eval_js(script);
+      g_free(script);
+    }
+    g_free(folder);
+  }
+  gtk_widget_destroy(GTK_WIDGET(dialog));
+  return FALSE;
+}
+
+/// WebKitGTK has neither the File System Access API nor a working
+/// `<input webkitdirectory>` (it degrades to a file dialog). The shell owns a
+/// real GTK folder chooser instead; the chosen absolute path goes back as the
+/// `molink-directory` DOM event.
+void pick_directory(GtkWidget* window) {
+  if (window == nullptr) return;
+  // An active X11 keyboard grab would keep the modal dialog from getting
+  // key events; release it first (focus loss would do this anyway).
+  release_keyboard_grab("directory dialog");
+  GtkWidget* dialog = gtk_file_chooser_dialog_new(
+      "选择目录", GTK_WINDOW(window), GTK_FILE_CHOOSER_ACTION_SELECT_FOLDER,
+      "取消", GTK_RESPONSE_CANCEL, "选择", GTK_RESPONSE_ACCEPT, nullptr);
+  gtk_window_set_modal(GTK_WINDOW(dialog), TRUE);
+  gtk_window_set_transient_for(GTK_WINDOW(dialog), GTK_WINDOW(window));
+  const char* home = g_get_home_dir();
+  if (home != nullptr && *home != '\0') {
+    gtk_file_chooser_set_current_folder(GTK_FILE_CHOOSER(dialog), home);
+  }
+  g_signal_connect(dialog, "response", G_CALLBACK(on_directory_chosen),
+                   nullptr);
+  gtk_widget_show(dialog);
+}
+
 void on_script_message(WebKitUserContentManager*, WebKitJavascriptResult* result,
                        gpointer data) {
   GtkWidget* window = GTK_WIDGET(data);
@@ -1471,6 +1544,8 @@ void on_script_message(WebKitUserContentManager*, WebKitJavascriptResult* result
   } else if (action == "release-keyboard") {
     g_grab_requested = false;
     release_keyboard_grab("page request");
+  } else if (action == "pick-directory") {
+    pick_directory(window);
   } else if (action == "minimize") {
     gtk_window_iconify(GTK_WINDOW(window));
   } else if (action == "maximize") {
