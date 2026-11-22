@@ -373,6 +373,7 @@ export function SessionView({
   const [inputNotice, setInputNotice] = useState<string | null>(null)
   const inputNoticeTimer = useRef<number | null>(null)
   const [retryCode, setRetryCode] = useState('')
+  const retryInputRef = useRef<HTMLInputElement>(null)
   const touchDevice = touchPrimary()
   const [virtualMouse, setVirtualMouse] = useState(false)
   const [displayMode, setDisplayMode] = useState<DisplayMode>('fit')
@@ -616,8 +617,15 @@ export function SessionView({
     connection()?.connect(tab.host, tab.port, tab.token, tab.token === '', tab.deviceId)
   }, [connection, tab.host, tab.port, tab.token, tab.deviceId])
   // A wrong verification code is a policy answer, not a network failure.
-  // Ask for a new code instead of reconnecting with the same one.
-  const needsCode = tab.errorCode === 'unauthorized'
+  // Ask for a new code instead of reconnecting with the same one. Both codes
+  // mean "the credential is not usable": `unauthorized` from the session
+  // hello, `invalid_token` from the login API.
+  const needsCode =
+    tab.errorCode === 'unauthorized' || tab.errorCode === 'invalid_token'
+  // Rate limiting has a different remedy (wait / stop), so it must not look
+  // like a mistyped code.
+  const rateLimited =
+    tab.errorCode === 'too_many_attempts' || tab.errorCode === 'ip_banned'
   // A rejected display-mode change is not a broken link: reconnecting cannot
   // fix it, and the backend cannot apply the mode at all.
   const displayModeError =
@@ -630,6 +638,17 @@ export function SessionView({
     setRetryCode('')
     connection()?.connect(tab.host, tab.port, value, false, tab.deviceId)
   }
+
+  // Once the host reports the credential was used or replaced, put the cursor
+  // straight back in the code field. The device address stays in the tab, so
+  // only the six digits need typing.
+  useEffect(() => {
+    if (!needsCode) return
+    const input = retryInputRef.current
+    if (input === null) return
+    input.focus()
+    input.select()
+  }, [needsCode, tab.errorCode])
 
   // A background tab is throttled and may miss frames; resync as soon as it
   // becomes visible again instead of waiting for the next pull.
@@ -2137,15 +2156,21 @@ export function SessionView({
           <span className="min-w-0 flex-1">
             {needsCode
               ? t('session.badCode')
-              : tab.errorCode === 'display_mode_busy'
-                ? t('session.displayModeBusy')
-                : displayModeError
-                  ? t('session.displayModeFailed')
-                  : tab.error
-                    ? String(
-                        t(`error.${tab.error}`, { defaultValue: tab.error }),
-                      )
-                    : actionError}
+              : rateLimited
+                ? t(
+                    tab.errorCode === 'ip_banned'
+                      ? 'error.ip_banned'
+                      : 'error.too_many_attempts',
+                  )
+                : tab.errorCode === 'display_mode_busy'
+                  ? t('session.displayModeBusy')
+                  : displayModeError
+                    ? t('session.displayModeFailed')
+                    : tab.error
+                      ? String(
+                          t(`error.${tab.error}`, { defaultValue: tab.error }),
+                        )
+                      : actionError}
           </span>
           {needsCode ? (
             <form
@@ -2156,6 +2181,7 @@ export function SessionView({
               }}
             >
               <input
+                ref={retryInputRef}
                 className="field h-7 w-32 px-2 font-mono text-[11px]"
                 value={retryCode}
                 onChange={(event) => setRetryCode(event.target.value)}

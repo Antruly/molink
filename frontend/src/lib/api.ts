@@ -143,6 +143,12 @@ export interface UiPreferences {
   deviceNotes?: Record<string, string>
   /// Last values typed into the simple connect form.
   connectDraft?: { input: string; code: string }
+  /// Whether reconnect credentials are persisted at all.
+  rememberDevice?: boolean
+  /// Host session tokens keyed by `molink.session.<host>:<port>`. Written by
+  /// the native shell through ui.json so a restarted client can reconnect
+  /// without spending another verification code.
+  sessions?: Record<string, { token: string; savedAt: number }>
 }
 
 export interface ServerState {

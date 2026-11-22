@@ -28,6 +28,7 @@ import {
   type DiscoveredPeer,
   type SecuritySettings,
   type ServerState,
+  type UiPreferences,
 } from '../lib/api'
 import type {
   ClientPhase,
@@ -50,6 +51,10 @@ import {
   setWindowFullscreen as setNativeFullscreen,
   shellInfo,
 } from '../lib/shell'
+import {
+  kRememberDeviceKey,
+  sessionStore,
+} from '../lib/session-store'
 
 export type Theme = 'light' | 'dark'
 export type AuthPhase = 'booting' | 'login' | 'locked' | 'ready'
@@ -177,6 +182,9 @@ interface AppState {
   /// Remote Explorer file clipboard -> this machine's clipboard. Off by
   /// default: enabling it transfers the whole file selection over the session.
   remoteClipboardFiles: boolean
+  /// Keep the host's reconnect credential across restarts, so a single-use
+  /// verification code is not needed again. On by default.
+  rememberDevice: boolean
   /// What the window's close button does while a session tab is open:
   /// ask once, hide to the tray, or close the session tab.
   windowCloseBehavior: 'ask' | 'tray' | 'tab'
@@ -220,6 +228,7 @@ interface AppState {
   setQualityWatermark: (enabled: boolean) => void
   setAutoAudio: (enabled: boolean) => void
   setRemoteClipboardFiles: (enabled: boolean) => void
+  setRememberDevice: (enabled: boolean) => void
   setWindowCloseBehavior: (behavior: 'ask' | 'tray' | 'tab') => void
   setQualityMode: (mode: QualityMode) => void
   setFrameRate: (fps: FpsSetting) => void
@@ -315,6 +324,9 @@ const UI_MODE_KEY = 'molink.uiMode'
 const SAVED_DEVICES_KEY = 'molink.savedDevices'
 const DEVICE_NOTES_KEY = 'molink.deviceNotes'
 const CONNECT_DRAFT_KEY = 'molink.connectDraft'
+/// Read by session-store too; kept in one place so the module and the UI can
+/// never disagree about the default.
+const REMEMBER_DEVICE_KEY = kRememberDeviceKey
 const EMPTY_STATS: Stats = {
   fps: 0,
   wireFps: 0,
@@ -519,42 +531,74 @@ export const useAppStore = create<AppState>((set, get) => {
   }
 
   let persistTimer: number | null = null
+
+  /// The complete ui.json document. Every save rewrites it, so the session
+  /// credentials must be part of the same snapshot; otherwise a preference
+  /// change would silently delete them.
+  const uiPreferencesSnapshot = (): UiPreferences => ({
+    uiMode: get().uiMode,
+    language: (() => {
+      try {
+        return window.localStorage.getItem('molink.lang') || 'zh-CN'
+      } catch {
+        return 'zh-CN'
+      }
+    })(),
+    savedDevices: get().savedDevices.map((device) => ({
+      key: device.key,
+      id: device.id,
+      host: device.host,
+      port: device.port,
+      label: device.label,
+      platform: device.platform,
+      // Keep ui.json small: only preset avatars are persisted; uploaded
+      // images are fetched from the directory when the device is online.
+      avatar:
+        device.avatar && !device.avatar.startsWith('data:')
+          ? device.avatar
+          : undefined,
+      token: device.token,
+      savedAt: device.savedAt,
+    })),
+    recents: get().recents,
+    deviceNotes: get().deviceNotes,
+    connectDraft: get().connectDraft,
+    rememberDevice: get().rememberDevice,
+    sessions: sessionStore.persistedRecords(),
+  })
+
+  /// Writes ui.json now. A session token arrives with `welcome`, and the user
+  /// may kill the process a moment later; the usual 400 ms debounce is too
+  /// long to promise a restart can reconnect.
+  const persistUiPreferencesNow = (): void => {
+    const token = get().token
+    // The endpoint is loopback-only; a remote browser's copy lives in
+    // localStorage instead.
+    if (!token || !get().localMode) return
+    void saveUiPreferences(token, uiPreferencesSnapshot()).catch(
+      () => undefined,
+    )
+  }
+
+  /// One persistent backend at a time. The native shell (and a browser served
+  /// by the local core) uses ui.json; a remote browser falls back to
+  /// localStorage. Never both, so the two copies cannot drift.
+  const configureSessionBackend = (local: boolean): void => {
+    if (!local) {
+      sessionStore.useLocalStorage()
+      return
+    }
+    // The ui.json endpoint needs the local token; switching before it exists
+    // would clear localStorage without being able to write the file store.
+    if (!get().token) return
+    sessionStore.useExternalPersistence(persistUiPreferencesNow)
+  }
+
   const schedulePersist = (): void => {
     if (persistTimer !== null) window.clearTimeout(persistTimer)
     persistTimer = window.setTimeout(() => {
       persistTimer = null
-      const token = get().token
-      if (!token) return
-      const saved = get().savedDevices.map((device) => ({
-        key: device.key,
-        id: device.id,
-        host: device.host,
-        port: device.port,
-        label: device.label,
-        platform: device.platform,
-        // Keep ui.json small: only preset avatars are persisted; uploaded
-        // images are fetched from the directory when the device is online.
-        avatar:
-          device.avatar && !device.avatar.startsWith('data:')
-            ? device.avatar
-            : undefined,
-        token: device.token,
-        savedAt: device.savedAt,
-      }))
-      void saveUiPreferences(token, {
-        uiMode: get().uiMode,
-        language: (() => {
-          try {
-            return window.localStorage.getItem('molink.lang') || 'zh-CN'
-          } catch {
-            return 'zh-CN'
-          }
-        })(),
-        savedDevices: saved,
-        recents: get().recents,
-        deviceNotes: get().deviceNotes,
-        connectDraft: get().connectDraft,
-      }).catch(() => undefined)
+      persistUiPreferencesNow()
     }, 400)
   }
 
@@ -606,6 +650,7 @@ export const useAppStore = create<AppState>((set, get) => {
     // On by default: pasting a file copied on the remote is the feature, and
     // the settings switch still lets a user opt out.
     remoteClipboardFiles: readStorage(REMOTE_CLIPBOARD_FILES_KEY) !== '0',
+    rememberDevice: readStorage(REMEMBER_DEVICE_KEY) !== '0',
     windowCloseBehavior: (() => {
       const saved = readStorage(CLOSE_BEHAVIOR_KEY)
       return saved === 'tray' || saved === 'tab' ? saved : 'ask'
@@ -665,6 +710,15 @@ export const useAppStore = create<AppState>((set, get) => {
       for (const connection of runtimes.values()) {
         connection.setRemoteClipboardEnabled(enabled)
       }
+    },
+
+    setRememberDevice: (enabled) => {
+      writeStorage(REMEMBER_DEVICE_KEY, enabled ? '1' : '0')
+      set({ rememberDevice: enabled })
+      // Turning it off deletes every persisted session credential; the
+      // in-memory copy survives so the open tab can still reconnect.
+      sessionStore.setRememberDevice(enabled)
+      schedulePersist()
     },
 
     setWindowCloseBehavior: (behavior) => {
@@ -782,6 +836,16 @@ export const useAppStore = create<AppState>((set, get) => {
             JSON.stringify(next.connectDraft),
           )
         }
+        // The core is the source of truth for remember_device and the session
+        // tokens in ui.json. Apply both together so turning the switch off on
+        // one launch cannot leave an old credential usable on the next.
+        const remember =
+          typeof prefs.rememberDevice === 'boolean'
+            ? prefs.rememberDevice
+            : get().rememberDevice
+        sessionStore.applyStoredPreferences(remember, prefs.sessions)
+        writeStorage(REMEMBER_DEVICE_KEY, remember ? '1' : '0')
+        next.rememberDevice = remember
         set(next)
       } catch {
         // Keep the local copy when the core is unavailable.
@@ -904,6 +968,9 @@ export const useAppStore = create<AppState>((set, get) => {
           locked: state.locked,
           lockTimeout: state.lock_timeout,
         })
+        // Choose where reconnect credentials live before anything can save
+        // one: ui.json for the local shell, localStorage for a remote browser.
+        configureSessionBackend(state.local)
         if (state.locked) {
           set({ authPhase: 'locked' })
           return
@@ -911,15 +978,14 @@ export const useAppStore = create<AppState>((set, get) => {
         if (state.local) {
           try {
             const device = await fetchDeviceInfo()
-            set({
-              device,
-              token: device.token,
-              authPhase: 'ready',
-              stateError: null,
-            })
+            set({ device, token: device.token })
+            configureSessionBackend(true)
+            // Hydrate the persisted credentials before the home screen lets
+            // the user connect.
+            await get().loadUiPreferences()
+            set({ authPhase: 'ready', stateError: null })
             get().syncUiState()
             void get().refreshSecurity()
-            void get().loadUiPreferences()
             return
           } catch {
             set({ authPhase: 'login', stateError: 'local_auth_failed' })
@@ -946,6 +1012,7 @@ export const useAppStore = create<AppState>((set, get) => {
           locked: state.locked,
           lockTimeout: state.lock_timeout,
         })
+        configureSessionBackend(state.local)
         if (state.locked) {
           if (previous.authPhase !== 'locked') {
             for (const id of Array.from(runtimes.keys())) {
@@ -972,10 +1039,12 @@ export const useAppStore = create<AppState>((set, get) => {
         ) {
           try {
             const device = await fetchDeviceInfo()
-            set({ device, token: device.token, authPhase: 'ready' })
+            set({ device, token: device.token })
+            configureSessionBackend(true)
+            await get().loadUiPreferences()
+            set({ authPhase: 'ready' })
             get().syncUiState()
             void get().refreshSecurity()
-            void get().loadUiPreferences()
           } catch {
             // stay on the login screen
           }
@@ -1031,14 +1100,15 @@ export const useAppStore = create<AppState>((set, get) => {
         if (result.local) {
           // Refresh the local device card (temporary code state) and use the
           // stable local session token rather than the login-issued one.
+          configureSessionBackend(true)
           try {
             const device = await fetchDeviceInfo()
             set({ device, token: device.token })
           } catch {
             // keep the login result
           }
+          await get().loadUiPreferences()
           void get().refreshSecurity()
-          void get().loadUiPreferences()
         }
         return true
       } catch (error) {
