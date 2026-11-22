@@ -1219,7 +1219,8 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
             }
             const uint64_t available = size - offset;
             const uint64_t take =
-                length_query != nullptr ? std::min(length, available)
+                // Parenthesised: the Windows headers still define a min macro.
+                length_query != nullptr ? (std::min)(length, available)
                                         : available;
             // The whole-file form keeps the old 256 MiB ceiling. A bounded
             // range is already capped above, so it needs no second limit.
