@@ -42,6 +42,16 @@ clipboard_file entry(const std::string& path, const std::string& name,
   return file;
 }
 
+/// An inner RDP virtual file: no path, bytes behind a backend stream token.
+clipboard_file stream_entry(const std::string& name, uint64_t size,
+                            uint64_t token) {
+  clipboard_file file;
+  file.name = name;
+  file.size = size;
+  file.stream_id = token;
+  return file;
+}
+
 clipboard_offer_entry offer(uint32_t id, const std::string& name,
                             uint64_t size) {
   clipboard_offer_entry item;
@@ -165,12 +175,68 @@ void test_short_read_is_an_error() {
   fs::remove_all(dir, ec);
 }
 
+void test_stream_entries() {
+  // An inner RDP file copied in the nested desktop: the host enumerated a
+  // FileGroupDescriptorW entry, so there is no path but there is a token.
+  const std::vector<clipboard_file> current = {
+      stream_entry("a.bin", 100, 0x0000000700000001ull)};
+  const std::vector<clipboard_offer_entry> offered = {offer(1, "a.bin", 100)};
+
+  clipboard_pull_result result =
+      read_clipboard_pull(current, offered, 1, 10, 50, 256 * 1024);
+  expect(result.status == clipboard_pull_status::ok,
+         "a virtual entry is readable");
+  expect(result.stream, "a virtual entry asks for a backend read");
+  expect(result.length == 50, "the requested length is echoed");
+  expect(result.data.empty(), "no bytes are read in the validation step");
+
+  clipboard_pull_result tail =
+      read_clipboard_pull(current, offered, 1, 90, 50, 256 * 1024);
+  expect(tail.status == clipboard_pull_status::ok && tail.stream,
+         "a tail range on a virtual entry is readable");
+  expect(tail.length == 10, "the tail is clamped to the advertised size");
+
+  clipboard_pull_result at_end =
+      read_clipboard_pull(current, offered, 1, 100, 50, 256 * 1024);
+  expect(at_end.status == clipboard_pull_status::ok && at_end.stream,
+         "offset == size is an empty success");
+  expect(at_end.length == 0, "no bytes are requested at EOF");
+
+  clipboard_pull_result past =
+      read_clipboard_pull(current, offered, 1, 101, 4, 256 * 1024);
+  expect(past.status == clipboard_pull_status::read_error,
+         "an offset past a virtual file's end is a read error");
+
+  // An entry with neither a path nor a token cannot be served.
+  clipboard_file empty;
+  empty.name = "a.bin";
+  empty.size = 100;
+  expect(read_clipboard_pull({empty}, offered, 1, 0, 4, 256 * 1024).status ==
+             clipboard_pull_status::gone,
+         "a pathless tokenless entry is gone");
+
+  // The same validation as CF_HDROP applies: a different name or size at the
+  // id means the clipboard moved on.
+  std::vector<clipboard_file> renamed = current;
+  renamed[0].name = "b.bin";
+  expect(read_clipboard_pull(renamed, offered, 1, 0, 4, 256 * 1024).status ==
+             clipboard_pull_status::gone,
+         "a renamed virtual entry is gone");
+
+  std::vector<clipboard_file> resized = current;
+  resized[0].size = 99;
+  expect(read_clipboard_pull(resized, offered, 1, 0, 4, 256 * 1024).status ==
+             clipboard_pull_status::gone,
+         "a resized virtual entry is gone");
+}
+
 }  // namespace
 
 int main() {
   test_range_read();
   test_gone_cases();
   test_short_read_is_an_error();
+  test_stream_entries();
   std::printf("%d checks, %d failure(s)\n", checks, failures);
   return failures == 0 ? 0 : 1;
 }

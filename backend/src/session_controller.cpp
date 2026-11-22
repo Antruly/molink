@@ -86,7 +86,20 @@ std::string clipboard_files_signature(
     const std::vector<clipboard_file>& files) {
   std::string signature;
   for (const clipboard_file& file : files) {
-    signature += file.path;
+    // Keep the historical path-only key for real files: clipboard_mark_files_written
+    // records just the paths, and changing the key would defeat echo
+    // suppression. A virtual entry has no path, so name/size/generation are
+    // what makes two data-object offers distinguishable.
+    if (!file.path.empty()) {
+      signature += file.path;
+    } else {
+      signature += "@stream:";
+      signature += file.name;
+      signature += ':';
+      signature += std::to_string(file.size);
+      signature += ':';
+      signature += std::to_string(file.stream_id);
+    }
     signature += '\n';
   }
   return signature;
@@ -357,7 +370,8 @@ void publish_clipboard_files(
     std::vector<clipboard_file> files, bool nested_rdp) {
   files.erase(std::remove_if(files.begin(), files.end(),
                              [](const clipboard_file& file) {
-                               return file.path.empty() || file.name.empty();
+                               return !clipboard_file_has_bytes(file) ||
+                                      file.name.empty();
                              }),
               files.end());
   if (files.empty()) return;
@@ -1496,9 +1510,11 @@ void session_controller::send_lazy_offer_reply(bool ok, bool stream,
   // True when the host will fetch byte ranges instead of asking for an
   // upload. The page then keeps answering `fetch` and never uploads.
   out["stream"] = ok && stream;
-  // An inner RDP session cannot render a delayed/virtual offer. The viewer
-  // must materialise the files first (upload-then-CF_HDROP) so mstsc can
-  // redirect them into the nested desktop.
+  // Legacy escape hatch: an older host used this to say that an inner RDP
+  // session could not render a delayed offer. Current hosts accept the offer
+  // and fall back to the eager source when mstsc is the clipboard consumer,
+  // so `compat` is never sent any more; the field stays understood by the
+  // client for compatibility with old cores.
   if (compat) out["compat"] = true;
   if (!ok) out["message"] = message;
   send_json(transport.get(), out);
@@ -1739,7 +1755,7 @@ void session_controller::announce_current_clipboard_files() {
           std::vector<clipboard_file> files) {
         files.erase(std::remove_if(files.begin(), files.end(),
                                    [](const clipboard_file& file) {
-                                     return file.path.empty() ||
+                                     return !clipboard_file_has_bytes(file) ||
                                             file.name.empty();
                                    }),
                     files.end());
@@ -3067,14 +3083,44 @@ void session_controller::on_text(const std::string& text) {
       std::weak_ptr<session_controller> weak = weak_from_this();
       auto post = options_.post;
       auto registry_ref = registry_;
-      options_.clipboard->request_files(
-          [weak, post, registry_ref, session_id, file_id, offset,
+      std::shared_ptr<clipboard_service> clipboard = options_.clipboard;
+      clipboard->request_files(
+          [weak, post, registry_ref, clipboard, session_id, file_id, offset,
            length](std::vector<clipboard_file> current) {
             const std::vector<clipboard_offer_entry> offered =
                 registry_ref->clipboard_offer(session_id);
             clipboard_pull_result result = read_clipboard_pull(
                 current, offered, file_id, offset, length,
                 kClipboardPullChunkBytes);
+            if (result.status == clipboard_pull_status::ok && result.stream) {
+              // An inner RDP virtual file: the bytes are behind the OLE data
+              // object. read_clipboard_pull already validated the id, name
+              // and size; the backend reads the range on its worker thread so
+              // a blocked RDP channel cannot stall this loop.
+              const clipboard_file target = current[file_id - 1];
+              const uint64_t reply_offset = result.offset;
+              const uint64_t take = result.length;
+              clipboard->read_file_range(
+                  target, reply_offset, take,
+                  [weak, post, file_id](uint32_t status, uint64_t reply_at,
+                                        std::vector<uint8_t> data) {
+                    auto deliver = [weak, file_id, status, reply_at,
+                                    data = std::move(data)] {
+                      if (auto self = weak.lock()) {
+                        self->send_clipboard_file_reply(
+                            file_id, status, reply_at,
+                            data.empty() ? nullptr : data.data(),
+                            data.size());
+                      }
+                    };
+                    if (post) {
+                      post(std::move(deliver));
+                    } else {
+                      deliver();
+                    }
+                  });
+              return;
+            }
             auto deliver = [weak, file_id, result = std::move(result)] {
               if (auto self = weak.lock()) {
                 self->send_clipboard_file_reply(
@@ -3140,23 +3186,24 @@ void session_controller::on_text(const std::string& text) {
         }
         offered.push_back(std::move(file));
       }
-      // A nested RDP session owns the clipboard: mstsc only redirects real
-      // CF_HDROP files, so nothing can trigger a delayed render. Reject the
-      // offer with `compat`, which tells the viewer to upload the files now.
-      if (options_.clipboard->nested_rdp()) {
-        send_lazy_offer_reply(
-            false, false,
-            "the clipboard belongs to an inner RDP session; files must be "
-            "materialised before they can be pasted there",
-            true);
-        return;
-      }
       // `source` posts to this session's event loop; the clipboard thread
       // then waits on its condition variable, never on the network. A viewer
       // that advertised `clipboard_stream` gets a range source, so a paste
       // writes Explorer's target file directly and nothing is staged under
       // ~/moLink. Everyone else keeps the upload-then-CF_HDROP path.
-      const bool stream = session->clipboard_stream;
+      //
+      // In a nested RDP session mstsc consumes the host clipboard and is not
+      // guaranteed to read FileContents streams, so the safe default is the
+      // eager source: the file is materialised on this machine and CF_HDROP is
+      // offered (which mstsc definitely redirects). MOLINK_RDP_STREAM_PUSH=1
+      // lets a real-machine test try the virtual stream against mstsc.
+      bool stream = session->clipboard_stream;
+      if (stream && options_.clipboard->nested_rdp()) {
+        const char* push = std::getenv("MOLINK_RDP_STREAM_PUSH");
+        if (push == nullptr || std::string(push) != "1") {
+          stream = false;
+        }
+      }
       std::weak_ptr<session_controller> weak = weak_from_this();
       auto post = options_.post;
       std::shared_ptr<lazy_blob_source> source;

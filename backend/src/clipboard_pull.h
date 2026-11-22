@@ -31,14 +31,22 @@ enum class clipboard_pull_status : uint32_t {
 struct clipboard_pull_result {
   clipboard_pull_status status = clipboard_pull_status::gone;
   uint64_t offset = 0;
+  /// Number of bytes this request covers. For a path entry it equals
+  /// `data.size()`; for a stream entry it tells the caller how much to ask the
+  /// backend for.
+  uint64_t length = 0;
+  /// The bytes live behind the backend's OLE data object (inner RDP virtual
+  /// file). `data` is empty; the caller must use
+  /// `clipboard_service::read_file_range` with the matching entry.
+  bool stream = false;
   std::vector<uint8_t> data;
 };
 
 /// Answer one range request for a host clipboard file.
 ///
-/// @param current  CF_HDROP / text-uri-list entries enumerated *now*. The host
-///                 re-enumerates on every pull because RDP redirection replaces
-///                 its temporary files.
+/// @param current  CF_HDROP / text-uri-list / data-object entries enumerated
+///                 *now*. The host re-enumerates on every pull because RDP
+///                 redirection replaces its temporary files.
 /// @param offered  The list last announced to this session.
 /// @param id       1-based file id from the pull request.
 /// @param offset   Byte offset the client already has.
@@ -47,6 +55,10 @@ struct clipboard_pull_result {
 ///
 /// A mismatch between @p current and @p offered is status `gone`: the client
 /// can no longer trust that id to name the bytes it was told about.
+///
+/// An entry with a `stream_id` returns `ok` with `stream=true` and no bytes;
+/// the caller then reads the range through the clipboard backend. An entry
+/// with neither a path nor a stream id is `gone`.
 clipboard_pull_result read_clipboard_pull(
     const std::vector<clipboard_file>& current,
     const std::vector<clipboard_offer_entry>& offered, uint32_t id,

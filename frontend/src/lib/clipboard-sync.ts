@@ -26,14 +26,12 @@ const RETRY_DELAY_MS = 3000
 const LAZY_OFFER_TIMEOUT_MS = 10000
 
 export interface ClipboardSyncOptions {
-  /// Null when the host does not advertise `clipboard_lazy`, or when the host
-  /// told us its clipboard belongs to an inner RDP session (virtual files
-  /// cannot cross that boundary).
+  /// Null when the host does not advertise `clipboard_lazy`.
   capability?: () => LazyCapability | null
   echo?: ClipboardEcho
-  /// Called when the host rejects a delayed offer because files must be
-  /// materialised first (nested RDP). The session then disables lazy mode for
-  /// the rest of this connection.
+  /// The host reported that its clipboard belongs to an inner RDP session.
+  /// Informational only: a current host reads the nested file through the OLE
+  /// data object, so lazy/stream mode stays enabled.
   onNestedRdp?: () => void
 }
 
@@ -371,9 +369,10 @@ export class ClipboardFileSync {
     this.clearOfferTimer()
     this.lazyOfferPending = false
     if (message.ok === false && message.compat === true) {
-      // The host's clipboard belongs to an inner RDP session. mstsc only
-      // redirects real CF_HDROP files, so upload the bytes now; the next poll
-      // will take the eager path because the session drops its capability.
+      // An old host could not render a delayed offer while mstsc owned its
+      // clipboard. Current hosts accept it (and read the nested file through
+      // the OLE data object), so this branch is compatibility only; it is a
+      // notice, not a mode switch.
       this.lazyActive = false
       this.lazyStream = false
       this.lazyFiles = []
