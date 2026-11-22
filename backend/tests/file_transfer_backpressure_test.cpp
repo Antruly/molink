@@ -227,11 +227,124 @@ void test_download_and_upload_slots_are_reclaimed() {
   fs::remove_all(home, ec);
 }
 
+/// The compact JSON dump writes `"id":N`, so pull the number without a parser.
+uint32_t id_in(const std::string& message) {
+  std::size_t pos = message.find("\"id\"");
+  if (pos == std::string::npos) return 0;
+  pos = message.find(':', pos);
+  if (pos == std::string::npos) return 0;
+  ++pos;
+  while (pos < message.size() &&
+         (message[pos] == ' ' || message[pos] == '\t')) {
+    ++pos;
+  }
+  uint32_t value = 0;
+  while (pos < message.size() && message[pos] >= '0' && message[pos] <= '9') {
+    value = value * 10 + static_cast<uint32_t>(message[pos] - '0');
+    ++pos;
+  }
+  return value;
+}
+
+void test_upload_paths_and_mkdir() {
+  namespace fs = std::filesystem;
+  const fs::path home =
+      fs::temp_directory_path() / "molink-file-transfer-paths-test";
+  std::error_code ec;
+  fs::remove_all(home, ec);
+  fs::create_directories(home, ec);
+#if defined(_WIN32)
+  _putenv_s("USERPROFILE", home.string().c_str());
+#else
+  setenv("HOME", home.string().c_str(), 1);
+#endif
+  std::vector<std::string> json;
+  molink::file_transfer transfer(
+      [&json](std::string value) { json.push_back(std::move(value)); },
+      [](uint32_t, uint64_t, const uint8_t*, std::size_t) { return true; });
+
+  auto accept = [&](const std::string& name, uint64_t size) {
+    transfer.offer(name, size, home.string());
+    const uint32_t id = id_in(json.back());
+    expect(id != 0,
+           "a relative upload name is accepted");
+    return id;
+  };
+  auto finish = [&](uint32_t id, const std::string& text) {
+    std::vector<uint8_t> bytes(text.begin(), text.end());
+    transfer.chunk(id, 0, bytes.data(), bytes.size());
+    transfer.complete(id);
+  };
+
+  // A client that has no directory support sends only a bare file name; that
+  // path must behave exactly as before.
+  finish(accept("plain.txt", 5), "hello");
+  expect(fs::exists(home / "plain.txt"),
+         "a bare file name still lands in the destination");
+
+  // A folder drag sends the relative parents and they are recreated.
+  finish(accept("photos/2024/a.jpg", 4), "jpeg");
+  expect(fs::exists(home / "photos" / "2024" / "a.jpg"),
+         "a relative path creates its folders under the destination");
+
+  finish(accept("照片/旅行/海.jpg", 4), "sea!");
+  expect(fs::exists(home / "照片" / "旅行" / "海.jpg"),
+         "UTF-8 folder and file names survive");
+
+  // Two files with the same relative name stay distinct.
+  finish(accept("dup.txt", 1), "a");
+  finish(accept("dup.txt", 1), "b");
+  expect(fs::exists(home / "dup.txt") && fs::exists(home / "dup (1).txt"),
+         "a duplicate name gets a numbered sibling");
+
+  // Absolute paths, drive letters, traversal and reserved device names are
+  // all refused before an upload slot or a temporary file is created.
+  const char* bad_names[] = {
+      "/etc/passwd", "C:\\Windows\\evil.txt", "\\\\server\\share\\x",
+      "..\\escape.txt", "a/../../escape.txt", "CON.txt", "nul", "a//b.txt"};
+  for (const char* name : bad_names) {
+    const std::size_t count = json.size();
+    transfer.offer(name, 1, home.string());
+    expect(json.size() == count + 1 &&
+               json.back().find("invalid file name") != std::string::npos,
+           "an unsafe upload path is rejected");
+  }
+  expect(!fs::exists(home / "etc" / "passwd") &&
+             !fs::exists(home / "escape.txt"),
+         "rejected paths create nothing under the destination");
+
+  // Empty folders: a successful mkdir says so, and creates every level.
+  transfer.mkdir("a/b", home.string());
+  expect(json.back().find("mkdir") != std::string::npos &&
+             json.back().find("true") != std::string::npos &&
+             fs::is_directory(home / "a" / "b"),
+         "mkdir creates the nested folder and reports success");
+  transfer.mkdir("照片/空 目录/", home.string());
+  expect(fs::is_directory(home / "照片" / "空 目录"),
+         "mkdir accepts a trailing slash and preserves UTF-8 with spaces");
+  transfer.mkdir("a/b", home.string());
+  expect(json.back().find("true") != std::string::npos,
+         "mkdir over an existing folder is still a success");
+
+  const char* bad_dirs[] = {"/abs", "../up", "C:\\tmp", "\\\\server\\share",
+                            "CON", "a//b"};
+  for (const char* path : bad_dirs) {
+    const std::size_t count = json.size();
+    transfer.mkdir(path, home.string());
+    expect(json.size() == count + 1 &&
+               json.back().find("invalid folder path") != std::string::npos,
+           "mkdir rejects an unsafe folder path");
+  }
+
+  fs::remove_all(home, ec);
+}
+
 }  // namespace
 
 int main() {
   test_download_retries_same_offset_after_backpressure();
   test_download_and_upload_slots_are_reclaimed();
+  test_upload_paths_and_mkdir();
   std::printf("%d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;
 }

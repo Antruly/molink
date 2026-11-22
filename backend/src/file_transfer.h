@@ -36,6 +36,10 @@ class file_transfer {
   /// relative parent inside `name` (a folder drag) is created underneath it.
   void offer(const std::string& name, uint64_t size,
              const std::string& destination);
+  /// Creates an empty directory (and its parents) under the viewer's chosen
+  /// destination. `path` must be relative and is validated like an upload
+  /// name; a peer that sends only a bare file name never needs this.
+  void mkdir(const std::string& path, const std::string& destination);
   void chunk(uint32_t id, uint64_t offset, const uint8_t* data,
              std::size_t len);
   void complete(uint32_t id, clock::time_point now = clock::now());

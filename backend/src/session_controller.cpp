@@ -2603,6 +2603,8 @@ void session_controller::on_text(const std::string& text) {
       files_->offer(string_field(j, "name"), size,
                     string_field(j, "dest"));
       update_file_retry_timer();
+    } else if (action == "mkdir") {
+      files_->mkdir(string_field(j, "path"), string_field(j, "dest"));
     } else if (action == "complete") {
       files_->complete(id);
       update_file_retry_timer();
