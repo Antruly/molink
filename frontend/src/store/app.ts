@@ -173,6 +173,9 @@ export interface ConnectDraft {
 interface AppState {
   theme: Theme
   qualityWatermark: boolean
+  /// Fade a session overlay to near-transparent while the pointer is within
+  /// its proximity radius. On by default; touch input never fades.
+  watermarkFade: boolean
   /// Play the remote machine's sound as soon as a session is live.
   autoAudio: boolean
   /// Remote Explorer file clipboard -> this machine's clipboard. Off by
@@ -228,6 +231,7 @@ interface AppState {
   setTheme: (theme: Theme) => void
   toggleTheme: () => void
   setQualityWatermark: (enabled: boolean) => void
+  setWatermarkFade: (enabled: boolean) => void
   setAutoAudio: (enabled: boolean) => void
   setRemoteClipboardFiles: (enabled: boolean) => void
   setRememberDevice: (enabled: boolean) => void
@@ -317,6 +321,7 @@ interface AppState {
 
 const THEME_KEY = 'molink.theme'
 const QUALITY_KEY = 'molink.quality'
+const WATERMARK_FADE_KEY = 'molink.watermarkFade'
 const AUTO_AUDIO_KEY = 'molink.autoAudio'
 const REMOTE_CLIPBOARD_FILES_KEY = 'molink.remoteClipboardFiles'
 const CLOSE_BEHAVIOR_KEY = 'molink.closeBehavior'
@@ -672,6 +677,9 @@ export const useAppStore = create<AppState>((set, get) => {
   return {
     theme: initialTheme(),
     qualityWatermark: readStorage(QUALITY_KEY) === '1',
+    // On by default: the overlays are useful when looked at, not while the
+    // pointer is crossing the picture to reach them.
+    watermarkFade: readStorage(WATERMARK_FADE_KEY) !== '0',
     autoAudio: readStorage(AUTO_AUDIO_KEY) !== '0',
     // On by default: pasting a file copied on the remote is the feature, and
     // the settings switch still lets a user opt out.
@@ -728,6 +736,11 @@ export const useAppStore = create<AppState>((set, get) => {
     setQualityWatermark: (enabled) => {
       writeStorage(QUALITY_KEY, enabled ? '1' : '0')
       set({ qualityWatermark: enabled })
+    },
+
+    setWatermarkFade: (enabled) => {
+      writeStorage(WATERMARK_FADE_KEY, enabled ? '1' : '0')
+      set({ watermarkFade: enabled })
     },
 
     setAutoAudio: (enabled) => {
