@@ -35,6 +35,7 @@
 #endif
 #include "protocol/frame_packet.h"
 #include "service_control.h"
+#include "session_preset.h"
 #include "transport/switchable_transport.h"
 #include "transport/ws_transport.h"
 #include "util.h"
@@ -2432,6 +2433,69 @@ void session_controller::on_text(const std::string& text) {
     return;
   }
 
+  // Viewer-owned picture preset. The viewer sends this after the welcome
+  // (before the first frame) and on every change. It is deliberately not
+  // written to auth settings and not broadcast to other viewers: the capture
+  // is shared, but each viewer's selector stays its own.
+  if (type == "session-preset") {
+    if (!options_.capture) {
+      send_error(transport.get(), "not_implemented", "capture is unavailable");
+      return;
+    }
+    session_preset_request request;
+    request.preset = string_field(j, "preset");
+    request.rate_mode = string_field(j, "rate_mode");
+    request.format = string_field(j, "format");
+    request.chroma = string_field(j, "chroma");
+    request.codec = string_field(j, "codec");
+    const auto read_int = [&j](const char* name, int& out) {
+      const auto it = j.find(name);
+      if (it == j.end()) return true;
+      if (!it->is_number()) return false;
+      out = static_cast<int>(it->get<double>());
+      return true;
+    };
+    if (!read_int("fps", request.fps) ||
+        !read_int("quality", request.quality) ||
+        !read_int("bitrate_kbps", request.bitrate_kbps)) {
+      send_error(transport.get(), "bad_preset",
+                 "fps, quality and bitrate_kbps must be numbers");
+      return;
+    }
+    session_preset_request resolved;
+    std::string error;
+    if (!normalize_session_preset(request, resolved, error)) {
+      send_error(transport.get(), "bad_preset", error);
+      return;
+    }
+    // The first preset of a session always starts from a keyframe, and a
+    // preset/format/rate change rebuilds the encoder at the next frame
+    // boundary (the capture thread owns it, so no half-encoded frame is
+    // published). A pure fps change does not need one.
+    const bool first = session->encoding_preset.empty();
+    const bool reinit =
+        session_preset_requires_keyframe(*options_.capture, resolved);
+    const session_preset_actual actual =
+        apply_session_preset(*options_.capture, resolved);
+    session->encoding_preset = resolved.preset;
+    session->no_subsampling = resolved.chroma == "444";
+    if (first || reinit) options_.capture->request_keyframe();
+
+    uvcpp_json ack;
+    ack["type"] = "session-preset";
+    ack["applied"] = true;
+    ack["preset"] = resolved.preset;
+    const std::string stream_codec = options_.capture->stream_codec_name();
+    const bool streaming = stream_codec != "tiles";
+    ack["actual"]["fps"] = actual.fps;
+    ack["actual"]["quality"] = actual.quality;
+    ack["actual"]["format"] = actual.format;
+    ack["actual"]["chroma"] = streaming ? "420" : actual.chroma;
+    ack["actual"]["codec"] = stream_codec;
+    send_json(transport.get(), ack);
+    return;
+  }
+
   // Quality preset plus an optional capture rate. The client resolves "auto"
   // into a concrete preset, so the core only has to apply encoding knobs.
   // Both are global to the host, like the capture rate.
@@ -2460,23 +2524,9 @@ void session_controller::on_text(const std::string& text) {
     // turbo -> colour used to leave most of the screen monochrome until every
     // tile was touched. Push one full frame immediately after any change.
     if (options_.capture->quality() != previous) {
+      // The preset is per viewer now; other sessions keep their own selection
+      // and are not told what this one picked.
       options_.capture->request_keyframe();
-      // The preset is global to the host. Every other viewer has to see the
-      // same one, otherwise its UI keeps asserting its own choice and the
-      // host ends up re-encoding for whoever pushed last.
-      uvcpp_json shared;
-      shared["type"] = "quality";
-      shared["mode"] = quality_mode_name(options_.capture->quality());
-      shared["format"] = tile_format_name(
-          quality_profile_for(options_.capture->quality()).format);
-      shared["scope"] = "global";
-      for (const session_info& peer : registry_->snapshot()) {
-        if (peer.id == session->id || !peer.authenticated ||
-            !peer.transport) {
-          continue;
-        }
-        send_json(peer.transport.get(), shared);
-      }
     }
     int fps = 0;
     if (fps_it != j.end()) {
@@ -2542,36 +2592,26 @@ void session_controller::on_text(const std::string& text) {
         rate_mode != options_.capture->stream_rate_mode_value() ||
         format != options_.capture->stream_format_override();
     options_.capture->set_stream_overrides(qp, bitrate_kbps, rate_mode, format);
-    if (options_.auth) {
-      options_.auth->set_stream_overrides(
-          qp, bitrate_kbps, fps, rate_name.empty() ? "auto" : rate_name,
-          format_name.empty() ? std::string() : format_name);
-    }
+    // Deliberately not persisted through auth->set_stream_overrides: these
+    // are the viewer's live knobs and must not become the host's settings.
     if (knobs_changed || options_.capture->quality() != previous) {
       // A new format or rate mode re-initialises the encoder and the client
       // must paint from a keyframe.
       options_.capture->request_keyframe();
     }
     const tile_format effective_format = options_.capture->quality_format();
-    uvcpp_json shared;
-    shared["type"] = "quality";
-    shared["mode"] = quality_mode_name(options_.capture->quality());
-    shared["format"] = tile_format_name(effective_format);
-    shared["qp"] = options_.capture->stream_qp();
-    shared["bitrate_kbps"] = options_.capture->stream_bitrate_kbps();
-    shared["rate_mode"] = options_.capture->stream_rate_mode_value() == 1
-                              ? "cq"
-                              : (options_.capture->stream_rate_mode_value() == 2
-                                     ? "cbr"
-                                     : "auto");
-    shared["scope"] = "global";
-    for (const session_info& peer : registry_->snapshot()) {
-      if (peer.id == session->id || !peer.authenticated || !peer.transport) {
-        continue;
-      }
-      send_json(peer.transport.get(), shared);
-    }
-    uvcpp_json ack = shared;
+    uvcpp_json ack;
+    ack["type"] = "quality";
+    ack["mode"] = quality_mode_name(options_.capture->quality());
+    ack["format"] = tile_format_name(effective_format);
+    ack["qp"] = options_.capture->stream_qp();
+    ack["bitrate_kbps"] = options_.capture->stream_bitrate_kbps();
+    ack["rate_mode"] = options_.capture->stream_rate_mode_value() == 1
+                           ? "cq"
+                           : (options_.capture->stream_rate_mode_value() == 2
+                                  ? "cbr"
+                                  : "auto");
+    ack["scope"] = "viewer";
     if (fps != 0) ack["fps"] = fps;
     send_json(transport.get(), ack);
     return;
@@ -3755,6 +3795,10 @@ void session_supervisor::run() {
       bool all_h264_stream = true;
       bool all_vp9_stream = true;
       bool all_vp8_stream = true;
+      /// A live viewer asked for a preset that must not be chroma-subsampled
+      /// (高清/真彩色). The low-delay 4:2:0 stream is then kept off so the BGRA
+      /// tile path is what actually reaches that viewer.
+      bool no_subsampling = false;
       int viewers = 0;
       // A tab that is gone but left its socket half-open keeps its hello
       // capabilities in the registry for minutes, and one such session with a
@@ -3771,6 +3815,7 @@ void session_supervisor::run() {
       for (const session_info& peer : registry_->snapshot()) {
         if (!peer.authenticated) continue;
         if (!still_watching(peer)) continue;
+        if (peer.no_subsampling) no_subsampling = true;
         // A session that neither receives the push clock nor advertised any
         // video decoder is a control/chat/file client, not a viewer. Counting
         // it in the "all viewers can decode X" test made a single such
@@ -3828,7 +3873,7 @@ void session_supervisor::run() {
       // permission now follows the low-delay stream capability. Without this
       // the pinned/laddered AV1 was always refused and silently fell back to
       // H.264.
-      const bool allow = enabled && live && all_stream;
+      const bool allow = enabled && live && all_stream && !no_subsampling;
       // What this host can actually encode. The viewer set only says what is
       // decodable; a Windows build without libvpx still has NVENC H.264, and
       // choosing VP9 merely because every viewer can decode it made the
@@ -3853,8 +3898,9 @@ void session_supervisor::run() {
       // kJoinStreamMs and the first picture waited for it; tiles can start at
       // once instead.
       const bool can_stream =
-          (allow && host_av1) || (all_h264_stream && host_h264) ||
-          (all_vp9_stream && host_vp9) || (all_vp8_stream && host_vp8);
+          !no_subsampling &&
+          ((allow && host_av1) || (all_h264_stream && host_h264) ||
+           (all_vp9_stream && host_vp9) || (all_vp8_stream && host_vp8));
       if (std::getenv("MOLINK_AV1_LOG") != nullptr && allow != av1_allowed_) {
         std::fprintf(stderr, "host: av1 allowed=%d\n", allow ? 1 : 0);
         av1_allowed_ = allow;
@@ -3925,7 +3971,7 @@ void session_supervisor::run() {
       // stream, so "auto" only ranks AV1 first when this host has a hardware
       // AV1 encoder (NVENC). Pinning AV1 by hand still selects it.
       const stream_choice stream =
-          live && viewers > 0 && stream_allowed
+          live && viewers > 0 && stream_allowed && !no_subsampling
               ? (pinned != stream_choice::none
                      ? pinned
                      : choose_video_codec(

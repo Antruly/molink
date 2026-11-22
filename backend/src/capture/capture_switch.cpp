@@ -244,6 +244,14 @@ bool capture_switch::stream_on() const {
   return result;
 }
 
+std::string capture_switch::stream_codec_name() const {
+  std::string result = "tiles";
+  with([&result](const capture_source& s) {
+    result = s.stream_codec_name();
+  });
+  return result;
+}
+
 void capture_switch::set_stream_always(bool always) {
   stream_always_.store(always);
   with([always](capture_source& s) { s.set_stream_always(always); });

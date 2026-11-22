@@ -1,0 +1,136 @@
+#include "session_preset.h"
+
+namespace molink {
+namespace {
+
+struct preset_plan {
+  const char* name;
+  quality_mode mode;
+  int fps;
+  int quality;
+  int bitrate_kbps;
+  const char* rate_mode;
+  const char* format;  // "" follows the quality profile
+  const char* chroma;
+};
+
+/// Mirrors `frontend/src/lib/session-presets.ts`. The viewer sends every
+/// resolved field, so this table is only the fallback for fields it omits and
+/// for older clients; keep the two in step.
+constexpr preset_plan kPlans[] = {
+    {"turbo", quality_mode::turbo, 10, 0, 2500, "auto", "", "gray"},
+    {"smooth", quality_mode::smooth, 24, 0, 6000, "auto", "", "420"},
+    {"balanced", quality_mode::balanced, 30, 0, 0, "auto", "", "444"},
+    {"hd", quality_mode::quality, 45, 0, 0, "auto", "", "444"},
+    {"truecolor", quality_mode::lossless, 18, 0, 0, "cq", "bgra", "444"},
+    {"auto", quality_mode::automatic, 30, 0, 0, "auto", "", "auto"},
+};
+
+const preset_plan* find_plan(const std::string& name) {
+  for (const preset_plan& plan : kPlans) {
+    if (name == plan.name) return &plan;
+  }
+  return nullptr;
+}
+
+bool valid_rate_mode(const std::string& value) {
+  return value == "auto" || value == "cq" || value == "cbr";
+}
+
+bool valid_chroma(const std::string& value) {
+  return value == "420" || value == "444" || value == "gray" ||
+         value == "565" || value == "auto";
+}
+
+bool valid_format(const std::string& value) {
+  if (value.empty() || value == "preset") return true;
+  tile_format parsed;
+  return tile_format_from_name(value, parsed);
+}
+
+}  // namespace
+
+bool session_preset_quality_mode(const std::string& name, quality_mode& out) {
+  const preset_plan* plan = find_plan(name);
+  if (plan == nullptr) return false;
+  out = plan->mode;
+  return true;
+}
+
+const char* session_preset_chroma_for_format(tile_format format) {
+  switch (format) {
+    case tile_format::bgra:
+    case tile_format::rgb24:
+      return "444";
+    case tile_format::rgb565:
+      return "565";
+    case tile_format::gray8:
+    default:
+      return "gray";
+  }
+}
+
+bool normalize_session_preset(const session_preset_request& in,
+                              session_preset_request& out,
+                              std::string& error) {
+  const preset_plan* plan = find_plan(in.preset);
+  if (plan == nullptr) {
+    error = "preset must be turbo, smooth, balanced, hd, truecolor or auto";
+    return false;
+  }
+  if (in.fps < 0 || in.fps > 60) {
+    error = "fps must be 1..60";
+    return false;
+  }
+  const int fps = in.fps == 0 ? plan->fps : in.fps;
+  if (fps < 1) {
+    error = "fps must be 1..60";
+    return false;
+  }
+  if (in.quality < 0 || in.quality > 63) {
+    error = "quality must be 0..63";
+    return false;
+  }
+  if (in.bitrate_kbps < 0 || in.bitrate_kbps > 60000) {
+    error = "bitrate_kbps must be 0..60000";
+    return false;
+  }
+  if (!in.rate_mode.empty() && !valid_rate_mode(in.rate_mode)) {
+    error = "rate_mode must be auto, cq or cbr";
+    return false;
+  }
+  if (!valid_format(in.format)) {
+    error = "format must be preset, gray8, rgb565, rgb24 or bgra";
+    return false;
+  }
+  if (!in.chroma.empty() && !valid_chroma(in.chroma)) {
+    error = "chroma must be 420 or 444";
+    return false;
+  }
+  if (!in.codec.empty() && in.codec != "auto" && in.codec != "av1" &&
+      in.codec != "h264" && in.codec != "vp9" && in.codec != "vp8" &&
+      in.codec != "tiles") {
+    error = "codec must be auto, av1, h264, vp9, vp8 or tiles";
+    return false;
+  }
+
+  out = in;
+  out.fps = fps;
+  // Fill the omitted fields from the plan.
+  if (out.quality == 0) out.quality = plan->quality;
+  if (out.bitrate_kbps == 0) out.bitrate_kbps = plan->bitrate_kbps;
+  if (out.rate_mode.empty()) out.rate_mode = plan->rate_mode;
+  if (out.format.empty()) out.format = plan->format;
+  if (out.chroma.empty()) out.chroma = plan->chroma;
+  if (out.codec.empty()) out.codec = "auto";
+  // 4:4:4 means the tile path: the host must not start a 4:2:0 stream. Force
+  // BGRA unless the viewer named another format explicitly (rgb24 is also
+  // chroma-preserving).
+  if (out.chroma == "444" &&
+      (out.format.empty() || out.format == "preset")) {
+    out.format = "bgra";
+  }
+  return true;
+}
+
+}  // namespace molink
