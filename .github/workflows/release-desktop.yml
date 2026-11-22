@@ -570,7 +570,10 @@ jobs:
 
   # Temporarily disabled during the test phase (macOS runners are scarce).
   macos:
-    if: ${{ inputs.skip_slow != true && inputs.skip_macos != true }}
+    # Repository variable SKIP_MACOS=true keeps a tag-triggered release to
+    # Linux and Windows: a tag push carries no inputs, so the switch has to
+    # live outside the dispatch form.
+    if: ${{ inputs.skip_slow != true && inputs.skip_macos != true && vars.SKIP_MACOS != 'true' }}
     needs: versions
     strategy:
       fail-fast: false
