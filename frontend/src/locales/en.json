@@ -427,7 +427,8 @@
     "server_not_configured": "moLink Server is not configured",
     "device_offline": "That device is offline",
     "server_unreachable": "The moLink Server could not be reached",
-    "clipboard_files_busy": "A clipboard transfer is running; try again in a moment"
+    "clipboard_files_busy": "A clipboard transfer is running; try again in a moment",
+    "clipboard_files_uploaded": "The remote does not support on-demand transfer; the files were uploaded directly"
   },
   "popout": {
     "noToken": "This window is missing the connection code."

@@ -29,6 +29,7 @@
 #include "capture/windows_secure_capture.h"
 #include "chat_hub.h"
 #include "clipboard/clipboard.h"
+#include "clipboard_lazy.h"
 #include "config.h"
 #include "surface/frame_surface.h"
 #include "discovery.h"
@@ -610,6 +611,9 @@ int main(int argc, char** argv) {
     }
   }
   session_opts.input = input;
+  // Shared by every session and by the Windows clipboard backend: at most one
+  // viewer's delayed file offer owns the host clipboard.
+  session_opts.lazy = std::make_shared<lazy_clipboard>();
   if (input) {
     const display_info display = capture->current_display_info();
     if (display.input_width > 0 && display.input_height > 0) {

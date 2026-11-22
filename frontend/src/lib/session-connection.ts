@@ -11,6 +11,8 @@ import type { Frame } from './protocol'
 import { FrameFlag } from './protocol'
 import { logDiag } from './diag-log'
 import { PcmPlayer } from './audio'
+import { ClipboardEcho } from './clipboard-echo'
+import { lazyCapability, type LazyCapability } from './clipboard-lazy'
 import { ClipboardFileSync } from './clipboard-sync'
 import { RemoteClipboardSync } from './remote-clipboard'
 import {
@@ -129,6 +131,12 @@ export class SessionConnection {
   private viewerStats = false
   private viewerTimer: number | null = null
   private clipboardEnabled = true
+  /// Delayed file rendering advertised by the current host, or null when it
+  /// must take the eager upload path.
+  private clipboardLazy: LazyCapability | null = null
+  /// Shared echo table: host paths this machine wrote (and the descriptors it
+  /// offered) are skipped when the remote reports them back.
+  private readonly clipboardEcho = new ClipboardEcho()
   /// This viewer's machine name/ID, sent in hello so the shared chat can
   /// attribute its messages. Empty for a plain browser.
   private clientName = ''
@@ -247,6 +255,7 @@ export class SessionConnection {
         })
       },
       onWelcome: (welcome) => {
+        this.clipboardLazy = lazyCapability(welcome)
         const format = welcome.audio_format
         this.audioFormat =
           format !== undefined && format !== null
@@ -542,6 +551,10 @@ export class SessionConnection {
         })
         this.sink.onPatch({ error: message, errorCode: null })
       },
+      {
+        capability: () => this.clipboardLazy,
+        echo: this.clipboardEcho,
+      },
     )
   }
 
@@ -571,6 +584,7 @@ export class SessionConnection {
           target: this.target || undefined,
         })
       },
+      this.clipboardEcho,
     )
     this.remoteClipboard.setEnabled(enabled)
   }
@@ -602,6 +616,10 @@ export class SessionConnection {
             target: this.target || undefined,
           })
           this.sink.onPatch({ error: message, errorCode: null })
+        },
+        {
+          capability: () => this.clipboardLazy,
+          echo: this.clipboardEcho,
         },
       )
     }

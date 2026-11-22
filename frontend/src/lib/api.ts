@@ -640,6 +640,8 @@ export interface ClipboardFileInfo {
   id: string
   name: string
   size: number
+  /// The local core staged this file from the remote: do not offer it back.
+  echo?: boolean
 }
 
 export interface ClipboardFilesResult {

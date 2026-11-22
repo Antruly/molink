@@ -11,13 +11,16 @@
 #include <windows.h>
 #endif
 
+#include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <map>
 #include <mutex>
 #include <string>
 #include <system_error>
@@ -66,6 +69,69 @@ struct clipboard_files_snapshot {
 std::shared_ptr<clipboard_files_snapshot> clipboard_snapshot() {
   static auto snapshot = std::make_shared<clipboard_files_snapshot>();
   return snapshot;
+}
+
+/// Paths this core has just written to its own clipboard by applying a staged
+/// remote selection. The page's local-file sync reads /api/clipboard-files;
+/// marking these entries prevents it from offering the same files straight
+/// back to the remote (the (1)(2) echo loop). Entries expire after the same
+/// two minutes the page-side echo table uses.
+struct clipboard_echo_marks {
+  std::mutex mutex;
+  std::map<std::string, uint64_t> applied;
+};
+
+constexpr uint64_t kClipboardEchoTtlMs = 2ull * 60 * 1000;
+constexpr std::size_t kClipboardEchoMax = 64;
+
+std::string echo_path_key(std::string path) {
+#if defined(_WIN32)
+  std::transform(path.begin(), path.end(), path.begin(),
+                 [](unsigned char c) {
+                   return static_cast<char>(std::tolower(c));
+                 });
+#endif
+  for (char& c : path) {
+    if (c == '\\') c = '/';
+  }
+  return path;
+}
+
+std::shared_ptr<clipboard_echo_marks> clipboard_echoes() {
+  static auto marks = std::make_shared<clipboard_echo_marks>();
+  return marks;
+}
+
+void remember_clipboard_echoes(const std::vector<std::string>& paths) {
+  const auto marks = clipboard_echoes();
+  const uint64_t now = now_ms();
+  std::lock_guard<std::mutex> lock(marks->mutex);
+  for (const std::string& path : paths) {
+    marks->applied[echo_path_key(path)] = now;
+  }
+  for (auto it = marks->applied.begin(); it != marks->applied.end();) {
+    if (now > it->second && now - it->second >= kClipboardEchoTtlMs) {
+      it = marks->applied.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  while (marks->applied.size() > kClipboardEchoMax) {
+    auto oldest = marks->applied.begin();
+    for (auto it = marks->applied.begin(); it != marks->applied.end(); ++it) {
+      if (it->second < oldest->second) oldest = it;
+    }
+    marks->applied.erase(oldest);
+  }
+}
+
+bool clipboard_echo_path(const std::string& path) {
+  const auto marks = clipboard_echoes();
+  const uint64_t now = now_ms();
+  std::lock_guard<std::mutex> lock(marks->mutex);
+  const auto it = marks->applied.find(echo_path_key(path));
+  if (it == marks->applied.end()) return false;
+  return now >= it->second && now - it->second < kClipboardEchoTtlMs;
 }
 
 std::string clipboard_file_id(const clipboard_file& file) {
@@ -268,8 +334,14 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
   const auto staging = std::make_shared<clipboard_stage>(
       stage_directory,
       [clipboard = deps.clipboard](const std::vector<std::string>& paths) {
-        return clipboard && clipboard->available() &&
-               clipboard->set_files(paths);
+        if (!clipboard || !clipboard->available() ||
+            !clipboard->set_files(paths)) {
+          return false;
+        }
+        // These bytes came from the remote; the local file sync must not
+        // offer them straight back.
+        remember_clipboard_echoes(paths);
+        return true;
       });
 
   // ---- Remote access gate ---------------------------------------------
@@ -925,6 +997,9 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
               item["id"] = clipboard_file_id(file);
               item["name"] = file.name;
               item["size"] = file.size;
+              // True when this core just staged the file from the remote; the
+              // page skips it so the two clipboard directions cannot ping-pong.
+              item["echo"] = clipboard_echo_path(file.path);
               list.push_back(std::move(item));
             }
             uvcpp_json j;

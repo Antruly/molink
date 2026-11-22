@@ -101,6 +101,12 @@ export interface Welcome {
   input_backend?: string
   clipboard?: boolean
   clipboard_backend?: string
+  /** The host can delay file rendering: send descriptors, fetch on paste. */
+  clipboard_lazy?: boolean
+  /** Maximum files in one delayed offer (host default 8). */
+  clipboard_lazy_files?: number
+  /** Maximum total bytes in one delayed offer (host default 2 GiB). */
+  clipboard_lazy_bytes?: number
   audio?: boolean
   audio_format?: {
     sample_rate: number
@@ -171,6 +177,14 @@ export interface FileMessage {
   count?: number
   entries?: FileEntry[]
   message?: string
+  /// Delayed clipboard: index/tag of the file the host is asking for, and
+  /// where it should be stored. The tag is echoed back on the upload offer so
+  /// a stale upload cannot complete a newer offer.
+  index?: number
+  tag?: number
+  dest?: string
+  files?: { name: string; size: number }[]
+  paths?: string[]
 }
 
 export type SessionEvent =

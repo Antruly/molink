@@ -17,6 +17,7 @@
 #include "capture/stream_qos.h"
 #include "chat_hub.h"
 #include "clipboard/clipboard.h"
+#include "clipboard_lazy.h"
 #include "file_transfer.h"
 #include "input/input.h"
 #include "lock_state.h"
@@ -44,6 +45,9 @@ struct session_options {
   std::shared_ptr<capture_source> capture;
   std::shared_ptr<input_injector> input;
   std::shared_ptr<clipboard_service> clipboard;
+  /// Host-global delayed-render registry shared by every session and by the
+  /// clipboard backend. Null when the build has no clipboard.
+  std::shared_ptr<lazy_clipboard> lazy;
   std::shared_ptr<lock_state> lock;
   std::shared_ptr<access_request_registry> access_requests;
   std::shared_ptr<network_settings> network;
@@ -121,6 +125,13 @@ class session_controller final
   void stop_voice();
   void send_voice(std::vector<uint8_t> pcm);
   void update_file_retry_timer();
+  /// Host-side delayed clipboard rendering: ask this session's viewer for one
+  /// offered file. Runs on the app loop (posted by the clipboard thread).
+  void request_lazy_file(std::size_t index);
+  void on_upload_event(int tag, file_transfer::upload_event event,
+                       uint32_t id, uint64_t received, uint64_t size,
+                       const std::string& path);
+  void send_lazy_offer_reply(bool ok, const std::string& message);
   void send_json_string(const std::string& text);
   bool send_file_chunk(uint32_t id, uint64_t offset, const uint8_t* data,
                        std::size_t len);
@@ -139,6 +150,12 @@ class session_controller final
   /// which case the client falls back to its verification code.
   std::string resume_token_;
   std::unique_ptr<file_transfer> files_;
+  /// The source behind this session's current lazy offer. Uploads are tagged
+  /// with a range owned by one offer, so a stale upload cannot complete a
+  /// newer offer's file.
+  std::shared_ptr<lazy_file_source> lazy_source_;
+  int lazy_tag_base_ = 0;
+  static constexpr int kLazyTagStride = 64;
   std::unique_ptr<uvcpp::uvcpp_timer> file_retry_timer_;
   int chat_subscription_ = 0;
   int audio_subscription_ = 0;

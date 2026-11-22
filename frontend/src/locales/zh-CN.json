@@ -427,7 +427,8 @@
     "server_not_configured": "尚未配置 moLink Server",
     "device_offline": "对方设备当前离线",
     "server_unreachable": "无法连接 moLink Server",
-    "clipboard_files_busy": "剪贴板正在同步文件，请稍后再拖入"
+    "clipboard_files_busy": "剪贴板正在同步文件，请稍后再拖入",
+    "clipboard_files_uploaded": "对方不支持按需传输，文件已直接上传"
   },
   "popout": {
     "noToken": "这个窗口缺少连接验证码。"

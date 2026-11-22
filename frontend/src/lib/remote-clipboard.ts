@@ -5,6 +5,7 @@ import {
   stageClipboardFile,
 } from './api'
 import { stageableClipboardFile } from './clipboard-local'
+import { ClipboardEcho } from './clipboard-echo'
 import type { ClipboardFileEntry, FileMessage } from './client'
 import {
   acceptDownloadChunk,
@@ -66,6 +67,7 @@ export class RemoteClipboardSync {
     private readonly token: () => string,
     private readonly onError: (code: string) => void,
     private readonly onApplied?: (count: number) => void,
+    private readonly echo?: ClipboardEcho,
   ) {}
 
   /// The settings switch. Turning it off abandons an in-flight batch; those
@@ -92,20 +94,29 @@ export class RemoteClipboardSync {
       (file) => file.path !== '' && stageableClipboardFile(file),
     )
     if (usable.length === 0) return
-    const key = usable
+    // Skip paths/descriptors this machine just wrote to the remote clipboard.
+    // Without this the two directions stage each other's files forever
+    // (`file (1)(2)`).
+    const fresh = usable.filter(
+      (file) =>
+        this.echo?.suppressPath(file.path) !== true &&
+        this.echo?.suppressFiles([file]) !== true,
+    )
+    if (fresh.length === 0) return
+    const key = fresh
       .map((file) => `${file.path}:${file.size}`)
       .sort()
       .join('|')
     if (key === this.lastKey) return
-    const total = usable.reduce((sum, file) => sum + file.size, 0)
+    const total = fresh.reduce((sum, file) => sum + file.size, 0)
     if (total > MAX_TOTAL_BYTES ||
-        usable.some((file) => file.size > MAX_FILE_BYTES)) {
+        fresh.some((file) => file.size > MAX_FILE_BYTES)) {
       this.lastKey = key
       this.onError('remote_clipboard_too_large')
       return
     }
     this.lastKey = key
-    this.queue = usable.slice()
+    this.queue = fresh.slice()
     this.stagingIds = []
     this.busy = true
     this.startNext()

@@ -262,6 +262,17 @@ file_transfer::file_transfer(json_sender send_json, chunk_sender send_chunk)
 
 file_transfer::~file_transfer() { close_all(); }
 
+void file_transfer::watch_uploads(upload_watcher watcher) {
+  upload_watcher_ = std::move(watcher);
+}
+
+void file_transfer::notify_upload(const upload& item, upload_event event,
+                                  const std::string& path) {
+  if (upload_watcher_) {
+    upload_watcher_(item.tag, event, item.id, item.received, item.size, path);
+  }
+}
+
 void file_transfer::fail(const std::string& action, uint32_t id,
                          const std::string& why) {
   uvcpp_json j;
@@ -283,7 +294,7 @@ void file_transfer::send_simple(const std::string& action, uint32_t id) {
 }
 
 void file_transfer::offer(const std::string& name, uint64_t size,
-                          const std::string& destination) {
+                          const std::string& destination, int tag) {
   if (uploads_.size() >= 8) {
     fail("reject", 0, "too many active uploads");
     return;
@@ -321,6 +332,7 @@ void file_transfer::offer(const std::string& name, uint64_t size,
   const uint32_t id = next_id_++;
   upload item;
   item.id = id;
+  item.tag = tag;
   item.name = base;
   item.final_dir = final_dir.string();
   item.temp_path = (fs::path(dir) / (".upload-" + std::to_string(id) + ".part"))
@@ -341,6 +353,7 @@ void file_transfer::offer(const std::string& name, uint64_t size,
   j["chunk"] = kChunkBytes;
   j["dir"] = dir;
   send_json_(dump_json(j));
+  notify_upload(uploads_.at(id), upload_event::accepted);
 }
 
 void file_transfer::mkdir(const std::string& path,
@@ -386,6 +399,9 @@ void file_transfer::chunk(uint32_t id, uint64_t offset, const uint8_t* data,
   }
   item.out.write(reinterpret_cast<const char*>(data),
                  static_cast<std::streamsize>(len));
+  // Delayed clipboard rendering may read the staging file from another
+  // thread; flush each chunk so a reader never waits on this buffer.
+  item.out.flush();
   if (!item.out) {
     fail("cancel", id, "could not write the file");
     drop_upload(id, true);
@@ -393,6 +409,7 @@ void file_transfer::chunk(uint32_t id, uint64_t offset, const uint8_t* data,
   }
   item.received += len;
   item.last_activity = clock::now();
+  notify_upload(item, upload_event::progress);
   if (item.complete_deadline && item.received == item.size) complete(id);
 }
 
@@ -422,6 +439,7 @@ void file_transfer::complete(uint32_t id, clock::time_point now) {
     drop_upload(id, true);
     return;
   }
+  notify_upload(item, upload_event::done, final_path);
   uploads_.erase(it);
   uvcpp_json j;
   j["type"] = "file";
@@ -670,6 +688,7 @@ void file_transfer::fail_pending() {
 void file_transfer::drop_upload(uint32_t id, bool remove_file) {
   auto it = uploads_.find(id);
   if (it == uploads_.end()) return;
+  notify_upload(it->second, upload_event::failed);
   it->second.out.close();
   if (remove_file) {
     std::error_code ec;

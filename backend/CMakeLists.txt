@@ -222,6 +222,7 @@ set(MOLINK_CORE_SOURCES
   src/clipboard/x11_clipboard.cpp
   src/clipboard/windows_clipboard.cpp
   src/clipboard_stage.cpp
+  src/clipboard_lazy.cpp
   src/access_requests.cpp
   src/auth_state.cpp
   src/compression.cpp
@@ -701,6 +702,18 @@ target_include_directories(molink-core-clipboard-stage-test PRIVATE src)
 set_target_properties(molink-core-clipboard-stage-test PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 add_test(NAME clipboard_stage COMMAND molink-core-clipboard-stage-test)
+
+# Delayed clipboard rendering state machine: offer limits, per-session clear,
+# and the 15 s / 10 s render budget. Platform-neutral, so Windows-only delayed
+# rendering is still covered by the Linux CI build.
+add_executable(molink-core-clipboard-lazy-test
+  tests/clipboard_lazy_test.cpp
+  src/clipboard_lazy.cpp
+)
+target_include_directories(molink-core-clipboard-lazy-test PRIVATE src)
+set_target_properties(molink-core-clipboard-lazy-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME clipboard_lazy COMMAND molink-core-clipboard-lazy-test)
 
 add_executable(molink-core-tile-scale-test
   tests/tile_scale_test.cpp
