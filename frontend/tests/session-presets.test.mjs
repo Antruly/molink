@@ -99,18 +99,35 @@ test('the wire message carries the selected preset, not a host default', () => {
   assert.equal(hd.preset, 'hd')
   assert.equal(hd.fps, 45)
   assert.equal(hd.quality, 0)
-  assert.equal(hd.chroma, '444')
+  assert.equal(hd.chroma, '420')
   assert.equal(hd.format, 'preset')
   assert.equal(hd.codec, 'auto')
 
   const truecolor = presetMessage('truecolor', 18)
   assert.equal(truecolor.format, 'bgra')
+  assert.equal(truecolor.chroma, '444')
   assert.equal(truecolor.rate_mode, 'cq')
 
   // A lowered rate is sent as-is; the preset itself stays the viewer's.
   const lowered = presetMessage('balanced', 12)
   assert.equal(lowered.preset, 'balanced')
   assert.equal(lowered.fps, 12)
+})
+
+test('switching tiers rebuilds every wire field (truecolor -> auto)', () => {
+  const truecolor = presetMessage('truecolor', 18)
+  const auto = presetMessage('auto', 30)
+  // Auto must not inherit truecolour's 4:4:4/BGRA/constant-quality request.
+  assert.equal(truecolor.chroma, '444')
+  assert.equal(auto.chroma, 'auto')
+  assert.equal(auto.format, 'preset')
+  assert.equal(auto.rate_mode, 'auto')
+  assert.equal(auto.bitrate_kbps, 0)
+  assert.equal(auto.preset, 'auto')
+  // The colour tiers stream 4:2:0; only truecolour asks for 4:4:4.
+  for (const id of ['turbo', 'smooth', 'balanced', 'hd', 'auto']) {
+    assert.notEqual(presetPlan(id).chroma, '444')
+  }
 })
 
 test('a host reply never moves the viewer selector', () => {

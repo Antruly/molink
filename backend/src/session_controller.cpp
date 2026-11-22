@@ -2464,7 +2464,14 @@ void session_controller::on_text(const std::string& text) {
     }
     session_preset_request resolved;
     std::string error;
-    if (!normalize_session_preset(request, resolved, error)) {
+    session_preset_capabilities caps;
+    // Probe the encoders rather than assuming: 4:4:4 stays on the video
+    // stream only when some available backend can actually carry it. With
+    // today's 4:2:0 encoders normalize resolves such a request to 4:2:0
+    // instead of silently disabling the stream (which is what pushed "高清"
+    // onto tiles).
+    caps.stream_444 = video_stream_supports_444();
+    if (!normalize_session_preset(request, resolved, error, caps)) {
       send_error(transport.get(), "bad_preset", error);
       return;
     }
@@ -2475,11 +2482,27 @@ void session_controller::on_text(const std::string& text) {
     const bool first = session->encoding_preset.empty();
     const bool reinit =
         session_preset_requires_keyframe(*options_.capture, resolved);
+    // Reset every field the tier owns. This is the auto-after-truecolor fix:
+    // no_subsampling is assigned from this request, never inherited, and the
+    // capture's format override is re-checked against it.
     const session_preset_actual actual =
-        apply_session_preset(*options_.capture, resolved);
-    session->encoding_preset = resolved.preset;
-    session->no_subsampling = resolved.chroma == "444";
+        apply_session_preset(*options_.capture, *session, resolved);
     if (first || reinit) options_.capture->request_keyframe();
+    // A preset that may use the video stream nudges it on for a window, just
+    // like the join window. Without the nudge a static screen kept the
+    // capture on tiles, so switching back from truecolor to auto reported
+    // "tiles 4:4:4" until something moved.
+    const std::string video_mode =
+        options_.auth ? options_.auth->settings().video_mode : "tiles";
+    const std::string preference =
+        options_.auth ? options_.auth->settings().stream_codec : "auto";
+    const bool stream_permitted =
+        video_mode != "tiles" && preference != "tiles";
+    if (!resolved.no_subsampling && stream_permitted) {
+      // Ten seconds, the same window a joining viewer gets.
+      constexpr uint64_t kPresetStreamMs = 10000;
+      options_.capture->request_stream(kPresetStreamMs);
+    }
 
     uvcpp_json ack;
     ack["type"] = "session-preset";
@@ -2490,7 +2513,9 @@ void session_controller::on_text(const std::string& text) {
     ack["actual"]["fps"] = actual.fps;
     ack["actual"]["quality"] = actual.quality;
     ack["actual"]["format"] = actual.format;
-    ack["actual"]["chroma"] = streaming ? "420" : actual.chroma;
+    // A stream is 4:2:0 unless the host has (and kept) a 4:4:4 encoder.
+    ack["actual"]["chroma"] =
+        streaming ? (resolved.chroma == "444" ? "444" : "420") : actual.chroma;
     ack["actual"]["codec"] = stream_codec;
     send_json(transport.get(), ack);
     return;

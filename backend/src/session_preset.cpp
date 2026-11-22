@@ -20,8 +20,13 @@ struct preset_plan {
 constexpr preset_plan kPlans[] = {
     {"turbo", quality_mode::turbo, 10, 0, 2500, "auto", "", "gray"},
     {"smooth", quality_mode::smooth, 24, 0, 6000, "auto", "", "420"},
-    {"balanced", quality_mode::balanced, 30, 0, 0, "auto", "", "444"},
-    {"hd", quality_mode::quality, 45, 0, 0, "auto", "", "444"},
+    // The fixed colour tiers improve the picture through QP, bitrate and
+    // frame rate, not by turning chroma subsampling off: a 4:4:4 request
+    // used to disable the whole video stream and drop these tiers onto tiles.
+    {"balanced", quality_mode::balanced, 30, 0, 0, "auto", "", "420"},
+    {"hd", quality_mode::quality, 45, 0, 0, "auto", "", "420"},
+    // Truecolour is deliberately the pixel-exact tile path: BGRA, no chroma
+    // subsampling, no video stream.
     {"truecolor", quality_mode::lossless, 18, 0, 0, "cq", "bgra", "444"},
     {"auto", quality_mode::automatic, 30, 0, 0, "auto", "", "auto"},
 };
@@ -70,9 +75,10 @@ const char* session_preset_chroma_for_format(tile_format format) {
   }
 }
 
-bool normalize_session_preset(const session_preset_request& in,
-                              session_preset_request& out,
-                              std::string& error) {
+bool normalize_session_preset(
+    const session_preset_request& in, session_preset_request& out,
+    std::string& error,
+    const session_preset_capabilities& caps) {
   const preset_plan* plan = find_plan(in.preset);
   if (plan == nullptr) {
     error = "preset must be turbo, smooth, balanced, hd, truecolor or auto";
@@ -123,12 +129,24 @@ bool normalize_session_preset(const session_preset_request& in,
   if (out.format.empty()) out.format = plan->format;
   if (out.chroma.empty()) out.chroma = plan->chroma;
   if (out.codec.empty()) out.codec = "auto";
-  // 4:4:4 means the tile path: the host must not start a 4:2:0 stream. Force
-  // BGRA unless the viewer named another format explicitly (rgb24 is also
-  // chroma-preserving).
-  if (out.chroma == "444" &&
-      (out.format.empty() || out.format == "preset")) {
-    out.format = "bgra";
+  // Every tier starts from a clean slate. `no_subsampling` is derived from
+  // this request alone; it is never carried over from the previous preset
+  // (switching truecolor -> auto used to stay on the tile path because the
+  // flag was not reset).
+  out.no_subsampling = false;
+  if (out.chroma == "444") {
+    // An explicit BGRA/RGB24 format is the pixel-exact tile path: truecolour
+    // asks for it by name and the 4:2:0 stream must stay off.
+    const bool explicit_tile_format =
+        out.format == "bgra" || out.format == "rgb24";
+    if (explicit_tile_format) {
+      out.no_subsampling = true;
+    } else if (!caps.stream_444) {
+      // No encoder here carries 4:4:4. Dropping to tiles would silently cost
+      // the video stream, so resolve to 4:2:0 instead: the tier keeps its QP,
+      // bitrate and frame rate and streams.
+      out.chroma = "420";
+    }
   }
   return true;
 }
