@@ -7,9 +7,11 @@
  * one encoding mode plus a capture rate, and the host must not switch it back.
  *
  * The wire values are the host's existing quality modes, so no host-side
- * preset table has to grow. `truecolor`/`hd` request 4:4:4; the host keeps the
- * tile path (BGRA, no chroma subsampling) for those and does not start a
- * 4:2:0 video stream.
+ * preset table has to grow. The colour tiers (turbo/smooth/balanced/hd/auto)
+ * improve the picture through QP, bitrate and frame rate while staying on the
+ * 4:2:0 video stream. Only `truecolor` asks for 4:4:4, and it does so with an
+ * explicit BGRA format: the host keeps the tile path (no chroma subsampling)
+ * and does not start a 4:2:0 video stream for it.
  */
 export type SessionPresetId =
   | 'turbo'
@@ -50,8 +52,9 @@ export interface SessionPresetPlan {
   bitrateKbps: number
   rateMode: PresetRateMode
   format: PresetFormat
-  /// Requested chroma: 444 keeps the tile path and suppresses the 4:2:0
-  /// stream. `auto` lets the host's selection stand.
+  /// Requested chroma. Only truecolour asks for 444 (with `format: 'bgra'`):
+  /// that keeps the pixel-exact tile path and suppresses the 4:2:0 stream.
+  /// `auto` lets the host's selection stand.
   chroma: PresetChroma
 }
 
@@ -117,7 +120,7 @@ export const PRESET_PLANS: Record<SessionPresetId, SessionPresetPlan> = {
     bitrateKbps: 0,
     rateMode: 'auto',
     format: 'preset',
-    chroma: '444',
+    chroma: '420',
   },
   hd: {
     id: 'hd',
@@ -131,7 +134,7 @@ export const PRESET_PLANS: Record<SessionPresetId, SessionPresetPlan> = {
     bitrateKbps: 0,
     rateMode: 'auto',
     format: 'preset',
-    chroma: '444',
+    chroma: '420',
   },
   truecolor: {
     id: 'truecolor',
@@ -265,6 +268,11 @@ export interface SessionPresetMessage {
 /// Resolves the selected preset into the exact wire payload. `fps` is the
 /// viewer's current target (the load controller may have lowered it); for the
 /// fixed tiers it starts at the plan's rate.
+///
+/// Every field is rebuilt from the plan on each call. Nothing from the
+/// previously selected tier (its chroma, BGRA format, bitrate or rate mode)
+/// is carried over: switching truecolor -> auto must send the auto plan's
+/// values, not truecolor's.
 export function presetMessage(
   preset: SessionPresetId,
   fps: number,

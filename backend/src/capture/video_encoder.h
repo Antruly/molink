@@ -51,6 +51,11 @@ struct video_encoder_backend {
   bool h264_stream = false;
   bool vp9_stream = false;
   bool vp8_stream = false;
+  /// True when the stream this backend produces keeps full 4:4:4 chroma. Every
+  /// encoder in this tree converts to 4:2:0; a backend that can carry 4:4:4
+  /// sets this so a 4:4:4 preset stays on the video stream instead of being
+  /// pushed onto tiles.
+  bool chroma444_stream = false;
   std::string detail;
 };
 
@@ -132,5 +137,15 @@ inline std::vector<video_codec> video_ladder(bool av1_stream_ok,
 
 /// Encoder backends present in this build and on this machine.
 std::vector<video_encoder_backend> video_encoder_backends();
+
+/// True when an available stream backend can carry 4:4:4 chroma. This is the
+/// capability the preset resolver probes before it allows "444 + video
+/// stream"; when it is false a 4:4:4 request becomes 4:2:0, not tiles.
+inline bool video_stream_supports_444() {
+  for (const video_encoder_backend& backend : video_encoder_backends()) {
+    if (backend.available && backend.chroma444_stream) return true;
+  }
+  return false;
+}
 
 }  // namespace molink
