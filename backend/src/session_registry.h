@@ -63,6 +63,13 @@ struct session_info {
   /// host's clock instead of polling `request-frame`. Pull stays the
   /// compatibility path for every client that does not ask for this.
   bool video_push = false;
+  /// Viewer-owned picture preset last applied for this session. Globally the
+  /// capture can only encode one preset at a time (last writer wins), but the
+  /// host never pushes this value back to any viewer's UI.
+  std::string encoding_preset;
+  /// The preset asked for 4:4:4. While any live session wants it the
+  /// low-delay 4:2:0 stream stays off and the host keeps the BGRA tile path.
+  bool no_subsampling = false;
   /// Last time (monotonic ms) this session received a sequence map, so a
   /// polling client is not flooded while the screen is static.
   uint64_t last_seq_ms = 0;

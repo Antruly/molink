@@ -46,12 +46,13 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from 'react'
 import { useTranslation } from 'react-i18next'
+import { MIN_FPS, fpsPlan } from '../lib/frame-rate'
 import {
-  FPS_CHOICES,
-  MIN_FPS,
-  fpsPlan,
-  parseFpsSetting,
-} from '../lib/frame-rate'
+  presetMessage,
+  presetPlan,
+  viewerPresetAfterReply,
+  type SessionPresetId,
+} from '../lib/session-presets'
 import {
   KEY_COMBOS,
   keySequence,
@@ -67,15 +68,10 @@ import {
   windowAction,
 } from '../lib/shell'
 import { openSessionWindow } from '../lib/windows'
-import {
-  QualityPanel,
-  defaultKnobs,
-  type EncodingKnobs,
-} from './QualityPanel'
+import { QualityPanel } from './QualityPanel'
 import {
   sessionConnection,
   useAppStore,
-  type QualityMode,
   type SessionTab,
 } from '../store/app'
 import { RemoteCursor } from './RemoteCursor'
@@ -172,7 +168,26 @@ function toolbarPinned(): boolean {
 }
 
 
-type ResolvedQuality = Exclude<QualityMode, 'auto'>
+type ResolvedQuality =
+  | 'turbo'
+  | 'smooth'
+  | 'balanced'
+  | 'quality'
+  | 'lossless'
+
+/// Frame-rate window for a preset. Fixed tiers keep their plan's rate as both
+/// the floor and the ceiling; only the load controller may lower it. "自动"
+/// keeps the existing tier/load window.
+function presetFpsPlan(presetId: SessionPresetId, tier: ResolvedQuality) {
+  if (presetId === 'auto') return fpsPlan('auto', tier)
+  const plan = presetPlan(presetId)
+  return {
+    min: plan.minFps,
+    floor: plan.fps,
+    max: plan.maxFps,
+    start: plan.fps,
+  }
+}
 
 /// Capture rate and pull interval per preset. The pull interval is the real
 /// ceiling: the client asks for the next frame only after the previous one
@@ -343,10 +358,7 @@ export function SessionView({
   const qualityWatermark = useAppStore((state) => state.qualityWatermark)
   const autoAudio = useAppStore((state) => state.autoAudio)
   const setQualityWatermark = useAppStore((state) => state.setQualityWatermark)
-  const qualityMode = useAppStore((state) => state.qualityMode)
-  const setQualityMode = useAppStore((state) => state.setQualityMode)
-  const frameRate = useAppStore((state) => state.frameRate)
-  const setFrameRate = useAppStore((state) => state.setFrameRate)
+  const setTabPreset = useAppStore((state) => state.setTabPreset)
   const setControlEnabled = useAppStore((state) => state.setControlEnabled)
   const closeTab = useAppStore((state) => state.closeTab)
   const createSession = useAppStore((state) => state.createSession)
@@ -375,8 +387,6 @@ export function SessionView({
   const [surfaceFocused, setSurfaceFocused] = useState(false)
   const grabWanted = grabEligible && surfaceFocused
   const clipboardAvailable = welcome?.clipboard === true
-  // The host walks the quality ladder itself when the preset is "auto".
-  const hostAutoQuality = welcome?.auto_quality === true
 
   const surfaceRef = useRef<HTMLDivElement>(null)
   const pendingMove = useRef<{ x: number; y: number } | null>(null)
@@ -481,7 +491,7 @@ export function SessionView({
   const panPointer = useRef<{ x: number; y: number } | null>(null)
   const statsRef = useRef(tab.stats)
   const hostRef = useRef({ fps: 0, buildMs: 0 })
-  const autoModeRef = useRef<QualityMode>('balanced')
+  const autoModeRef = useRef<SessionPresetId>('smooth')
   const autoRef = useRef<{
     tier: ResolvedQuality | null
     streak: number
@@ -502,42 +512,29 @@ export function SessionView({
   const lastCentroid = useRef<{ x: number; y: number } | null>(null)
   const composingRef = useRef(false)
 
+  // The viewer owns the preset. A host reply only updates the "actual" line;
+  // it never moves this selector (that was the "被改回去" bug).
+  const presetId: SessionPresetId = viewerPresetAfterReply(
+    tab.preset ?? 'smooth',
+    tab.appliedPreset,
+  )
+  const preset = presetPlan(presetId)
   const resolvedMode: ResolvedQuality =
-    qualityMode === 'auto' ? autoTier : qualityMode
+    presetId === 'auto' ? autoTier : preset.mode
   // Stream codecs the toolbar may offer: the host can encode them and this
   // page can decode them. Empty for hosts that do not advertise the list.
   const codecOptions = tab.codecOptions ?? []
   const codecPreference = tab.codecPreference ?? 'auto'
-  // Average frame rate: the user's choice (or the tier window in auto), then
-  // lowered by the load controller while the host or the link is saturated.
+  // Average frame rate: the preset's own rate (or the tier window in auto),
+  // then lowered by the load controller while the host or link is saturated.
+  // The host never raises it back.
   const [targetFps, setTargetFps] = useState(() =>
-    fpsPlan(frameRate, resolvedMode).start,
+    presetFpsPlan(presetId, resolvedMode).start,
   )
-  // Toolbar sliders. They are preferences the host's QoS keeps re-tuning
-  // around, not fixed values; "custom" only says the user moved one.
-  const [knobs, setKnobs] = useState<EncodingKnobs>(defaultKnobs)
-  const [customKnobs, setCustomKnobs] = useState(false)
   const targetFpsRef = useRef(targetFps)
-  const frameRateRef = useRef(frameRate)
-  const qualityModeRef = useRef(qualityMode)
-  useEffect(() => {
-    const stream = welcome?.stream
-    if (!stream) return
-    // The welcome carries the host's current slider values; adopting them is
-    // the point of the effect, and they change only when the host re-announces
-    // them (reconnect, another viewer), not on every render.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setKnobs({
-      qp: stream.qp ?? 0,
-      bitrateKbps: stream.bitrate_kbps ?? 0,
-      rateMode:
-        stream.rate_mode === 'cq' || stream.rate_mode === 'cbr'
-          ? stream.rate_mode
-          : 'auto',
-      format: stream.format_custom ? (stream.format ?? 'preset') : 'preset',
-    })
-  }, [welcome?.stream])
-  const planRef = useRef(fpsPlan(frameRate, resolvedMode))
+  const presetRef = useRef(presetId)
+  const resolvedModeRef = useRef(resolvedMode)
+  const planRef = useRef(presetFpsPlan(presetId, resolvedMode))
   const fpsState = useRef({
     target: targetFps,
     good: 0,
@@ -1005,18 +1002,15 @@ export function SessionView({
     targetFpsRef.current = targetFps
   }, [targetFps])
 
-  // Keep the plan and the adapted target in step. A user choice (rate or
-  // quality) starts at its own resting value; an automatic quality-tier change
-  // only clamps the current target into the new window, so a downgrade does
-  // not immediately raise the rate again.
+  // Keep the plan and the adapted target in step. A new preset starts at its
+  // own resting rate; an automatic tier change only clamps the current target
+  // into the new window, so a downgrade does not immediately raise the rate.
   useEffect(() => {
-    const plan = fpsPlan(frameRate, resolvedMode)
+    const plan = presetFpsPlan(presetId, resolvedMode)
     planRef.current = plan
-    const userChoice =
-      frameRateRef.current !== frameRate ||
-      qualityModeRef.current !== qualityMode
-    frameRateRef.current = frameRate
-    qualityModeRef.current = qualityMode
+    const userChoice = presetRef.current !== presetId
+    presetRef.current = presetId
+    resolvedModeRef.current = resolvedMode
     let next: number
     if (userChoice) {
       next = plan.start
@@ -1033,80 +1027,38 @@ export function SessionView({
       fpsState.current.bad = 0
     }
     setTargetFps((current) => (current === next ? current : next))
-  }, [frameRate, qualityMode, resolvedMode])
+  }, [presetId, resolvedMode])
 
-  // The preset is host-global: one capture serves every viewer. When another
-  // viewer picks one, follow it — otherwise this tab's next push asserts its
-  // own choice right back and the host re-encodes for whoever spoke last.
-  //
-  // Only a *new* notice is adopted. The remembered notice stays in the tab
-  // state, and without this guard every local change was compared with that
-  // stale value and immediately reverted, which left the preset pinned to
-  // whatever the last broadcast said.
-  const lastSharedQuality = useRef<string | null>(null)
+  // Send the viewer-owned preset. SessionConnection holds the first one until
+  // the welcome, so the host starts on this tier before the first frame; later
+  // changes are coalesced there. A host reply is never fed back in here, which
+  // is what stopped the selector from snapping back.
+  const lastSentPreset = useRef<string | null>(null)
   useEffect(() => {
-    const shared = tab.sharedKnobs
-    if (!shared) return
-    // Mirrors the host-global sliders another viewer just moved (same pattern
-    // as sharedQuality above).
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setKnobs((previous) => ({
-      qp: shared.qp ?? previous.qp,
-      bitrateKbps: shared.bitrateKbps ?? previous.bitrateKbps,
-      rateMode:
-        shared.rateMode === 'cq' || shared.rateMode === 'cbr'
-          ? shared.rateMode
-          : 'auto',
-      format: shared.format ?? previous.format,
-    }))
-  }, [tab.sharedKnobs])
+    const conn = connection()
+    if (!conn) return
+    const message = presetMessage(presetId, targetFps)
+    const wire = JSON.stringify(message)
+    if (lastSentPreset.current === wire) return
+    lastSentPreset.current = wire
+    conn.setSessionPreset(message)
+    // A preset change can also change the tile format (turbo is gray8), so a
+    // full picture is needed; the host forces its own keyframe as well.
+    if (tab.phase === 'live') conn.requestKeyframe()
+  }, [tab.phase, tab.id, connection, presetId, targetFps])
 
+  // Auto quality: only the explicit "auto" preset may adapt. The link picks
+  // the image tier; the frame rate has its own controller below. A tier is
+  // lowered only once the rate is already at the tier's floor, and raised
+  // when the link is healthy with headroom.
   useEffect(() => {
-    const shared = tab.sharedQuality?.mode
-    if (!shared || shared === 'auto') return
-    if (lastSharedQuality.current === shared) return
-    lastSharedQuality.current = shared
-    if (shared !== qualityMode) setQualityMode(shared as QualityMode)
-  }, [tab.sharedQuality, qualityMode, setQualityMode])
-
-  // Push the active preset and the average rate after a short settle delay.
-  // Both are host-global, like the old capture-fps message.
-  const lastPushedQuality = useRef<string | null>(null)
-  useEffect(() => {
-    if (tab.phase !== 'live') {
-      lastPushedQuality.current = null
-      return
-    }
-    const timer = window.setTimeout(() => {
-      const conn = connection()
-      if (!conn) return
-      conn.setQuality(
-        hostAutoQuality && qualityMode === 'auto' ? 'auto' : resolvedMode,
-        targetFps,
-      )
-      // A preset change can change the tile format (turbo is gray8); without
-      // a full frame the host only repaints tiles that happen to change, so
-      // the rest of the picture stays in the previous format.
-      const key = `${tab.id}:${resolvedMode}`
-      if (lastPushedQuality.current !== key) {
-        lastPushedQuality.current = key
-        conn.requestKeyframe()
-      }
-    }, 400)
-    return () => window.clearTimeout(timer)
-  }, [tab.phase, tab.id, connection, resolvedMode, targetFps, hostAutoQuality, qualityMode])
-
-  // Auto quality: the link only picks the image tier now; the frame rate has
-  // its own controller below. A tier is lowered only once the rate is already
-  // at the tier's floor, and raised when the link is healthy with headroom.
-  useEffect(() => {
-    if (tab.phase !== 'live' || qualityMode !== 'auto' || hostAutoQuality) {
+    if (tab.phase !== 'live' || presetId !== 'auto') {
       // Remember the preset we left so re-entering auto starts fresh.
-      autoModeRef.current = qualityMode
+      autoModeRef.current = presetId
       return
     }
-    if (autoModeRef.current !== qualityMode) {
-      autoModeRef.current = qualityMode
+    if (autoModeRef.current !== presetId) {
+      autoModeRef.current = presetId
       autoRef.current = { tier: null, streak: 0, lastChange: 0 }
     }
     const timer = window.setInterval(() => {
@@ -1178,7 +1130,7 @@ export function SessionView({
       }
     }, 1000)
     return () => window.clearInterval(timer)
-  }, [tab.phase, tab.id, qualityMode, resolvedMode])
+  }, [tab.phase, tab.id, presetId, resolvedMode])
 
   // Average frame rate. The configured rate is the goal; the controller only
   // leaves it when the host cannot encode fast enough (its reported build
@@ -2608,50 +2560,25 @@ export function SessionView({
                   {t(`session.${mode}`)}
                 </button>
               ))}
-              <label
-                className="flex shrink-0 items-center gap-1 rounded-md border border-line bg-panel px-1.5 text-muted"
-                title={t('session.frameRate')}
-              >
-                <Activity size={12} />
-                <select
-                  value={String(frameRate)}
-                  onChange={(event) =>
-                    setFrameRate(parseFpsSetting(event.target.value))
-                  }
-                  aria-label={t('session.frameRate')}
-                  className="h-7 bg-transparent text-[11px] text-ink outline-none [&>option]:bg-surface [&>option]:text-ink"
-                >
-                  {FPS_CHOICES.map((choice) => (
-                    <option key={String(choice)} value={String(choice)}>
-                      {choice === 'auto'
-                        ? t('session.frameRateAuto')
-                        : t('session.frameRateValue', { count: choice })}
-                    </option>
-                  ))}
-                </select>
-              </label>
               <QualityPanel
-                mode={qualityMode}
-                custom={customKnobs}
-                knobs={knobs}
-                fps={targetFps}
-                onMode={(mode) => {
-                  setQualityMode(mode as QualityMode)
-                  setCustomKnobs(false)
+                preset={presetId}
+                applied={tab.appliedPreset}
+                onPreset={(next) => {
+                  setTabPreset(tab.id, next)
+                  // A new tier starts at its own resting rate instead of
+                  // inheriting the previous tier's adapted one.
+                  const tier =
+                    next === 'auto' ? autoTier : presetPlan(next).mode
+                  const plan = presetFpsPlan(next, tier)
+                  fpsState.current = {
+                    target: plan.start,
+                    good: 0,
+                    bad: 0,
+                    lastChange: performance.now(),
+                  }
+                  setTargetFps(plan.start)
+                  if (next === 'auto') setAutoTier('balanced')
                 }}
-                onKnobs={(next) => {
-                  setKnobs(next)
-                  setCustomKnobs(
-                    next.qp !== 0 ||
-                      next.bitrateKbps !== 0 ||
-                      next.rateMode !== 'auto' ||
-                      next.format !== 'preset',
-                  )
-                  connection()?.setQuality(qualityMode, undefined, next)
-                }}
-                onFps={(value) =>
-                  connection()?.setQuality(qualityMode, value, knobs)
-                }
               />
               {codecOptions.length > 0 ? (
                 <label

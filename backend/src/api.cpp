@@ -1850,6 +1850,27 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
       if (!device.detail.empty()) item["detail"] = device.detail;
       j["devices"].push_back(std::move(item));
     }
+    // Capability query only: which encoders this host can run and the
+    // resolution it is capturing. The session's picture tier comes from the
+    // viewer ('session-preset'), never from this endpoint.
+    j["encoders"] = uvcpp_json::array();
+    for (const video_encoder_backend& backend : video_encoder_backends()) {
+      uvcpp_json item;
+      item["id"] = backend.id;
+      item["name"] = backend.name;
+      item["hardware"] = backend.hardware;
+      item["available"] = backend.available;
+      item["av1"] = backend.av1_stream;
+      item["h264"] = backend.h264_stream;
+      item["vp9"] = backend.vp9_stream;
+      item["vp8"] = backend.vp8_stream;
+      j["encoders"].push_back(std::move(item));
+    }
+    if (deps.capture) {
+      const display_info display = deps.capture->current_display_info();
+      j["max_width"] = display.width;
+      j["max_height"] = display.height;
+    }
     if (deps.capture) {
       const quality_mode mode = deps.capture->quality();
       const quality_profile profile = quality_profile_for(mode);

@@ -1,5 +1,4 @@
 import {
-  Activity,
   Check,
   ClipboardCopy,
   Cpu,
@@ -22,7 +21,11 @@ import {
   type Av1Settings,
   type ServerState,
 } from '../lib/api'
-import { FPS_CHOICES, parseFpsSetting } from '../lib/frame-rate'
+import {
+  SESSION_PRESETS,
+  presetPlan,
+  type SessionPresetId,
+} from '../lib/session-presets'
 import {
   keyboardGrabApplicable,
   keyboardGrabAvailable,
@@ -34,7 +37,7 @@ import {
   normalizeVideoMode,
   type VideoMode,
 } from '../lib/video-mode'
-import { useAppStore, type QualityMode, type Theme } from '../store/app'
+import { useAppStore, type Theme } from '../store/app'
 import { ServicePanel } from './ServicePanel'
 import { WindowsSessionsPanel } from './WindowsSessionsPanel'
 
@@ -187,52 +190,20 @@ function NetworkPortSettings({
   )
 }
 
+/// The six viewer-owned tiers. This is the default *for this machine when it
+/// is the controller*; a per-host choice saved in the session wins over it.
 const QUALITY_PRESETS: {
-  value: QualityMode
+  value: SessionPresetId
   label: string
   description: string
-}[] = [
-  {
-    value: 'auto',
-    label: 'session.qualityAuto',
-    description: 'settings.qualityDescAuto',
-  },
-  {
-    value: 'turbo',
-    label: 'session.qualityTurbo',
-    description: 'settings.qualityDescTurbo',
-  },
-  {
-    value: 'smooth',
-    label: 'session.qualitySmooth',
-    description: 'settings.qualityDescSmooth',
-  },
-  {
-    value: 'balanced',
-    label: 'session.qualityBalanced',
-    description: 'settings.qualityDescBalanced',
-  },
-  {
-    value: 'quality',
-    label: 'session.qualityHigh',
-    description: 'settings.qualityDescQuality',
-  },
-  {
-    value: 'ultra',
-    label: 'session.qualityUltra',
-    description: 'settings.qualityDescUltra',
-  },
-  {
-    value: 'lossless',
-    label: 'session.qualityLossless',
-    description: 'settings.qualityDescLossless',
-  },
-  {
-    value: 'game',
-    label: 'session.qualityGame',
-    description: 'settings.qualityDescGame',
-  },
-]
+}[] = SESSION_PRESETS.map((value) => {
+  const plan = presetPlan(value)
+  return {
+    value,
+    label: plan.labelKey,
+    description: plan.descriptionKey,
+  }
+})
 
 const QUALITY_LABEL_KEYS: Record<string, string> = {
   turbo: 'session.qualityTurbo',
@@ -598,10 +569,8 @@ export function PreferencesControls({
     keyboardGrabAvailable(),
   )
   const localMode = useAppStore((state) => state.localMode)
-  const qualityMode = useAppStore((state) => state.qualityMode)
-  const setQualityMode = useAppStore((state) => state.setQualityMode)
-  const frameRate = useAppStore((state) => state.frameRate)
-  const setFrameRate = useAppStore((state) => state.setFrameRate)
+  const defaultPreset = useAppStore((state) => state.defaultPreset)
+  const setDefaultPreset = useAppStore((state) => state.setDefaultPreset)
   const lockTimeout = useAppStore((state) => state.lockTimeout)
   const setLockTimeout = useAppStore((state) => state.setLockTimeout)
   const server = useAppStore((state) => state.server)
@@ -795,47 +764,25 @@ export function PreferencesControls({
 
           <div className="space-y-2">
             <div className="flex items-center gap-2 text-[12px] font-medium text-ink">
-              <Activity size={14} className="text-accent" />
-              {t('settings.frameRate')}
-            </div>
-            <p className="text-[11px] leading-relaxed text-muted">
-              {t('settings.frameRateHint')}
-            </p>
-            <select
-              value={String(frameRate)}
-              onChange={(event) =>
-                setFrameRate(parseFpsSetting(event.target.value))
-              }
-              className="field"
-            >
-              {FPS_CHOICES.map((choice) => (
-                <option key={String(choice)} value={String(choice)}>
-                  {choice === 'auto'
-                    ? t('settings.frameRateAuto')
-                    : t('settings.frameRateValue', { count: choice })}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div className="space-y-2">
-            <div className="flex items-center gap-2 text-[12px] font-medium text-ink">
               <Gauge size={14} className="text-accent" />
-              {t('settings.defaultQuality')}
+              {t('settings.defaultPreset')}
             </div>
             <p className="text-[11px] leading-relaxed text-muted">
-              {t('settings.qualityHint')}
+              {t('settings.defaultPresetHint')}
+            </p>
+            <p className="rounded-md border border-line bg-panel/40 px-2.5 py-1.5 text-[10px] leading-relaxed text-muted">
+              {t('settings.viewerOnly')}
             </p>
             <div className="space-y-1.5" role="radiogroup">
               {QUALITY_PRESETS.map((preset) => {
-                const selected = qualityMode === preset.value
+                const selected = defaultPreset === preset.value
                 return (
                   <button
                     key={preset.value}
                     type="button"
                     role="radio"
                     aria-checked={selected}
-                    onClick={() => setQualityMode(preset.value)}
+                    onClick={() => setDefaultPreset(preset.value)}
                     className={
                       'flex w-full items-start gap-2 rounded-lg border px-3 py-2 text-left transition ' +
                       (selected

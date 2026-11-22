@@ -1,73 +1,27 @@
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useTranslation } from 'react-i18next'
-import { Gauge, RotateCcw, X } from 'lucide-react'
+import { Gauge, X } from 'lucide-react'
+import {
+  SESSION_PRESETS,
+  chromaLabel,
+  presetPlan,
+  type PresetApplied,
+  type SessionPresetId,
+} from '../lib/session-presets'
 
-/// Toolbar slider values. 0 (or "preset") means "follow the quality preset";
-/// the host treats every slider as a preference it may adjust around, not a
-/// fixed value.
-export interface EncodingKnobs {
-  qp: number
-  bitrateKbps: number
-  rateMode: 'auto' | 'cq' | 'cbr'
-  format: string
-}
-
-export const defaultKnobs: EncodingKnobs = {
-  qp: 0,
-  bitrateKbps: 0,
-  rateMode: 'auto',
-  format: 'preset',
-}
-
-const PRESETS = [
-  'turbo',
-  'smooth',
-  'balanced',
-  'quality',
-  'ultra',
-  'lossless',
-  'auto',
-] as const
-
-const PRESET_LABEL: Record<string, string> = {
-  turbo: 'session.qualityTurbo',
-  smooth: 'session.qualitySmooth',
-  balanced: 'session.qualityBalanced',
-  quality: 'session.qualityHigh',
-  ultra: 'session.qualityUltra',
-  lossless: 'session.qualityLossless',
-  auto: 'session.qualityAuto',
-}
-
-const FORMATS = ['preset', 'gray8', 'rgb565', 'bgra'] as const
-
-const FORMAT_LABEL: Record<string, string> = {
-  preset: 'session.formatPreset',
-  gray8: 'session.formatMono',
-  rgb565: 'session.format16',
-  bgra: 'session.formatTrue',
-}
-
-/// The toolbar's 画质 group: preset chips on top, then the rate-mode switch
-/// and the per-knob sliders. Moving any slider makes the tier "custom" -- the
-/// preset stays the baseline the host may adapt around.
+/// The toolbar's 画质 group. This is the viewer's picture tier: fixed presets
+/// (plus a separate 自动), stored per host:port. Clicking one takes effect
+/// immediately and is persisted by the caller; the small line underneath is
+/// what the host reported it actually applied (fps / codec / chroma).
 export function QualityPanel({
-  mode,
-  custom,
-  knobs,
-  fps,
-  onMode,
-  onKnobs,
-  onFps,
+  preset,
+  applied,
+  onPreset,
 }: {
-  mode: string
-  custom: boolean
-  knobs: EncodingKnobs
-  fps: number
-  onMode: (mode: string) => void
-  onKnobs: (knobs: EncodingKnobs) => void
-  onFps: (fps: number) => void
+  preset: SessionPresetId
+  applied?: PresetApplied
+  onPreset: (preset: SessionPresetId) => void
 }) {
   const { t } = useTranslation()
   const [open, setOpen] = useState(false)
@@ -93,7 +47,7 @@ export function QualityPanel({
     }
   }, [open])
 
-  const width = 316
+  const width = 300
   const toggle = () => {
     if (open) {
       setOpen(false)
@@ -108,30 +62,24 @@ export function QualityPanel({
     setOpen(true)
   }
 
-  const label = custom ? t('session.qualityCustom') : t(PRESET_LABEL[mode] ?? 'session.quality')
-  const sliderRow = (
-    name: string,
-    value: number,
-    min: number,
-    max: number,
-    display: string,
-    onChange: (value: number) => void,
-    inverted = false,
-  ) => (
-    <label className="flex items-center gap-2 text-[11px] text-muted">
-      <span className="w-14 shrink-0">{name}</span>
-      <input
-        type="range"
-        min={min}
-        max={max}
-        value={value}
-        onChange={(event) => onChange(Number(event.target.value))}
-        className={'h-1 min-w-0 flex-1 accent-accent ' + (inverted ? 'direction-rtl' : '')}
-        dir={inverted ? 'rtl' : 'ltr'}
-      />
-      <span className="w-20 shrink-0 text-right text-ink">{display}</span>
-    </label>
-  )
+  const plan = presetPlan(preset)
+  const actual = applied?.actual
+  const codec = actual?.codec
+  const codecLabel =
+    codec === 'tiles'
+      ? t('session.codecTiles')
+      : codec
+        ? codec === 'h264'
+          ? 'H.264'
+          : codec.toUpperCase()
+        : '—'
+  const actualLine = applied
+    ? t('session.presetActual', {
+        fps: actual?.fps ?? 0,
+        codec: codecLabel,
+        chroma: chromaLabel(actual?.chroma),
+      })
+    : t('session.presetPending')
 
   return (
     <div ref={holder} className="shrink-0">
@@ -140,13 +88,13 @@ export function QualityPanel({
         type="button"
         onClick={toggle}
         className="btn btn-quiet flex h-7 shrink-0 items-center gap-0.5 !px-1.5"
-        title={t('session.quality')}
-        aria-label={t('session.quality')}
+        title={t('session.presetTitle')}
+        aria-label={t('session.presetTitle')}
         aria-haspopup="dialog"
         aria-expanded={open}
       >
         <Gauge size={12} />
-        <span className="text-[11px]">{label}</span>
+        <span className="text-[11px]">{t(plan.labelKey)}</span>
       </button>
       {open && spot
         ? createPortal(
@@ -156,11 +104,11 @@ export function QualityPanel({
               className="fixed z-50 flex flex-col gap-2 rounded-lg border border-line bg-surface p-2.5 shadow-xl"
               style={{ left: spot.left, top: spot.top, width }}
               role="dialog"
-              aria-label={t('session.quality')}
+              aria-label={t('session.presetTitle')}
             >
               <div className="flex items-center justify-between">
                 <span className="text-[11px] font-medium text-ink">
-                  {t('session.quality')}
+                  {t('session.presetTitle')}
                 </span>
                 <button
                   type="button"
@@ -171,102 +119,38 @@ export function QualityPanel({
                   <X size={12} />
                 </button>
               </div>
-              <div className="grid grid-cols-4 gap-1">
-                {PRESETS.map((preset) => (
-                  <button
-                    key={preset}
-                    type="button"
-                    onClick={() => {
-                      onMode(preset)
-                      onKnobs(defaultKnobs)
-                    }}
-                    className={
-                      'btn h-6 !px-1 text-[10px] ' +
-                      (!custom && mode === preset ? 'text-accent' : 'btn-quiet')
-                    }
-                    aria-pressed={!custom && mode === preset}
-                  >
-                    {t(PRESET_LABEL[preset])}
-                  </button>
-                ))}
+              <div className="grid grid-cols-3 gap-1">
+                {SESSION_PRESETS.map((id) => {
+                  // 自动 is deliberately separate from the five fixed tiers.
+                  const item = presetPlan(id)
+                  const selected = preset === id
+                  return (
+                    <button
+                      key={id}
+                      type="button"
+                      onClick={() => {
+                        onPreset(id)
+                        setOpen(false)
+                      }}
+                      className={
+                        'btn h-7 !px-1 text-[11px] ' +
+                        (selected ? 'text-accent' : 'btn-quiet') +
+                        (id === 'auto' ? ' col-start-1 mt-1' : '')
+                      }
+                      aria-pressed={selected}
+                      title={t(item.descriptionKey)}
+                    >
+                      {t(item.labelKey)}
+                    </button>
+                  )
+                })}
               </div>
-              <div className="flex items-center gap-1">
-                <span className="w-14 shrink-0 text-[11px] text-muted">
-                  {t('session.rateMode')}
-                </span>
-                {(['auto', 'cq', 'cbr'] as const).map((value) => (
-                  <button
-                    key={value}
-                    type="button"
-                    onClick={() => onKnobs({ ...knobs, rateMode: value })}
-                    className={
-                      'btn h-6 flex-1 !px-1 text-[10px] ' +
-                      (knobs.rateMode === value ? 'text-accent' : 'btn-quiet')
-                    }
-                    aria-pressed={knobs.rateMode === value}
-                  >
-                    {t(
-                      value === 'auto'
-                        ? 'session.rateModeAuto'
-                        : value === 'cq'
-                          ? 'session.rateModeCq'
-                          : 'session.rateModeCbr',
-                    )}
-                  </button>
-                ))}
+              <div className="rounded-md border border-line bg-panel/60 px-2 py-1.5 text-[10px] leading-relaxed text-muted">
+                {actualLine}
               </div>
-              {sliderRow(
-                t('session.knobQuality'),
-                knobs.qp,
-                0,
-                63,
-                knobs.qp === 0 ? t('session.knobFollowPreset') : String(knobs.qp),
-                (qp) => onKnobs({ ...knobs, qp }),
-                true,
-              )}
-              {sliderRow(
-                t('session.knobBitrate'),
-                knobs.bitrateKbps,
-                0,
-                20000,
-                knobs.bitrateKbps === 0
-                  ? t('session.knobFollowPreset')
-                  : `${knobs.bitrateKbps} kbps`,
-                (bitrateKbps) => onKnobs({ ...knobs, bitrateKbps }),
-              )}
-              {sliderRow(
-                t('session.knobFps'),
-                fps,
-                1,
-                60,
-                `${fps} fps`,
-                (value) => onFps(value),
-              )}
-              <label className="flex items-center gap-2 text-[11px] text-muted">
-                <span className="w-14 shrink-0">{t('session.imageFormat')}</span>
-                <select
-                  value={knobs.format}
-                  onChange={(event) =>
-                    onKnobs({ ...knobs, format: event.target.value })
-                  }
-                  className="h-6 min-w-0 flex-1 bg-transparent text-[11px] text-ink outline-none [&>option]:bg-surface [&>option]:text-ink"
-                  aria-label={t('session.imageFormat')}
-                >
-                  {FORMATS.map((format) => (
-                    <option key={format} value={format}>
-                      {t(FORMAT_LABEL[format])}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <button
-                type="button"
-                onClick={() => onKnobs(defaultKnobs)}
-                className="btn btn-quiet flex h-6 items-center justify-center gap-1 text-[10px]"
-              >
-                <RotateCcw size={11} />
-                {t('session.qualityReset')}
-              </button>
+              <p className="text-[10px] leading-relaxed text-muted">
+                {t('session.presetHint')}
+              </p>
             </div>,
             document.body,
           )

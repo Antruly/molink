@@ -22,6 +22,10 @@ import {
   forgetSessionScreenBuffer,
 } from './screen-buffer'
 import { forgetSessionFrames, noteSessionFrame } from './session-repaint'
+import type {
+  PresetApplied,
+  SessionPresetMessage,
+} from './session-presets'
 
 export interface Stats {
   /** Frames that were actually painted in the last second. */
@@ -68,15 +72,8 @@ export interface TabPatch {
   /// Host-reported capture rate and encoder build time (EMA).
   hostFps?: number
   hostBuildMs?: number
-  /// Preset another viewer selected on the shared host.
-  sharedQuality?: { mode: string }
-  /// Another viewer moved the encoding sliders.
-  sharedKnobs?: {
-    qp?: number
-    bitrateKbps?: number
-    rateMode?: string
-    format?: string
-  }
+  /// The host applied the viewer-owned preset; actual fps/codec/chroma.
+  appliedPreset?: PresetApplied
   notice?: string | null
   approvalDeadline?: number | null
   retryAt?: number | null
@@ -129,6 +126,10 @@ export class SessionConnection {
   private audioFormat: { sampleRate: number; channels: number } | null = null
   /// Host accepts per-second viewer health reports (welcome.viewer_stats).
   private viewerStats = false
+  /// Viewer-owned preset waiting for the welcome. Sending it before the first
+  /// frame means the host starts on the viewer's tier instead of its default.
+  private pendingPreset: SessionPresetMessage | null = null
+  private presetTimer: number | null = null
   private viewerTimer: number | null = null
   private clipboardEnabled = true
   /// Delayed file rendering advertised by the current host, or null when it
@@ -301,6 +302,9 @@ export class SessionConnection {
           displayIndex: welcome.display_index ?? 0,
           ...(label ? { label } : {}),
         })
+        // The host is live now; hand it the viewer's tier before the first
+        // frame so a session never opens on the host's own default.
+        this.flushPreset()
       },
       onDisplay: (index) => this.sink.onPatch({ displayIndex: index }),
       onWireFrame: () => {
@@ -448,9 +452,8 @@ export class SessionConnection {
         })
         this.sink.onPatch({ codecPreference: value })
       },
-      onQualityShared: (mode) =>
-        this.sink.onPatch({ sharedQuality: { mode } }),
-      onQualityKnobs: (knobs) => this.sink.onPatch({ sharedKnobs: knobs }),
+      onSessionPresetApplied: (applied) =>
+        this.sink.onPatch({ appliedPreset: applied }),
       onCursor: (cursorShape) => this.sink.onPatch({ cursorShape }),
       onCursorPosition: (cursorPosition) =>
         this.sink.onPatch({ cursorPosition }),
@@ -903,17 +906,26 @@ export class SessionConnection {
     this.client.sendInput(payload)
   }
 
-  setQuality(
-    mode: string,
-    fps?: number,
-    knobs?: {
-      qp?: number
-      bitrateKbps?: number
-      rateMode?: string
-      format?: string
-    },
-  ): void {
-    this.client.setQuality(mode, fps, knobs)
+  /// Queues the viewer-owned preset. Before the welcome it is held; after it,
+  /// rapid clicks are coalesced into one message (well under the one-second
+  /// ceiling) so only the final tier rebuilds the encoder.
+  setSessionPreset(preset: SessionPresetMessage): void {
+    this.pendingPreset = preset
+    if (!this.client.isLive()) return
+    if (this.presetTimer !== null) window.clearTimeout(this.presetTimer)
+    this.presetTimer = window.setTimeout(() => {
+      this.presetTimer = null
+      this.flushPreset()
+    }, 120)
+  }
+
+  private flushPreset(): void {
+    if (this.presetTimer !== null) {
+      window.clearTimeout(this.presetTimer)
+      this.presetTimer = null
+    }
+    if (!this.pendingPreset || !this.client.isLive()) return
+    this.client.setSessionPreset(this.pendingPreset)
   }
 
   /// Pins the host-global stream codec ("auto" restores the ladder).
