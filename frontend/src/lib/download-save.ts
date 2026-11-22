@@ -92,6 +92,9 @@ export function basename(path: string): string {
 /// Keep the suggested name harmless without dropping the extension.
 export function suggestedFileName(name: string, fallbackPath: string): string {
   const raw = name.trim() !== '' ? name : basename(fallbackPath)
+  // Control characters are what we are stripping: the file picker rejects
+  // them and a host may hand them over in a name.
+  // eslint-disable-next-line no-control-regex
   const cleaned = raw.replace(/[\\/:*?"<>|\u0000-\u001f\u007f]/g, '_').trim()
   return cleaned !== '' ? cleaned : 'file'
 }

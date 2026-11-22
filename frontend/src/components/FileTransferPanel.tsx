@@ -717,7 +717,11 @@ export function FileTransferPanel({
     },
     [t],
   )
-  finishBrowseRef.current = finishBrowse
+  // Published after commit: a ref read by an event handler must not be
+  // written during render (React Compiler).
+  useEffect(() => {
+    finishBrowseRef.current = finishBrowse
+  })
 
   const pumpBrowse = useCallback(() => {
     if (browseActive.current) return
@@ -731,7 +735,9 @@ export function FileTransferPanel({
     }, browseTimeoutMs)
     connectionRef.current?.sendFileAction('browse', { path: request.path })
   }, [t])
-  browsePumpRef.current = pumpBrowse
+  useEffect(() => {
+    browsePumpRef.current = pumpBrowse
+  })
 
   const requestListing = useCallback(
     (path: string, display: boolean): Promise<RemoteListing> =>
@@ -949,7 +955,9 @@ export function FileTransferPanel({
     },
     [discardPartial, noteTaskSpeed, patchChild, t],
   )
-  finishDownloadRef.current = finishDownload
+  useEffect(() => {
+    finishDownloadRef.current = finishDownload
+  })
 
   const pumpDownloads = useCallback(() => {
     if (downloadSection.current) return
@@ -1040,7 +1048,9 @@ export function FileTransferPanel({
     t,
     updateTask,
   ])
-  downloadPumpRef.current = pumpDownloads
+  useEffect(() => {
+    downloadPumpRef.current = pumpDownloads
+  })
 
   const makeJob = useCallback(
     (props: {
@@ -1249,6 +1259,9 @@ export function FileTransferPanel({
           kept.push(queued)
           continue
         }
+        // Job records are plain objects owned by this panel, not React state;
+        // the pump reads the flag off the same object.
+        // eslint-disable-next-line react-hooks/immutability
         queued.cancelled = true
         if (queued.target) {
           void queued.target
@@ -1490,9 +1503,11 @@ export function FileTransferPanel({
   )
 
   const messageRef = useRef(handleMessage)
-  messageRef.current = handleMessage
   const chunkRef = useRef(handleChunk)
-  chunkRef.current = handleChunk
+  useEffect(() => {
+    messageRef.current = handleMessage
+    chunkRef.current = handleChunk
+  })
 
   useEffect(() => {
     if (!connection) return
@@ -2574,7 +2589,9 @@ export function FileTransferPanel({
   // The unsubscribe below must not run on a language change, so the message
   // is read through a ref instead of putting `t` in the dependency list.
   const cancelledMessage = useRef(t('files.cancelled'))
-  cancelledMessage.current = t('files.cancelled')
+  useEffect(() => {
+    cancelledMessage.current = t('files.cancelled')
+  })
 
   useEffect(() => {
     return () => {
@@ -2591,6 +2608,9 @@ export function FileTransferPanel({
       }
       for (const run of downloadRuns.current.values()) run.cancelled = true
       for (const queued of downloadQueue.current) {
+        // Job records are plain objects owned by this panel, not React state;
+        // the pump reads the flag off the same object.
+        // eslint-disable-next-line react-hooks/immutability
         queued.cancelled = true
         if (queued.target) {
           void queued.target

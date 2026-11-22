@@ -129,6 +129,8 @@ export function safeTargetSegments(
   for (const part of raw.replace(/\\/g, '/').split('/')) {
     if (part === '' || part === '.' || part === '..') continue
     const cleaned = part
+      // Control characters are what we are stripping.
+      // eslint-disable-next-line no-control-regex
       .replace(/[\\/:*?"<>|\u0000-\u001f\u007f]/g, '_')
       .trim()
     if (cleaned === '' || cleaned === '.' || cleaned === '..') continue
