@@ -83,6 +83,13 @@ class clipboard_service {
   /// True while this backend owns the clipboard for a lazy offer and is
   /// serving descriptors instead of real paths.
   virtual bool lazy_rendering() const { return false; }
+
+  /// True when the current clipboard is owned by an inner RDP client (the
+  /// host is running mstsc and the user is working inside the nested session).
+  /// mstsc's redirection understands CF_HDROP but not OLE virtual-file
+  /// streams, so the host must ask the viewer to upload real files before the
+  /// paste instead of installing a delayed offer.
+  virtual bool nested_rdp() const { return false; }
 };
 
 /// nullptr when the build has no X11 support or no display is reachable.

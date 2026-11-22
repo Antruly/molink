@@ -19,6 +19,8 @@
 #include <condition_variable>
 #include <cstdio>
 #include <cstring>
+#include <cwchar>
+#include <cwctype>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -61,6 +63,21 @@ bool open_clipboard_retry(HWND owner, int attempts = 10) {
     Sleep(10);
   }
   return false;
+}
+
+/// mstsc's main window class. Its presence means an inner Windows session is
+/// connected; clipboard redirection then only understands CF_HDROP.
+BOOL CALLBACK find_rdp_window(HWND window, LPARAM found) {
+  wchar_t name[64] = {};
+  if (GetClassNameW(window, name,
+                    static_cast<int>(sizeof(name) / sizeof(name[0]))) == 0) {
+    return TRUE;
+  }
+  if (wcscmp(name, L"TscShellContainerClass") == 0) {
+    *reinterpret_cast<bool*>(found) = true;
+    return FALSE;
+  }
+  return TRUE;
 }
 
 UINT file_descriptor_format() {
@@ -958,12 +975,16 @@ class windows_clipboard final : public clipboard_service {
             std::wstring path(length + 1, L'\0');
             if (DragQueryFileW(drop, i, path.data(), length + 1) == 0) continue;
             path.resize(length);
+            const std::filesystem::path fs_path(path);
+            std::error_code ec;
+            // CF_HDROP can name folders too. A recursive folder copy is the
+            // files panel's job; the clipboard file list only carries regular
+            // files, and a folder here would make a pull fail.
+            if (!std::filesystem::is_regular_file(fs_path, ec) || ec) continue;
             clipboard_file file;
             file.path = to_utf8(path.c_str());
-            const std::filesystem::path fs_path(path);
             const std::wstring name = fs_path.filename().wstring();
             file.name = to_utf8(name.c_str());
-            std::error_code ec;
             const auto size = std::filesystem::file_size(fs_path, ec);
             if (!ec) file.size = size;
             files.push_back(std::move(file));
@@ -1029,6 +1050,90 @@ class windows_clipboard final : public clipboard_service {
   }
 
   bool supports_lazy_files() const override { return true; }
+
+  /// An inner RDP session owns the clipboard when mstsc/msrdc wrote the
+  /// current contents (copying a file inside the remote desktop materialises
+  /// it on this side and makes the RDP client the owner), or when CF_HDROP
+  /// points into the client's redirection temp folder. Cached for a second:
+  /// this is called from the supervisor's clipboard poll and from the offer
+  /// handler, and it opens the clipboard.
+  bool nested_rdp() const override {
+    const uint64_t now = GetTickCount64();
+    {
+      std::lock_guard<std::mutex> lock(nested_mutex_);
+      if (nested_checked_ && now - nested_checked_ms_ < 1000) {
+        return nested_cached_;
+      }
+    }
+    bool nested = false;
+    if (open_clipboard_retry(nullptr, 3)) {
+      const HWND owner = GetClipboardOwner();
+      if (owner != nullptr) {
+        DWORD process_id = 0;
+        GetWindowThreadProcessId(owner, &process_id);
+        if (process_id != 0 && process_id != GetCurrentProcessId()) {
+          HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,
+                                       FALSE, process_id);
+          if (process != nullptr) {
+            wchar_t path[MAX_PATH] = {};
+            DWORD length = MAX_PATH;
+            if (QueryFullProcessImageNameW(process, 0, path, &length)) {
+              const std::wstring name =
+                  std::filesystem::path(path).filename().wstring();
+              std::wstring lower = name;
+              std::transform(lower.begin(), lower.end(), lower.begin(),
+                             [](wchar_t c) {
+                               return static_cast<wchar_t>(std::towlower(c));
+                             });
+              nested = lower == L"mstsc.exe" || lower == L"msrdc.exe";
+            }
+            CloseHandle(process);
+          }
+        }
+      }
+      if (!nested) {
+        // The clipboard owner check only fires after the inner session copied
+        // something. A connected mstsc window is the earlier signal.
+        bool rdp_window = false;
+        EnumWindows(&find_rdp_window, reinterpret_cast<LPARAM>(&rdp_window));
+        nested = rdp_window;
+      }
+      if (!nested && IsClipboardFormatAvailable(CF_HDROP)) {
+        HANDLE data = GetClipboardData(CF_HDROP);
+        if (data != nullptr) {
+          HDROP drop = static_cast<HDROP>(data);
+          const UINT count = DragQueryFileW(drop, 0xFFFFFFFFu, nullptr, 0);
+          for (UINT i = 0; i < count && !nested; ++i) {
+            const UINT length = DragQueryFileW(drop, i, nullptr, 0);
+            if (length == 0) continue;
+            std::wstring path(length + 1, L'\0');
+            if (DragQueryFileW(drop, i, path.data(), length + 1) == 0) {
+              continue;
+            }
+            path.resize(length);
+            std::wstring lower = path;
+            std::transform(lower.begin(), lower.end(), lower.begin(),
+                           [](wchar_t c) {
+                             return static_cast<wchar_t>(std::towlower(c));
+                           });
+            // mstsc materialises redirected files as RDP<hex> temp names, and
+            // an explicit \\tsclient path is the other shape we see.
+            nested = lower.find(L"\\\\tsclient\\") == 0 ||
+                     lower.find(L"\\temp\\rdp") != std::wstring::npos ||
+                     lower.find(L"/temp/rdp") != std::wstring::npos;
+          }
+        }
+      }
+      CloseClipboard();
+    }
+    {
+      std::lock_guard<std::mutex> lock(nested_mutex_);
+      nested_cached_ = nested;
+      nested_checked_ = true;
+      nested_checked_ms_ = now;
+    }
+    return nested;
+  }
 
   bool install_lazy(std::shared_ptr<lazy_clipboard> lazy,
                     std::string& error) override {
@@ -1137,6 +1242,13 @@ class windows_clipboard final : public clipboard_service {
   DWORD sequence_ = 0;
   std::atomic<bool> running_{false};
   std::thread watcher_;
+
+  /// nested_rdp() cache; the probe opens the clipboard and inspects the owner
+  /// process, so the supervisor's 400 ms poll must not pay it every tick.
+  mutable std::mutex nested_mutex_;
+  mutable bool nested_cached_ = false;
+  mutable bool nested_checked_ = false;
+  mutable uint64_t nested_checked_ms_ = 0;
 
   mutable std::mutex lazy_mutex_;
   std::condition_variable lazy_cv_;

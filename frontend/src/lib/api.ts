@@ -703,13 +703,14 @@ export function stageClipboardFile(
   token: string,
   name: string,
   size: number,
+  batch?: string,
 ): Promise<StagedClipboardFile> {
   return request<StagedClipboardFile>(
     '/api/clipboard-stage',
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, size }),
+      body: JSON.stringify(batch ? { name, size, batch } : { name, size }),
     },
     token,
   )

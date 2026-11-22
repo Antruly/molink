@@ -282,6 +282,45 @@ void test_apply_failure_can_retry() {
   fs::remove_all(dir, ec);
 }
 
+void test_batch_directory() {
+  const fs::path dir = fs::temp_directory_path() / "molink-clipboard-stage-g";
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+  fs::create_directories(dir, ec);
+
+  clipboard_stage stage(dir.string(), [](const std::vector<std::string>&) {
+    return true;
+  });
+  std::string id;
+  std::string path;
+  const std::string batch = "0123abcd0123abcd0123abcd0123abcd0123abcd";
+  expect(stage.begin("a.txt", 1, id, path, batch) == stage_error::none,
+         "a SHA-1 batch directory is accepted");
+  expect(fs::path(path).parent_path().filename() == batch,
+         "the final file lives in the batch directory");
+  expect(fs::is_directory(fs::path(dir) / batch),
+         "the batch directory exists");
+
+  // The same name in a later batch is not renamed with " (1)".
+  std::string second_id;
+  std::string second_path;
+  const std::string batch2 = "ffffffffffffffffffffffffffffffffffffffff";
+  expect(stage.begin("a.txt", 1, second_id, second_path, batch2) ==
+             stage_error::none,
+         "the same name in a new batch is accepted");
+  expect(fs::path(second_path).filename() == "a.txt",
+         "a new batch keeps the original name");
+
+  expect(stage.begin("b.txt", 1, id, path, "../escape") ==
+             stage_error::bad_request,
+         "a path-like batch is refused");
+  expect(stage.begin("b.txt", 1, id, path, "xyz") ==
+             stage_error::bad_request,
+         "a short/non-hex batch is refused");
+
+  fs::remove_all(dir, ec);
+}
+
 void test_no_config_directory() {
   clipboard_stage stage(std::string(), [](const std::vector<std::string>&) {
     return true;
@@ -303,6 +342,7 @@ int main() {
   test_limits_and_bad_names();
   test_expiry_is_lazy();
   test_apply_failure_can_retry();
+  test_batch_directory();
   test_no_config_directory();
   std::printf("%d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;

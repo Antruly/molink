@@ -603,7 +603,9 @@ export const useAppStore = create<AppState>((set, get) => {
     theme: initialTheme(),
     qualityWatermark: readStorage(QUALITY_KEY) === '1',
     autoAudio: readStorage(AUTO_AUDIO_KEY) !== '0',
-    remoteClipboardFiles: readStorage(REMOTE_CLIPBOARD_FILES_KEY) === '1',
+    // On by default: pasting a file copied on the remote is the feature, and
+    // the settings switch still lets a user opt out.
+    remoteClipboardFiles: readStorage(REMOTE_CLIPBOARD_FILES_KEY) !== '0',
     windowCloseBehavior: (() => {
       const saved = readStorage(CLOSE_BEHAVIOR_KEY)
       return saved === 'tray' || saved === 'tab' ? saved : 'ask'

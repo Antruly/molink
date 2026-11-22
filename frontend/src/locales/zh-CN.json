@@ -418,6 +418,9 @@
     "remote_clipboard_failed": "远端文件复制到本机剪贴板失败",
     "remote_clipboard_too_large": "远端剪贴板文件超过自动复制的上限，请在文件面板中手动接收",
     "remote_clipboard_incomplete": "远端文件没有完整传完，未写入本机剪贴板",
+    "remote_clipboard_gone": "远端剪贴板已变化，未生成文件，请重新复制",
+    "remote_clipboard_unavailable": "本机没有可用的剪贴板写入器，无法把远端文件放进本机剪贴板；请在文件面板里手动接收",
+    "remote_clipboard_truncated": "剪贴板文件过多或过大，只同步了前面一部分",
     "clipboard_read_failed": "无法读取本机剪贴板",
     "clipboard_write_failed": "无法写入本机剪贴板",
     "clipboard_unavailable": "当前浏览器环境不提供剪贴板",
@@ -430,7 +433,8 @@
     "server_unreachable": "无法连接 moLink Server",
     "clipboard_files_busy": "剪贴板正在同步文件，请稍后再拖入",
     "clipboard_files_uploaded": "对方不支持按需传输，文件已直接上传",
-    "clipboard_files_staged": "对方不支持虚拟文件流，粘贴时会先复制到对方的 moLink 目录"
+    "clipboard_files_staged": "对方不支持虚拟文件流，粘贴时会先复制到对方的 moLink 目录",
+    "clipboard_files_compat": "检测到嵌套 RDP 会话：文件会先完整传到对方再放入剪贴板，这样里层桌面才能粘贴"
   },
   "popout": {
     "noToken": "这个窗口缺少连接验证码。"
@@ -557,7 +561,7 @@
     "clipboardTitle": "远程剪贴板",
     "clipboardHint": "远程资源管理器里复制的文件；接收后会下载到本机。",
     "clipboardAuto": "已开启自动复制：这些文件会完整传到本机并放入本机剪贴板，大文件需要等待。",
-    "clipboardLocalApp": "要把远端文件直接粘到本机，需要在本机的 moLink 应用里打开这个会话（浏览器访问远端页面无法写入本机剪贴板）。",
+    "clipboardLocalApp": "要把远端文件直接粘到本机，需要在本机的 moLink 应用里打开这个会话（浏览器访问远端页面无法写入本机剪贴板）。也可以点“全部接收”下载到本机下载目录。",
     "save": "保存",
     "saved": "已保存",
     "saving": "正在保存…",

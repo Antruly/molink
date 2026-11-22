@@ -36,6 +36,12 @@ export const PacketType = {
    * `{"type":"file","action":"fetch"}`. `tileClock` already owns 0x15.
    */
   clipboardRange: 0x17,
+  /**
+   * Clipboard file range reply (host -> client): u32 file id, u32 status
+   * (0 ok, 1 read error, 2 clipboard changed / file gone), u64 offset, then
+   * the bytes. Answers a `{"type":"file","action":"clipboard-pull"}`.
+   */
+  clipboardFile: 0x18,
   control: 0x7f,
   ping: 0x80,
   pong: 0x81,

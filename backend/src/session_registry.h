@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "clipboard_pull.h"
 #include "transport/channel_scheduler.h"
 #include "transport/session_transport.h"
 
@@ -40,6 +41,19 @@ struct session_info {
   /// files (FileGroupDescriptorW + FileContents) and never stages them under
   /// ~/moLink. Without it the eager upload path stays in use.
   bool clipboard_stream = false;
+  /// The client advertised `clipboard_pull` in hello: it understands
+  /// `clipboard-sync.files` and answers with `clipboard-pull` range requests.
+  /// Older clients only get the legacy path list, so a files-only
+  /// `clipboard-sync` cannot clear their text clipboard.
+  bool clipboard_pull = false;
+  /// The file list last published to this session, used to validate a
+  /// `clipboard-pull`. 1-based ids map to positions in this vector. Guarded by
+  /// session_registry::mu_; use the registry accessors, not the field.
+  std::vector<clipboard_offer_entry> clipboard_offer;
+  /// The clipboard was owned by an inner RDP session when that offer was
+  /// published; the viewer is told to materialise files instead of streaming
+  /// virtual ones.
+  bool clipboard_nested_rdp = false;
   /// The client can take a WebRTC video track and data channel (Phase 4).
   bool webrtc = false;
   /// The peer for that track, once it exists. Shared because its callbacks hop
@@ -123,6 +137,14 @@ class session_registry {
   void set_awaiting_approval(const std::shared_ptr<session_info>& s,
                              bool awaiting);
   void touch(session_info& s);
+  /// Records the file list just published to one session. A later pull is
+  /// validated against it.
+  void set_clipboard_offer(uint32_t id,
+                           std::vector<clipboard_offer_entry> files,
+                           bool nested_rdp);
+  /// Copy of that list (empty when the session is gone or the host has not
+  /// published files yet).
+  std::vector<clipboard_offer_entry> clipboard_offer(uint32_t id) const;
 
  private:
   mutable std::mutex mu_;

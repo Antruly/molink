@@ -111,16 +111,27 @@ bool clipboard_stage::ensure_directory_locked() {
   return fs::is_directory(directory_, ec) && !ec;
 }
 
+bool clipboard_stage::valid_batch(const std::string& batch) {
+  if (batch.size() < 8 || batch.size() > 64) return false;
+  for (const char c : batch) {
+    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+  }
+  return true;
+}
+
 std::string clipboard_stage::unique_final_path_locked(
-    const std::string& name) const {
-  const fs::path dir(directory_);
+    const std::string& name, const std::string& directory) const {
+  const fs::path dir(directory);
   auto taken = [this](const fs::path& candidate) {
     std::error_code ec;
     if (fs::exists(candidate, ec) && !ec) return true;
     const std::string text = candidate.filename().string();
     for (const auto& item : entries_) {
-      if (same_name(fs::path(item.second.final_path).filename().string(),
-                    text)) {
+      const fs::path existing(item.second.final_path);
+      // Names only collide inside one directory; `a.txt` in another batch's
+      // folder is a different file.
+      if (existing.parent_path() == candidate.parent_path() &&
+          same_name(existing.filename().string(), text)) {
         return true;
       }
     }
@@ -158,8 +169,9 @@ void clipboard_stage::sweep_locked(uint64_t now) {
 }
 
 /// Leftovers from a previous process (or an apply that never happened) are
-/// hidden `.stage-*` files. Remove ones older than the same TTL. Final files
-/// are never touched: the OS clipboard may still reference them.
+/// hidden `.stage-*` files. Remove ones older than the same TTL. Applied
+/// files are kept for kAppliedTtlMs because the OS clipboard still references
+/// them, then swept as well.
 void clipboard_stage::sweep_orphan_files_locked(uint64_t now) {
   if (directory_.empty()) return;
   if (now >= last_orphan_sweep_ms_ &&
@@ -168,38 +180,65 @@ void clipboard_stage::sweep_orphan_files_locked(uint64_t now) {
   }
   last_orphan_sweep_ms_ = now;
   std::error_code ec;
-  fs::directory_iterator it(directory_, ec);
-  if (ec) return;
   const auto file_now = fs::file_time_type::clock::now();
-  for (const fs::directory_entry& entry : it) {
+  auto sweep_one = [&](const fs::directory_entry& entry) {
+    std::error_code file_ec;
+    if (!entry.is_regular_file(file_ec) || file_ec) return;
     const std::string name = entry.path().filename().string();
-    if (name.compare(0, 7, ".stage-") != 0) continue;
     std::error_code time_ec;
     const auto written = entry.last_write_time(time_ec);
-    if (time_ec) continue;
-    if (written + std::chrono::milliseconds(kEntryTtlMs) < file_now) {
+    if (time_ec) return;
+    const bool pending = name.compare(0, 7, ".stage-") == 0;
+    const uint64_t ttl = pending ? kEntryTtlMs : kAppliedTtlMs;
+    if (written + std::chrono::milliseconds(ttl) < file_now) {
       fs::remove(entry.path(), time_ec);
     }
+  };
+  fs::directory_iterator it(directory_, ec);
+  if (ec) return;
+  for (const fs::directory_entry& entry : it) {
+    std::error_code type_ec;
+    if (entry.is_directory(type_ec) && !type_ec) {
+      // Per-batch subdirectories (`<sha1>/`).
+      std::error_code child_ec;
+      fs::directory_iterator child(entry.path(), child_ec);
+      if (child_ec) continue;
+      for (const fs::directory_entry& item : child) sweep_one(item);
+      continue;
+    }
+    sweep_one(entry);
   }
 }
 
 stage_error clipboard_stage::begin(const std::string& name, uint64_t size,
-                                   std::string& id, std::string& path) {
+                                   std::string& id, std::string& path,
+                                   const std::string& batch) {
   std::lock_guard<std::mutex> lock(mutex_);
   const uint64_t now = now_ms();
   sweep_locked(now);
   if (directory_.empty()) return stage_error::unavailable;
   if (size > kMaxFileBytes) return stage_error::too_large;
+  if (!batch.empty() && !valid_batch(batch)) return stage_error::bad_request;
   const std::string clean = sanitize_name(name);
   if (clean.empty()) return stage_error::bad_request;
   if (!ensure_directory_locked()) return stage_error::io_error;
+
+  std::string directory = directory_;
+  if (!batch.empty()) {
+    directory = (fs::path(directory_) / batch).string();
+    std::error_code dir_ec;
+    fs::create_directories(directory, dir_ec);
+    if (dir_ec || !fs::is_directory(directory, dir_ec) || dir_ec) {
+      return stage_error::io_error;
+    }
+  }
 
   std::string stage_id = random_stage_id();
   while (entries_.find(stage_id) != entries_.end()) {
     stage_id = random_stage_id();
   }
-  const std::string final_path = unique_final_path_locked(clean);
-  const fs::path temp_path = fs::path(directory_) / (".stage-" + stage_id);
+  const std::string final_path = unique_final_path_locked(clean, directory);
+  const fs::path temp_path = fs::path(directory) / (".stage-" + stage_id);
 
   std::ofstream out(temp_path, std::ios::binary | std::ios::trunc);
   if (!out) return stage_error::io_error;

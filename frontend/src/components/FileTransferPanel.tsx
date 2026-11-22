@@ -3057,6 +3057,14 @@ export function FileTransferPanel({
                   {t('files.receiveAll')}
                 </button>
               </div>
+              {clipboardMode === 'local-app' ? (
+                // A plain browser page cannot write the OS clipboard; say so
+                // and point at "Receive all", which downloads the same files
+                // through the ordinary transfer channel.
+                <p className="mt-1 text-[9px] leading-snug text-muted">
+                  {t('files.clipboardLocalApp')}
+                </p>
+              ) : null}
               <ul className="mt-1 max-h-20 space-y-0.5 overflow-y-auto">
                 {clipboardFiles.map((file) => (
                   <li key={file.path}>

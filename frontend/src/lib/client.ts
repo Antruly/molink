@@ -104,6 +104,10 @@ export interface Welcome {
   clipboard_backend?: string
   /** The host can delay file rendering: send descriptors, fetch on paste. */
   clipboard_lazy?: boolean
+  /** The host serves `clipboard-pull` range requests (clipboard-sync.files). */
+  clipboard_pull?: boolean
+  /** The host's clipboard belongs to an inner RDP session. */
+  clipboard_nested_rdp?: boolean
   /** Maximum files in one delayed offer (host default 8). */
   clipboard_lazy_files?: number
   /** Maximum total bytes in one delayed offer (host default 2 GiB). */
@@ -167,6 +171,16 @@ export interface ClipboardFileEntry {
   size: number
 }
 
+/// One file announced in `clipboard-sync.files`. `id` is the host's
+/// session-scoped handle for a `clipboard-pull`; `path` is only present for
+/// the browser fallback and is never needed by the pull path.
+export interface ClipboardPullFile {
+  id: number
+  name: string
+  size: number
+  path?: string
+}
+
 export interface FileMessage {
   action: string
   ok?: boolean
@@ -195,6 +209,9 @@ export interface FileMessage {
   stream?: boolean
   offset?: number
   length?: number
+  /// The host rejected a delayed offer because its clipboard belongs to an
+  /// inner RDP session; upload the files instead.
+  compat?: boolean
   files?: { name: string; size: number }[]
   paths?: string[]
 }
@@ -205,6 +222,21 @@ export type SessionEvent =
   | { kind: 'file'; message: FileMessage }
   | { kind: 'file-chunk'; id: number; offset: number; data: Uint8Array }
   | { kind: 'clipboard-files'; files: ClipboardFileEntry[] }
+  /// The host announced files that can be pulled by id (clipboard-sync.files).
+  /// `omitted` counts files the host left out of the capped list.
+  | {
+      kind: 'clipboard-pull-files'
+      files: ClipboardPullFile[]
+      omitted?: number
+    }
+  /// One range reply for a clipboard-pull (packet type 0x18).
+  | {
+      kind: 'clipboard-pull-chunk'
+      id: number
+      status: number
+      offset: number
+      data: Uint8Array
+    }
   | { kind: 'audio'; data: Uint8Array }
   | {
       kind: 'call'
@@ -357,7 +389,10 @@ interface ControlMessage {
   sender_name?: string
   sender_id?: string
   sender_session?: number
-  files?: ClipboardFileEntry[]
+  /// `clipboard` action=files sends paths; `clipboard-sync` sends ids.
+  files?: (ClipboardFileEntry | ClipboardPullFile)[]
+  /// `clipboard-sync`: files the host left out of its capped id list.
+  omitted?: number
   host_microphone?: boolean
   started_ms?: number
 }
@@ -910,9 +945,10 @@ export class MolinkClient {
           type: 'request-access',
           name: clientName || 'moLink web',
           client: 'molink-web',
-          // No hello follows an approved request, so the one capability the
-          // clipboard needs travels here.
+          // No hello follows an approved request, so the capabilities the
+          // clipboard needs travel here.
           clipboard_stream: true,
+          clipboard_pull: true,
           ...(clientId ? { device_id: clientId } : {}),
         })
       } else {
@@ -939,6 +975,10 @@ export class MolinkClient {
           // the destination folder. The host confirms by echoing
           // `clipboard_stream` in welcome; without it the upload path stays.
           clipboard_stream: true,
+          // This page understands clipboard-sync.files and downloads the
+          // bytes with clipboard-pull. Older clients only get the legacy path
+          // list.
+          clipboard_pull: true,
           // A browser with WebRTC lets the host send H.264 as a real video
           // track instead of MOLK frames.
           webrtc: typeof RTCPeerConnection !== 'undefined',
@@ -1769,15 +1809,39 @@ export class MolinkClient {
         if (message.action === 'files') {
           this.handlers.onSessionEvent?.({
             kind: 'clipboard-files',
-            files: message.files ?? [],
+            // The legacy `clipboard/files` message always carries paths; the
+            // union only exists because `clipboard-sync` reuses the field.
+            files: (message.files ?? []) as ClipboardFileEntry[],
           })
         } else {
           this.handlers.onClipboard?.(message.text ?? '')
         }
         break
-      case 'clipboard-sync':
-        this.handlers.onClipboard?.(message.text ?? '')
+      case 'clipboard-sync': {
+        // Files and text share the message. An empty text must not clear the
+        // local clipboard (files-only announcements used to do exactly that).
+        const text = message.text ?? ''
+        if (text !== '') this.handlers.onClipboard?.(text)
+        const files = Array.isArray(message.files)
+          ? (message.files as ClipboardPullFile[]).filter(
+              (file) =>
+                typeof file?.id === 'number' && file.id > 0 &&
+                typeof file.name === 'string' && file.name !== '' &&
+                typeof file.size === 'number',
+            )
+          : []
+        if (files.length > 0 || (message.omitted ?? 0) > 0) {
+          this.handlers.onSessionEvent?.({
+            kind: 'clipboard-pull-files',
+            files,
+            omitted:
+              typeof message.omitted === 'number' && message.omitted > 0
+                ? message.omitted
+                : undefined,
+          })
+        }
         break
+      }
       case 'chat':
         if (message.action === 'history') {
           this.handlers.onSessionEvent?.({
@@ -2082,6 +2146,24 @@ export class MolinkClient {
           this.handlers.onSessionEvent?.({
             kind: 'file-chunk',
             id: view.getUint32(0, true),
+            offset: Number(view.getBigUint64(8, true)),
+            data: payload.subarray(16),
+          })
+        }
+        return
+      }
+      if (packet.type === PacketType.clipboardFile) {
+        const payload = packet.payload
+        if (payload.byteLength >= 16) {
+          const view = new DataView(
+            payload.buffer,
+            payload.byteOffset,
+            payload.byteLength,
+          )
+          this.handlers.onSessionEvent?.({
+            kind: 'clipboard-pull-chunk',
+            id: view.getUint32(0, true),
+            status: view.getUint32(4, true),
             offset: Number(view.getBigUint64(8, true)),
             data: payload.subarray(16),
           })
@@ -3241,6 +3323,7 @@ export class MolinkClient {
       vp8_stream: this.vp8Capable,
       av1_native: this.av1NativeCapable,
       clipboard_stream: true,
+      clipboard_pull: true,
       client: 'molink-web',
       protocol: 1,
     }

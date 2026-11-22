@@ -41,6 +41,7 @@ export function lazyCapability(
     clipboard_lazy_files?: unknown
     clipboard_lazy_bytes?: unknown
     clipboard_stream?: unknown
+    clipboard_nested_rdp?: unknown
   } | null | undefined,
 ): LazyCapability | null {
   if (!welcome || welcome.clipboard_lazy !== true) return null

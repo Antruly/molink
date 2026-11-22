@@ -55,6 +55,7 @@
 | `0x15` | `TILE_CLOCK` | 每格最新像素时间戳映射 |
 | `0x16` | `TILE_SEQ` | 每格已应用序列映射 |
 | `0x17` | `CLIPBOARD_RANGE` | 虚拟文件范围回复（客户端→主机）：`u32 id` + `u32 错误码` + `u64 offset` + 字节 |
+| `0x18` | `CLIPBOARD_FILE` | 剪贴板文件范围回复（主机→客户端）：`u32 id` + `u32 状态` + `u64 offset` + 字节 |
 | `0x7F` | `CONTROL` | 会话级 JSON 控制 |
 | `0x80` | `PING` | 空 |
 | `0x81` | `PONG` | 空 |
@@ -469,6 +470,43 @@ X11 的屏幕抓取**不包含鼠标光标**，服务端单独发送形状与位
   文件写进 `~/moLink`，Explorer 直接把内容写进用户选择的目标目录，并显示复制进度。
   未声明该能力（或 `MOLINK_CLIPBOARD_STREAM=0`）时退回上面的整文件上传路径。
   `clipboard-file` 的 `offset`/`length` 可省略；省略时行为与旧版一致（整个文件）。
+
+- 远端文件 → 本机剪贴板（id 拉取，含嵌套 RDP）：
+
+  主机在 `welcome` 里用 `"clipboard_pull": true` 表示支持。主机文件剪贴板变化时向每个
+  已鉴权会话推送：
+
+  ```json
+  {"type":"clipboard-sync","files":[{"id":1,"name":"a.txt","size":123,"path":"..."}]}
+  ```
+
+  `id` 是会话内唯一、1 起算的序号；`path` 只给浏览器/文件面板做降级下载用，新客户端
+  不需要它，也不会把它当下载依据。客户端逐块请求：
+
+  ```json
+  {"type":"file","action":"clipboard-pull","id":1,"offset":0,"length":262144}
+  ```
+
+  主机**每次拉取都重新枚举**当前文件剪贴板（CF_HDROP / text/uri-list），按 `id-1`
+  取序号；因此 mstsc 重定向产生又替换掉的临时文件总能取到最新的一份。回复用 `0x18`：
+
+  | 字段 | 长度 | 说明 |
+  |---|---:|---|
+  | `id` | 4 | 请求里的文件 id |
+  | `status` | 4 | `0` 成功；`1` 读取失败；`2` 剪贴板已变化/文件已消失 |
+  | `offset` | 8 | 本次回复的起始偏移 |
+  | 字节 | N | `min(length, size-offset, 256 KiB)` |
+
+  状态 `2` 表示主机重新枚举后数量、该序号的文件名或大小与告知客户端的不一致，或者
+  文件已经不在了（内层 RDP 会话关闭、剪贴板被文本替换）。客户端必须报错并且**不能**
+  生成半截文件。客户端最多同时下载 2 个文件，每块 256 KiB；全部完成后再一次性写入
+  本机剪贴板。上限：8 个文件 / 单文件 256 MiB / 合计 2 GiB，超出只同步前 N 个。
+
+  嵌套 RDP 探测：Windows 主机检查剪贴板 owner 是否为 `mstsc.exe`/`msrdc.exe`，或
+  CF_HDROP 路径是否位于 RDP 重定向临时目录。命中时 `welcome.clipboard_nested_rdp=true`
+  且 `clipboard_lazy`/`clipboard_stream` 为 false；若客户端仍发 `clipboard-offer`，
+  主机回 `{"ok":false,"compat":true}`，客户端改为“先落盘再 CF_HDROP”的直传路径，
+  因为 mstsc 的重定向不认 OLE 虚拟文件流。
 
 **音频**
 

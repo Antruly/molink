@@ -18,6 +18,13 @@ test('a host without clipboard_lazy has no capability', () => {
   assert.equal(lazyCapability({}), null)
   assert.equal(lazyCapability({ clipboard_lazy: false }), null)
   assert.equal(lazyCapability({ clipboard_lazy: 'true' }), null)
+  // The nested-RDP decision is made per offer, after the host inspects the
+  // live clipboard owner; the welcome capability itself stays advertised so
+  // the viewer can receive the explicit `compat` refusal.
+  assert.equal(
+    lazyCapability({ clipboard_lazy: true, clipboard_nested_rdp: true })?.stream,
+    false,
+  )
 })
 
 test('the welcome limits are used when they are sane', () => {

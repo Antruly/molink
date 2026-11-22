@@ -418,6 +418,9 @@
     "remote_clipboard_failed": "Could not copy the remote files to this machine's clipboard",
     "remote_clipboard_too_large": "The remote clipboard selection is too large to copy automatically; use the files panel",
     "remote_clipboard_incomplete": "The remote file did not arrive completely and was not put on the clipboard",
+    "remote_clipboard_gone": "The remote clipboard changed, so no file was created; copy the files again",
+    "remote_clipboard_unavailable": "This machine has no clipboard writer, so remote files cannot be put on its clipboard; use the files panel to receive them",
+    "remote_clipboard_truncated": "The clipboard selection was too large or had too many files; only the first part was synced",
     "clipboard_read_failed": "Could not read the local clipboard",
     "clipboard_write_failed": "Could not write to the local clipboard",
     "clipboard_unavailable": "The browser does not expose the clipboard here",
@@ -430,7 +433,8 @@
     "server_unreachable": "The moLink Server could not be reached",
     "clipboard_files_busy": "A clipboard transfer is running; try again in a moment",
     "clipboard_files_uploaded": "The remote does not support on-demand transfer; the files were uploaded directly",
-    "clipboard_files_staged": "The remote cannot stream clipboard files; a paste copies them into its moLink folder first"
+    "clipboard_files_staged": "The remote cannot stream clipboard files; a paste copies them into its moLink folder first",
+    "clipboard_files_compat": "Nested RDP detected: files are transferred in full before being put on the remote clipboard, so the inner desktop can paste them"
   },
   "popout": {
     "noToken": "This window is missing the connection code."
@@ -557,7 +561,7 @@
     "clipboardTitle": "Remote clipboard",
     "clipboardHint": "Files copied in the remote Explorer. Receiving downloads them to this machine.",
     "clipboardAuto": "Automatic copy is on: these files are transferred in full and put on this machine's clipboard. Large files take a while.",
-    "clipboardLocalApp": "To paste remote files directly on this machine, open this session in the local moLink app. A remote browser page cannot write this machine's clipboard.",
+    "clipboardLocalApp": "To paste remote files directly on this machine, open this session in the local moLink app. A remote browser page cannot write this machine's clipboard; use \"Receive all\" to download the files instead.",
     "save": "Save",
     "saved": "Saved",
     "saving": "Saving…",

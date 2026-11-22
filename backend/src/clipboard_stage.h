@@ -53,6 +53,9 @@ class clipboard_stage {
   /// A staging entry nobody finished is dropped on the next request after
   /// this long. Applied files are no longer entries and are kept.
   static constexpr uint64_t kEntryTtlMs = 30ull * 60 * 1000;
+  /// Copied files stay available to the clipboard for a day. Older files are
+  /// swept so a machine that copies large files does not grow without bound.
+  static constexpr uint64_t kAppliedTtlMs = 24ull * 60 * 60 * 1000;
 
   clipboard_stage(std::string directory, files_applier applier,
                   clock_fn clock = {});
@@ -62,8 +65,13 @@ class clipboard_stage {
   /// Declares one file. `path` is the final name it will have after apply;
   /// the bytes go to a private temp file until then. Same names get a
   /// `name (1).ext` suffix.
+  ///
+  /// `batch` (optional) is a lowercase-hex id naming the subdirectory for one
+  /// clipboard selection, e.g. `~/.cache/molink/clipboard/<sha1>/`. Isolating
+  /// batches keeps a later copy of the same file from colliding with an
+  /// earlier one and makes it obvious which files belong together.
   stage_error begin(const std::string& name, uint64_t size, std::string& id,
-                    std::string& path);
+                    std::string& path, const std::string& batch = {});
 
   /// Appends one contiguous chunk. `offset` must equal the bytes received so
   /// far (`conflict`) and the chunk may not cross the declared size
@@ -86,13 +94,17 @@ class clipboard_stage {
   /// One safe file name: no separators, no control characters, no `.`/`..`,
   /// bounded in bytes. Returns empty when nothing safe remains.
   static std::string sanitize_name(const std::string& raw);
+  /// True for a value accepted as a batch directory name: 8..64 lowercase
+  /// hex characters. The client sends a SHA-1; the limit also blocks `..`.
+  static bool valid_batch(const std::string& batch);
 
  private:
   uint64_t now_ms() const;
   void sweep_locked(uint64_t now);
   void sweep_orphan_files_locked(uint64_t now);
   bool ensure_directory_locked();
-  std::string unique_final_path_locked(const std::string& name) const;
+  std::string unique_final_path_locked(const std::string& name,
+                                       const std::string& directory) const;
 
   std::string directory_;
   files_applier applier_;

@@ -134,6 +134,9 @@ export class SessionConnection {
   /// Delayed file rendering advertised by the current host, or null when it
   /// must take the eager upload path.
   private clipboardLazy: LazyCapability | null = null
+  /// The current host serves clipboard-pull, so remote files arrive through
+  /// `clipboard-sync.files` instead of the path-based legacy download.
+  private clipboardPull = false
   /// Shared echo table: host paths this machine wrote (and the descriptors it
   /// offered) are skipped when the remote reports them back.
   private readonly clipboardEcho = new ClipboardEcho()
@@ -256,6 +259,7 @@ export class SessionConnection {
       },
       onWelcome: (welcome) => {
         this.clipboardLazy = lazyCapability(welcome)
+        this.clipboardPull = welcome.clipboard_pull === true
         const format = welcome.audio_format
         this.audioFormat =
           format !== undefined && format !== null
@@ -509,7 +513,25 @@ export class SessionConnection {
           }
         }
         if (event.kind === 'clipboard-files') {
-          this.remoteClipboard?.handleFiles(event.files)
+          // The pull-capable host sends the same selection twice (ids for the
+          // local writer, paths for the browser fallback); do not download it
+          // both ways.
+          if (this.clipboardPull !== true) {
+            this.remoteClipboard?.handleFiles(event.files)
+          }
+        }
+        if (event.kind === 'clipboard-pull-files') {
+          this.remoteClipboard?.handleOffer(event.files, event.omitted ?? 0)
+          // The files panel still needs the path list, which the host sends
+          // as the legacy `clipboard` message. Nothing to forward here.
+          return
+        }
+        if (event.kind === 'clipboard-pull-chunk') {
+          if (this.remoteClipboard?.handlePullChunk(
+            event.id, event.status, event.offset, event.data,
+          ) === true) {
+            return
+          }
         }
         if (event.kind === 'audio') {
           this.lastAudioAt = performance.now()
@@ -554,6 +576,11 @@ export class SessionConnection {
       {
         capability: () => this.clipboardLazy,
         echo: this.clipboardEcho,
+        onNestedRdp: () => {
+          // The host's clipboard is owned by an inner RDP session; it cannot
+          // render virtual files, so fall back to uploading real ones.
+          this.clipboardLazy = null
+        },
       },
     )
   }
@@ -585,6 +612,7 @@ export class SessionConnection {
         })
       },
       this.clipboardEcho,
+      { usePull: () => this.clipboardPull },
     )
     this.remoteClipboard.setEnabled(enabled)
   }
@@ -620,6 +648,9 @@ export class SessionConnection {
         {
           capability: () => this.clipboardLazy,
           echo: this.clipboardEcho,
+          onNestedRdp: () => {
+            this.clipboardLazy = null
+          },
         },
       )
     }

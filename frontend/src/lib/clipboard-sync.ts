@@ -26,9 +26,15 @@ const RETRY_DELAY_MS = 3000
 const LAZY_OFFER_TIMEOUT_MS = 10000
 
 export interface ClipboardSyncOptions {
-  /// Null when the host does not advertise `clipboard_lazy`.
+  /// Null when the host does not advertise `clipboard_lazy`, or when the host
+  /// told us its clipboard belongs to an inner RDP session (virtual files
+  /// cannot cross that boundary).
   capability?: () => LazyCapability | null
   echo?: ClipboardEcho
+  /// Called when the host rejects a delayed offer because files must be
+  /// materialised first (nested RDP). The session then disables lazy mode for
+  /// the rest of this connection.
+  onNestedRdp?: () => void
 }
 
 /// Mirrors files copied on this machine into the remote clipboard.
@@ -70,6 +76,7 @@ export class ClipboardFileSync {
 
   private readonly echo: ClipboardEcho
   private readonly capability: () => LazyCapability | null
+  private readonly onNestedRdp: (() => void) | null
 
   constructor(
     private readonly connection: () => SessionConnection | null,
@@ -79,6 +86,7 @@ export class ClipboardFileSync {
   ) {
     this.echo = options.echo ?? new ClipboardEcho()
     this.capability = options.capability ?? (() => null)
+    this.onNestedRdp = options.onNestedRdp ?? null
   }
 
   /// Called once a second by the session. Cheap when nothing changed.
@@ -362,6 +370,19 @@ export class ClipboardFileSync {
     if (!this.lazyOfferPending) return
     this.clearOfferTimer()
     this.lazyOfferPending = false
+    if (message.ok === false && message.compat === true) {
+      // The host's clipboard belongs to an inner RDP session. mstsc only
+      // redirects real CF_HDROP files, so upload the bytes now; the next poll
+      // will take the eager path because the session drops its capability.
+      this.lazyActive = false
+      this.lazyStream = false
+      this.lazyFiles = []
+      this.fetchQueue = []
+      this.lastKey = ''
+      this.onNestedRdp?.()
+      this.onError('clipboard_files_compat')
+      return
+    }
     if (message.ok === false) {
       this.lazyActive = false
       this.lazyStream = false

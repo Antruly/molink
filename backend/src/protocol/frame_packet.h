@@ -101,6 +101,12 @@ enum class packet_type : uint8_t {
   /// this is the next free control-band value rather than the number an
   /// early draft of the feature mentioned.
   clipboard_range = 0x17,
+  /// Clipboard file range reply (host -> client): u32 file id, u32 status
+  /// (0 = ok, 1 = read error, 2 = the clipboard changed / file is gone),
+  /// u64 offset, then the bytes of that range. Answers a JSON
+  /// `{"type":"file","action":"clipboard-pull"}`. 0x16 belongs to tile_seq and
+  /// 0x17 to the reverse direction, so this takes the next free value.
+  clipboard_file = 0x18,
   control = 0x7f,    ///< JSON control payload, session-scoped
   ping = 0x80,       ///< empty payload
   pong = 0x81,       ///< empty payload

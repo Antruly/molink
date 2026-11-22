@@ -118,6 +118,30 @@ std::string local_home_directory() {
 #endif
 }
 
+/// Where files copied from a remote clipboard are materialised. They are cache
+/// data (the OS clipboard references them), not configuration, so they live
+/// under the platform cache directory: `~/.cache/molink/clipboard/<sha1>/` on
+/// Linux, `%LOCALAPPDATA%\moLink\cache\clipboard\<sha1>\` on Windows and
+/// `~/Library/Caches/moLink/clipboard/<sha1>/` on macOS.
+std::string clipboard_cache_directory() {
+#if defined(_WIN32)
+  const char* local = std::getenv("LOCALAPPDATA");
+  const std::string base =
+      local != nullptr && *local != '\0'
+          ? std::string(local) + "\\moLink\\cache"
+          : local_home_directory() + "\\AppData\\Local\\moLink\\cache";
+  return base + "\\clipboard";
+#elif defined(__APPLE__)
+  return local_home_directory() + "/Library/Caches/moLink/clipboard";
+#else
+  const char* xdg = std::getenv("XDG_CACHE_HOME");
+  const std::string base =
+      xdg != nullptr && *xdg != '\0' ? std::string(xdg)
+                                     : local_home_directory() + "/.cache";
+  return base + "/molink/clipboard";
+#endif
+}
+
 /// Resolve a path typed into the local pane. Empty and `~` name the user's
 /// home; `~/x` is home-relative; anything else is taken as typed (a relative
 /// path is relative to home). The local UI is loopback-only, so unlike the
@@ -353,8 +377,10 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
   // only after the whole selection arrived does it become the OS clipboard
   // (CF_HDROP / text/uri-list). The files stay behind because the clipboard
   // references them, not because staging needs them.
-  std::string stage_directory;
-  {
+  std::string stage_directory = clipboard_cache_directory();
+  if (stage_directory.empty()) {
+    // No cache location (unusual, but a stripped-down service account may
+    // have neither XDG_CACHE_HOME nor HOME): fall back to the config folder.
     const std::string config_dir = config_directory();
     if (!config_dir.empty()) {
       stage_directory =
@@ -1265,11 +1291,15 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
                resp.end();
                return;
              }
+             std::string batch;
+             if (body.contains("batch") && body["batch"].is_string()) {
+               batch = body["batch"].get<std::string>();
+             }
              std::string id;
              std::string path;
              const stage_error error =
                  staging->begin(body["name"].get<std::string>(), size, id,
-                                path);
+                                path, batch);
              if (error != stage_error::none) {
                send_stage_error(resp, error);
                return;

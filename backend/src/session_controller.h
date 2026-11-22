@@ -136,10 +136,19 @@ class session_controller final
                        uint32_t id, uint64_t received, uint64_t size,
                        const std::string& path);
   void send_lazy_offer_reply(bool ok, bool stream,
-                             const std::string& message);
+                             const std::string& message,
+                             bool compat = false);
+  /// Publish the files already on the host clipboard to this session. A viewer
+  /// that connects after the user copied something would otherwise wait for
+  /// the next copy; only the first welcome of a connection does this.
+  void announce_current_clipboard_files();
   void send_json_string(const std::string& text);
   bool send_file_chunk(uint32_t id, uint64_t offset, const uint8_t* data,
                        std::size_t len);
+  /// Answer a `clipboard-pull` with a `clipboard_file` (0x18) packet:
+  /// u32 file id, u32 status, u64 offset, then the requested bytes.
+  void send_clipboard_file_reply(uint32_t id, uint32_t status, uint64_t offset,
+                                 const uint8_t* data, std::size_t len);
   void send_audio(std::vector<uint8_t> pcm);
   /// Brings up the WebRTC peer for a session that asked for one (Phase 4).
   void start_rtc(const std::shared_ptr<session_info>& session);
@@ -169,6 +178,7 @@ class session_controller final
   int audio_subscription_ = 0;
   int call_subscription_ = 0;
   bool voice_active_ = false;
+  bool announced_initial_files_ = false;
   /// Rate limit for reporting silent input-injection failures to the client.
   std::uint64_t last_input_error_ms_ = 0;
 };
