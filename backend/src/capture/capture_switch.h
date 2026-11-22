@@ -69,6 +69,7 @@ class capture_switch final : public capture_source {
   void set_h264_stream_allowed(bool allowed) override;
   void request_stream(uint64_t ms) override;
   bool stream_on() const override;
+  std::string stream_codec_name() const override;
   void set_stream_always(bool always) override;
   void set_vp9_stream_allowed(bool allowed) override;
   void set_vp8_stream_allowed(bool allowed) override;

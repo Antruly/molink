@@ -340,6 +340,10 @@ class capture_source {
   /// path. A session that joins now must wait for a stream keyframe instead of
   /// replaying the tile keyframe, which is the expensive full-screen one.
   virtual bool stream_on() const { return false; }
+  /// The label for what the picture path currently uses: "tiles", "av1",
+  /// "h264", "vp9" or "vp8". Reported to the viewer in the `session-preset`
+  /// reply; advisory, never used to pick an encoder.
+  virtual std::string stream_codec_name() const { return "tiles"; }
   /// "Video encoding" mode: the stream is always the picture, no tiles.
   virtual void set_stream_always(bool always) { (void)always; }
   virtual void set_vp9_stream_allowed(bool allowed) { (void)allowed; }
@@ -688,6 +692,14 @@ class capture_base : public capture_source {
   bool stream_on() const override {
     if (stream_nudge_until_.load() > monotonic_ms()) return true;
     return stream_live_.load();
+  }
+  std::string stream_codec_name() const override {
+    if (!stream_live_.load()) return "tiles";
+    if (av1_stream_allowed_.load()) return "av1";
+    if (h264_stream_allowed_.load()) return "h264";
+    if (vp9_stream_allowed_.load()) return "vp9";
+    if (vp8_stream_allowed_.load()) return "vp8";
+    return "tiles";
   }
   void set_vp9_stream_allowed(bool allowed) override {
     vp9_stream_allowed_.store(allowed);

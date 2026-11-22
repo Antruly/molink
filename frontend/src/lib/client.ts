@@ -26,6 +26,11 @@ import {
   type VpxCodec,
 } from './vpx-stream'
 import { WtTransport, fingerprintBytes, webTransportSupported } from './webtransport'
+import type {
+  PresetActual,
+  PresetApplied,
+  SessionPresetMessage,
+} from './session-presets'
 import {
   forgetSession,
   rememberSession,
@@ -318,16 +323,9 @@ export interface ClientHandlers {
   /// The host's global stream codec preference changed (another tab, or this
   /// one echoing back).
   onCodecPreference?: (value: string) => void
-  /// Another viewer changed the host-global quality preset; this tab must
-  /// follow it instead of asserting its own choice.
-  onQualityShared?: (mode: string) => void
-  /** Another viewer (or the host) changed the encoding sliders. */
-  onQualityKnobs?: (knobs: {
-    qp?: number
-    bitrateKbps?: number
-    rateMode?: string
-    format?: string
-  }) => void
+  /// The host applied a viewer-owned `session-preset` and reports the actual
+  /// rate/codec/chroma. The reply never changes the viewer's selection.
+  onSessionPresetApplied?: (applied: PresetApplied) => void
   onCursor: (shape: CursorShape) => void
   onCursorPosition: (position: CursorPosition) => void
   onClipboard: (text: string) => void
@@ -393,6 +391,11 @@ interface ControlMessage {
   /// Host capture rate and encoder build time in a `capture-stats` message.
   fps?: number
   build_ms?: number
+  /// `session-preset` reply: the host acknowledged and reports the actual
+  /// encoder values. `preset` is informational only.
+  applied?: boolean
+  preset?: string
+  actual?: PresetActual
   /// Emitted with a codec stat: the stream is AV1-only, not AV1 patches.
   full?: boolean
   /// Bytes per second the host sent over the network in the last window.
@@ -608,12 +611,7 @@ export class MolinkClient {
   private lastSeqRequest = 0
   private lastKeyframeRequest = 0
   /// Latest measured round-trip, reported with the viewer stats.
-  private lastRttMs = 0
-  /// Preset this tab pushed; used to notice a host-global preset changed by
-  /// another viewer while we keep asking for a colour format.
-  private pushedQuality: { mode: string; fps?: number } | null = null
-  private lastQualityAssertAt = 0
-  /// Last keyframe request made because no picture exists yet.
+  private lastRttMs = 0  /// Last keyframe request made because no picture exists yet.
   private lastKeyframeRecovery = 0
   /// Last time a stream-decoder failure was forwarded to the core's log.
   private lastDecoderLog = 0
@@ -1535,28 +1533,13 @@ export class MolinkClient {
   }
 
   /**
-   * Applies an encoding preset. "auto" is resolved client-side, so only the
-   * three concrete modes are ever sent.
+   * Sends the viewer-owned preset. The host applies it immediately (rebuilding
+   * the encoder at the next frame boundary) and replies with the actual
+   * values; nothing here follows a host-side default back.
    */
-  setQuality(
-    mode: string,
-    fps?: number,
-    knobs?: {
-      qp?: number
-      bitrateKbps?: number
-      rateMode?: string
-      format?: string
-    },
-  ): void {
-    this.pushedQuality = { mode, fps }
-    this.lastQualityAssertAt = 0
+  setSessionPreset(preset: SessionPresetMessage): void {
     if (!this.isLive()) return
-    const extra: Record<string, unknown> = {}
-    if (knobs?.qp !== undefined) extra.qp = knobs.qp
-    if (knobs?.bitrateKbps !== undefined) extra.bitrate_kbps = knobs.bitrateKbps
-    if (knobs?.rateMode !== undefined) extra.rate_mode = knobs.rateMode
-    if (knobs?.format !== undefined) extra.format = knobs.format
-    this.sendJson({ type: 'quality', mode, ...(fps ? { fps } : {}), ...extra })
+    this.sendJson({ ...preset })
   }
 
   /** Switches the remote capture to another monitor. */
@@ -1923,19 +1906,23 @@ export class MolinkClient {
         })
         break
       case 'quality':
-        if (typeof message.mode === 'string') {
-          this.handlers.onQualityShared?.(message.mode)
-        }
-        this.handlers.onQualityKnobs?.({
-          qp: typeof message.qp === 'number' ? message.qp : undefined,
-          bitrateKbps:
-            typeof message.bitrate_kbps === 'number'
-              ? message.bitrate_kbps
+        // Retired host-global broadcast. Preset changes are now viewer-owned
+        // (`session-preset`) and a host echo must never move the selector, so
+        // there is deliberately nothing to apply here.
+        break
+      case 'session-preset':
+        if (message.applied === true) {
+          this.handlers.onSessionPresetApplied?.({
+            applied: true,
+            preset: typeof message.preset === 'string'
+              ? message.preset
               : undefined,
-          rateMode:
-            typeof message.rate_mode === 'string' ? message.rate_mode : undefined,
-          format: typeof message.format === 'string' ? message.format : undefined,
-        })
+            actual:
+              message.actual !== null && typeof message.actual === 'object'
+                ? message.actual
+                : { fps: 0 },
+          })
+        }
         break
       case 'codec':
         if (message.av1 === true) {
@@ -2263,7 +2250,6 @@ export class MolinkClient {
       this.videoProbeAt = 0
       this.noteFrameClock(packet.tsUs)
       this.noteReceived(frame, (packet.flags & PacketFlag.tileRefresh) !== 0)
-      this.reconcileQualityPreset(frame)
 
       if (
         frame.codec === Codec.h264Stream ||
@@ -2507,29 +2493,6 @@ export class MolinkClient {
       )
       this.handlers.onError?.(message)
     }
-  }
-
-  /**
-   * The host's capture preset is global across sessions, so another viewer can
-   * switch it to turbo (gray8) while this tab asked for a colour preset. The
-   * tiles that arrive then are monochrome and would stay that way until their
-   * pixels change. Re-assert this tab's preset and pull one full frame.
-   */
-  private reconcileQualityPreset(frame: Frame): void {
-    const pushed = this.pushedQuality
-    if (!pushed || pushed.mode === 'turbo') return
-    if (frame.codec !== Codec.gray8 && frame.codec !== Codec.deflateGray8) {
-      return
-    }
-    const now = Date.now()
-    if (now - this.lastQualityAssertAt < 2000) return
-    this.lastQualityAssertAt = now
-    this.sendJson({
-      type: 'quality',
-      mode: pushed.mode,
-      ...(pushed.fps ? { fps: pushed.fps } : {}),
-    })
-    this.requestKeyframe()
   }
 
   private async deliverCompressed(

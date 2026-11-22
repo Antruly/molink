@@ -145,6 +145,12 @@ export interface UiPreferences {
   connectDraft?: { input: string; code: string }
   /// Whether reconnect credentials are persisted at all.
   rememberDevice?: boolean
+  /// Default picture preset for a new session (viewer-side only).
+  defaultPreset?: string
+  /// Viewer-owned presets keyed by `molink.preset.<host>:<port>`. Written by
+  /// the native shell through ui.json so a restarted viewer keeps each
+  /// device's tier even though the core's origin changes every launch.
+  presets?: Record<string, { preset: string; fps?: number; updatedAt?: number }>
   /// Host session tokens keyed by `molink.session.<host>:<port>`. Written by
   /// the native shell through ui.json so a restarted client can reconnect
   /// without spending another verification code.

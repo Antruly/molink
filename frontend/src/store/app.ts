@@ -38,10 +38,19 @@ import type {
 } from '../lib/client'
 import { cleanDeviceNote, deviceNoteKey } from '../lib/device-note'
 import { logDiag } from '../lib/diag-log'
-import type { FpsSetting } from '../lib/frame-rate'
-import { parseFpsSetting } from '../lib/frame-rate'
 import type { Frame } from '../lib/protocol'
 import { forgetSessionScreenBuffer } from '../lib/screen-buffer'
+import {
+  DEFAULT_SESSION_PRESET,
+  PRESET_STORAGE_PREFIX,
+  normalizePresetId,
+  parseStoredPreset,
+  presetStorageKey,
+  writeStoredPreset,
+  type SessionPresetId,
+  type StoredSessionPreset,
+  type PresetApplied,
+} from '../lib/session-presets'
 import {
   SessionConnection,
   type Stats,
@@ -58,18 +67,9 @@ import {
 
 export type Theme = 'light' | 'dark'
 export type AuthPhase = 'booting' | 'login' | 'locked' | 'ready'
-/// "auto" is resolved in the client into a concrete preset. A preset only
-/// controls picture quality; the average frame rate is a separate setting
-/// (`frameRate`).
-export type QualityMode =
-  | 'turbo'
-  | 'smooth'
-  | 'balanced'
-  | 'quality'
-  | 'ultra'
-  | 'lossless'
-  | 'game'
-  | 'auto'
+/// Picture presets are viewer-owned and stored per host:port. "auto" is one
+/// of the presets; only it may adapt. See lib/session-presets.ts.
+export type { SessionPresetId } from '../lib/session-presets'
 /// A control session starts with input enabled; a view-only session starts
 /// with it off. The session toolbar can still change it later.
 export type SessionMode = 'control' | 'view'
@@ -120,15 +120,11 @@ export interface SessionTab {
   /// slow encoder.
   hostFps?: number
   hostBuildMs?: number
-  /// Preset another viewer selected on the shared host; this tab follows it.
-  sharedQuality?: { mode: string }
-  /// Another viewer moved the toolbar's encoding sliders.
-  sharedKnobs?: {
-    qp?: number
-    bitrateKbps?: number
-    rateMode?: string
-    format?: string
-  }
+  /// Viewer-owned picture preset for this host:port. Never written back to
+  /// the host's settings.
+  preset: SessionPresetId
+  /// What the host reported it actually applied (fps/codec/chroma).
+  appliedPreset?: PresetApplied
   notice: string | null
   /// When the host must approve this session: epoch ms of the 60 s deadline.
   approvalDeadline: number | null
@@ -192,10 +188,12 @@ interface AppState {
   /// What the window's close button does while a session tab is open:
   /// ask once, hide to the tray, or close the session tab.
   windowCloseBehavior: 'ask' | 'tray' | 'tab'
-  qualityMode: QualityMode
-  /// Average frame rate: a fixed 5/10/15/25/45/60 or 'auto' (quality-tier
-  /// window adapted to the actual load). Independent from the quality preset.
-  frameRate: FpsSetting
+  /// Default picture preset for a new session. Only affects this machine when
+  /// it is the viewer/controller; a host:port with a remembered choice wins.
+  defaultPreset: SessionPresetId
+  /// Viewer-owned presets keyed by `molink.preset.<host>:<port>`, mirrored to
+  /// ui.json so the native shell survives its changing origin.
+  presets: Record<string, StoredSessionPreset>
   settingsOpen: boolean
   /// The native shell window is fullscreen but the app chrome stays visible.
   /// This is the title bar's fullscreen control, not session immersive mode.
@@ -235,8 +233,10 @@ interface AppState {
   setRememberDevice: (enabled: boolean) => void
   setKeyboardGrab: (enabled: boolean) => void
   setWindowCloseBehavior: (behavior: 'ask' | 'tray' | 'tab') => void
-  setQualityMode: (mode: QualityMode) => void
-  setFrameRate: (fps: FpsSetting) => void
+  /// Sets the default preset for future sessions (viewer-side only).
+  setDefaultPreset: (preset: SessionPresetId) => void
+  /// Changes one tab's preset and remembers it for that host:port.
+  setTabPreset: (id: string, preset: SessionPresetId) => void
   setSettingsOpen: (open: boolean) => void
   setWindowFullscreen: (value: boolean) => void
   setImmersive: (value: boolean) => void
@@ -321,7 +321,7 @@ const AUTO_AUDIO_KEY = 'molink.autoAudio'
 const REMOTE_CLIPBOARD_FILES_KEY = 'molink.remoteClipboardFiles'
 const CLOSE_BEHAVIOR_KEY = 'molink.closeBehavior'
 const QUALITY_MODE_KEY = 'molink.qualityMode'
-const FRAME_RATE_KEY = 'molink.frameRate'
+const DEFAULT_PRESET_KEY = 'molink.defaultPreset'
 const RECENT_KEY = 'molink.recents'
 const HISTORY_VIEW_KEY = 'molink.historyView'
 const MODE_KEY = 'molink.sessionMode'
@@ -396,21 +396,39 @@ export function initialTheme(): Theme {
     : 'dark'
 }
 
-function initialQualityMode(): QualityMode {
-  const saved = readStorage(QUALITY_MODE_KEY)
-  if (
-    saved === 'turbo' ||
-    saved === 'smooth' ||
-    saved === 'balanced' ||
-    saved === 'quality' ||
-    saved === 'ultra' ||
-    saved === 'lossless' ||
-    saved === 'game' ||
-    saved === 'auto'
-  ) {
-    return saved
+/// The default for a session with no remembered per-host choice. The legacy
+/// `molink.qualityMode` is read once so an existing install keeps the tier it
+/// already had instead of jumping to the new default.
+function initialDefaultPreset(): SessionPresetId {
+  const saved =
+    readStorage(DEFAULT_PRESET_KEY) || readStorage(QUALITY_MODE_KEY)
+  if (saved === 'turbo') return 'turbo'
+  if (saved === 'smooth') return 'smooth'
+  if (saved === 'balanced') return 'balanced'
+  if (saved === 'quality' || saved === 'ultra' || saved === 'lossless') {
+    return 'hd'
   }
-  return 'auto'
+  if (saved === 'auto') return 'auto'
+  return DEFAULT_SESSION_PRESET
+}
+
+/// localStorage remembers per host:port. The map is also copied to ui.json by
+/// the store snapshot, so a native shell restart (new ephemeral origin) keeps
+/// every device's choice.
+function initialPresets(): Record<string, StoredSessionPreset> {
+  const presets: Record<string, StoredSessionPreset> = {}
+  try {
+    const storage = window.localStorage
+    for (let index = 0; index < storage.length; index += 1) {
+      const key = storage.key(index)
+      if (!key || !key.startsWith(PRESET_STORAGE_PREFIX)) continue
+      const parsed = parseStoredPreset(storage.getItem(key))
+      if (parsed) presets[key] = parsed
+    }
+  } catch {
+    // Blocked storage just means no remembered presets.
+  }
+  return presets
 }
 
 function initialHistoryView(): HistoryView {
@@ -570,6 +588,8 @@ export const useAppStore = create<AppState>((set, get) => {
     deviceNotes: get().deviceNotes,
     connectDraft: get().connectDraft,
     rememberDevice: get().rememberDevice,
+    defaultPreset: get().defaultPreset,
+    presets: get().presets,
     sessions: sessionStore.persistedRecords(),
   })
 
@@ -666,8 +686,8 @@ export const useAppStore = create<AppState>((set, get) => {
       const saved = readStorage(CLOSE_BEHAVIOR_KEY)
       return saved === 'tray' || saved === 'tab' ? saved : 'ask'
     })(),
-    qualityMode: initialQualityMode(),
-    frameRate: parseFpsSetting(readStorage(FRAME_RATE_KEY)),
+    defaultPreset: initialDefaultPreset(),
+    presets: initialPresets(),
     settingsOpen: false,
     windowFullscreen: false,
     immersive: false,
@@ -743,14 +763,30 @@ export const useAppStore = create<AppState>((set, get) => {
       set({ windowCloseBehavior: behavior })
     },
 
-    setQualityMode: (mode) => {
-      writeStorage(QUALITY_MODE_KEY, mode)
-      set({ qualityMode: mode })
+    setDefaultPreset: (preset) => {
+      writeStorage(DEFAULT_PRESET_KEY, preset)
+      set({ defaultPreset: preset })
+      // The settings page is host-local; mirror the default into ui.json so a
+      // native-shell restart (new origin) keeps it.
+      schedulePersist()
     },
 
-    setFrameRate: (fps) => {
-      writeStorage(FRAME_RATE_KEY, String(fps))
-      set({ frameRate: fps })
+    setTabPreset: (id, preset) => {
+      const tab = get().tabs.find((item) => item.id === id)
+      if (!tab) return
+      const key = presetStorageKey(tab.host, tab.port)
+      const stored: StoredSessionPreset = {
+        preset,
+        updatedAt: Date.now(),
+      }
+      writeStoredPreset(tab.host, tab.port, stored)
+      set((state) => ({
+        presets: { ...state.presets, [key]: stored },
+        tabs: state.tabs.map((item) =>
+          item.id === id ? { ...item, preset, appliedPreset: undefined } : item,
+        ),
+      }))
+      schedulePersist()
     },
 
     setSettingsOpen: (open) => set({ settingsOpen: open }),
@@ -852,6 +888,29 @@ export const useAppStore = create<AppState>((set, get) => {
             CONNECT_DRAFT_KEY,
             JSON.stringify(next.connectDraft),
           )
+        }
+        // Viewer-owned presets, keyed by `molink.preset.<host>:<port>`. The
+        // ui.json copy is the one that survives the shell's ephemeral origin.
+        const storedPresets: Record<string, StoredSessionPreset> = {}
+        if (prefs.presets && typeof prefs.presets === 'object') {
+          for (const [key, value] of Object.entries(prefs.presets)) {
+            if (!key.startsWith(PRESET_STORAGE_PREFIX)) continue
+            const parsed = parseStoredPreset(JSON.stringify(value))
+            if (!parsed) continue
+            storedPresets[key] = parsed
+            try {
+              window.localStorage.setItem(key, JSON.stringify(parsed))
+            } catch {
+              // Blocked storage; the in-memory map still applies.
+            }
+          }
+        }
+        if (Object.keys(storedPresets).length > 0) {
+          next.presets = { ...get().presets, ...storedPresets }
+        }
+        if (typeof prefs.defaultPreset === 'string') {
+          next.defaultPreset = normalizePresetId(prefs.defaultPreset)
+          writeStorage(DEFAULT_PRESET_KEY, next.defaultPreset)
         }
         // The core is the source of truth for remember_device and the session
         // tokens in ui.json. Apply both together so turning the switch off on
@@ -1306,13 +1365,18 @@ export const useAppStore = create<AppState>((set, get) => {
                     avatar) => {
       const id = `session-${nextId++}`
       const trimmedToken = token.trim()
+      const trimmedHost = host.trim()
+      const presetKey = presetStorageKey(trimmedHost, port)
+      const preset =
+        get().presets[presetKey]?.preset ?? get().defaultPreset
       const tab: SessionTab = {
         id,
         label: label?.trim() || host,
-        host: host.trim(),
+        host: trimmedHost,
         port,
         token: trimmedToken,
         deviceId,
+        preset,
         phase: 'connecting',
         welcome: null,
         frame: null,

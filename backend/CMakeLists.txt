@@ -207,6 +207,7 @@ set(MOLINK_CORE_SOURCES
   src/audio/windows_audio.cpp
   src/audio/windows_voice.cpp
   src/capture/capture.cpp
+  src/capture/quality_profile.cpp
   src/capture/synthetic_capture.cpp
   src/capture/x11_capture.cpp
   src/capture/windows_capture.cpp
@@ -243,6 +244,7 @@ set(MOLINK_CORE_SOURCES
   src/tls_identity.cpp
   src/lock_state.cpp
   src/session_registry.cpp
+  src/session_preset.cpp
   src/service_control.cpp
   src/test_pattern.cpp
   src/transport/ws_transport.cpp
@@ -835,6 +837,20 @@ target_include_directories(molink-core-video-mode-test PRIVATE src)
 set_target_properties(molink-core-video-mode-test PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 add_test(NAME video_mode COMMAND molink-core-video-mode-test)
+
+# Viewer-owned picture presets: validation, plan defaults and the
+# "rebuild forces a keyframe" contract.
+add_executable(molink-core-session-preset-test
+  tests/session_preset_test.cpp
+  src/session_preset.cpp
+  src/capture/quality_profile.cpp
+)
+target_include_directories(molink-core-session-preset-test PRIVATE src)
+target_compile_definitions(molink-core-session-preset-test PRIVATE
+  MOLINK_SESSION_PRESET_TEST=1)
+set_target_properties(molink-core-session-preset-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME session_preset COMMAND molink-core-session-preset-test)
 
 # Service registration: the path staleness rule is pure and shared with the
 # status endpoint (Win32/systemd orchestration stays in the core).
