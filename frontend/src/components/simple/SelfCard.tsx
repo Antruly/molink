@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   Check,
   Copy,
@@ -37,6 +37,16 @@ export function SelfCard() {
   const [pickerOpen, setPickerOpen] = useState(false)
   const [showAllAddresses, setShowAllAddresses] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
+
+  // A consumed single-use code is replaced by the core immediately. Without a
+  // poll the host screen kept showing the spent code until something else
+  // happened to refresh the device card, which is exactly when a viewer needs
+  // to read the new one. Two loopback GETs per 1.5 s keep it under 2 s.
+  useEffect(() => {
+    if (!localMode || !token) return
+    const timer = window.setInterval(() => void refreshDevice(), 1500)
+    return () => window.clearInterval(timer)
+  }, [localMode, token, refreshDevice])
 
   const storedName = security?.device_name ?? device?.device_name ?? ''
   const name = nameDraft ?? storedName

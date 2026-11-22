@@ -129,10 +129,13 @@ export function HomeView() {
     if (!localMode) return
     void refreshDiscovery()
     void refreshDevice()
+    // The host screen must show a code the moment the core rotates it (a
+    // single-use code is replaced as soon as it is consumed). Two loopback
+    // GETs per tick are cheap; 1.5 s keeps the rotation under the 2 s target.
     const timer = window.setInterval(() => {
       void refreshDiscovery()
       void refreshDevice()
-    }, 3000)
+    }, 1500)
     return () => window.clearInterval(timer)
   }, [localMode, refreshDiscovery, refreshDevice])
 

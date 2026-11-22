@@ -26,6 +26,11 @@ import {
   type VpxCodec,
 } from './vpx-stream'
 import { WtTransport, fingerprintBytes, webTransportSupported } from './webtransport'
+import {
+  forgetSession,
+  rememberSession,
+  sessionTokenFor,
+} from './session-store'
 
 export type ClientPhase = 'idle' | 'connecting' | 'live' | 'error' | 'disconnected'
 
@@ -513,12 +518,10 @@ const kStreamReorderWaitMs = 120
 /// Never hold more than this many frames; a longer hole is a real loss.
 const kStreamReorderMax = 6
 
-/// Host session tokens, keyed by "target|code". A token is a reconnect
-/// credential, not connection state: every connect still builds its own
-/// MolinkClient/WebSocket, but a new tab (or a manual disconnect followed by a
-/// connect) can present the token instead of spending another use of the
-/// host's temporary code. Cleared when the host rejects it. In-memory only.
-const resumeTokens = new Map<string, string>()
+/// Host session tokens live in session-store.ts, keyed by `host:port` and
+/// persisted so a restart can reconnect without spending another verification
+/// code. A token is a reconnect credential, not connection state: every
+/// connect still builds its own MolinkClient/WebSocket.
 
 /// Allow time for keyframe repair before falling back from a stalled P2P path.
 /// Use the same interval before probing video on an otherwise quiet session.
@@ -708,9 +711,10 @@ export class MolinkClient {
   /// Session token from the last welcome. Reconnecting with it does not spend
   /// another use of the host's temporary verification code.
   private resumeToken = ''
-  /// Key the token is stored under, so a connect to another target/code never
-  /// inherits this credential.
-  private resumeKey = ''
+  /// The target the token belongs to. Forgetting a rejected credential must
+  /// delete exactly this host/port entry and no other machine's.
+  private resumeHost = ''
+  private resumePort = 0
   /// The hello sent on this socket, kept for retries over a lossy ICE path.
   private helloPayload: Record<string, unknown> | null = null
   private helloTimer: number | null = null
@@ -788,11 +792,12 @@ export class MolinkClient {
     this.directProxyFailed = false
     this.lastErrorCode = ''
     this.lastErrorMessage = ''
-    // Reuse the host session token for the same target+code, even in a fresh
-    // tab: a single-use code is already spent by the time it reconnects.
-    this.resumeKey = targetId !== '' ? `id:${targetId}|${token}`
-                                     : `${host}:${port}|${token}`
-    this.resumeToken = resumeTokens.get(this.resumeKey) ?? ''
+    // Reuse the host session token for this address, even in a fresh tab or
+    // after the client process was killed: a single-use code is already spent
+    // by the time it reconnects.
+    this.resumeHost = host
+    this.resumePort = port
+    this.resumeToken = sessionTokenFor(host, port)
     this.frameClockOffset = 0
     this.frameClockSamples = []
     this.cellReceivedSeq.clear()
@@ -802,11 +807,11 @@ export class MolinkClient {
     this.openSocket()
   }
 
-  /// Drops the resume credential for this target+code after the host rejected
-  /// it, so the next connect falls back to the code or an access request.
+  /// Drops the resume credential for this target after the host rejected it,
+  /// so the next connect falls back to the code or an access request.
   private forgetResumeToken(): void {
     this.resumeToken = ''
-    if (this.resumeKey !== '') resumeTokens.delete(this.resumeKey)
+    if (this.resumePort > 0) forgetSession(this.resumeHost, this.resumePort)
   }
 
   /// Manual reconnect from the disconnected overlay.
@@ -939,7 +944,10 @@ export class MolinkClient {
 
     ws.onopen = () => {
       if (this.ws !== ws) return
-      if (requestAccess || token === '') {
+      // A persisted session token is a credential in its own right: present
+      // it even for a connection that was originally approved without a code,
+      // instead of asking the host user to approve the same machine again.
+      if ((requestAccess || token === '') && this.resumeToken === '') {
         // No code: ask the host user to approve this session.
         this.sendJson({
           type: 'request-access',
@@ -1046,6 +1054,7 @@ export class MolinkClient {
           .test(closeReason)
       const policyError = reasonAuth ||
           this.lastErrorCode === 'unauthorized' ||
+          this.lastErrorCode === 'invalid_token' ||
           this.lastErrorCode === 'locked' ||
           this.lastErrorCode === 'too_many_attempts' ||
           this.lastErrorCode === 'ip_banned' ||
@@ -1055,6 +1064,7 @@ export class MolinkClient {
         // the stored token for a lock or a denied request (the code is still
         // valid and the host honours recent tokens), drop it for a bad code.
         if (reasonAuth || this.lastErrorCode === 'unauthorized' ||
+            this.lastErrorCode === 'invalid_token' ||
             this.lastErrorCode === 'ip_banned' ||
             this.lastErrorCode === 'too_many_attempts') {
           this.forgetResumeToken()
@@ -1070,6 +1080,13 @@ export class MolinkClient {
           'session.rejected',
           this.lastErrorMessage || closeReason || this.lastErrorCode,
           { target: `${host}:${port}`, code: this.lastErrorCode },
+        )
+        // The error frame and the close can race; make sure the UI still
+        // learns the machine-readable code when only the close arrived. That
+        // code is what turns the banner into a code-entry form.
+        this.handlers.onError?.(
+          this.lastErrorMessage || closeReason || this.lastErrorCode,
+          this.lastErrorCode,
         )
         this.handlers.onPhase?.('error',
                                 this.lastErrorMessage || this.lastErrorCode)
@@ -1689,8 +1706,8 @@ export class MolinkClient {
         if (typeof welcome.session_token === 'string' &&
             welcome.session_token !== '') {
           this.resumeToken = welcome.session_token
-          if (this.resumeKey !== '') {
-            resumeTokens.set(this.resumeKey, this.resumeToken)
+          if (this.resumePort > 0) {
+            rememberSession(this.resumeHost, this.resumePort, this.resumeToken)
           }
         }
         this.stopHelloRetry()
@@ -2055,8 +2072,8 @@ export class MolinkClient {
         }
         // The host rejected our credentials (wrong or exhausted code); a
         // fresh code will arrive from the UI, so drop the stale resume token.
-        if (code === 'unauthorized' || code === 'ip_banned' ||
-            code === 'too_many_attempts') {
+        if (code === 'unauthorized' || code === 'invalid_token' ||
+            code === 'ip_banned' || code === 'too_many_attempts') {
           this.forgetResumeToken()
         }
         this.lastErrorCode = code

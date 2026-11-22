@@ -8417,8 +8417,11 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
       // Registration happens a moment after the core binds, and the id can
       // change when the directory is unreachable, so poll the identity (not
       // just at startup). Two loopback GETs; a missing core refuses at once.
+      // Also poll fast enough that a code rotated by the core (the single-use
+      // code is replaced the moment a viewer spends it) is on screen within
+      // two seconds.
       if (GetTickCount64() >= g.id_refresh_at) {
-        g.id_refresh_at = GetTickCount64() + 5000;
+        g.id_refresh_at = GetTickCount64() + 1500;
         // The host core is a child process. Windows can end it (a crash, or a
         // security suite killing it) while this shell stays open; without a
         // watchdog the machine then silently disappears from the directory and

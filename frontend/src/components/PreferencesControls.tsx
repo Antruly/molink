@@ -4,6 +4,7 @@ import {
   ClipboardCopy,
   Cpu,
   Gauge,
+  KeyRound,
   Languages,
   Moon,
   Network,
@@ -579,6 +580,8 @@ export function PreferencesControls({
   const setRemoteClipboardFiles = useAppStore(
     (state) => state.setRemoteClipboardFiles,
   )
+  const rememberDevice = useAppStore((state) => state.rememberDevice)
+  const setRememberDevice = useAppStore((state) => state.setRememberDevice)
   const localMode = useAppStore((state) => state.localMode)
   const qualityMode = useAppStore((state) => state.qualityMode)
   const setQualityMode = useAppStore((state) => state.setQualityMode)
@@ -705,6 +708,23 @@ export function PreferencesControls({
               checked={autoAudio}
               onChange={setAutoAudio}
               label={t('settings.autoAudio')}
+            />
+          </div>
+
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <div className="flex items-center gap-2 text-[12px] font-medium text-ink">
+                <KeyRound size={14} className="text-accent" />
+                {t('settings.rememberDevice')}
+              </div>
+              <div className="mt-1 text-[11px] leading-relaxed text-muted">
+                {t('settings.rememberDeviceHint')}
+              </div>
+            </div>
+            <Toggle
+              checked={rememberDevice}
+              onChange={setRememberDevice}
+              label={t('settings.rememberDevice')}
             />
           </div>
 
