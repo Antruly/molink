@@ -11,6 +11,10 @@ on:
         description: 'Only run the Windows jobs (skip Linux and macOS)'
         type: boolean
         default: false
+      skip_macos:
+        description: 'Skip the macOS jobs (Linux and Windows only)'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -566,7 +570,7 @@ jobs:
 
   # Temporarily disabled during the test phase (macOS runners are scarce).
   macos:
-    if: ${{ inputs.skip_slow != true }}
+    if: ${{ inputs.skip_slow != true && inputs.skip_macos != true }}
     needs: versions
     strategy:
       fail-fast: false
@@ -869,7 +873,7 @@ jobs:
     # Publish once, after every builder succeeded. Each job used to attach its
     # own files, so a failed platform still left a partially populated release
     # behind (and the tag could ship without the missing assets).
-    if: github.ref_type == 'tag'
+    if: ${{ always() && github.ref_type == 'tag' && !failure() && !cancelled() }}
     needs: [linux, windows, macos, win7-x86]
     runs-on: ubuntu-latest
     steps:
