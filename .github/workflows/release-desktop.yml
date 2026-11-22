@@ -179,11 +179,23 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Printed so a failure here says which toolchain produced it: the
+          # runner images moved to CMake 4 / GCC 15, and both change how old
+          # third-party CMakeLists are accepted.
+          cmake --version | head -1
+          cc --version | head -1
+          c++ --version | head -1
           git clone --depth 1 --branch v0.22.6 --recurse-submodules --shallow-submodules \
             https://github.com/paullouisageneau/libdatachannel.git "$RUNNER_TEMP/libdatachannel"
+          # CMake 4 removed compatibility with cmake_minimum_required < 3.5, and
+          # this tag's bundled usrsctp (3.0), plog (3.0) and json (3.1) still
+          # declare it, so the configure step dies on the newer runner images.
+          # The policy floor is the documented escape hatch and is ignored by
+          # CMake 3.x.
           cmake -S "$RUNNER_TEMP/libdatachannel" -B "$RUNNER_TEMP/libdatachannel/build" \
             -DCMAKE_BUILD_TYPE=Release -DNO_EXAMPLES=ON -DNO_TESTS=ON \
             -DUSE_GNUTLS=OFF -DUSE_NICE=OFF \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
             -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/datachannel"
           cmake --build "$RUNNER_TEMP/libdatachannel/build" --parallel
           cmake --install "$RUNNER_TEMP/libdatachannel/build"
