@@ -1,6 +1,7 @@
 import {
   ArrowDownToLine,
   ArrowLeft,
+  ArrowLeftRight,
   ArrowRight,
   ChevronUp,
   ClipboardCopy,
@@ -10,6 +11,7 @@ import {
   Folder,
   FolderOpen,
   Home,
+  Link2,
   RefreshCw,
   Save,
   Upload,
@@ -25,7 +27,17 @@ import {
 } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { TFunction } from 'i18next'
-import { coreBaseUrl, fetchLocalDirectory, type FsEntry } from '../lib/api'
+import {
+  coreBaseUrl,
+  fetchLocalDirectory,
+  makeLocalDirectory,
+  moveLocalFile,
+  readLocalFileRange,
+  removeLocalFile,
+  writeLocalFileChunk,
+  type FsEntry,
+  type FsRoot,
+} from '../lib/api'
 import { clipboardFilesMode } from '../lib/clipboard-local'
 import {
   collectDropEntries,
@@ -57,8 +69,13 @@ import {
   downloadBlockReason,
   downloadModeFor,
   isUnsupportedAction,
+  joinPath,
+  joinRelative,
   localEntriesAt,
   normalizeRelativePath,
+  parentPath,
+  pathCrumbs,
+  pathFlavor,
   relativeUnder,
   resolveRemotePath,
   safeTargetSegments,
@@ -105,29 +122,6 @@ function formatBytes(bytes: number): string {
   return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`
 }
 
-/// The remote listing uses the host's separator; every path the panel joins
-/// keeps that separator so a Windows host never gets a mixed path.
-function joinPath(base: string, name: string): string {
-  if (base === '') return name
-  const separator = base.includes('\\') ? '\\' : '/'
-  const trimmed = base.replace(/[\\/]+$/, '')
-  return trimmed + separator + name
-}
-
-function parentPath(path: string, root: string): string {
-  if (!path || path === root) return root
-  const separator = path.includes('\\') ? '\\' : '/'
-  const trimmed = path.replace(/[\\/]+$/, '')
-  const cut = trimmed.lastIndexOf(separator)
-  if (cut <= 0) return root
-  const parent = trimmed.slice(0, cut)
-  const base = root.replace(/[\\/]+$/, '')
-  if (base !== '' && parent !== base && !parent.startsWith(base + separator)) {
-    return root
-  }
-  return parent
-}
-
 /// A path the user intends as an absolute home path rather than a subfolder
 /// of the currently picked source: POSIX `/x`, Windows `C:\x`, UNC `\\x`, or
 /// a `~`-relative home path.
@@ -147,9 +141,12 @@ function errorText(error: unknown): string {
 }
 
 interface RemoteListing {
+  /// Empty while the host is showing its volume/root list.
   path: string
   root: string
+  parent: string
   entries: FileEntry[]
+  roots: FsRoot[]
 }
 
 interface BrowseRequest {
@@ -163,7 +160,10 @@ interface BrowseRequest {
 interface LocalFile {
   path: string
   size: number
-  file: File
+  /// Present when the browser picked/dropped the file. A folder listed by the
+  /// local core has no `File`; its bytes are read from `absPath`.
+  file: File | null
+  absPath?: string
 }
 
 type LocalSource =
@@ -180,12 +180,14 @@ type LocalSource =
       label: string
     }
   | {
-      /// A folder listed by the local core (`/api/fs/list`). The browser can
-      /// navigate it but cannot read its files, so uploads still need a picker.
+      /// A folder listed by the local core (`/api/fs/list`). The desktop core
+      /// can also read/write these bytes (`/api/fs/read` `/api/fs/write`), so
+      /// it behaves like a real folder rather than a names-only preview.
       kind: 'fs'
       path: string
       parent: string
       root: string
+      roots: FsRoot[]
     }
 
 interface HandleEntry {
@@ -279,6 +281,10 @@ interface DownloadJob {
   /// Directory-mode target: the writable is created under this handle.
   baseDir: FileSystemDirectoryHandle | null
   segments: string[] | null
+  /// Local-core target (desktop shell): bytes are written to `fsTemp`, then
+  /// renamed to `fsTarget` when the transfer completes.
+  fsTarget: string | null
+  fsTemp: string | null
   writable: FileSystemWritableFileStream | null
   parentDir: FileSystemDirectoryHandle | null
   createdFile: boolean
@@ -423,6 +429,30 @@ function blockText(
     case 'busy':
       return t('files.busy')
   }
+}
+
+function rootKindText(t: TFunction, kind: string): string {
+  switch (kind) {
+    case 'removable':
+      return t('files.driveRemovable')
+    case 'network':
+      return t('files.driveNetwork')
+    case 'cdrom':
+      return t('files.driveCdrom')
+    case 'ram':
+      return t('files.driveRam')
+    case 'home':
+      return t('files.driveHome')
+    case 'unknown':
+      return t('files.driveUnknown')
+    default:
+      return ''
+  }
+}
+
+function rootLabel(t: TFunction, root: FsRoot): string {
+  const kind = rootKindText(t, root.kind)
+  return kind === '' ? root.name : `${root.name} · ${kind}`
 }
 
 function downloadPhaseText(
@@ -638,6 +668,7 @@ export function FileTransferPanel({
   /// Rows listed through the local core's `/api/fs/list`.
   const [fsEntries, setFsEntries] = useState<FsEntry[]>([])
   const localLoadToken = useRef(0)
+  const localInitial = useRef<string | null>(null)
   const directoryInputRef = useRef<HTMLInputElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
@@ -855,7 +886,15 @@ export function FileTransferPanel({
         // It may already be gone (or the abort removed it).
       }
     }
-  }, [])
+    if (job.fsTemp && token !== '') {
+      try {
+        await removeLocalFile(token, job.fsTemp)
+      } catch {
+        // The staging file may never have been created.
+      }
+      job.fsTemp = null
+    }
+  }, [token])
 
   const finishDownload = useCallback(
     (job: DownloadJob, failure?: string, cancelled = false) => {
@@ -879,6 +918,39 @@ export function FileTransferPanel({
           }
           if (!job.silent) setError(failure)
           setDownload(null)
+        } else if (job.fsTemp && job.fsTarget) {
+          setDownload((current) =>
+            current?.key === job.key
+              ? { ...current, phase: 'saving' }
+              : current,
+          )
+          try {
+            await job.writeChain
+            if (job.writeError !== undefined) throw job.writeError
+            if (token === '') throw new Error('no local core token')
+            await moveLocalFile(token, job.fsTemp, job.fsTarget)
+            job.fsTemp = null
+            job.committed = true
+            if (job.taskKey !== null && job.childKey) {
+              patchChild(job.taskKey, job.childKey, {
+                status: 'done',
+                progress: job.size,
+                size: job.size,
+              })
+              noteTaskSpeed(job.taskKey)
+            }
+            setDownload(null)
+          } catch {
+            await discardPartial(job)
+            if (job.taskKey !== null && job.childKey) {
+              patchChild(job.taskKey, job.childKey, {
+                status: 'error',
+                error: t('files.saveFailed'),
+              })
+            }
+            if (!job.silent) setError(t('files.saveFailed'))
+            setDownload(null)
+          }
         } else if (job.writable) {
           setDownload((current) =>
             current?.key === job.key
@@ -953,7 +1025,7 @@ export function FileTransferPanel({
       }
       void settle()
     },
-    [discardPartial, noteTaskSpeed, patchChild, t],
+    [discardPartial, noteTaskSpeed, patchChild, t, token],
   )
   useEffect(() => {
     finishDownloadRef.current = finishDownload
@@ -1063,26 +1135,33 @@ export function FileTransferPanel({
       target: Promise<FileSystemWritableFileStream> | null
       baseDir: FileSystemDirectoryHandle | null
       segments: string[] | null
+      fsTarget?: string | null
       resolve: () => void
-    }): DownloadJob => ({
-      key: nextKey.current++,
-      ...props,
-      writable: null,
-      parentDir: null,
-      createdFile: false,
-      requesting: false,
-      id: 0,
-      size: 0,
-      received: 0,
-      eofSeen: false,
-      cancelled: false,
-      finishing: false,
-      committed: false,
-      chunks: [],
-      writeChain: Promise.resolve(),
-      writeError: undefined,
-      timer: 0,
-    }),
+    }): DownloadJob => {
+      const key = nextKey.current++
+      const fsTarget = props.fsTarget ?? null
+      return {
+        key,
+        ...props,
+        fsTarget,
+        fsTemp: fsTarget === null ? null : `${fsTarget}.molink-${key}.part`,
+        writable: null,
+        parentDir: null,
+        createdFile: false,
+        requesting: false,
+        id: 0,
+        size: 0,
+        received: 0,
+        eofSeen: false,
+        cancelled: false,
+        finishing: false,
+        committed: false,
+        chunks: [],
+        writeChain: Promise.resolve(),
+        writeError: undefined,
+        timer: 0,
+      }
+    },
     [],
   )
 
@@ -1102,6 +1181,7 @@ export function FileTransferPanel({
       targets: Array<Promise<FileSystemWritableFileStream> | null>,
       strategy: SaveStrategy,
       silent: boolean,
+      fsTargets: Array<string | null> = [],
     ) => {
       try {
         updateTask(taskKey, (task) => ({ ...task, phase: 'running' }))
@@ -1122,6 +1202,7 @@ export function FileTransferPanel({
               target: targets[index] ?? null,
               baseDir: null,
               segments: null,
+              fsTarget: fsTargets[index] ?? null,
               resolve,
             })
             queueJob(job)
@@ -1322,11 +1403,15 @@ export function FileTransferPanel({
               null,
               message.message ?? t('files.error'),
             )
-          } else if (message.path && message.entries) {
+          } else if (message.entries) {
+            // `path` is empty for the volume/root list, so test `entries`
+            // rather than the path.
             finishBrowseRef.current({
-              path: message.path,
-              root: message.root ?? message.path,
+              path: message.path ?? '',
+              root: message.root ?? message.path ?? '',
+              parent: message.parent ?? parentPath(message.path ?? ''),
               entries: message.entries,
+              roots: message.roots ?? [],
             })
           }
           break
@@ -1454,7 +1539,29 @@ export function FileTransferPanel({
         finishDownloadRef.current(job, t('files.incomplete'))
         return
       }
-      if (job.writable) {
+      if (job.fsTemp) {
+        if (token === '') {
+          finishDownloadRef.current(job, t('files.saveFailed'))
+          return
+        }
+        // Copy the socket buffer; it is reused after this handler returns.
+        const chunk = new Uint8Array(data)
+        const truncate = offset === 0
+        job.writeChain = job.writeChain.then(async () => {
+          if (job.cancelled) return
+          try {
+            await writeLocalFileChunk(
+              token,
+              job.fsTemp!,
+              offset,
+              chunk,
+              truncate,
+            )
+          } catch (writeError) {
+            job.writeError = writeError
+          }
+        })
+      } else if (job.writable) {
         // Copy into a plain ArrayBuffer: the socket buffer may be reused, and
         // FileSystemWritableFileStream rejects a SharedArrayBuffer-backed view.
         const chunk = new Uint8Array(data).buffer
@@ -1499,7 +1606,7 @@ export function FileTransferPanel({
         }
       })
     },
-    [armDownloadTimeout, patchProgress, t],
+    [armDownloadTimeout, patchProgress, t, token],
   )
 
   const messageRef = useRef(handleMessage)
@@ -1586,13 +1693,19 @@ export function FileTransferPanel({
       const loadToken = ++localLoadToken.current
       setLocalLoading(true)
       try {
-        const result = await fetchLocalDirectory(token, path)
+        // An empty request means the home folder here; the volume list has
+        // its own `roots=1` route.
+        const result = await fetchLocalDirectory(
+          token,
+          path.trim() === '' ? '~' : path,
+        )
         if (loadToken !== localLoadToken.current) return
         setSource({
           kind: 'fs',
           path: result.path,
           parent: result.parent,
           root: result.root,
+          roots: result.roots ?? [],
         })
         setFsEntries(result.entries)
         setHandleEntries([])
@@ -1613,6 +1726,22 @@ export function FileTransferPanel({
     },
     [localMode, token, t],
   )
+
+  // In the desktop shell the local pane can start on the folder last used
+  // without asking for a directory picker. A browser-only page cannot, so it
+  // keeps the drop/pick hint until the user chooses something.
+  useEffect(() => {
+    if (!open) {
+      localInitial.current = null
+      return
+    }
+    if (!localMode || token === '') return
+    const stored = readStored(LOCAL_PATH_KEY)
+    const key = `${token}:${stored}`
+    if (localInitial.current === key) return
+    localInitial.current = key
+    void loadLocalDirectory(stored)
+  }, [loadLocalDirectory, localMode, open, token])
 
   const chooseLocalDirectory = useCallback(() => {
     setError(null)
@@ -1926,7 +2055,11 @@ export function FileTransferPanel({
     // a page served by a remote host cannot, and must say so instead of
     // silently doing nothing.
     if (!source && text === '') {
-      chooseLocalDirectory()
+      if (canListLocal) {
+        void loadLocalDirectory('')
+      } else {
+        chooseLocalDirectory()
+      }
       return
     }
     if (!source || source.kind === 'fs' || looksAbsolutePath(text)) {
@@ -2069,13 +2202,96 @@ export function FileTransferPanel({
   }, [connection, open, requestListing])
 
   const remoteUp = useCallback(() => {
-    const current = listing?.path ?? remoteInput
-    browseRemote(parentPath(current, listing?.root ?? ''))
-  }, [browseRemote, listing, remoteInput])
+    if (!listing || listing.path === '') return
+    // The host reports an empty parent for a volume/share root; that is the
+    // drive list, not the user's home.
+    browseRemote(listing.parent)
+  }, [browseRemote, listing])
 
   const remoteHome = useCallback(() => {
     browseRemote(listing?.root ?? '')
   }, [browseRemote, listing])
+
+  const remoteCrumbs = useMemo(
+    () => (listing ? pathCrumbs(listing.path) : []),
+    [listing],
+  )
+
+  const remoteActiveRoot = useMemo(() => {
+    if (!listing || listing.path === '') return ''
+    for (const root of listing.roots) {
+      const base = root.path.replace(/[\\/]+$/, '')
+      if (listing.path === root.path || listing.path === base ||
+          listing.path.startsWith(base + '\\') ||
+          listing.path.startsWith(base + '/')) {
+        return root.path
+      }
+    }
+    return ''
+  }, [listing])
+
+  const localCrumbs = useMemo(
+    () => (source?.kind === 'fs' ? pathCrumbs(source.path) : []),
+    [source],
+  )
+
+  const localActiveRoot = useMemo(() => {
+    if (source?.kind !== 'fs') return ''
+    for (const root of source.roots) {
+      const base = root.path.replace(/[\\/]+$/, '')
+      if (source.path === root.path || source.path === base ||
+          source.path.startsWith(base + '\\') ||
+          source.path.startsWith(base + '/')) {
+        return root.path
+      }
+    }
+    return ''
+  }, [source])
+
+  /// Make the local pane follow the remote folder. A Windows remote path on a
+  /// POSIX local core (or the reverse) cannot exist; confirm before trying.
+  const syncRemoteToLocal = useCallback(() => {
+    if (!listing || listing.path === '') {
+      setError(t('files.needRemoteListing'))
+      return
+    }
+    if (!localMode || token === '') {
+      setError(t('files.localPathNeedsClient'))
+      return
+    }
+    const localPath =
+      source?.kind === 'fs' ? source.path : readStored(LOCAL_PATH_KEY)
+    const remoteFlavor = pathFlavor(listing.path)
+    const localFlavor = pathFlavor(localPath)
+    if (remoteFlavor !== 'unknown' && localFlavor !== 'unknown' &&
+        remoteFlavor !== localFlavor &&
+        !window.confirm(t('files.syncMismatch'))) {
+      return
+    }
+    void loadLocalDirectory(listing.path)
+  }, [listing, loadLocalDirectory, localMode, source, t, token])
+
+  /// Make the remote pane follow the local folder. Only a folder listed by the
+  /// local core has an absolute path to send; a picked/dropped snapshot does
+  /// not.
+  const syncLocalToRemote = useCallback(() => {
+    if (source?.kind !== 'fs') {
+      setError(t('files.syncNeedsLocalFs'))
+      return
+    }
+    if (!listing) {
+      setError(t('files.needRemoteListing'))
+      return
+    }
+    const localFlavor = pathFlavor(source.path)
+    const remoteFlavor = pathFlavor(listing.path)
+    if (localFlavor !== 'unknown' && remoteFlavor !== 'unknown' &&
+        localFlavor !== remoteFlavor &&
+        !window.confirm(t('files.syncMismatch'))) {
+      return
+    }
+    browseRemote(source.path)
+  }, [browseRemote, listing, source, t])
 
   const toggleRemote = useCallback((entry: FileEntry) => {
     setRemoteSelection((current) => {
@@ -2087,7 +2303,7 @@ export function FileTransferPanel({
   }, [])
 
   const toggleAllRemote = useCallback(() => {
-    if (!listing) return
+    if (!listing || listing.path === '') return
     setRemoteSelection((current) =>
       current.size === listing.entries.length
         ? new Map()
@@ -2099,25 +2315,19 @@ export function FileTransferPanel({
     if (!listing) return [] as Array<FileEntry & { path: string }>
     return [...remoteSelection.values()].map((entry) => ({
       ...entry,
-      path: joinPath(listing.path, entry.name),
+      path: entry.path ?? joinPath(listing.path, entry.name),
     }))
   }, [listing, remoteSelection])
 
   // ------------------------------------------------------------- upload run
   const sendOver = useCallback(async () => {
     if (!source || listing === null || localSelection.size === 0) return
-    // A `/api/fs/list` pane knows names only; the browser still has no read
-    // access to those bytes. Say how to actually send them instead of
-    // starting a transfer that cannot produce a single file.
-    if (source.kind === 'fs') {
-      setError(t('files.fsListHint'))
-      return
-    }
     const dest = listing.path
     setError(null)
     setUploadBusy(true)
     try {
       let plan: UploadPlan
+      let walkTruncated = false
       if (source.kind === 'snapshot') {
         const base = snapshotPath
         const strip = (path: string) =>
@@ -2133,6 +2343,77 @@ export function FileTransferPanel({
           return { path: rel, dir: row?.dir ?? false }
         })
         plan = buildUploadPlan(files, dirs, selection)
+      } else if (source.kind === 'fs') {
+        // Desktop shell: the local core can read every file under the open
+        // folder, so walk the selected folders through `/api/fs/list` and read
+        // the bytes lazily while uploading.
+        if (!localMode || token === '') {
+          setError(t('files.localPathNeedsClient'))
+          setUploadBusy(false)
+          return
+        }
+        const files: LocalFile[] = []
+        const dirs: string[] = []
+        let skipped = 0
+        let budget = 20000
+        const walkFs = async (
+          path: string,
+          prefix: string,
+          depth: number,
+        ): Promise<void> => {
+          if (budget <= 0 || depth > 64) {
+            walkTruncated = true
+            return
+          }
+          const result = await fetchLocalDirectory(token, path)
+          for (const entry of result.entries) {
+            if (budget <= 0) {
+              walkTruncated = true
+              return
+            }
+            budget -= 1
+            const rel = prefix === '' ? entry.name : `${prefix}/${entry.name}`
+            if (entry.dir) {
+              dirs.push(rel)
+              // Never follow a symlink/junction folder: a loop would recurse
+              // forever just like it would on the remote host.
+              if (!entry.link) {
+                await walkFs(joinPath(result.path, entry.name), rel, depth + 1)
+              }
+            } else {
+              files.push({
+                path: rel,
+                size: entry.size,
+                file: null,
+                absPath: joinPath(result.path, entry.name),
+              })
+            }
+          }
+        }
+        for (const row of localRows) {
+          if (!localSelection.has(row.rel)) continue
+          if (row.dir) {
+            dirs.push(row.name)
+            try {
+              await walkFs(joinPath(source.path, row.name), row.name, 0)
+            } catch {
+              skipped += 1
+            }
+          } else {
+            files.push({
+              path: row.name,
+              size: row.size,
+              file: null,
+              absPath: joinPath(source.path, row.name),
+            })
+          }
+        }
+        const selection = [...localSelection].map((rel) => {
+          const row = localRows.find((item) => item.rel === rel)
+          return { path: rel, dir: row?.dir ?? false }
+        })
+        plan = buildUploadPlan(files, dirs, selection)
+        plan = { ...plan, skipped: plan.skipped + skipped }
       } else {
         const files: LocalFile[] = []
         const dirs: string[] = []
@@ -2210,6 +2491,7 @@ export function FileTransferPanel({
         skipped: plan.skipped,
         dirsTotal: plan.dirs.length,
       })
+      if (walkTruncated) appendNote(taskKey, t('files.walkTruncated'))
       const run: UploadRun = { taskKey, cancelled: false, activeId: 0 }
       uploadRuns.current.set(taskKey, run)
       updateTask(taskKey, (task) => ({ ...task, phase: 'running' }))
@@ -2320,14 +2602,37 @@ export function FileTransferPanel({
               break
             }
             const end = Math.min(file.size, offset + chunk)
-            const buffer = await file.file.slice(offset, end).arrayBuffer()
+            let bytes: Uint8Array
+            try {
+              if (file.file) {
+                bytes = new Uint8Array(
+                  await file.file.slice(offset, end).arrayBuffer(),
+                )
+              } else if (file.absPath && token !== '') {
+                bytes = await readLocalFileRange(
+                  token,
+                  file.absPath,
+                  offset,
+                  end - offset,
+                )
+              } else {
+                throw new Error('no local source')
+              }
+            } catch {
+              patchChild(taskKey, child.key, {
+                status: 'error',
+                error: t('files.localPathMissing'),
+              })
+              failed = true
+              break
+            }
             if (run.cancelled) {
               connectionRef.current?.sendFileAction('cancel', { id })
               patchChild(taskKey, child.key, { status: 'cancelled' })
               failed = true
               break
             }
-            target.sendFileChunk(id, offset, new Uint8Array(buffer))
+            target.sendFileChunk(id, offset, bytes)
             offset = end
             patchProgress(taskKey, child.key, offset)
             // Yield so a large file does not freeze the UI thread.
@@ -2406,6 +2711,7 @@ export function FileTransferPanel({
     appendNote,
     createTask,
     finalizeTask,
+    localMode,
     localRows,
     localSelection,
     patchChild,
@@ -2415,14 +2721,20 @@ export function FileTransferPanel({
     source,
     listing,
     t,
+    token,
     updateTask,
     waitUpload,
   ])
 
   // ----------------------------------------------------------- download run
   const receiveBack = useCallback(async () => {
-    if (!listing || !currentHandle || remoteSelection.size === 0) return
+    if (!listing || remoteSelection.size === 0) return
+    // A browser-only page needs a directory handle. The desktop shell can
+    // write into the local core's current folder instead.
+    const fsBase =
+      source?.kind === 'fs' && localMode && token !== '' ? source.path : ''
     const destination = currentHandle
+    if (!destination && fsBase === '') return
     const remoteRoot = listing.path
     const selected = remoteSelectedEntries
     const taskName = selected.length === 1
@@ -2508,9 +2820,13 @@ export function FileTransferPanel({
 
       for (const dir of dirs) {
         if (run.cancelled) break
-        const segments = safeTargetSegments(dir, 'folder')
         try {
-          await ensureDirectory(destination, segments)
+          if (fsBase !== '') {
+            await makeLocalDirectory(token, joinRelative(fsBase, dir))
+          } else if (destination) {
+            const segments = safeTargetSegments(dir, 'folder')
+            await ensureDirectory(destination, segments)
+          }
           updateTask(taskKey, (task) => ({
             ...task,
             dirsDone: task.dirsDone + 1,
@@ -2539,6 +2855,9 @@ export function FileTransferPanel({
         const segments = safeTargetSegments(file.rel, 'file')
         const name = segments[segments.length - 1]!
         const parent = segments.slice(0, -1)
+        const fsTarget = fsBase === ''
+          ? null
+          : joinRelative(fsBase, segments.join('/'))
         await new Promise<void>((resolve) => {
           const job = makeJob({
             path: file.path,
@@ -2546,10 +2865,11 @@ export function FileTransferPanel({
             taskKey,
             childKey: child.key,
             silent: true,
-            strategy: 'picker',
+            strategy: fsTarget ? 'button' : 'picker',
             target: null,
-            baseDir: destination,
-            segments: parent,
+            baseDir: fsTarget ? null : destination,
+            segments: fsTarget ? null : parent,
+            fsTarget,
             resolve,
           })
           queueJob(job)
@@ -2575,13 +2895,16 @@ export function FileTransferPanel({
     currentHandle,
     finalizeTask,
     listing,
+    localMode,
     makeJob,
     patchChild,
     queueJob,
     remoteSelectedEntries,
     remoteSelection.size,
     requestListing,
+    source,
     t,
+    token,
     updateTask,
   ])
 
@@ -2668,7 +2991,11 @@ export function FileTransferPanel({
   if (!open) return null
 
   const directionMode: DownloadMode = downloadModeFor(window)
-  const canReceive = directionMode === 'directory' && currentHandle !== null
+  /// The local core can read and write the open folder in the desktop shell,
+  /// even though the browser's File System Access API is unavailable there.
+  const fsLocalTarget = source?.kind === 'fs' && localMode && token !== ''
+  const canReceive =
+    fsLocalTarget || (directionMode === 'directory' && currentHandle !== null)
   const uploadBlock = uploadBlockReason({
     selected: localSelection.size,
     remotePath: listing?.path ?? '',
@@ -2681,8 +3008,7 @@ export function FileTransferPanel({
     mode: directionMode,
     hasTarget: canReceive,
   })
-  const fsSource = source?.kind === 'fs'
-  const uploadDisabled = uploadBlock !== null || fsSource
+  const uploadDisabled = uploadBlock !== null
   const downloadDisabled = downloadBlock !== null
   const allLocalSelected =
     localRows.length > 0 && localSelection.size === localRows.length
@@ -2742,6 +3068,28 @@ export function FileTransferPanel({
             <span className="shrink-0 text-[10px] font-semibold uppercase tracking-[0.14em] text-muted">
               {t('files.local')}
             </span>
+            {source?.kind === 'fs' && source.roots.length > 0 ? (
+              <select
+                value={localActiveRoot}
+                onChange={(event) => {
+                  if (event.target.value !== '') {
+                    void loadLocalDirectory(event.target.value)
+                  }
+                }}
+                className="field h-6 max-w-[130px] shrink-0 truncate text-[9px]"
+                aria-label={t('files.roots')}
+                title={t('files.roots')}
+              >
+                <option value="" disabled>
+                  {t('files.roots')}
+                </option>
+                {source.roots.map((root) => (
+                  <option key={root.path} value={root.path}>
+                    {rootLabel(t, root)}
+                  </option>
+                ))}
+              </select>
+            ) : null}
             <button
               type="button"
               onClick={localUp}
@@ -2786,7 +3134,11 @@ export function FileTransferPanel({
                   setLocalInput(localLabel || readStored(LOCAL_PATH_KEY))
                 }
               }}
-              placeholder={t('files.pathPlaceholderLocal')}
+              placeholder={
+                localMode
+                  ? t('files.pathPlaceholderLocal')
+                  : t('files.pathPlaceholderLocalBrowser')
+              }
               className="field min-w-0 flex-1 font-mono text-[10px]"
               aria-label={t('files.localPath')}
             />
@@ -2840,7 +3192,41 @@ export function FileTransferPanel({
                 event.target.value = ''
               }}
             />
+            <button
+              type="button"
+              onClick={syncLocalToRemote}
+              disabled={source?.kind !== 'fs' || !listing}
+              className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-muted transition hover:bg-panel hover:text-accent disabled:opacity-40"
+              aria-label={t('files.syncToRemote')}
+              title={
+                source?.kind === 'fs'
+                  ? t('files.syncToRemote')
+                  : t('files.syncNeedsLocalFs')
+              }
+            >
+              <ArrowLeftRight size={12} />
+            </button>
           </div>
+          {source?.kind === 'fs' && source.path !== '' &&
+          localCrumbs.length > 0 ? (
+            <div className="flex shrink-0 items-center gap-0.5 overflow-x-auto px-1.5 pb-1 text-[9px] text-muted">
+              {localCrumbs.map((crumb) => (
+                <span key={crumb.path} className="flex shrink-0 items-center">
+                  {crumb.name !== '/' ? (
+                    <span className="px-0.5 text-line">›</span>
+                  ) : null}
+                  <button
+                    type="button"
+                    onClick={() => void loadLocalDirectory(crumb.path)}
+                    className="max-w-[120px] truncate rounded px-1 transition hover:bg-panel hover:text-accent"
+                    title={crumb.path}
+                  >
+                    {crumb.name}
+                  </button>
+                </span>
+              ))}
+            </div>
+          ) : null}
           <div className="flex shrink-0 items-center gap-1.5 px-2 py-1">
             <label className="flex items-center gap-1 text-[10px] text-muted">
               <input
@@ -2944,11 +3330,9 @@ export function FileTransferPanel({
             onClick={() => void sendOver()}
             disabled={uploadDisabled}
             title={
-              fsSource
-                ? t('files.fsListHint')
-                : uploadBlock
-                  ? blockText(t, uploadBlock, 'up')
-                  : t('files.sendToHint')
+              uploadBlock
+                ? blockText(t, uploadBlock, 'up')
+                : t('files.sendToHint')
             }
             className="btn btn-primary flex h-12 flex-col items-center justify-center gap-0.5 px-1 text-[10px] leading-tight"
           >
@@ -2977,10 +3361,29 @@ export function FileTransferPanel({
             <span className="shrink-0 text-[10px] font-semibold uppercase tracking-[0.14em] text-muted">
               {t('files.remote')}
             </span>
+            {listing && listing.roots.length > 0 ? (
+              <select
+                value={listing.path === '' ? '__roots__' : remoteActiveRoot}
+                onChange={(event) => {
+                  const value = event.target.value
+                  browseRemote(value === '__roots__' ? '' : value)
+                }}
+                className="field h-6 max-w-[130px] shrink-0 truncate text-[9px]"
+                aria-label={t('files.roots')}
+                title={t('files.roots')}
+              >
+                <option value="__roots__">{t('files.roots')}</option>
+                {listing.roots.map((root) => (
+                  <option key={root.path} value={root.path}>
+                    {rootLabel(t, root)}
+                  </option>
+                ))}
+              </select>
+            ) : null}
             <button
               type="button"
               onClick={remoteUp}
-              disabled={!listing}
+              disabled={!listing || listing.path === ''}
               className="ml-auto grid h-6 w-6 shrink-0 place-items-center rounded text-muted transition hover:bg-panel hover:text-ink disabled:opacity-40"
               aria-label={t('files.up')}
               title={t('files.up')}
@@ -3032,13 +3435,50 @@ export function FileTransferPanel({
               <FolderOpen size={12} />
               {t('files.browse')}
             </button>
+            <button
+              type="button"
+              onClick={syncRemoteToLocal}
+              disabled={!listing || listing.path === '' || !localMode ||
+                token === ''}
+              className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-muted transition hover:bg-panel hover:text-accent disabled:opacity-40"
+              aria-label={t('files.syncToLocal')}
+              title={t('files.syncToLocal')}
+            >
+              <ArrowLeftRight size={12} />
+            </button>
           </div>
+          {listing && listing.path !== '' && remoteCrumbs.length > 0 ? (
+            <div className="flex shrink-0 items-center gap-0.5 overflow-x-auto px-1.5 py-1 text-[9px] text-muted">
+              <button
+                type="button"
+                onClick={() => browseRemote('')}
+                className="shrink-0 rounded px-1 transition hover:bg-panel hover:text-accent"
+                title={t('files.roots')}
+              >
+                {t('files.rootsShort')}
+              </button>
+              {remoteCrumbs.map((crumb) => (
+                <span key={crumb.path} className="flex shrink-0 items-center">
+                  <span className="px-0.5 text-line">›</span>
+                  <button
+                    type="button"
+                    onClick={() => browseRemote(crumb.path)}
+                    className="max-w-[120px] truncate rounded px-1 transition hover:bg-panel hover:text-accent"
+                    title={crumb.path}
+                  >
+                    {crumb.name}
+                  </button>
+                </span>
+              ))}
+            </div>
+          ) : null}
           <div className="flex shrink-0 items-center gap-1.5 px-2 py-1">
             <label className="flex items-center gap-1 text-[10px] text-muted">
               <input
                 type="checkbox"
                 checked={allRemoteSelected}
-                disabled={!listing || listing.entries.length === 0}
+                disabled={!listing || listing.path === '' ||
+                  listing.entries.length === 0}
                 onChange={toggleAllRemote}
                 title={t('files.selectAll')}
                 className="h-3 w-3"
@@ -3125,6 +3565,9 @@ export function FileTransferPanel({
               <ul className="space-y-0.5">
                 {listing.entries.map((entry) => {
                   const selected = remoteSelection.has(entry.name)
+                  const rootsView = listing.path === ''
+                  const entryPath =
+                    entry.path ?? joinPath(listing.path, entry.name)
                   return (
                     <li
                       key={entry.name}
@@ -3136,6 +3579,7 @@ export function FileTransferPanel({
                       <input
                         type="checkbox"
                         checked={selected}
+                        disabled={rootsView}
                         onChange={() => toggleRemote(entry)}
                         className="h-3 w-3 shrink-0"
                         aria-label={entry.name}
@@ -3143,14 +3587,14 @@ export function FileTransferPanel({
                       <button
                         type="button"
                         onClick={() => {
-                          if (entry.dir && listing) {
-                            browseRemote(joinPath(listing.path, entry.name))
+                          if (entry.dir) {
+                            browseRemote(entryPath)
                           } else {
                             toggleRemote(entry)
                           }
                         }}
                         className="flex min-w-0 flex-1 items-center gap-2 text-left"
-                        title={entry.dir ? t('files.openDir') : entry.name}
+                        title={entry.dir ? entryPath : entry.name}
                       >
                         {entry.dir ? (
                           <Folder size={13} className="shrink-0 text-accent/80" />
@@ -3160,6 +3604,14 @@ export function FileTransferPanel({
                         <span className="min-w-0 flex-1 truncate text-[11px] text-ink">
                           {entry.name}
                         </span>
+                        {entry.link ? (
+                          <Link2 size={10} className="shrink-0 text-muted" />
+                        ) : null}
+                        {entry.kind && rootsView ? (
+                          <span className="shrink-0 text-[9px] text-muted">
+                            {rootKindText(t, entry.kind)}
+                          </span>
+                        ) : null}
                         {entry.dir ? null : (
                           <span className="shrink-0 text-[9px] text-muted">
                             {formatBytes(entry.size)}
@@ -3170,11 +3622,7 @@ export function FileTransferPanel({
                         <button
                           type="button"
                           onClick={() =>
-                            listing &&
-                            startQuickDownload(
-                              joinPath(listing.path, entry.name),
-                              entry.name,
-                            )
+                            startQuickDownload(entryPath, entry.name)
                           }
                           className="grid h-6 w-6 shrink-0 place-items-center rounded text-muted transition hover:bg-panel hover:text-accent"
                           aria-label={t('files.download')}

@@ -167,6 +167,18 @@ export interface FileEntry {
   dir: boolean
   size: number
   mtime: number
+  /// Dot file, or a Windows hidden/system entry.
+  hidden?: boolean
+  /// Symlink, junction or Windows reparse point.
+  link?: boolean
+  /// Absolute path on a volume-list row (the roots view).
+  path?: string
+  /// "fixed" / "removable" / "network" / "cdrom" / "ram" / "home" / "unknown".
+  kind?: string
+  /// The entry name was readable but its metadata was not.
+  error?: string
+  /// True on a volume-list row.
+  root?: boolean
 }
 
 /// One file on the host's Explorer clipboard (CF_HDROP).
@@ -199,6 +211,13 @@ export interface FileMessage {
   dir?: string
   path?: string
   root?: string
+  /// Parent folder from a `listing`; empty means the host is showing its
+  /// volume/root list.
+  parent?: string
+  /// Volumes the host can open; present on every `listing`.
+  roots?: Array<{ name: string; path: string; kind: string }>
+  /// The host stopped at its entry cap.
+  truncated?: boolean
   chunk?: number
   count?: number
   entries?: FileEntry[]

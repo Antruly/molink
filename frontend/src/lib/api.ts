@@ -828,6 +828,23 @@ export interface FsEntry {
   name: string
   dir: boolean
   size: number
+  mtime?: number
+  hidden?: boolean
+  /// Symlink or Windows junction/reparse point.
+  link?: boolean
+  /// Present on volume-list rows only: the absolute root to open.
+  path?: string
+  /// "fixed", "removable", "network", "cdrom", "ram", "home", "unknown".
+  kind?: string
+  /// Set when the name was readable but its metadata was not.
+  error?: string
+  root?: boolean
+}
+
+export interface FsRoot {
+  name: string
+  path: string
+  kind: string
 }
 
 /// A folder listing from the *local* core (`/api/fs/list`). It exists so the
@@ -838,6 +855,7 @@ export interface FsListing {
   path: string
   root: string
   parent: string
+  roots: FsRoot[]
   entries: FsEntry[]
 }
 
@@ -847,6 +865,121 @@ export function fetchLocalDirectory(
 ): Promise<FsListing> {
   const query = new URLSearchParams({ path })
   return request<FsListing>(`/api/fs/list?${query.toString()}`, {}, token)
+}
+
+/// `request` with the same auth headers, for endpoints that return bytes or
+/// accept a binary body instead of JSON.
+function binaryRequest(
+  path: string,
+  init: RequestInit,
+  token: string,
+): Promise<Response> {
+  const headers = new Headers(init.headers)
+  if (token) headers.set('Authorization', `Bearer ${token}`)
+  if (clientToken) headers.set('X-MoLink-Client', clientToken)
+  return fetch(`${coreBaseUrl()}${path}`, {
+    ...init,
+    headers,
+    cache: 'no-store',
+  })
+}
+
+/// One range of a local file, read by the local core (desktop shell only).
+export async function readLocalFileRange(
+  token: string,
+  path: string,
+  offset: number,
+  length: number,
+): Promise<Uint8Array> {
+  const query = new URLSearchParams({
+    path,
+    offset: String(offset),
+    length: String(length),
+  })
+  const response = await binaryRequest(
+    `/api/fs/read?${query.toString()}`,
+    {},
+    token,
+  )
+  if (!response.ok) throw new ApiError(response.status, 'read_failed')
+  return new Uint8Array(await response.arrayBuffer())
+}
+
+/// Appends one received chunk to a local staging file. `truncate` is set for
+/// the first chunk so a retried transfer starts from a clean file.
+export async function writeLocalFileChunk(
+  token: string,
+  path: string,
+  offset: number,
+  data: Uint8Array,
+  truncate: boolean,
+): Promise<void> {
+  const query = new URLSearchParams({
+    path,
+    offset: String(offset),
+    truncate: truncate ? '1' : '0',
+  })
+  const response = await binaryRequest(
+    `/api/fs/write?${query.toString()}`,
+    { method: 'POST', body: data as BodyInit },
+    token,
+  )
+  if (!response.ok) throw new ApiError(response.status, 'write_failed')
+}
+
+/// Renames a finished staging file into place. The server picks a non-existing
+/// name (`name (1).ext`) rather than overwriting another file.
+export async function moveLocalFile(
+  token: string,
+  from: string,
+  to: string,
+): Promise<string> {
+  const result = await request<{ ok: boolean; path?: string; message?: string }>(
+    '/api/fs/move',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from, to }),
+    },
+    token,
+  )
+  if (!result.ok || !result.path) {
+    throw new ApiError(500, 'move_failed')
+  }
+  return result.path
+}
+
+/// Creates a folder (and parents) on this machine for a received tree.
+export async function makeLocalDirectory(
+  token: string,
+  path: string,
+): Promise<void> {
+  const result = await request<{ ok: boolean }>(
+    '/api/fs/mkdir',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path }),
+    },
+    token,
+  )
+  if (!result.ok) throw new ApiError(500, 'mkdir_failed')
+}
+
+/// Removes a staging file after a cancelled/failed download.
+export async function removeLocalFile(
+  token: string,
+  path: string,
+): Promise<void> {
+  await request<{ ok: boolean }>(
+    '/api/fs/remove',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path }),
+    },
+    token,
+  )
 }
 
 /// Ask the directory to join a shared code, or to issue a fresh one for this

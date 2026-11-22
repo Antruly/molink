@@ -5,7 +5,12 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  joinPath,
+  joinRelative,
   normalizeRemotePath,
+  parentPath,
+  pathCrumbs,
+  pathFlavor,
   resolveRemotePath,
 } from './file-transfer.ts'
 
@@ -57,4 +62,61 @@ test('~ is expanded from the host-reported home', () => {
 test('empty input opens the host home', () => {
   assert.equal(resolveRemotePath('', '/home/me', '/home/me'), '/home/me')
   assert.equal(resolveRemotePath('   ', '/home/me', '/home/me'), '/home/me')
+})
+
+test('joinPath uses the separator of the folder being displayed', () => {
+  assert.equal(joinPath('C:\\', 'Windows'), 'C:\\Windows')
+  assert.equal(joinPath('C:/Users', 'me'), 'C:/Users/me')
+  assert.equal(joinPath('/', 'etc'), '/etc')
+  assert.equal(joinPath('', 'x'), 'x')
+  assert.equal(joinRelative('C:\\Users\\me', 'a/b'), 'C:\\Users\\me\\a\\b')
+  assert.equal(joinRelative('/home/me', 'a/b'), '/home/me/a/b')
+})
+
+test('parentPath stops at a volume or share root', () => {
+  assert.equal(parentPath('/etc'), '/')
+  assert.equal(parentPath('/etc/ssh'), '/etc')
+  assert.equal(parentPath('/'), '')
+  assert.equal(parentPath('C:\\Windows'), 'C:\\')
+  assert.equal(parentPath('C:\\Windows\\System32'), 'C:\\Windows')
+  assert.equal(parentPath('C:\\'), '')
+  assert.equal(parentPath('\\\\server\\share'), '')
+  assert.equal(parentPath('\\\\server\\share\\dir'), '\\\\server\\share')
+})
+
+test('pathCrumbs builds clickable prefixes for drives and POSIX roots', () => {
+  assert.deepEqual(pathCrumbs('/var/log'), [
+    { name: '/', path: '/' },
+    { name: 'var', path: '/var' },
+    { name: 'log', path: '/var/log' },
+  ])
+  assert.deepEqual(pathCrumbs('C:\\Users\\me'), [
+    { name: 'C:', path: 'C:\\' },
+    { name: 'Users', path: 'C:\\Users' },
+    { name: 'me', path: 'C:\\Users\\me' },
+  ])
+  assert.deepEqual(pathCrumbs('\\\\server\\share\\dir'), [
+    { name: '\\\\server\\share', path: '\\\\server\\share' },
+    { name: 'dir', path: '\\\\server\\share\\dir' },
+  ])
+  assert.deepEqual(pathCrumbs(''), [])
+})
+
+test('pathFlavor tells a Windows path from a POSIX one', () => {
+  assert.equal(pathFlavor('C:\\Windows'), 'windows')
+  assert.equal(pathFlavor('C:/Windows'), 'windows')
+  assert.equal(pathFlavor('\\\\server\\share'), 'windows')
+  assert.equal(pathFlavor('/var/log'), 'posix')
+  assert.equal(pathFlavor('relative'), 'unknown')
+  assert.equal(pathFlavor(''), 'unknown')
+})
+
+test('a drive switch parses like any other absolute path', () => {
+  assert.equal(normalizeRemotePath('D:\\'), 'D:/')
+  assert.equal(resolveRemotePath('D:\\games', 'C:\\Users\\me', 'C:\\Users\\me'),
+    'D:/games')
+  assert.deepEqual(pathCrumbs('D:\\games'), [
+    { name: 'D:', path: 'D:\\' },
+    { name: 'games', path: 'D:\\games' },
+  ])
 })

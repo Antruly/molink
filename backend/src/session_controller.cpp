@@ -3291,7 +3291,12 @@ void session_controller::on_text(const std::string& text) {
       files_->cancel(id);
       update_file_retry_timer();
     } else if (action == "browse") {
-      files_->browse(string_field(j, "path"));
+      bool roots = false;
+      if (const auto it = j.find("roots");
+          it != j.end() && it->is_boolean()) {
+        roots = it->get<bool>();
+      }
+      files_->browse(string_field(j, "path"), roots);
     } else if (action == "request") {
       files_->request(string_field(j, "path"));
       update_file_retry_timer();
