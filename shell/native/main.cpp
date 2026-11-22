@@ -5,6 +5,12 @@
 
 #include <gtk/gtk.h>
 #include <gdk/gdkkeysyms.h>
+#ifdef GDK_WINDOWING_X11
+#include <gdk/gdkx.h>
+#ifdef MOLINK_HAVE_XI2
+#include <X11/extensions/XInput2.h>
+#endif
+#endif
 #include <glib-unix.h>
 #include <webkit2/webkit2.h>
 #include <cairo.h>
@@ -20,6 +26,7 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <cstdarg>
 
 #include <chrono>
 #include <cstdio>
@@ -46,6 +53,379 @@ bool g_core_tls = false;
 int g_instance_fd = -1;
 std::string g_instance_path;
 GtkWidget* g_main_window = nullptr;
+WebKitWebView* g_web_view = nullptr;
+
+// --- X11 keyboard grab -----------------------------------------------------
+//
+// The desktop environment's window manager owns Super/Alt combos, so the page
+// never sees them. While the remote picture is focused the page may ask us to
+// take an active X11 keyboard grab: every key then reaches our window (and
+// WebKit) instead of the WM, and the existing event.code forwarding sends
+// Win+R and friends to the remote unchanged. Wayland has no equivalent hook
+// for an application, so this path is X11-only.
+//
+// The grab is a privileged state: a missed release locks the user out of their
+// own keyboard. Every exit path below is deliberate.
+constexpr gint64 kGrabDebounceUsec = 300 * 1000;
+
+bool g_keyboard_grabbed = false;
+/// XI2 device id of the active keyboard grab, -1 when no grab is held.
+int g_xi_device_id = -1;
+/// The page still wants the grab, even if a focus blip made us drop it.
+bool g_grab_requested = false;
+/// Swallow the Escape key release after the local escape combo fired.
+bool g_swallow_escape_release = false;
+gint64 g_grab_started_us = 0;
+guint g_grab_release_source = 0;
+guint g_grab_watchdog_source = 0;
+bool g_grab_debounce_noted = false;
+
+void shell_log_grab(const char* format, ...) {
+  std::FILE* log = std::fopen("/tmp/molink-shell.log", "a");
+  if (log == nullptr) return;
+  std::fprintf(log, "[grab %.3f] ", g_get_real_time() / 1000000.0);
+  va_list args;
+  va_start(args, format);
+  std::vfprintf(log, format, args);
+  va_end(args);
+  std::fputc('\n', log);
+  std::fclose(log);
+}
+
+void shell_eval_js(const char* script) {
+  if (g_web_view == nullptr) return;
+  webkit_web_view_evaluate_javascript(g_web_view, script, -1, nullptr, nullptr,
+                                      nullptr, nullptr, nullptr);
+}
+
+bool session_is_wayland() {
+  const char* type = g_getenv("XDG_SESSION_TYPE");
+  if (type != nullptr && g_ascii_strcasecmp(type, "wayland") == 0) return true;
+  const char* display = g_getenv("WAYLAND_DISPLAY");
+  return display != nullptr && display[0] != '\0';
+}
+
+/// X11 is the only backend where an application grab can intercept the
+/// desktop's own shortcuts. A Wayland session is refused even if GTK happens
+/// to run through XWayland, because the compositor keeps Super/Alt+Tab.
+bool keyboard_grab_supported(GtkWidget* window) {
+#if defined(GDK_WINDOWING_X11) && defined(MOLINK_HAVE_XI2)
+  if (session_is_wayland()) return false;
+  GdkDisplay* display = window != nullptr ? gtk_widget_get_display(window)
+                                           : gdk_display_get_default();
+  return display != nullptr && GDK_IS_X11_DISPLAY(display);
+#else
+  (void)window;
+  return false;
+#endif
+}
+
+void report_grab_status(const char* status) {
+  gchar* script = g_strdup_printf(
+      "window.dispatchEvent(new CustomEvent('molink-grab',{detail:'%s'}))",
+      status);
+  shell_eval_js(script);
+  g_free(script);
+}
+
+/// Tells the page (which may already have mounted) whether this shell can grab
+/// at all, and leaves the answer readable synchronously.
+void publish_grab_support() {
+  const bool supported = keyboard_grab_supported(g_main_window);
+  const char* status = supported ? "off" : "unsupported";
+  gchar* script = g_strdup_printf(
+      "window.__molinkGrabSupported=%s;"
+      "window.dispatchEvent(new CustomEvent('molink-grab',{detail:'%s'}));",
+      supported ? "true" : "false", status);
+  shell_eval_js(script);
+  g_free(script);
+  shell_log_grab("support=%s", supported ? "x11" : "unsupported");
+}
+
+void release_keyboard_grab(const char* reason) {
+  if (g_grab_release_source != 0) {
+    g_source_remove(g_grab_release_source);
+    g_grab_release_source = 0;
+  }
+  if (g_grab_watchdog_source != 0) {
+    g_source_remove(g_grab_watchdog_source);
+    g_grab_watchdog_source = 0;
+  }
+  if (!g_keyboard_grabbed) return;
+#if defined(GDK_WINDOWING_X11) && defined(MOLINK_HAVE_XI2)
+  GdkDisplay* display = g_main_window != nullptr
+                            ? gtk_widget_get_display(g_main_window)
+                            : gdk_display_get_default();
+  if (display != nullptr && GDK_IS_X11_DISPLAY(display) &&
+      g_xi_device_id >= 0) {
+    XIUngrabDevice(GDK_DISPLAY_XDISPLAY(display), g_xi_device_id,
+                   CurrentTime);
+  }
+  g_xi_device_id = -1;
+#endif
+  const gint64 held_ms =
+      (g_get_monotonic_time() - g_grab_started_us) / 1000;
+  g_keyboard_grabbed = false;
+  g_grab_started_us = 0;
+  shell_log_grab("release (%s) after %" G_GINT64_FORMAT " ms", reason,
+                 held_ms);
+  // The grab may have swallowed part of a local shortcut (notably the escape
+  // combo). Let the page release every key it already forwarded, so the
+  // remote never keeps Ctrl/Alt/Shift held.
+  shell_eval_js(
+      "if(window.__molinkReleaseKeys)window.__molinkReleaseKeys()");
+  report_grab_status("off");
+}
+
+gboolean grab_watchdog(gpointer data);
+
+void grab_keyboard(GtkWidget* window) {
+  if (window == nullptr) return;
+  if (g_keyboard_grabbed) {
+    shell_log_grab("grab ignored: already grabbed");
+    report_grab_status("on");
+    return;
+  }
+  g_grab_requested = true;
+  if (!keyboard_grab_supported(window)) {
+    shell_log_grab("grab refused: %s",
+                   session_is_wayland() ? "wayland" : "not x11");
+    report_grab_status("unsupported");
+    return;
+  }
+#if defined(GDK_WINDOWING_X11) && defined(MOLINK_HAVE_XI2)
+  // An inactive window must not grab: nothing would later deliver the
+  // focus-out that releases it.
+  if (!gtk_window_is_active(GTK_WINDOW(window))) {
+    shell_log_grab("grab deferred: window is not active");
+    report_grab_status("off");
+    return;
+  }
+  if (!gtk_widget_get_realized(window)) gtk_widget_realize(window);
+  GdkWindow* gdk_window = gtk_widget_get_window(window);
+  if (gdk_window == nullptr) {
+    shell_log_grab("grab failed: window has no GdkWindow");
+    report_grab_status("failed");
+    return;
+  }
+  GdkDisplay* display = gtk_widget_get_display(window);
+  Display* xdisplay = GDK_DISPLAY_XDISPLAY(display);
+  const Window xid = gdk_x11_window_get_xid(gdk_window);
+  // XGrabKeyboard is a core-protocol grab. GTK3 consumes key events through
+  // XInput2, and a core grab's events (delivered to the grab window rather
+  // than the focus window) never reach gtk_widget key-press-event: the X
+  // events arrive, but GDK drops them, so WebKit sees nothing and even the
+  // local escape combo cannot fire. An XI2 grab on the master keyboard is
+  // translated by GDK normally and still overrides the WM's Super/Alt grabs.
+  int device = -1;
+  int device_count = 0;
+  XIDeviceInfo* devices =
+      XIQueryDevice(xdisplay, XIAllMasterDevices, &device_count);
+  if (devices != nullptr) {
+    for (int i = 0; i < device_count; ++i) {
+      if (devices[i].use == XIMasterKeyboard) {
+        device = devices[i].deviceid;
+        break;
+      }
+    }
+    XIFreeDeviceInfo(devices);
+  }
+  if (device < 0) {
+    shell_log_grab("grab failed: no master keyboard");
+    report_grab_status("failed");
+    return;
+  }
+  unsigned char key_mask_bits[XIMaskLen(XI_LASTEVENT)] = {0};
+  XISetMask(key_mask_bits, XI_KeyPress);
+  XISetMask(key_mask_bits, XI_KeyRelease);
+  XIEventMask event_mask;
+  event_mask.deviceid = XIAllMasterDevices;
+  event_mask.mask_len = XIMaskLen(XI_LASTEVENT);
+  event_mask.mask = key_mask_bits;
+  const int status =
+      XIGrabDevice(xdisplay, device, xid, CurrentTime, None, GrabModeAsync,
+                   GrabModeAsync, False, &event_mask);
+  if (status != GrabSuccess) {
+    const char* name = "unknown";
+    switch (status) {
+      case AlreadyGrabbed: name = "AlreadyGrabbed"; break;
+      case GrabInvalidTime: name = "GrabInvalidTime"; break;
+      case GrabNotViewable: name = "GrabNotViewable"; break;
+      case GrabFrozen: name = "GrabFrozen"; break;
+      default: break;
+    }
+    shell_log_grab("grab failed: %s (%d)", name, status);
+    report_grab_status("failed");
+    return;
+  }
+  g_xi_device_id = device;
+  g_keyboard_grabbed = true;
+  g_grab_debounce_noted = false;
+  g_grab_started_us = g_get_monotonic_time();
+  // FocusOut is not dependable while the XI2 grab is active; poll the X focus
+  // so a window switch can never leave the desktop keyboard captured.
+  g_grab_watchdog_source = g_timeout_add(200, grab_watchdog, window);
+  shell_log_grab("grab ok xid=0x%lx device=%d",
+                 static_cast<unsigned long>(xid), device);
+  report_grab_status("on");
+#else
+  (void)window;
+#endif
+}
+
+/// True while the X input focus still belongs to this toplevel (GTK's focus
+/// proxy is a child, so walk up). An active XI2 grab can hide FocusOut from
+/// GTK, which makes a polled check the only reliable release trigger.
+bool x_focus_is_ours(GtkWidget* window) {
+#if defined(GDK_WINDOWING_X11) && defined(MOLINK_HAVE_XI2)
+  GdkWindow* gdk_window = gtk_widget_get_window(window);
+  if (gdk_window == nullptr) return false;
+  Display* display = GDK_DISPLAY_XDISPLAY(gtk_widget_get_display(window));
+  const Window ours = gdk_x11_window_get_xid(gdk_window);
+  Window focus = None;
+  int revert = RevertToNone;
+  XGetInputFocus(display, &focus, &revert);
+  while (focus != None && focus != PointerRoot) {
+    if (focus == ours) return true;
+    if (focus == DefaultRootWindow(display)) return false;
+    Window root = None;
+    Window parent = None;
+    Window* children = nullptr;
+    unsigned int count = 0;
+    if (!XQueryTree(display, focus, &root, &parent, &children, &count)) {
+      return false;
+    }
+    if (children != nullptr) XFree(children);
+    if (parent == focus || parent == None) return false;
+    focus = parent;
+  }
+  return false;
+#else
+  (void)window;
+  return false;
+#endif
+}
+
+gboolean grab_watchdog(gpointer data) {
+  if (!g_keyboard_grabbed) {
+    g_grab_watchdog_source = 0;
+    return G_SOURCE_REMOVE;
+  }
+  GtkWidget* window = GTK_WIDGET(data);
+  // Same debounce as the focus handler: X11 can flicker focus for a moment
+  // right after a grab, and releasing there would undo the grab instantly.
+  if (g_get_monotonic_time() - g_grab_started_us < kGrabDebounceUsec) {
+    if (!g_grab_debounce_noted && !x_focus_is_ours(window)) {
+      g_grab_debounce_noted = true;
+      shell_log_grab("focus left during 300 ms debounce; holding grab");
+    }
+    return G_SOURCE_CONTINUE;
+  }
+  GdkWindow* gdk_window = gtk_widget_get_window(window);
+  const bool iconified =
+      gdk_window != nullptr &&
+      (gdk_window_get_state(gdk_window) & GDK_WINDOW_STATE_ICONIFIED) != 0;
+  if (iconified || !gtk_window_is_active(GTK_WINDOW(window)) ||
+      !x_focus_is_ours(window)) {
+    g_grab_watchdog_source = 0;  // release() must not remove this source
+    release_keyboard_grab(iconified ? "watchdog: iconified"
+                                    : "watchdog: focus left the window");
+    return G_SOURCE_REMOVE;
+  }
+  return G_SOURCE_CONTINUE;
+}
+
+gboolean grab_release_check(gpointer data) {
+  g_grab_release_source = 0;
+  if (!g_keyboard_grabbed) return G_SOURCE_REMOVE;
+  GtkWidget* window = GTK_WIDGET(data);
+  GdkWindow* gdk_window = gtk_widget_get_window(window);
+  const bool iconified =
+      gdk_window != nullptr &&
+      (gdk_window_get_state(gdk_window) & GDK_WINDOW_STATE_ICONIFIED) != 0;
+  if (!gtk_window_is_active(GTK_WINDOW(window)) || !x_focus_is_ours(window) ||
+      iconified) {
+    release_keyboard_grab(iconified ? "iconified (debounced)"
+                                    : "focus-out (debounced)");
+  } else {
+    // The grab itself makes X11 focus flicker right after it starts; the
+    // window is still active, so keep it.
+    shell_log_grab("focus jitter settled; keeping grab");
+  }
+  return G_SOURCE_REMOVE;
+}
+
+gboolean on_grab_focus_out(GtkWidget* window, GdkEventFocus*, gpointer) {
+  if (!g_keyboard_grabbed) return FALSE;
+  const gint64 elapsed_us = g_get_monotonic_time() - g_grab_started_us;
+  if (elapsed_us < kGrabDebounceUsec) {
+    // RustDesk sees ~10 Hz focus-out/focus-in pairs on X11 right after a
+    // grab. Do not release on the first one: re-check once the debounce
+    // window has passed, and release only if the window is still unfocused.
+    const gint64 remaining_ms = (kGrabDebounceUsec - elapsed_us + 999) / 1000;
+    if (g_grab_release_source == 0) {
+      shell_log_grab("focus-out %" G_GINT64_FORMAT
+                     " ms after grab; re-check in %" G_GINT64_FORMAT " ms",
+                     elapsed_us / 1000, remaining_ms);
+      g_grab_release_source = g_timeout_add(
+          static_cast<guint>(remaining_ms), grab_release_check, window);
+    } else {
+      shell_log_grab("focus-out within debounce; already scheduled");
+    }
+    return FALSE;
+  }
+  release_keyboard_grab("focus-out");
+  return FALSE;
+}
+
+gboolean grab_again_idle(gpointer data) {
+  GtkWidget* window = GTK_WIDGET(data);
+  if (g_grab_requested && !g_keyboard_grabbed &&
+      gtk_window_is_active(GTK_WINDOW(window))) {
+    shell_log_grab("window active again; restoring requested grab");
+    grab_keyboard(window);
+  }
+  return G_SOURCE_REMOVE;
+}
+
+gboolean on_grab_focus_in(GtkWidget* window, GdkEventFocus*, gpointer) {
+  if (g_grab_release_source != 0) {
+    g_source_remove(g_grab_release_source);
+    g_grab_release_source = 0;
+    shell_log_grab("focus returned within debounce; release cancelled");
+  }
+  // An auto-release (focus-out/unmap/iconify) keeps the page's request alive;
+  // once the window is active again the remote picture is still focused, so
+  // restore the grab. Deferred out of this signal to avoid re-entrancy.
+  if (!g_keyboard_grabbed && g_grab_requested) {
+    g_idle_add(grab_again_idle, window);
+  }
+  return FALSE;
+}
+
+void on_grab_unmap(GtkWidget*, gpointer) {
+  release_keyboard_grab("unmap");
+}
+
+/// Runs before GTK delivers the key to the focused WebView, so the local
+/// escape combo cannot be swallowed by the page or the remote.
+gint on_grab_key_snooper(GtkWidget*, GdkEventKey* event, gpointer) {
+  if (event == nullptr) return FALSE;
+  if (event->type == GDK_KEY_RELEASE && g_swallow_escape_release &&
+      event->keyval == GDK_KEY_Escape) {
+    g_swallow_escape_release = false;
+    return TRUE;
+  }
+  if (event->type != GDK_KEY_PRESS || !g_keyboard_grabbed) return FALSE;
+  const guint required = GDK_CONTROL_MASK | GDK_MOD1_MASK | GDK_SHIFT_MASK;
+  if ((event->state & required) != required) return FALSE;
+  if (event->keyval != GDK_KEY_Escape) return FALSE;
+  shell_log_grab("escape combo pressed; releasing local grab");
+  g_swallow_escape_release = true;
+  g_grab_requested = false;
+  release_keyboard_grab("escape combo");
+  return TRUE;  // The page must not forward half of a shortcut.
+}
 
 std::string exe_dir() {
   std::error_code ec;
@@ -276,9 +656,15 @@ gboolean check_core(gpointer) {
   return G_SOURCE_CONTINUE;
 }
 
-void on_destroy(GtkWidget*, gpointer) { gtk_main_quit(); }
+void on_destroy(GtkWidget*, gpointer) {
+  // The view may be on its way out with the window; do not evaluate into it.
+  g_web_view = nullptr;
+  release_keyboard_grab("window destroy");
+  gtk_main_quit();
+}
 
 gboolean on_quit_signal(gpointer) {
+  release_keyboard_grab("quit signal");
   gtk_main_quit();
   return G_SOURCE_CONTINUE;
 }
@@ -367,6 +753,10 @@ gboolean log_viewport(gpointer data) {
 
 void on_load_changed(WebKitWebView* view, WebKitLoadEvent event, gpointer) {
   if (event != WEBKIT_LOAD_FINISHED) return;
+  g_web_view = view;
+  // A reload or navigation replaces the page object: tell the new one whether
+  // this shell can grab before it draws the settings switch.
+  publish_grab_support();
   // A window that the WM maximized before the page loaded can miss the
   // resize; reallocate once the page is up as well.
   GtkWidget* toplevel = gtk_widget_get_toplevel(GTK_WIDGET(view));
@@ -617,6 +1007,11 @@ gboolean on_size_allocate(GtkWidget* widget, GdkRectangle*, gpointer) {
 
 gboolean on_window_state(GtkWidget* widget, GdkEventWindowState* event,
                          gpointer) {
+  // A minimized window must never keep the keyboard grabbed.
+  if ((event->changed_mask & GDK_WINDOW_STATE_ICONIFIED) != 0 &&
+      (event->new_window_state & GDK_WINDOW_STATE_ICONIFIED) != 0) {
+    release_keyboard_grab("iconified");
+  }
   const GdkWindowState square_mask = static_cast<GdkWindowState>(
       GDK_WINDOW_STATE_MAXIMIZED | GDK_WINDOW_STATE_FULLSCREEN);
   g_window_square = (event->new_window_state & square_mask) != 0;
@@ -852,7 +1247,12 @@ void on_script_message(WebKitUserContentManager*, WebKitJavascriptResult* result
   char* raw = jsc_value_to_string(value);
   const std::string action = raw != nullptr ? raw : "";
   g_free(raw);
-  if (action == "minimize") {
+  if (action == "grab-keyboard") {
+    grab_keyboard(window);
+  } else if (action == "release-keyboard") {
+    g_grab_requested = false;
+    release_keyboard_grab("page request");
+  } else if (action == "minimize") {
     gtk_window_iconify(GTK_WINDOW(window));
   } else if (action == "maximize") {
     if (gtk_window_is_maximized(GTK_WINDOW(window))) {
@@ -1086,6 +1486,7 @@ int main(int argc, char** argv) {
   }
 
   GtkWidget* view = webkit_web_view_new();
+  g_web_view = WEBKIT_WEB_VIEW(view);
   WebKitSettings* settings = webkit_web_view_get_settings(WEBKIT_WEB_VIEW(view));
   webkit_settings_set_enable_developer_extras(settings, TRUE);
   webkit_settings_set_enable_fullscreen(settings, TRUE);
@@ -1120,6 +1521,16 @@ int main(int argc, char** argv) {
   g_signal_connect(window, "size-allocate", G_CALLBACK(on_size_allocate), nullptr);
   g_signal_connect(window, "window-state-event", G_CALLBACK(on_window_state),
                    nullptr);
+  // The grab must not survive focus loss, unmapping (hide-to-tray) or a
+  // minimized window; each of these is an independent escape hatch.
+  g_signal_connect(window, "focus-out-event", G_CALLBACK(on_grab_focus_out),
+                   nullptr);
+  g_signal_connect(window, "focus-in-event", G_CALLBACK(on_grab_focus_in),
+                   nullptr);
+  g_signal_connect(window, "unmap", G_CALLBACK(on_grab_unmap), nullptr);
+  // Ctrl+Alt+Shift+Escape is checked before WebKit sees the key, so the page
+  // never forwards a lone Escape release to the remote.
+  gtk_key_snooper_install(on_grab_key_snooper, window);
 
   WebKitUserContentManager* content_manager =
       webkit_web_view_get_user_content_manager(WEBKIT_WEB_VIEW(view));
