@@ -43,6 +43,7 @@ import {
   useRef,
   useState,
   type ReactNode,
+  type DragEvent as ReactDragEvent,
   type PointerEvent as ReactPointerEvent,
 } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -61,7 +62,7 @@ import {
 } from '../lib/key-combos'
 import { keyToCode, normalizeKeyCode } from '../lib/key-code'
 import { Codec, codecName } from '../lib/protocol'
-import { collectDropEntries, stageDroppedFiles } from '../lib/file-drop'
+import { collectDropEntries, stageRemoteDrop } from '../lib/file-drop'
 import {
   setKeyboardGrab,
   shellInfo,
@@ -413,6 +414,11 @@ export function SessionView({
   const [chatUnread, setChatUnread] = useState(0)
   const chatOpenRef = useRef(false)
   const [filesOpen, setFilesOpen] = useState(false)
+  /// The remote folder the file panel is showing, published by the panel. A
+  /// drop on the session is uploaded straight into it.
+  const [remoteDir, setRemoteDir] = useState('')
+  const [dropActive, setDropActive] = useState(false)
+  const dropDepth = useRef(0)
   // The player lives in the connection, so a background tab keeps playing and
   // the toggle reflects that when the tab is shown again.
   const [audioOn, setAudioOn] = useState(
@@ -910,32 +916,48 @@ export function SessionView({
     return () => observer.disconnect()
   }, [compactBar, quickOpen])
 
-  // While the transfer drawer is open the whole window accepts a file drop:
-  // the WebView's own drag destination only reaches the page when the page says
-  // it wants the drop, and a drop that lands a few pixels off the drawer zone
-  // used to be swallowed by the shell.
-  useEffect(() => {
-    if (!filesOpen) return
-    const onDragOver = (event: globalThis.DragEvent) => {
-      if (Array.from(event.dataTransfer?.types ?? []).includes('Files')) {
-        event.preventDefault()
-        if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
-      }
-    }
-    const onDrop = (event: globalThis.DragEvent) => {
-      if (!event.dataTransfer) return
-      event.preventDefault()
-      void collectDropEntries(event.dataTransfer).then((entries) =>
-        stageDroppedFiles(entries),
-      )
-    }
-    document.addEventListener('dragover', onDragOver)
-    document.addEventListener('drop', onDrop)
-    return () => {
-      document.removeEventListener('dragover', onDragOver)
-      document.removeEventListener('drop', onDrop)
-    }
-  }, [filesOpen])
+  // A file dropped on the session goes straight to the remote folder the file
+  // panel is showing (or the one remembered from last time). The drawer has its
+  // own drop zone for staging a local list; this one is the shortcut.
+  type SurfaceDrag = ReactDragEvent<HTMLDivElement>
+  const dragHasFiles = (event: SurfaceDrag) =>
+    Array.from(event.dataTransfer?.types ?? []).includes('Files')
+  const dragOverPanel = (target: EventTarget | null) =>
+    target instanceof Element && target.closest('[data-file-drop]') !== null
+
+  const onSessionDragEnter = (event: SurfaceDrag) => {
+    if (!connection() || !dragHasFiles(event)) return
+    if (dragOverPanel(event.target)) return
+    event.preventDefault()
+    dropDepth.current += 1
+    setDropActive(true)
+  }
+
+  const onSessionDragOver = (event: SurfaceDrag) => {
+    if (!connection() || !dragHasFiles(event)) return
+    if (dragOverPanel(event.target)) return
+    event.preventDefault()
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
+    setDropActive(true)
+  }
+
+  const onSessionDragLeave = (event: SurfaceDrag) => {
+    if (dragOverPanel(event.target)) return
+    // dragenter/dragleave fire per child; count them so moving over a button
+    // inside the picture does not flicker the overlay off.
+    dropDepth.current = Math.max(0, dropDepth.current - 1)
+    if (dropDepth.current === 0) setDropActive(false)
+  }
+
+  const onSessionDrop = (event: SurfaceDrag) => {
+    if (!connection() || !event.dataTransfer) return
+    if (dragOverPanel(event.target)) return
+    event.preventDefault()
+    event.stopPropagation()
+    dropDepth.current = 0
+    setDropActive(false)
+    void collectDropEntries(event.dataTransfer).then(stageRemoteDrop)
+  }
 
   // The expanded quick bar collapses when focus or the pointer moves outside.
   useEffect(() => {
@@ -2159,7 +2181,26 @@ export function SessionView({
               : t('session.watermarkTiles')
 
   return (
-    <div ref={sessionRootRef} className="flex min-h-0 flex-1 flex-col">
+    <div
+      ref={sessionRootRef}
+      className="relative flex min-h-0 flex-1 flex-col"
+      onDragEnter={onSessionDragEnter}
+      onDragOver={onSessionDragOver}
+      onDragLeave={onSessionDragLeave}
+      onDrop={onSessionDrop}
+    >
+      {dropActive ? (
+        <div className="pointer-events-none absolute inset-0 z-[60] flex items-center justify-center bg-black/45 p-6 backdrop-blur-[2px]">
+          <div className="flex max-w-[92vw] flex-col items-center gap-2 rounded-xl border-2 border-dashed border-accent/70 bg-surface/95 px-8 py-6 text-center shadow-2xl">
+            <FolderOpen size={30} className="text-accent" />
+            <span className="text-[13px] font-medium text-ink">
+              {remoteDir !== ''
+                ? t('files.dropToRemote', { path: remoteDir })
+                : t('files.dropPickRemote')}
+            </span>
+          </div>
+        </div>
+      ) : null}
       {tab.error || actionError ? (
         <div
           className={
@@ -3201,6 +3242,8 @@ export function SessionView({
             open={filesOpen}
             onClose={() => setFilesOpen(false)}
             connection={connection() ?? null}
+            onRemotePathChange={setRemoteDir}
+            onRequestOpen={() => setFilesOpen(true)}
           />
 
 

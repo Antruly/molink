@@ -146,3 +146,32 @@ export function installUpdate(url: string): void {
 export function setWindowFullscreen(on: boolean): void {
   windowAction(on ? 'fullscreen-on' : 'fullscreen-off')
 }
+
+export interface ShellDragOutPayload {
+  /// Absolute staging folder under the local cache; the shell removes it
+  /// after the drag if the user cancels.
+  dir: string
+  /// Absolute local files, one per remote entry (folders expanded).
+  paths: string[]
+  /// Display names in the same order; only used for the drag icon/fallback.
+  names: string[]
+}
+
+/// Only the Linux GTK shell can start a system drag from a WebView: the
+/// browser page has no API for it, and WebView2/Windows is a separate shell
+/// that does not implement the bridge command yet.
+export function shellDragOutCapable(): boolean {
+  const target = window as unknown as WebKitWindow
+  return shellInfo.enabled && shellInfo.platform === 'linux' &&
+    Boolean(target.webkit?.messageHandlers?.molink)
+}
+
+/// Hands the prepared local files to the shell, which starts the native
+/// `text/uri-list` drag at the pointer. Returns false when no bridge exists so
+/// the caller can fall back to a normal download.
+export function startShellDragOut(payload: ShellDragOutPayload): boolean {
+  if (!shellDragOutCapable()) return false
+  if (payload.paths.length === 0) return false
+  postShellCommand(`drag-out:${JSON.stringify(payload)}`)
+  return true
+}

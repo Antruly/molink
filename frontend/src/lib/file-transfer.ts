@@ -282,6 +282,43 @@ export function localEntriesAt(
   })
 }
 
+/// A drop's flat path list turned into the tree `buildUploadPlan` expects.
+/// Dropping a folder keeps its name as the first segment (`photos/a.jpg`), so
+/// the remote folder gets the same `photos/` tree. Several dropped roots are
+/// selected individually; a top-level file is selected as a file.
+export function droppedTree(paths: string[]): {
+  dirs: string[]
+  selection: UploadSelection[]
+} {
+  const dirs = new Set<string>()
+  const tops = new Map<string, boolean>()
+  for (const raw of paths) {
+    const path = normalizeRelativePath(raw)
+    if (path === '') continue
+    const parts = path.split('/')
+    for (let index = 1; index < parts.length; index += 1) {
+      dirs.add(parts.slice(0, index).join('/'))
+    }
+    tops.set(parts[0]!, parts.length > 1 || tops.get(parts[0]!) === true)
+  }
+  return {
+    dirs: [...dirs].sort(),
+    selection: [...tops.entries()].map(([path, dir]) => ({ path, dir })),
+  }
+}
+
+/// Where a drop on the session lands. The folder the panel is showing wins;
+/// with no panel/listing yet, the last folder the user browsed is the only
+/// sensible guess. An empty result means the page must ask once.
+export function dropTarget(
+  listingPath: string | null | undefined,
+  remembered: string | null | undefined,
+): string {
+  const current = (listingPath ?? '').trim()
+  if (current !== '') return current
+  return (remembered ?? '').trim()
+}
+
 /// The plan for one "send over" action: the selected files plus every
 /// selected folder expanded recursively, and the empty folders that have no
 /// file to carry them. Paths are relative to the open local directory, which

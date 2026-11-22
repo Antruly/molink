@@ -24,6 +24,7 @@ import {
   useRef,
   useState,
   type DragEvent,
+  type PointerEvent as ReactPointerEvent,
 } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { TFunction } from 'i18next'
@@ -42,8 +43,18 @@ import { clipboardFilesMode } from '../lib/clipboard-local'
 import {
   collectDropEntries,
   onDroppedFiles,
+  onRemoteDropFiles,
   type StagedFile,
 } from '../lib/file-drop'
+import {
+  buildRemoteDragPayload,
+  dragItemsFor,
+  encodeRemoteDragPayload,
+  isOutsideWindow,
+  REMOTE_DRAG_MIME,
+  type RemoteDragItem,
+} from '../lib/remote-drag'
+import { shellDragOutCapable, startShellDragOut } from '../lib/shell'
 import type {
   ClipboardFileEntry,
   FileEntry,
@@ -68,6 +79,8 @@ import {
   buildUploadPlan,
   downloadBlockReason,
   downloadModeFor,
+  droppedTree,
+  dropTarget,
   isUnsupportedAction,
   joinPath,
   joinRelative,
@@ -285,6 +298,14 @@ interface DownloadJob {
   /// renamed to `fsTarget` when the transfer completes.
   fsTarget: string | null
   fsTemp: string | null
+  /// Final absolute path the local core chose (`fsTarget`, possibly with a
+  /// ` (1)` suffix). Drag-out reports these to the shell.
+  finalPath: string | null
+  /// Called once the job settles: the committed path, or null on failure.
+  onDone: ((path: string | null) => void) | null
+  /// Browser drag-out fallback: hand the completed blob to the browser as a
+  /// download instead of waiting for a Save button click.
+  autoDownload: boolean
   writable: FileSystemWritableFileStream | null
   parentDir: FileSystemDirectoryHandle | null
   createdFile: boolean
@@ -473,10 +494,17 @@ export function FileTransferPanel({
   open,
   onClose,
   connection,
+  onRemotePathChange,
+  onRequestOpen,
 }: {
   open: boolean
   onClose: () => void
   connection: SessionConnection | null
+  /// Publishes the folder the remote pane is showing so the session surface
+  /// can describe a drop target.
+  onRemotePathChange?: (path: string) => void
+  /// Asks the session to open this drawer (a drop with no destination yet).
+  onRequestOpen?: () => void
 }) {
   const { t } = useTranslation()
   const localMode = useAppStore((state) => state.localMode)
@@ -928,7 +956,11 @@ export function FileTransferPanel({
             await job.writeChain
             if (job.writeError !== undefined) throw job.writeError
             if (token === '') throw new Error('no local core token')
-            await moveLocalFile(token, job.fsTemp, job.fsTarget)
+            job.finalPath = await moveLocalFile(
+              token,
+              job.fsTemp,
+              job.fsTarget,
+            )
             job.fsTemp = null
             job.committed = true
             if (job.taskKey !== null && job.childKey) {
@@ -997,6 +1029,22 @@ export function FileTransferPanel({
           }
         } else if (maySaveFromButton(job.strategy, job, false)) {
           const blob = new Blob(job.chunks as BlobPart[])
+          if (job.autoDownload) {
+            // Drag-out fallback in a plain browser: the bytes arrived after
+            // the drop gesture, so this is the closest thing to "download it
+            // to the browser's folder". A blocked automatic download still
+            // leaves the same blob in the Save list below.
+            const url = URL.createObjectURL(blob)
+            const anchor = document.createElement('a')
+            anchor.href = url
+            anchor.download = suggestedFileName(job.name, job.name)
+            document.body.appendChild(anchor)
+            anchor.click()
+            anchor.remove()
+            window.setTimeout(() => URL.revokeObjectURL(url), 30_000)
+          }
+          // If the browser blocks the automatic download, the Save entry is
+          // still there; the same check feeds the manual button.
           setSaveReady((current) => [
             ...current.slice(-7),
             { key: job.key, name: job.name, size: job.size, blob },
@@ -1020,6 +1068,7 @@ export function FileTransferPanel({
           if (!job.silent) setError(t('files.incomplete'))
           setDownload(null)
         }
+        job.onDone?.(job.finalPath)
         job.resolve()
         downloadPumpRef.current()
       }
@@ -1136,6 +1185,8 @@ export function FileTransferPanel({
       baseDir: FileSystemDirectoryHandle | null
       segments: string[] | null
       fsTarget?: string | null
+      onDone?: (path: string | null) => void
+      autoDownload?: boolean
       resolve: () => void
     }): DownloadJob => {
       const key = nextKey.current++
@@ -1145,6 +1196,9 @@ export function FileTransferPanel({
         ...props,
         fsTarget,
         fsTemp: fsTarget === null ? null : `${fsTarget}.molink-${key}.part`,
+        finalPath: null,
+        onDone: props.onDone ?? null,
+        autoDownload: props.autoDownload === true,
         writable: null,
         parentDir: null,
         createdFile: false,
@@ -2320,6 +2374,801 @@ export function FileTransferPanel({
   }, [listing, remoteSelection])
 
   // ------------------------------------------------------------- upload run
+  /// Runs one upload plan against a destination folder. Shared by the
+  /// panel's "send over" button and by files dropped on the session picture,
+  /// which skip the local pane and go straight to the remote folder.
+  const runUploadPlan = useCallback(
+    async ({
+      plan,
+      dest,
+      taskName,
+      walkTruncated = false,
+    }: {
+      plan: UploadPlan
+      dest: string
+      taskName: string
+      walkTruncated?: boolean
+    }) => {
+      setUploadBusy(true)
+      if (plan.files.length === 0 && plan.dirs.length === 0) {
+        setError(t('files.nothingToSend'))
+        setUploadBusy(false)
+        return
+      }
+
+      const children: TaskChild[] = plan.files.map((file) => ({
+        key: `c${childSeq.current++}`,
+        name: file.path,
+        path: file.path,
+        size: file.size,
+        progress: 0,
+        status: 'queued',
+      }))
+      const taskKey = createTask('up', taskName, children, {
+        skipped: plan.skipped,
+        dirsTotal: plan.dirs.length,
+      })
+      if (walkTruncated) appendNote(taskKey, t('files.walkTruncated'))
+      const run: UploadRun = { taskKey, cancelled: false, activeId: 0 }
+      uploadRuns.current.set(taskKey, run)
+      updateTask(taskKey, (task) => ({ ...task, phase: 'running' }))
+
+      try {
+        let unsupportedDirs = false
+        let unsupportedDest = false
+
+        for (const dir of plan.dirs) {
+          if (run.cancelled) break
+          if (unsupportedDirs) {
+            updateTask(taskKey, (task) => ({
+              ...task,
+              dirsFailed: task.dirsFailed + 1,
+            }))
+            continue
+          }
+          const answerPromise = waitUpload('mkdir', uploadReplyTimeoutMs)
+          connectionRef.current?.sendFileAction('mkdir', { path: dir, dest })
+          const answer = await answerPromise
+          if (run.cancelled) break
+          if (answer.ok) {
+            updateTask(taskKey, (task) => ({
+              ...task,
+              dirsDone: task.dirsDone + 1,
+            }))
+          } else if (answer.cancelled) {
+            break
+          } else {
+            updateTask(taskKey, (task) => ({
+              ...task,
+              dirsFailed: task.dirsFailed + 1,
+            }))
+            if (isUnsupportedAction(answer.code, answer.message)) {
+              unsupportedDirs = true
+              appendNote(taskKey, t('files.unsupportedDirs'))
+            }
+          }
+        }
+
+        for (const child of children) {
+          const file = plan.files.find((item) => item.path === child.path)
+          if (run.cancelled) {
+            patchChild(taskKey, child.key, { status: 'cancelled' })
+            continue
+          }
+          if (!file) {
+            patchChild(taskKey, child.key, {
+              status: 'error',
+              error: t('files.error'),
+            })
+            continue
+          }
+          patchChild(taskKey, child.key, { status: 'running' })
+
+          const answerPromise = waitUpload('offer', uploadReplyTimeoutMs)
+          connectionRef.current?.sendFileAction('offer', {
+            name: file.path,
+            size: file.size,
+            dest,
+          })
+          const answer = await answerPromise
+          if (run.cancelled || answer.cancelled) {
+            if (answer.id) {
+              connectionRef.current?.sendFileAction('cancel', {
+                id: answer.id,
+              })
+            }
+            patchChild(taskKey, child.key, { status: 'cancelled' })
+            continue
+          }
+          if (!answer.ok || !answer.id) {
+            patchChild(taskKey, child.key, {
+              status: 'error',
+              error: answer.message ?? t('files.error'),
+            })
+            // A read-only or missing remote folder must say so instead of
+            // leaving the failure buried in the task row.
+            setError(answer.message ?? t('files.error'))
+            continue
+          }
+          const echoed = answer.dir === undefined
+            ? null
+            : relativeUnder(dest, answer.dir)
+          if (!unsupportedDest && echoed !== '') {
+            unsupportedDest = true
+            appendNote(taskKey, t('files.unsupportedDest'))
+          }
+
+          const id = answer.id
+          run.activeId = id
+          const chunk = answer.chunk && answer.chunk > 0
+            ? answer.chunk
+            : 256 * 1024
+          let offset = 0
+          let failed = false
+          while (offset < file.size) {
+            if (run.cancelled) {
+              connectionRef.current?.sendFileAction('cancel', { id })
+              patchChild(taskKey, child.key, { status: 'cancelled' })
+              failed = true
+              break
+            }
+            const target = connectionRef.current
+            if (!target) {
+              patchChild(taskKey, child.key, {
+                status: 'error',
+                error: t('files.error'),
+              })
+              failed = true
+              break
+            }
+            const end = Math.min(file.size, offset + chunk)
+            let bytes: Uint8Array
+            try {
+              if (file.file) {
+                bytes = new Uint8Array(
+                  await file.file.slice(offset, end).arrayBuffer(),
+                )
+              } else if (file.absPath && token !== '') {
+                bytes = await readLocalFileRange(
+                  token,
+                  file.absPath,
+                  offset,
+                  end - offset,
+                )
+              } else {
+                throw new Error('no local source')
+              }
+            } catch {
+              patchChild(taskKey, child.key, {
+                status: 'error',
+                error: t('files.localPathMissing'),
+              })
+              failed = true
+              break
+            }
+            if (run.cancelled) {
+              connectionRef.current?.sendFileAction('cancel', { id })
+              patchChild(taskKey, child.key, { status: 'cancelled' })
+              failed = true
+              break
+            }
+            target.sendFileChunk(id, offset, bytes)
+            offset = end
+            patchProgress(taskKey, child.key, offset)
+            // Yield so a large file does not freeze the UI thread.
+            await new Promise((resolve) => window.setTimeout(resolve, 0))
+          }
+          run.activeId = 0
+          if (failed) continue
+
+          patchProgress(taskKey, child.key, offset, true)
+          const target = connectionRef.current
+          if (!target) {
+            patchChild(taskKey, child.key, {
+              status: 'error',
+              error: t('files.error'),
+            })
+            continue
+          }
+          target.sendClientLog(
+            `upload chunks done id=${id} sent=${offset} size=${file.size}`,
+          )
+          const donePromise = waitUpload('done', uploadDoneTimeoutMs)
+          target.sendFileAction('complete', { id })
+          const done = await donePromise
+          if (done.ok) {
+            // It won the race with the cancel: the host already renamed the
+            // file, so report it as done instead of pretending it vanished.
+            patchChild(taskKey, child.key, {
+              status: 'done',
+              progress: file.size,
+              size: file.size,
+            })
+            if (done.path) {
+              updateTask(taskKey, (task) => ({
+                ...task,
+                remotePaths: [...task.remotePaths, done.path!],
+              }))
+            }
+          } else if (done.cancelled) {
+            patchChild(taskKey, child.key, { status: 'cancelled' })
+          } else if (run.cancelled) {
+            patchChild(taskKey, child.key, { status: 'cancelled' })
+          } else {
+            patchChild(taskKey, child.key, {
+              status: 'error',
+              error: done.message ?? t('files.error'),
+            })
+          }
+        }
+      } finally {
+        uploadRuns.current.delete(taskKey)
+        updateTask(taskKey, (task) => ({
+          ...task,
+          children: task.children.map((child) =>
+            child.status === 'queued' || child.status === 'running'
+              ? {
+                  ...child,
+                  status: run.cancelled ? 'cancelled' : 'error',
+                }
+              : child,
+          ),
+        }))
+        finalizeTask(taskKey)
+        setUploadBusy(false)
+        const currentListing = listingRef.current
+        if (currentListing) {
+          void requestListing(currentListing.path, true).catch(
+            () => undefined,
+          )
+        }
+      }
+    },
+    [
+      appendNote,
+      createTask,
+      finalizeTask,
+      patchChild,
+      patchProgress,
+      requestListing,
+      t,
+      token,
+      updateTask,
+      waitUpload,
+    ],
+  )
+
+  /// Reads a remote selection into the file/folder tree both drag-out paths
+  /// need. Folders are expanded recursively; a failed listing is recorded
+  /// instead of silently dropping that subtree.
+  const collectRemoteFiles = useCallback(
+    async (
+      items: RemoteDragItem[],
+      stopped: () => boolean,
+    ): Promise<{
+      files: RemotePlanFile[]
+      dirs: string[]
+      failures: string[]
+    }> => {
+      const files: RemotePlanFile[] = []
+      const dirs: string[] = []
+      const failures: string[] = []
+      const walk = async (path: string, rel: string): Promise<void> => {
+        if (stopped()) return
+        dirs.push(rel)
+        let result: RemoteListing
+        try {
+          result = await requestListing(path, false)
+        } catch (walkError) {
+          failures.push(
+            `${rel}: ${errorText(walkError) || t('files.error')}`,
+          )
+          return
+        }
+        if (stopped()) return
+        for (const entry of result.entries) {
+          const childPath = joinPath(result.path, entry.name)
+          const childRel = rel === '' ? entry.name : `${rel}/${entry.name}`
+          if (entry.dir) await walk(childPath, childRel)
+          else {
+            files.push({ path: childPath, rel: childRel, size: entry.size })
+          }
+        }
+      }
+      for (const item of items) {
+        if (stopped()) break
+        if (item.dir) await walk(item.path, item.name)
+        else files.push({ path: item.path, rel: item.name, size: 0 })
+      }
+      return { files, dirs, failures }
+    },
+    [requestListing, t],
+  )
+
+  /// Sizes of plain files come from the listing that built the selection; the
+  /// recursive walk above starts from an entry and only knows names, so fill
+  /// in the size for the top-level files from the caller's entries.
+  const collectDragOutFiles = useCallback(
+    async (items: RemoteDragItem[], stopped: () => boolean) => {
+      const walked = await collectRemoteFiles(items, stopped)
+      const sizes = new Map(
+        items.filter((item) => !item.dir).map((item) => [item.path, item.size]),
+      )
+      return {
+        ...walked,
+        files: walked.files.map((file) => ({
+          ...file,
+          size: sizes.get(file.path) ?? file.size,
+        })),
+      }
+    },
+    [collectRemoteFiles],
+  )
+
+  // ---------------------------------------------------------- remote drop-in
+  const uploadDropped = useCallback(
+    async (staged: StagedFile[], dest: string) => {
+      const files: LocalFile[] = []
+      for (const item of staged) {
+        const path = normalizeRelativePath(
+          item.path === '' ? item.file.name : item.path,
+        )
+        if (path === '') continue
+        files.push({ path, size: item.file.size, file: item.file })
+      }
+      const { dirs, selection } = droppedTree(files.map((file) => file.path))
+      const plan = buildUploadPlan(files, dirs, selection)
+      const taskName = selection.length === 1
+        ? selection[0]!.path
+        : t('files.itemsCount', { count: selection.length })
+      setError(null)
+      await runUploadPlan({ plan, dest, taskName })
+    },
+    [runUploadPlan, t],
+  )
+
+  const handleRemoteDrop = useCallback(
+    (staged: StagedFile[]) => {
+      if (staged.length === 0) {
+        setError(t('files.emptyDrop'))
+        return
+      }
+      const dest = dropTarget(
+        listingRef.current?.path,
+        readStored(REMOTE_PATH_KEY),
+      )
+      if (dest === '') {
+        // No folder is known yet: stage the files in the drawer and ask once.
+        applyDropped(staged)
+        onRequestOpen?.()
+        setError(t('files.dropNeedTarget'))
+        return
+      }
+      // The drawer owns the task list, so opening it is what gives the drop
+      // visible per-file progress and the cancel button.
+      onRequestOpen?.()
+      void uploadDropped(staged, dest)
+    },
+    [applyDropped, onRequestOpen, t, uploadDropped],
+  )
+
+  useEffect(() => onRemoteDropFiles(handleRemoteDrop), [handleRemoteDrop])
+
+  // ----------------------------------------------------------- drag-out
+  const [dragOut, setDragOut] = useState<{
+    phase: 'preparing' | 'ready' | 'error'
+    name: string
+    percent: number
+    slow: boolean
+  } | null>(null)
+  const dragOutTicket = useRef(0)
+  const dragOutRun = useRef<{ cancelled: boolean } | null>(null)
+  const dragOutSlowTimer = useRef(0)
+  const dragOutProgressTimer = useRef(0)
+  /// A press on a remote row that may become a drag-out. Pointer events are
+  /// used instead of an HTML drag: WebKit's own drag keeps the pointer grab,
+  /// which made a nested GTK drag unable to reach the desktop.
+  const dragOutPointer = useRef<{
+    pointerId: number
+    items: RemoteDragItem[]
+    startX: number
+    startY: number
+    moved: boolean
+    triggered: boolean
+  } | null>(null)
+  /// Swallow the click WebKit may still deliver after the pointer left for a
+  /// drag-out, so releasing on the edge does not also open a folder.
+  const dragOutSuppressClick = useRef(false)
+
+  useEffect(() => {
+    if (listing) onRemotePathChange?.(listing.path)
+    else onRemotePathChange?.(readStored(REMOTE_PATH_KEY))
+  }, [listing, onRemotePathChange])
+
+  const localHomePath = useCallback(async (): Promise<string> => {
+    if (!localMode || token === '') return ''
+    try {
+      const home = await fetchLocalDirectory(token, '')
+      return (home.root || home.path).trim()
+    } catch {
+      return ''
+    }
+  }, [localMode, token])
+
+  /// Prepares local copies under the cache directory, then asks the shell to
+  /// start the system drag. The overlay reports progress and can be cancelled.
+  const prepareDragOut = useCallback(
+    async (items: RemoteDragItem[]) => {
+      const ticket = (dragOutTicket.current += 1)
+      const run = { cancelled: false }
+      dragOutRun.current = run
+      const stopped = () =>
+        run.cancelled || ticket !== dragOutTicket.current
+      const label = items.length === 1
+        ? items[0]!.name
+        : t('files.itemsCount', { count: items.length })
+      setDragOut({
+        phase: 'preparing',
+        name: label,
+        percent: 0,
+        slow: false,
+      })
+      window.clearTimeout(dragOutSlowTimer.current)
+      dragOutSlowTimer.current = window.setTimeout(() => {
+        setDragOut((current) =>
+          current && current.phase === 'preparing'
+            ? { ...current, slow: true }
+            : current,
+        )
+      }, 10_000)
+      window.clearInterval(dragOutProgressTimer.current)
+      const finishOverlay = () => {
+        window.clearTimeout(dragOutSlowTimer.current)
+        window.clearInterval(dragOutProgressTimer.current)
+      }
+      let handedOff = false
+
+      try {
+        const home = await localHomePath()
+        if (stopped()) return
+        if (home === '') {
+          finishOverlay()
+          setDragOut(null)
+          setError(t('files.dragOutNeedClient'))
+          return
+        }
+        const id =
+          typeof crypto !== 'undefined' &&
+          typeof crypto.randomUUID === 'function'
+            ? crypto.randomUUID()
+            : `${Date.now()}-${Math.random().toString(36).slice(2)}`
+        const staging = joinRelative(
+          home,
+          `.cache/molink/dragout/${id}`,
+        )
+        await makeLocalDirectory(token, staging)
+        if (stopped()) return
+
+        const { files, dirs, failures } = await collectDragOutFiles(
+          items,
+          stopped,
+        )
+        if (stopped()) return
+        if (files.length === 0 || failures.length > 0) {
+          finishOverlay()
+          setDragOut(null)
+          setError(failures[0] ?? t('files.error'))
+          return
+        }
+
+        for (const dir of dirs) {
+          if (stopped()) return
+          const segments = safeTargetSegments(dir, 'folder')
+          await makeLocalDirectory(
+            token,
+            joinRelative(staging, segments.join('/')),
+          ).catch(() => undefined)
+        }
+
+        const totalBytes = files.reduce((sum, file) => sum + file.size, 0)
+        let doneBytes = 0
+        const committed: string[] = []
+        dragOutProgressTimer.current = window.setInterval(() => {
+          const job = downloadSection.current
+          const received = job?.received ?? 0
+          setDragOut((current) =>
+            current && current.phase === 'preparing'
+              ? {
+                  ...current,
+                  percent:
+                    totalBytes <= 0
+                      ? 0
+                      : Math.min(
+                          99,
+                          Math.round(
+                            ((doneBytes + received) / totalBytes) * 100,
+                          ),
+                        ),
+                }
+              : current,
+          )
+        }, 250)
+
+        for (const file of files) {
+          if (stopped()) break
+          const segments = safeTargetSegments(file.rel, 'file')
+          const name = segments[segments.length - 1]!
+          const fsTarget = joinRelative(staging, segments.join('/'))
+          await new Promise<void>((resolve) => {
+            queueJob(
+              makeJob({
+                path: file.path,
+                name,
+                taskKey: null,
+                childKey: null,
+                silent: true,
+                strategy: 'button',
+                target: null,
+                baseDir: null,
+                segments: null,
+                fsTarget,
+                onDone: (path) => {
+                  if (path) committed.push(path)
+                },
+                resolve,
+              }),
+            )
+          })
+          doneBytes += file.size
+        }
+
+        finishOverlay()
+        if (stopped()) {
+          setDragOut(null)
+          return
+        }
+        if (committed.length !== files.length) {
+          setDragOut(null)
+          setError(t('files.dragOutFailed'))
+          return
+        }
+        setDragOut({
+          phase: 'ready',
+          name: label,
+          percent: 100,
+          slow: false,
+        })
+        if (!startShellDragOut({ dir: staging, paths: committed, names: files.map((file) => file.rel) })) {
+          setError(t('files.dragOutNeedClient'))
+          return
+        }
+        handedOff = true
+        // The native drag runs its own loop; the preparation card has done its
+        // job. If the user cancels, the shell keeps the cache for five minutes.
+        window.setTimeout(() => setDragOut(null), 1_200)
+      } catch (dragError) {
+        finishOverlay()
+        setDragOut(null)
+        setError(errorText(dragError) || t('files.dragOutFailed'))
+      } finally {
+        if (dragOutRun.current === run) dragOutRun.current = null
+        // A newer gesture owns the overlay; only the run that still owns it
+        // may tear it down.
+        if (!handedOff && ticket === dragOutTicket.current) {
+          finishOverlay()
+          setDragOut(null)
+        }
+      }
+    },
+    [
+      collectDragOutFiles,
+      localHomePath,
+      makeJob,
+      queueJob,
+      t,
+      token,
+    ],
+  )
+
+  const cancelDragOut = useCallback(() => {
+    dragOutTicket.current += 1
+    const run = dragOutRun.current
+    if (run) run.cancelled = true
+    const job = downloadSection.current
+    if (job) finishDownloadRef.current(job, t('files.cancelled'), true)
+    dragOutRun.current = null
+    window.clearTimeout(dragOutSlowTimer.current)
+    window.clearInterval(dragOutProgressTimer.current)
+    setDragOut(null)
+  }, [t])
+
+  /// The browser fallback: fetch the selection and hand it to the browser as a
+  /// normal download. The page cannot start a system drag, which is why this
+  /// path exists at all.
+  const fallbackDragOut = useCallback(
+    async (items: RemoteDragItem[]) => {
+      setError(t('files.dragOutFallback'))
+      const run = { cancelled: false }
+      const { files } = await collectDragOutFiles(items, () => run.cancelled)
+      if (files.length === 0) {
+        setError(t('files.error'))
+        return
+      }
+      const children: TaskChild[] = files.map((file) => ({
+        key: `c${childSeq.current++}`,
+        name: file.rel,
+        path: file.path,
+        size: file.size,
+        progress: 0,
+        status: 'queued',
+      }))
+      const taskKey = createTask('down', t('files.dragOutDownload'), children)
+      const downloadRun: DownloadRun = { taskKey, cancelled: false }
+      downloadRuns.current.set(taskKey, downloadRun)
+      try {
+        for (let index = 0; index < files.length; index += 1) {
+          const file = files[index]!
+          if (downloadRun.cancelled) break
+          const segments = safeTargetSegments(file.rel, 'file')
+          const name = segments[segments.length - 1]!
+          await new Promise<void>((resolve) => {
+            queueJob(
+              makeJob({
+                path: file.path,
+                name,
+                taskKey,
+                childKey: children[index]!.key,
+                silent: true,
+                strategy: 'button',
+                target: null,
+                baseDir: null,
+                segments: null,
+                autoDownload: true,
+                resolve,
+              }),
+            )
+          })
+        }
+      } finally {
+        downloadRuns.current.delete(taskKey)
+        finalizeTask(taskKey)
+      }
+    },
+    [collectDragOutFiles, createTask, finalizeTask, makeJob, queueJob, t],
+  )
+
+  const triggerDragOut = useCallback(
+    (items: RemoteDragItem[]) => {
+      if (shellDragOutCapable() && localMode && token !== '') {
+        void prepareDragOut(items)
+      } else {
+        void fallbackDragOut(items)
+      }
+    },
+    [fallbackDragOut, localMode, prepareDragOut, token],
+  )
+
+  /// Which remote entries the press would drag: the whole selection when the
+  /// row is part of it, otherwise just that row.
+  const dragItemsAt = useCallback(
+    (entry: FileEntry, entryPath: string): RemoteDragItem[] => {
+      if (!listing || listing.path === '') return []
+      const selected: RemoteDragItem[] = [...remoteSelection.values()].map(
+        (item) => ({
+          path: item.path ?? joinPath(listing.path, item.name),
+          name: item.name,
+          dir: item.dir,
+          size: item.size,
+        }),
+      )
+      return dragItemsFor(
+        { path: entryPath, name: entry.name, dir: entry.dir, size: entry.size },
+        selected,
+      )
+    },
+    [listing, remoteSelection],
+  )
+
+  const onRemoteDragStart = useCallback(
+    (event: DragEvent, entry: FileEntry, entryPath: string) => {
+      const items = dragItemsAt(entry, entryPath)
+      // The requirement is that the page never starts a local file drag: it
+      // has no bytes yet and the shell owns the real drag. Pointer events keep
+      // tracking the held button after this cancellation.
+      event.preventDefault()
+      if (items.length === 0) return
+      const payload = buildRemoteDragPayload(items)
+      event.dataTransfer.setData(
+        REMOTE_DRAG_MIME,
+        encodeRemoteDragPayload(payload),
+      )
+      event.dataTransfer.setData('text/plain', payload.names.join('\n'))
+      event.dataTransfer.effectAllowed = 'copy'
+    },
+    [dragItemsAt],
+  )
+
+  const onRemotePointerDown = useCallback(
+    (event: ReactPointerEvent<HTMLLIElement>, entry: FileEntry, entryPath: string) => {
+      dragOutSuppressClick.current = false
+      if (event.button !== 0) return
+      // Checkboxes and the per-row download button keep their own gestures.
+      const target = event.target as Element | null
+      if (target?.closest('input, a, [data-no-drag]')) return
+      const items = dragItemsAt(entry, entryPath)
+      if (items.length === 0) return
+      dragOutPointer.current = {
+        pointerId: event.pointerId,
+        items,
+        startX: event.clientX,
+        startY: event.clientY,
+        moved: false,
+        triggered: false,
+      }
+    },
+    [dragItemsAt],
+  )
+
+  // The pointer still belongs to the page while the button is held, even when
+  // it has left the window. Reaching the edge is the signal to prepare the
+  // local copies; the native drag starts when they exist.
+  useEffect(() => {
+    const trigger = (gesture: { items: RemoteDragItem[]; triggered: boolean }) => {
+      if (gesture.triggered) return
+      gesture.triggered = true
+      dragOutSuppressClick.current = true
+      triggerDragOut(gesture.items)
+    }
+    const onMove = (event: globalThis.PointerEvent) => {
+      const gesture = dragOutPointer.current
+      if (!gesture || event.pointerId !== gesture.pointerId) return
+      if (
+        !gesture.moved &&
+        Math.hypot(
+          event.clientX - gesture.startX,
+          event.clientY - gesture.startY,
+        ) > 6
+      ) {
+        gesture.moved = true
+      }
+      if (
+        gesture.moved &&
+        isOutsideWindow(
+          event.clientX,
+          event.clientY,
+          window.innerWidth,
+          window.innerHeight,
+        )
+      ) {
+        trigger(gesture)
+      }
+    }
+    const onUp = (event: globalThis.PointerEvent) => {
+      const gesture = dragOutPointer.current
+      if (!gesture || event.pointerId !== gesture.pointerId) return
+      dragOutPointer.current = null
+      if (gesture.moved) dragOutSuppressClick.current = true
+    }
+    const onCancel = () => {
+      dragOutPointer.current = null
+    }
+    const onLeave = () => {
+      const gesture = dragOutPointer.current
+      if (!gesture || !gesture.moved) return
+      trigger(gesture)
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+    window.addEventListener('pointercancel', onCancel)
+    document.documentElement.addEventListener('pointerleave', onLeave)
+    return () => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+      window.removeEventListener('pointercancel', onCancel)
+      document.documentElement.removeEventListener('pointerleave', onLeave)
+    }
+  }, [triggerDragOut])
+
   const sendOver = useCallback(async () => {
     if (!source || listing === null || localSelection.size === 0) return
     const dest = listing.path
@@ -2468,262 +3317,26 @@ export function FileTransferPanel({
         plan = { ...plan, skipped: plan.skipped + skipped }
       }
 
-      if (plan.files.length === 0 && plan.dirs.length === 0) {
-        setError(t('files.nothingToSend'))
-        setUploadBusy(false)
-        return
-      }
-
       const selectedRows = localRows.filter((row) =>
         localSelection.has(row.rel))
       const taskName = selectedRows.length === 1
         ? selectedRows[0]!.name
         : t('files.itemsCount', { count: selectedRows.length })
-      const children: TaskChild[] = plan.files.map((file) => ({
-        key: `c${childSeq.current++}`,
-        name: file.path,
-        path: file.path,
-        size: file.size,
-        progress: 0,
-        status: 'queued',
-      }))
-      const taskKey = createTask('up', taskName, children, {
-        skipped: plan.skipped,
-        dirsTotal: plan.dirs.length,
-      })
-      if (walkTruncated) appendNote(taskKey, t('files.walkTruncated'))
-      const run: UploadRun = { taskKey, cancelled: false, activeId: 0 }
-      uploadRuns.current.set(taskKey, run)
-      updateTask(taskKey, (task) => ({ ...task, phase: 'running' }))
-
-      try {
-        let unsupportedDirs = false
-        let unsupportedDest = false
-
-        for (const dir of plan.dirs) {
-          if (run.cancelled) break
-          if (unsupportedDirs) {
-            updateTask(taskKey, (task) => ({
-              ...task,
-              dirsFailed: task.dirsFailed + 1,
-            }))
-            continue
-          }
-          const answerPromise = waitUpload('mkdir', uploadReplyTimeoutMs)
-          connectionRef.current?.sendFileAction('mkdir', { path: dir, dest })
-          const answer = await answerPromise
-          if (run.cancelled) break
-          if (answer.ok) {
-            updateTask(taskKey, (task) => ({
-              ...task,
-              dirsDone: task.dirsDone + 1,
-            }))
-          } else if (answer.cancelled) {
-            break
-          } else {
-            updateTask(taskKey, (task) => ({
-              ...task,
-              dirsFailed: task.dirsFailed + 1,
-            }))
-            if (isUnsupportedAction(answer.code, answer.message)) {
-              unsupportedDirs = true
-              appendNote(taskKey, t('files.unsupportedDirs'))
-            }
-          }
-        }
-
-        for (const child of children) {
-          const file = plan.files.find((item) => item.path === child.path)
-          if (run.cancelled) {
-            patchChild(taskKey, child.key, { status: 'cancelled' })
-            continue
-          }
-          if (!file) {
-            patchChild(taskKey, child.key, {
-              status: 'error',
-              error: t('files.error'),
-            })
-            continue
-          }
-          patchChild(taskKey, child.key, { status: 'running' })
-
-          const answerPromise = waitUpload('offer', uploadReplyTimeoutMs)
-          connectionRef.current?.sendFileAction('offer', {
-            name: file.path,
-            size: file.size,
-            dest,
-          })
-          const answer = await answerPromise
-          if (run.cancelled || answer.cancelled) {
-            if (answer.id) {
-              connectionRef.current?.sendFileAction('cancel', {
-                id: answer.id,
-              })
-            }
-            patchChild(taskKey, child.key, { status: 'cancelled' })
-            continue
-          }
-          if (!answer.ok || !answer.id) {
-            patchChild(taskKey, child.key, {
-              status: 'error',
-              error: answer.message ?? t('files.error'),
-            })
-            continue
-          }
-          const echoed = answer.dir === undefined
-            ? null
-            : relativeUnder(dest, answer.dir)
-          if (!unsupportedDest && echoed !== '') {
-            unsupportedDest = true
-            appendNote(taskKey, t('files.unsupportedDest'))
-          }
-
-          const id = answer.id
-          run.activeId = id
-          const chunk = answer.chunk && answer.chunk > 0
-            ? answer.chunk
-            : 256 * 1024
-          let offset = 0
-          let failed = false
-          while (offset < file.size) {
-            if (run.cancelled) {
-              connectionRef.current?.sendFileAction('cancel', { id })
-              patchChild(taskKey, child.key, { status: 'cancelled' })
-              failed = true
-              break
-            }
-            const target = connectionRef.current
-            if (!target) {
-              patchChild(taskKey, child.key, {
-                status: 'error',
-                error: t('files.error'),
-              })
-              failed = true
-              break
-            }
-            const end = Math.min(file.size, offset + chunk)
-            let bytes: Uint8Array
-            try {
-              if (file.file) {
-                bytes = new Uint8Array(
-                  await file.file.slice(offset, end).arrayBuffer(),
-                )
-              } else if (file.absPath && token !== '') {
-                bytes = await readLocalFileRange(
-                  token,
-                  file.absPath,
-                  offset,
-                  end - offset,
-                )
-              } else {
-                throw new Error('no local source')
-              }
-            } catch {
-              patchChild(taskKey, child.key, {
-                status: 'error',
-                error: t('files.localPathMissing'),
-              })
-              failed = true
-              break
-            }
-            if (run.cancelled) {
-              connectionRef.current?.sendFileAction('cancel', { id })
-              patchChild(taskKey, child.key, { status: 'cancelled' })
-              failed = true
-              break
-            }
-            target.sendFileChunk(id, offset, bytes)
-            offset = end
-            patchProgress(taskKey, child.key, offset)
-            // Yield so a large file does not freeze the UI thread.
-            await new Promise((resolve) => window.setTimeout(resolve, 0))
-          }
-          run.activeId = 0
-          if (failed) continue
-
-          patchProgress(taskKey, child.key, offset, true)
-          const target = connectionRef.current
-          if (!target) {
-            patchChild(taskKey, child.key, {
-              status: 'error',
-              error: t('files.error'),
-            })
-            continue
-          }
-          target.sendClientLog(
-            `upload chunks done id=${id} sent=${offset} size=${file.size}`,
-          )
-          const donePromise = waitUpload('done', uploadDoneTimeoutMs)
-          target.sendFileAction('complete', { id })
-          const done = await donePromise
-          if (done.ok) {
-            // It won the race with the cancel: the host already renamed the
-            // file, so report it as done instead of pretending it vanished.
-            patchChild(taskKey, child.key, {
-              status: 'done',
-              progress: file.size,
-              size: file.size,
-            })
-            if (done.path) {
-              updateTask(taskKey, (task) => ({
-                ...task,
-                remotePaths: [...task.remotePaths, done.path!],
-              }))
-            }
-          } else if (done.cancelled) {
-            patchChild(taskKey, child.key, { status: 'cancelled' })
-          } else if (run.cancelled) {
-            patchChild(taskKey, child.key, { status: 'cancelled' })
-          } else {
-            patchChild(taskKey, child.key, {
-              status: 'error',
-              error: done.message ?? t('files.error'),
-            })
-          }
-        }
-      } finally {
-        uploadRuns.current.delete(taskKey)
-        updateTask(taskKey, (task) => ({
-          ...task,
-          children: task.children.map((child) =>
-            child.status === 'queued' || child.status === 'running'
-              ? {
-                  ...child,
-                  status: run.cancelled ? 'cancelled' : 'error',
-                }
-              : child,
-          ),
-        }))
-        finalizeTask(taskKey)
-        setUploadBusy(false)
-        const currentListing = listingRef.current
-        if (currentListing) {
-          void requestListing(currentListing.path, true).catch(
-            () => undefined,
-          )
-        }
-      }
+      await runUploadPlan({ plan, dest, taskName, walkTruncated })
     } catch (uploadError) {
       setUploadBusy(false)
       setError(errorText(uploadError) || t('files.error'))
     }
   }, [
-    appendNote,
-    createTask,
-    finalizeTask,
     localMode,
     localRows,
     localSelection,
-    patchChild,
-    patchProgress,
-    requestListing,
+    listing,
+    runUploadPlan,
     snapshotPath,
     source,
-    listing,
     t,
     token,
-    updateTask,
-    waitUpload,
   ])
 
   // ----------------------------------------------------------- download run
@@ -3571,6 +4184,19 @@ export function FileTransferPanel({
                   return (
                     <li
                       key={entry.name}
+                      draggable={!rootsView}
+                      onDragStart={(event) =>
+                        onRemoteDragStart(event, entry, entryPath)
+                      }
+                      onPointerDown={(event) =>
+                        onRemotePointerDown(event, entry, entryPath)
+                      }
+                      onClickCapture={(event) => {
+                        if (!dragOutSuppressClick.current) return
+                        dragOutSuppressClick.current = false
+                        event.preventDefault()
+                        event.stopPropagation()
+                      }}
                       className={
                         'flex items-center gap-1 rounded-md px-1.5 py-1 transition ' +
                         (selected ? 'bg-accent-soft' : 'hover:bg-panel/70')
@@ -3639,6 +4265,45 @@ export function FileTransferPanel({
           </div>
         </section>
       </div>
+
+      {dragOut ? (
+        <div className="mx-2 mb-1 shrink-0 rounded-lg border border-accent/35 bg-accent-soft px-2.5 py-1.5">
+          <div className="flex items-center gap-2 text-[10px] text-ink">
+            <Upload size={12} className="shrink-0 text-accent" />
+            <span className="min-w-0 flex-1 truncate">
+              {dragOut.phase === 'preparing'
+                ? t('files.dragOutTitle', { name: dragOut.name })
+                : dragOut.phase === 'ready'
+                  ? t('files.dragOutReady')
+                  : t('files.dragOutFailed')}
+            </span>
+            {dragOut.phase === 'preparing' ? (
+              <button
+                type="button"
+                onClick={cancelDragOut}
+                className="shrink-0 rounded border border-line px-1.5 py-0.5 text-[9px] text-muted transition hover:bg-panel hover:text-ink"
+              >
+                {t('common.cancel')}
+              </button>
+            ) : null}
+          </div>
+          {dragOut.phase === 'preparing' ? (
+            <>
+              <div className="mt-1 h-1 overflow-hidden rounded-full bg-line">
+                <div
+                  className="h-full rounded-full bg-accent transition-all"
+                  style={{ width: `${dragOut.percent}%` }}
+                />
+              </div>
+              {dragOut.slow ? (
+                <div className="mt-1 text-[9px] leading-snug text-muted">
+                  {t('files.dragOutSlow')}
+                </div>
+              ) : null}
+            </>
+          ) : null}
+        </div>
+      ) : null}
 
       {download ? (
         <div className="mx-2 mb-1 shrink-0 rounded-lg border border-accent/35 bg-accent-soft px-2.5 py-1.5">

@@ -55,6 +55,23 @@ std::string g_instance_path;
 GtkWidget* g_main_window = nullptr;
 WebKitWebView* g_web_view = nullptr;
 
+// --- drag-out --------------------------------------------------------------
+//
+// The page cannot start an OS-level drag from remote bytes. It downloads the
+// selection into a per-gesture cache folder and posts `drag-out:<json>`; this
+// side starts a real text/uri-list drag at the pointer. If the user cancels,
+// the cache stays for five minutes (the retry may still be dragging); after a
+// successful drop it is removed one minute later, when the target has read it.
+struct DragOutState {
+  std::string dir;
+  std::vector<std::string> uris;
+  std::string plain;
+  std::string copied;
+  guint cleanup_source = 0;
+};
+
+DragOutState* g_drag_out = nullptr;
+
 // --- X11 keyboard grab -----------------------------------------------------
 //
 // The desktop environment's window manager owns Super/Alt combos, so the page
@@ -1239,6 +1256,208 @@ void setup_tray(GtkWidget* window) {
   g_signal_connect(g_tray_icon, "popup-menu", G_CALLBACK(on_tray_popup), window);
 }
 
+gboolean drag_out_cleanup_cb(gpointer data) {
+  auto* state = static_cast<DragOutState*>(data);
+  state->cleanup_source = 0;
+  std::error_code ec;
+  fs::remove_all(state->dir, ec);
+  if (g_drag_out == state) g_drag_out = nullptr;
+  delete state;
+  return G_SOURCE_REMOVE;
+}
+
+void schedule_drag_out_cleanup(DragOutState* state, guint seconds) {
+  if (state == nullptr || state->cleanup_source != 0) return;
+  state->cleanup_source =
+      g_timeout_add_seconds(seconds, drag_out_cleanup_cb, state);
+}
+
+/// Fills the selection for every format the drag source advertises.
+void on_drag_data_get(GtkWidget*, GdkDragContext*, GtkSelectionData* data,
+                      guint info, guint, gpointer) {
+  DragOutState* state = g_drag_out;
+  if (state == nullptr) return;
+  if (info == 0) {
+    std::vector<char*> uris;
+    uris.reserve(state->uris.size() + 1);
+    for (const std::string& uri : state->uris) {
+      uris.push_back(const_cast<char*>(uri.c_str()));
+    }
+    uris.push_back(nullptr);
+    gtk_selection_data_set_uris(data, uris.data());
+  } else if (info == 2) {
+    // Nautilus also understands this; a plain uri-list is the fallback.
+    gtk_selection_data_set_text(data, state->copied.c_str(), -1);
+  } else {
+    gtk_selection_data_set_text(data, state->plain.c_str(), -1);
+  }
+}
+
+gboolean on_drag_failed(GtkWidget*, GdkDragContext*, GtkDragResult, gpointer) {
+  // A cancelled drag is not an error: keep the cache around long enough for
+  // the user to try again, then let the cleanup timer remove it.
+  schedule_drag_out_cleanup(g_drag_out, 300);
+  return FALSE;
+}
+
+void on_drag_end(GtkWidget*, GdkDragContext* context, gpointer) {
+  DragOutState* state = g_drag_out;
+  if (state == nullptr) return;
+  const GdkDragAction action = gdk_drag_context_get_selected_action(context);
+  const bool copied =
+      action == GDK_ACTION_COPY || action == GDK_ACTION_MOVE ||
+      action == GDK_ACTION_LINK;
+  schedule_drag_out_cleanup(state, copied ? 60 : 300);
+}
+
+/// Removes cache folders left behind by an earlier crash or a killed shell.
+/// Only molink's own dragout root is touched.
+void prune_stale_drag_out() {
+  std::vector<std::string> roots;
+  const char* cache = g_get_user_cache_dir();
+  if (cache != nullptr && *cache != '\0') {
+    roots.push_back((fs::path(cache) / "molink" / "dragout").string());
+  }
+  const char* home = g_get_home_dir();
+  if (home != nullptr && *home != '\0') {
+    roots.push_back((fs::path(home) / ".cache" / "molink" / "dragout").string());
+  }
+  const auto now = fs::file_time_type::clock::now();
+  for (const std::string& root : roots) {
+    std::error_code ec;
+    if (!fs::is_directory(root, ec)) continue;
+    for (const auto& entry : fs::directory_iterator(root, ec)) {
+      if (ec) break;
+      std::error_code age_ec;
+      const auto written = fs::last_write_time(entry.path(), age_ec);
+      if (age_ec) continue;
+      if (now - written > std::chrono::hours(1)) {
+        std::error_code remove_ec;
+        fs::remove_all(entry.path(), remove_ec);
+      }
+    }
+  }
+}
+
+/// Parses `{"dir": "...", "paths": ["..."]}` from the bridge and starts the
+/// GTK drag. The JSON is parsed with JSC so no extra dependency is needed.
+void start_drag_out(JSCContext* context, const std::string& json) {
+  if (context == nullptr || json.empty()) return;
+  JSCValue* root = jsc_value_new_from_json(context, json.c_str());
+  if (root == nullptr || !jsc_value_is_object(root)) {
+    if (root != nullptr) g_object_unref(root);
+    g_printerr("moLink shell: drag-out payload is not an object\n");
+    return;
+  }
+  JSCValue* dir_value = jsc_value_object_get_property(root, "dir");
+  JSCValue* paths_value = jsc_value_object_get_property(root, "paths");
+  std::string dir;
+  if (dir_value != nullptr && jsc_value_is_string(dir_value)) {
+    char* text = jsc_value_to_string(dir_value);
+    if (text != nullptr) dir = text;
+    g_free(text);
+  }
+  std::vector<std::string> paths;
+  if (paths_value != nullptr && jsc_value_is_array(paths_value)) {
+    JSCValue* length_value =
+        jsc_value_object_get_property(paths_value, "length");
+    const int length = length_value != nullptr
+                           ? jsc_value_to_int32(length_value)
+                           : 0;
+    if (length_value != nullptr) g_object_unref(length_value);
+    for (int index = 0; index < length; ++index) {
+      JSCValue* item = jsc_value_object_get_property_at_index(paths_value,
+                                                              index);
+      if (item == nullptr) continue;
+      if (jsc_value_is_string(item)) {
+        char* text = jsc_value_to_string(item);
+        if (text != nullptr && *text != '\0') paths.emplace_back(text);
+        g_free(text);
+      }
+      g_object_unref(item);
+    }
+  }
+  if (paths_value != nullptr) g_object_unref(paths_value);
+  if (dir_value != nullptr) g_object_unref(dir_value);
+  g_object_unref(root);
+
+  if (paths.empty()) {
+    g_printerr("moLink shell: drag-out without files\n");
+    return;
+  }
+  GtkWidget* window = g_main_window;
+  if (window == nullptr) return;
+
+  auto* state = new DragOutState();
+  state->dir = dir;
+  for (const std::string& path : paths) {
+    GError* error = nullptr;
+    gchar* uri = g_filename_to_uri(path.c_str(), nullptr, &error);
+    if (uri == nullptr) {
+      g_printerr("moLink shell: drag-out path %s: %s\n", path.c_str(),
+                 error != nullptr ? error->message : "invalid path");
+      if (error != nullptr) g_error_free(error);
+      continue;
+    }
+    state->uris.emplace_back(uri);
+    g_free(uri);
+  }
+  if (state->uris.empty()) {
+    delete state;
+    return;
+  }
+  for (std::size_t index = 0; index < state->uris.size(); ++index) {
+    if (index != 0) {
+      state->plain += "\n";
+      state->copied += "\n";
+    }
+    state->plain += state->uris[index];
+    if (index == 0) state->copied += "copy\n";
+    state->copied += state->uris[index];
+  }
+
+  g_drag_out = state;
+
+  GdkDisplay* display = gtk_widget_get_display(window);
+  GdkSeat* seat = gdk_display_get_default_seat(display);
+  GdkDevice* pointer = seat != nullptr ? gdk_seat_get_pointer(seat) : nullptr;
+  gint pointer_x = 0;
+  gint pointer_y = 0;
+  if (pointer != nullptr) {
+    gdk_device_get_position(pointer, nullptr, &pointer_x, &pointer_y);
+  }
+  gint origin_x = 0;
+  gint origin_y = 0;
+  GdkWindow* gdk_window = gtk_widget_get_window(window);
+  if (gdk_window != nullptr) {
+    gdk_window_get_origin(gdk_window, &origin_x, &origin_y);
+  }
+
+  GdkDragContext* drag = gtk_drag_begin_with_coordinates(
+      window, gtk_drag_source_get_target_list(window), GDK_ACTION_COPY, 1,
+      nullptr, pointer_x - origin_x, pointer_y - origin_y);
+  if (drag == nullptr) {
+    g_printerr("moLink shell: drag-out did not start\n");
+    schedule_drag_out_cleanup(state, 300);
+    return;
+  }
+
+  GdkPixbuf* icon = gdk_pixbuf_new_from_file_at_size(paths[0].c_str(), 48, 48,
+                                                     nullptr);
+  if (icon != nullptr) {
+    gtk_drag_set_icon_pixbuf(drag, icon, 8, 8);
+    g_object_unref(icon);
+  } else {
+    const gboolean is_dir =
+        g_file_test(paths[0].c_str(), G_FILE_TEST_IS_DIR) != FALSE;
+    gtk_drag_set_icon_name(drag, is_dir ? "folder" : "text-x-generic", 0, 0);
+  }
+  // drag-data-get lives on the source widget (connected once in main), not on
+  // the GdkDragContext; connecting it here is a GLib critical and never fires.
+  g_printerr("moLink shell: drag-out started with %zu file(s)\n",
+             state->uris.size());
+}
+
 void on_script_message(WebKitUserContentManager*, WebKitJavascriptResult* result,
                        gpointer data) {
   GtkWidget* window = GTK_WIDGET(data);
@@ -1318,6 +1537,8 @@ void on_script_message(WebKitUserContentManager*, WebKitJavascriptResult* result
     gdk_device_get_position(pointer, nullptr, &x, &y);
     gtk_window_begin_resize_drag(GTK_WINDOW(window), edge, 1, x, y,
                                  GDK_CURRENT_TIME);
+  } else if (action.rfind("drag-out:", 0) == 0) {
+    start_drag_out(jsc_value_get_context(value), action.substr(9));
   } else if (action == "quit") {
     gtk_main_quit();
   }
@@ -1538,6 +1759,21 @@ int main(int argc, char** argv) {
                                                               "molink");
   g_signal_connect(content_manager, "script-message-received::molink",
                    G_CALLBACK(on_script_message), window);
+
+  // The page starts this drag by name (`drag-out:`); GTK still needs the
+  // window registered as a source so the data-get/drag-end signals fire.
+  static GtkTargetEntry drag_targets[] = {
+      {const_cast<gchar*>("text/uri-list"), 0, 0},
+      {const_cast<gchar*>("text/plain;charset=utf-8"), 0, 1},
+      {const_cast<gchar*>("x-special/gnome-copied-files"), 0, 2},
+  };
+  gtk_drag_source_set(window, GDK_BUTTON1_MASK, drag_targets,
+                      G_N_ELEMENTS(drag_targets), GDK_ACTION_COPY);
+  g_signal_connect(window, "drag-data-get", G_CALLBACK(on_drag_data_get),
+                   nullptr);
+  g_signal_connect(window, "drag-failed", G_CALLBACK(on_drag_failed), nullptr);
+  g_signal_connect(window, "drag-end", G_CALLBACK(on_drag_end), nullptr);
+  prune_stale_drag_out();
 
   if (!g_url_mode) setup_tray(window);
 
