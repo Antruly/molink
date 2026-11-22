@@ -78,8 +78,12 @@ void test_welcome_advertises_both_paths_in_auto() {
 
   const std::vector<std::string> stream_codecs =
       advertised_stream_codecs("stream", host, viewer);
-  expect(contains(stream_codecs, "av1") && !contains(stream_codecs, "tiles"),
-         "stream mode advertises only stream codecs");
+  expect(contains(stream_codecs, "av1"),
+         "stream mode still advertises the stream encoders");
+  expect(contains(stream_codecs, "tiles"),
+         "stream mode also advertises the manual tile choice");
+  expect(stream_codecs.back() == "tiles",
+         "tiles stays last in stream mode");
 
   stream_codec_capabilities h264_only_viewer;
   h264_only_viewer.h264 = true;
@@ -90,10 +94,28 @@ void test_welcome_advertises_both_paths_in_auto() {
          "auto intersects the host encoders with what the viewer decodes");
 }
 
+void test_stream_always_preference_overrides_mode() {
+  using molink::stream_always_for;
+  expect(stream_always_for("stream", "auto"),
+         "stream + auto forces the stream");
+  expect(!stream_always_for("stream", "tiles"),
+         "an explicit tiles preference wins over a stream default");
+  expect(!stream_always_for("auto", "auto"),
+         "auto leaves the adaptive policy in charge");
+  expect(!stream_always_for("auto", "tiles"),
+         "auto + tiles never forces the stream");
+  expect(!stream_always_for("tiles", "auto"),
+         "tiles never forces the stream");
+  expect(!stream_always_for("tiles", "tiles"),
+         "tiles + tiles never forces the stream");
+  expect(!stream_always_for("mixed", "av1"),
+         "the legacy mixed spelling normalises to auto, not stream");
+}
+
 void test_auto_releases_stream_always() {
   using molink::apply_video_mode;
   fake_capture capture;
-  apply_video_mode(capture, "auto", 20);
+  apply_video_mode(capture, "auto", "auto", 20);
   expect(capture.stream_always_calls == 1,
          "the supervisor applies the video mode to the capture");
   expect(!capture.last_stream_always,
@@ -101,11 +123,19 @@ void test_auto_releases_stream_always() {
   expect(capture.last_enter_percent == 20,
          "the movement threshold is still applied");
 
-  apply_video_mode(capture, "stream", 20);
+  apply_video_mode(capture, "stream", "auto", 20);
   expect(capture.last_stream_always,
          "stream pins stream_always true");
 
-  apply_video_mode(capture, "tiles", 20);
+  apply_video_mode(capture, "stream", "tiles", 20);
+  expect(!capture.last_stream_always,
+         "picking tiles in the toolbar releases the forced stream");
+
+  apply_video_mode(capture, "stream", "tiles", 20, true);
+  expect(capture.last_stream_always,
+         "the secure desktop still forces the stream over a tiles preference");
+
+  apply_video_mode(capture, "tiles", "auto", 20);
   expect(!capture.last_stream_always,
          "tiles also releases the forced stream");
 }
@@ -115,6 +145,7 @@ void test_auto_releases_stream_always() {
 int main() {
   test_settings_values_normalise();
   test_welcome_advertises_both_paths_in_auto();
+  test_stream_always_preference_overrides_mode();
   test_auto_releases_stream_always();
   std::printf("%d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;

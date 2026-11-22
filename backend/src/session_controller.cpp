@@ -2388,9 +2388,12 @@ void session_controller::on_text(const std::string& text) {
     const std::string mode = normalize_video_mode(value);
     if (options_.capture) {
       // "stream" pins the video path and "tiles" disables it; "auto" leaves
-      // stream_always_ false so the supervisor's stream_policy decides. The
-      // supervisor applies the rest on its next tick.
-      options_.capture->set_stream_always(stream_always_for_video_mode(mode));
+      // stream_always_ false so the supervisor's stream_policy decides. A
+      // tiles codec preference still wins over the stream mode: it is the
+      // viewer's manual choice from the toolbar. The supervisor applies the
+      // rest on its next tick.
+      const std::string preference = options_.auth->settings().stream_codec;
+      options_.capture->set_stream_always(stream_always_for(mode, preference));
     }
     uvcpp_json shared;
     shared["type"] = "video-mode";
@@ -2427,19 +2430,22 @@ void session_controller::on_text(const std::string& text) {
       return;
     }
     if (options_.auth) options_.auth->set_stream_codec(value);
-    // A codec switch has to be visible at once. Apply the new codec to the
+    // A codec (or path) switch has to be visible at once. Apply it to the
     // capture here instead of waiting for the supervisor's one-second tick;
-    // the supervisor still re-evaluates the viewer set and corrects it if some
-    // other viewer cannot decode this codec. The encoder is re-initialised on
-    // the new codec and the first frame is a keyframe.
+    // the supervisor still re-reads the preference every tick, so the change
+    // takes effect without reconnecting and is corrected if another viewer
+    // cannot decode a codec. Picking "tiles" is a request to stop streaming,
+    // so it releases stream_always_ and skips the stream nudge.
     if (options_.capture) {
+      const std::string mode = options_.auth->settings().video_mode;
+      options_.capture->set_stream_always(stream_always_for(mode, value));
       if (value != "auto") {
         options_.capture->set_av1_stream_allowed(value == "av1");
         options_.capture->set_h264_stream_allowed(value == "h264");
         options_.capture->set_vp9_stream_allowed(value == "vp9");
         options_.capture->set_vp8_stream_allowed(value == "vp8");
       }
-      options_.capture->request_stream(15000);
+      if (value != "tiles") options_.capture->request_stream(15000);
     }
     // The preference is host-global: every tab has to show the same value or
     // the last writer wins forever.
@@ -3171,18 +3177,21 @@ void session_supervisor::run() {
       }
       const std::string video_mode =
           options_.auth ? options_.auth->settings().video_mode : "tiles";
-      if (options_.capture) {
-        // "stream" forces the stream; "auto" and "tiles" release it, and the
-        // capture's stream_policy decides from the movement average.
-        const int enter_percent =
-            options_.auth ? options_.auth->settings().stream_enter_percent : 15;
-        apply_video_mode(*options_.capture, video_mode, enter_percent);
-      }
       // The secure desktop cannot use tiles: it is captured through the
       // helper at a few frames per second, so a pinned "tiles" is ignored
-      // there and the stream is always allowed.
+      // there and the stream is always forced.
       const bool secure_desktop =
           options_.capture && options_.capture->is_secure_desktop();
+      if (options_.capture) {
+        // "stream" forces the stream unless the viewer picked tiles by hand;
+        // "auto" and "tiles" release it, and the capture's stream_policy
+        // decides from the movement average. Re-read every tick so a toolbar
+        // choice takes effect without reconnecting.
+        const int enter_percent =
+            options_.auth ? options_.auth->settings().stream_enter_percent : 15;
+        apply_video_mode(*options_.capture, video_mode, preference,
+                         enter_percent, secure_desktop);
+      }
       const bool stream_allowed =
           secure_desktop ||
           (video_mode != "tiles" && preference != "tiles");
