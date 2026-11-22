@@ -15,10 +15,29 @@ struct service_status_info {
   /// True when the service is a login autostart (systemd), not a background
   /// helper that the core itself starts and stops.
   bool autostart = false;
+  /// Windows: the ImagePath the service is actually registered with.
+  std::string registered_path;
+  /// Windows: where this build expects the helper to live, i.e.
+  /// %ProgramData%\moLink\service\molink-service.exe.
+  std::string expected_path;
+  /// Windows: the registered path differs from `expected_path`, or the binary
+  /// it names is gone. Installed-only: a missing service is not "stale".
+  bool stale = false;
+  /// Windows: the core process already holds administrator rights, so
+  /// ShellExecuteW("runas", ...) will not show a UAC prompt.
+  bool elevated = false;
   std::string error;
 };
 
 service_status_info query_session_service();
+
+/// Pure rule behind `service_status_info::stale`. Paths are compared
+/// case-insensitively (Windows semantics) after stripping surrounding quotes.
+/// An empty `expected` means "cannot tell", so it is never stale; an empty
+/// registered path is stale because it names no binary at all.
+bool service_status_is_stale(const std::string& registered,
+                             const std::string& expected,
+                             bool registered_exists);
 /// True when the core itself runs in the physical console session, so the
 /// SYSTEM helper (launched there) captures the same desktop. RDP sessions
 /// keep using DXGI for their own desktop.

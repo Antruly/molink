@@ -86,6 +86,26 @@ void session_registry::set_awaiting_approval(
   s->awaiting_approval = awaiting;
 }
 
+void session_registry::set_clipboard_offer(
+    uint32_t id, std::vector<clipboard_offer_entry> files, bool nested_rdp) {
+  std::lock_guard<std::mutex> lock(mu_);
+  for (const auto& session : sessions_) {
+    if (session->id != id) continue;
+    session->clipboard_offer = std::move(files);
+    session->clipboard_nested_rdp = nested_rdp;
+    return;
+  }
+}
+
+std::vector<clipboard_offer_entry> session_registry::clipboard_offer(
+    uint32_t id) const {
+  std::lock_guard<std::mutex> lock(mu_);
+  for (const auto& session : sessions_) {
+    if (session->id == id) return session->clipboard_offer;
+  }
+  return {};
+}
+
 void session_registry::touch(session_info& s) { s.last_seen_ms = now_ms(); }
 
 }  // namespace molink

@@ -221,6 +221,9 @@ set(MOLINK_CORE_SOURCES
   src/surface/surface_compositor.cpp
   src/clipboard/x11_clipboard.cpp
   src/clipboard/windows_clipboard.cpp
+  src/clipboard_stage.cpp
+  src/clipboard_lazy.cpp
+  src/clipboard_pull.cpp
   src/access_requests.cpp
   src/auth_state.cpp
   src/compression.cpp
@@ -231,6 +234,8 @@ set(MOLINK_CORE_SOURCES
   src/input/windows_input.cpp
   src/input/windows_secure_input.cpp
   src/input/macos_input.cpp
+  src/input/input_event.cpp
+  src/input/key_alias.cpp
   src/config.cpp
   src/identity.cpp
   src/tls_identity.cpp
@@ -688,7 +693,104 @@ set_target_properties(molink-core-frame-budget-test PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 add_test(NAME frame_budget COMMAND molink-core-frame-budget-test)
 
+# Input event validation and the legacy key aliases. Pure platform-neutral
+# code: a fake injector checks every rejected path still carries a message.
+add_executable(molink-core-input-event-test
+  tests/input_event_test.cpp
+  src/input/input_event.cpp
+  src/input/key_alias.cpp
+)
+target_include_directories(molink-core-input-event-test PRIVATE src)
+set_target_properties(molink-core-input-event-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
+  string(TOUPPER "${uvp_config}" uvp_config_upper)
+  set_target_properties(molink-core-input-event-test PROPERTIES
+    "RUNTIME_OUTPUT_DIRECTORY_${uvp_config_upper}" "${CMAKE_BINARY_DIR}")
+endforeach()
+add_test(NAME input_event COMMAND molink-core-input-event-test)
+
 # Box averaging for large tile strips: pure pixel arithmetic.
+# Clipboard staging for "remote file -> local clipboard": file naming, offset
+# rules and the apply call. No libuvcpp or clipboard backend is linked; the
+# test supplies a fake clipboard_service.
+add_executable(molink-core-clipboard-stage-test
+  tests/clipboard_stage_test.cpp
+  src/clipboard_stage.cpp
+)
+target_include_directories(molink-core-clipboard-stage-test PRIVATE src)
+set_target_properties(molink-core-clipboard-stage-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME clipboard_stage COMMAND molink-core-clipboard-stage-test)
+
+# Host -> viewer clipboard file ranges: id/order validation, "the clipboard
+# changed" (status 2), chunk bounds and short-read handling. Platform-neutral;
+# the caller supplies the list that would have come from CF_HDROP.
+add_executable(molink-core-clipboard-pull-test
+  tests/clipboard_pull_test.cpp
+  src/clipboard_pull.cpp
+)
+target_include_directories(molink-core-clipboard-pull-test PRIVATE src)
+set_target_properties(molink-core-clipboard-pull-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME clipboard_pull COMMAND molink-core-clipboard-pull-test)
+
+# Delayed clipboard rendering state machine: offer limits, per-session clear,
+# and the 15 s / 10 s render budget. Platform-neutral, so Windows-only delayed
+# rendering is still covered by the Linux CI build.
+add_executable(molink-core-clipboard-lazy-test
+  tests/clipboard_lazy_test.cpp
+  src/clipboard_lazy.cpp
+)
+target_include_directories(molink-core-clipboard-lazy-test PRIVATE src)
+set_target_properties(molink-core-clipboard-lazy-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME clipboard_lazy COMMAND molink-core-clipboard-lazy-test)
+
+# Windows-only: takes the OLE clipboard, then reads it back as Explorer does
+# (FileGroupDescriptorW + FileContents IStream). It is skipped unless
+# MOLINK_CLIPBOARD_WINDOWS_TEST=1 because it replaces the developer's clipboard.
+# The fetch table behind it is covered by clipboard_lazy_test on every OS.
+# X11 file clipboard writer: takes CLIPBOARD and asks the selection for
+# text/uri-list and x-special/gnome-copied-files the way a file manager does.
+# It replaces the developer's clipboard, so it is gated on an environment
+# variable just like the Windows test.
+if(MOLINK_HAVE_X11)
+  add_executable(molink-core-x11-clipboard-files-test
+    tests/x11_clipboard_files_test.cpp
+    src/clipboard/x11_clipboard.cpp
+  )
+  target_include_directories(molink-core-x11-clipboard-files-test PRIVATE src)
+  target_compile_definitions(molink-core-x11-clipboard-files-test
+    PRIVATE MOLINK_HAVE_X11=1)
+  target_link_libraries(molink-core-x11-clipboard-files-test PRIVATE
+    X11::X11 pthread)
+  set_target_properties(molink-core-x11-clipboard-files-test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+  add_test(NAME x11_clipboard_files
+    COMMAND molink-core-x11-clipboard-files-test)
+  set_tests_properties(x11_clipboard_files PROPERTIES
+    SKIP_RETURN_CODE 77)
+endif()
+
+if(WIN32)
+  add_executable(molink-core-windows-clipboard-stream-test
+    tests/windows_clipboard_stream_test.cpp
+    src/clipboard/windows_clipboard.cpp
+    src/clipboard_lazy.cpp
+  )
+  target_include_directories(molink-core-windows-clipboard-stream-test
+    PRIVATE src)
+  target_link_libraries(molink-core-windows-clipboard-stream-test
+    PRIVATE ole32 oleaut32 uuid shell32 user32)
+  set_target_properties(molink-core-windows-clipboard-stream-test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+  add_test(NAME windows_clipboard_stream
+    COMMAND molink-core-windows-clipboard-stream-test)
+  set_tests_properties(windows_clipboard_stream PROPERTIES
+    SKIP_RETURN_CODE 77)
+endif()
+
 add_executable(molink-core-tile-scale-test
   tests/tile_scale_test.cpp
 )
@@ -714,6 +816,21 @@ target_include_directories(molink-core-video-mode-test PRIVATE src)
 set_target_properties(molink-core-video-mode-test PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 add_test(NAME video_mode COMMAND molink-core-video-mode-test)
+
+# Service registration: the path staleness rule is pure and shared with the
+# status endpoint (Win32/systemd orchestration stays in the core).
+add_executable(molink-core-service-control-test
+  tests/service_control_test.cpp
+  src/service_control.cpp
+)
+target_include_directories(molink-core-service-control-test PRIVATE src)
+if(WIN32)
+  target_link_libraries(molink-core-service-control-test PRIVATE
+    advapi32 shell32 wtsapi32)
+endif()
+set_target_properties(molink-core-service-control-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME service_control COMMAND molink-core-service-control-test)
 
 # The weight-based QoS controller: viewer feedback in, budget scale out.
 add_executable(molink-core-stream-qos-test

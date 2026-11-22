@@ -1,4 +1,12 @@
-import { Play, RefreshCw, RotateCcw, Server, Square, Trash2 } from 'lucide-react'
+import {
+  AlertTriangle,
+  Play,
+  RefreshCw,
+  RotateCcw,
+  Server,
+  Square,
+  Trash2,
+} from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
@@ -6,6 +14,13 @@ import {
   postServiceAction,
   type ServiceStatus,
 } from '../lib/api'
+import {
+  serviceActionFailure,
+  servicePanelHints,
+  serviceRecoveryHint,
+} from '../lib/service-panel'
+
+type ServiceAction = 'install' | 'uninstall' | 'start' | 'stop' | 'restart'
 
 /// Settings view for the optional Windows session service. Starting/stopping
 /// uses the service DACL; install/uninstall still prompt for UAC.
@@ -22,6 +37,7 @@ export function ServicePanel({
   const [status, setStatus] = useState<ServiceStatus | null>(null)
   const [busy, setBusy] = useState(false)
   const [note, setNote] = useState<string | null>(null)
+  const [noteAction, setNoteAction] = useState<ServiceAction | null>(null)
 
   const load = useCallback(async () => {
     try {
@@ -40,19 +56,21 @@ export function ServicePanel({
     }
   }, [load])
 
-  const act = async (
-    action: 'install' | 'uninstall' | 'start' | 'stop' | 'restart',
-  ) => {
+  const act = async (action: ServiceAction) => {
     setBusy(true)
     setNote(null)
+    setNoteAction(action)
     try {
       const result = await postServiceAction(token, action)
-      setNote(result.ok ? null : result.error ?? t('service.actionFailed'))
-      await load()
-    } catch {
-      setNote(t('service.actionFailed'))
+      // Non-2xx responses arrive as ApiError whose message is the backend's
+      // `error` field; keep that text instead of replacing it with a generic
+      // sentence.
+      if (!result.ok) setNote(result.error ?? t('service.actionFailed'))
+    } catch (caught) {
+      setNote(serviceActionFailure(caught, t('service.actionFailed')).message)
     } finally {
       setBusy(false)
+      void load()
     }
   }
 
@@ -80,6 +98,10 @@ export function ServicePanel({
     : status.running
       ? t('service.running')
       : t('service.stopped')
+  const hints = servicePanelHints(status)
+  const stale = hints.showStaleWarning
+  const recovery =
+    note && noteAction === 'install' ? serviceRecoveryHint(note) : null
 
   return (
     <div className="space-y-2">
@@ -99,8 +121,50 @@ export function ServicePanel({
       <p className="text-[11px] text-muted">
         {t('service.status')}: <span className="font-mono">{state}</span>
       </p>
-      <div className="flex flex-wrap gap-2">
-        {!status.installed ? (
+      {status.path ? (
+        <p
+          className={
+            'text-[11px] leading-relaxed ' +
+            (stale ? 'text-warn' : 'text-muted')
+          }
+        >
+          {t('service.path')}:{' '}
+          <span className="break-all font-mono">{status.path}</span>
+        </p>
+      ) : null}
+      {stale ? (
+        <p className="flex items-start gap-1.5 text-[11px] text-warn">
+          <AlertTriangle size={12} className="mt-0.5 shrink-0" />
+          <span>
+            {t('service.staleWarning')}
+            {status.expected ? (
+              <>
+                {' '}
+                <span className="break-all font-mono text-[10px] text-muted">
+                  {t('service.expectedPath', { path: status.expected })}
+                </span>
+              </>
+            ) : null}
+          </span>
+        </p>
+      ) : null}
+      <div className="flex flex-wrap items-center gap-2">
+        {hints.showReregister ? (
+          <button
+            type="button"
+            className={
+              'btn h-8 gap-1 px-2 text-[11px]' +
+              (status.installed ? '' : ' btn-primary')
+            }
+            disabled={busy}
+            onClick={() => void act('install')}
+          >
+            <RefreshCw size={12} />
+            {hints.reregisterLabel === 'install'
+              ? t('service.install')
+              : t('service.reregister')}
+          </button>
+        ) : !status.installed ? (
           <button
             type="button"
             className="btn h-8 px-2 text-[11px]"
@@ -109,7 +173,11 @@ export function ServicePanel({
           >
             {autostart ? t('service.enableAutostart') : t('service.install')}
           </button>
-        ) : (
+        ) : null}
+        {hints.showUacHint ? (
+          <span className="text-[10px] text-muted">{t('service.uacHint')}</span>
+        ) : null}
+        {status.installed ? (
           <>
             <button
               type="button"
@@ -143,11 +211,27 @@ export function ServicePanel({
               {autostart ? t('service.disableAutostart') : t('service.uninstall')}
             </button>
           </>
-        )}
+        ) : null}
       </div>
-      {note ? <p className="text-[11px] text-warn">{note}</p> : null}
+      {note ? (
+        <p className="break-words text-[11px] text-warn">{note}</p>
+      ) : null}
+      {recovery === 'portable' ? (
+        <p className="text-[11px] leading-relaxed text-warn">
+          {t('service.portableMissing')}
+        </p>
+      ) : null}
+      {recovery === 'manual' ? (
+        <p className="text-[11px] leading-relaxed text-muted">
+          {t('service.manualInstallHint')}
+        </p>
+      ) : null}
       <p className="text-[11px] leading-relaxed text-muted">
-        {autostart ? t('service.autostartHint') : t('service.panelHint')}
+        {autostart
+          ? t('service.autostartHint')
+          : status.elevated
+            ? t('service.panelHintElevated')
+            : t('service.panelHint')}
       </p>
     </div>
   )

@@ -1,28 +1,49 @@
 import { ApiError, fetchClipboardFile, fetchClipboardFiles } from './api'
+import { ClipboardEcho } from './clipboard-echo'
+import {
+  LAZY_DEST,
+  clipboardFileMode,
+  directUploadEligible,
+  resolveClipboardFetch,
+  type LazyCapability,
+} from './clipboard-lazy'
 import type { FileMessage } from './client'
 import type { SessionConnection } from './session-connection'
 
 interface QueuedFile {
   name: string
   size: number
+  /// The local core's opaque clipboard id, kept for the delayed path: the
+  /// bytes are only read when the remote actually pastes.
+  id?: string
   /// Clipboard files are read through the local core into memory (they are
   /// capped); dropped files stay as Blobs and are sliced while uploading.
   data?: ArrayBuffer
   file?: File
 }
 
-const MAX_CLIPBOARD_BYTES = 256 * 1024 * 1024
-const MAX_DROP_BYTES = 2 * 1024 * 1024 * 1024
 const RETRY_DELAY_MS = 3000
+const LAZY_OFFER_TIMEOUT_MS = 10000
+
+export interface ClipboardSyncOptions {
+  /// Null when the host does not advertise `clipboard_lazy`, or when the host
+  /// told us its clipboard belongs to an inner RDP session (virtual files
+  /// cannot cross that boundary).
+  capability?: () => LazyCapability | null
+  echo?: ClipboardEcho
+  /// Called when the host rejects a delayed offer because files must be
+  /// materialised first (nested RDP). The session then disables lazy mode for
+  /// the rest of this connection.
+  onNestedRdp?: () => void
+}
 
 /// Mirrors files copied on this machine into the remote clipboard.
 ///
 /// The page cannot read the OS clipboard's file list. The local core exposes
-/// it over loopback instead; this class polls that snapshot, uploads new files
-/// through the ordinary file-transfer channel, and asks the host to put the
-/// uploaded paths on its clipboard (CF_HDROP / text/uri-list). A paste in the
-/// remote desktop — including inside an RDP client with clipboard redirection
-/// — then works without opening a panel or pressing a button.
+/// it over loopback instead; this class polls that snapshot. When the host
+/// supports delayed rendering it sends descriptors only (`clipboard-offer`)
+/// and uploads a file when the host asks (`clipboard-fetch`); otherwise it
+/// keeps the eager upload + `clipboard-set` path.
 export class ClipboardFileSync {
   private busy = false
   private processing = false
@@ -34,12 +55,39 @@ export class ClipboardFileSync {
   private paths: string[] = []
   private watchdog: number | null = null
   private pasteAfterDrop = false
+  /// Which transfer the shared queue/active state belongs to.
+  private mode: 'direct' | 'fetch' | null = null
+  private fallbackNotified = false
+
+  // Delayed clipboard state.
+  private lazyFiles: QueuedFile[] = []
+  private lazyDest = LAZY_DEST
+  private lazyActive = false
+  /// The host accepted a streaming offer: answer `fetch` ranges, never upload.
+  private lazyStream = false
+  private lazyOfferPending = false
+  private lazyTag = 0
+  private offerTimer: number | null = null
+  private fetchQueue: { index: number; tag: number }[] = []
+  private fetchActive: number | null = null
+  /// Bumped when a new local selection replaces the offered one, so a fetch
+  /// whose bytes were still loading cannot start an upload for the old list.
+  private generation = 0
+
+  private readonly echo: ClipboardEcho
+  private readonly capability: () => LazyCapability | null
+  private readonly onNestedRdp: (() => void) | null
 
   constructor(
     private readonly connection: () => SessionConnection | null,
     private readonly token: () => string,
     private readonly onError: (message: string) => void,
-  ) {}
+    options: ClipboardSyncOptions = {},
+  ) {
+    this.echo = options.echo ?? new ClipboardEcho()
+    this.capability = options.capability ?? (() => null)
+    this.onNestedRdp = options.onNestedRdp ?? null
+  }
 
   /// Called once a second by the session. Cheap when nothing changed.
   async poll(): Promise<void> {
@@ -50,7 +98,11 @@ export class ClipboardFileSync {
     this.processing = true
     try {
       const result = await fetchClipboardFiles(token)
-      const files = result.files.filter((file) => file.size > 0)
+      // `echo` marks a file the local core just staged from the remote; the
+      // reverse sync must not offer its own files back.
+      const files = result.files.filter(
+        (file) => file.size > 0 && file.echo !== true,
+      )
       if (files.length === 0) {
         // Let the same files sync again after the clipboard was cleared.
         this.lastKey = ''
@@ -63,11 +115,33 @@ export class ClipboardFileSync {
       if (key === this.lastKey) return
       if (Date.now() - this.lastAttempt < RETRY_DELAY_MS) return
       this.lastAttempt = Date.now()
-      const total = files.reduce((sum, file) => sum + file.size, 0)
-      if (total > MAX_CLIPBOARD_BYTES) {
+
+      const capability = this.capability()
+      const mode = clipboardFileMode(files, capability)
+      if (mode === 'stream' || mode === 'lazy') {
+        // Descriptors only. In `stream` mode not a single byte is read here:
+        // the host fetches ranges when (and where) the user pastes.
+        if (mode === 'lazy' && !this.fallbackNotified) {
+          // The host must materialise the file under its staging folder
+          // before Explorer can copy it. Say so once, instead of letting the
+          // user wonder why a shortcut copy appears there.
+          this.fallbackNotified = true
+          this.onError('clipboard_files_staged')
+        }
+        this.lastKey = key
+        this.offer(files)
+        return
+      }
+      // The host cannot delay, or the selection is outside its/our limits.
+      if (mode === 'none') {
         this.onError('clipboard_files_too_large')
         this.lastKey = key
         return
+      }
+      if (capability === null && !this.fallbackNotified) {
+        // One informational notice per session, not per copy.
+        this.fallbackNotified = true
+        this.onError('clipboard_files_uploaded')
       }
       const queue: QueuedFile[] = []
       for (const file of files) {
@@ -78,8 +152,10 @@ export class ClipboardFileSync {
         })
       }
       this.lastKey = key
+      this.dropLazyOffer()
       this.queue = queue
       this.paths = []
+      this.mode = 'direct'
       this.busy = true
       this.sendNext()
     } catch (error) {
@@ -95,33 +171,36 @@ export class ClipboardFileSync {
       this.onError('clipboard_files_failed')
     } finally {
       this.processing = false
+      // A fetch may have arrived while the poll was reading the local
+      // clipboard; nothing else would wake the queue.
+      if (this.fetchQueue.length > 0) void this.pumpFetch()
     }
   }
 
   /// Upload the files the user dropped on the remote screen, put them on the
   /// remote clipboard, and (when the session is controllable) send Ctrl+V so
-  /// they land in the folder that has focus. The remote never sees a ghost
-  /// entry during the drag — that needs a host filesystem agent — but the drop
-  /// itself is a normal copy.
+  /// they land in the folder that has focus. A drop is an explicit action, so
+  /// it always uploads immediately instead of offering descriptors.
   async uploadFiles(files: File[], pasteAfterUpload: boolean): Promise<void> {
     if (this.busy || this.processing) {
       this.onError('clipboard_files_busy')
       return
     }
     if (files.length === 0) return
-    const total = files.reduce((sum, file) => sum + file.size, 0)
-    if (total > MAX_DROP_BYTES) {
+    if (!directUploadEligible(files)) {
       this.onError('clipboard_files_too_large')
       return
     }
     this.processing = true
     try {
+      this.dropLazyOffer()
       this.queue = files.map((file) => ({
         name: file.name,
         size: file.size,
         file,
       }))
       this.paths = []
+      this.mode = 'direct'
       this.pasteAfterDrop = pasteAfterUpload
       this.busy = true
       this.sendNext()
@@ -133,6 +212,44 @@ export class ClipboardFileSync {
   /// The session's `file` events. Only this class's own transfer is consumed;
   /// the files panel has its own ids and is paused while it is open.
   handleMessage(message: FileMessage): void {
+    // Delayed clipboard control messages arrive whether or not a transfer is
+    // running.
+    if (message.action === 'clipboard-offer') {
+      this.handleOfferReply(message)
+      return
+    }
+    if (message.action === 'fetch') {
+      // Virtual file: one byte range of an offered file. Independent of the
+      // upload queue, because Explorer reads several files concurrently.
+      void this.answerFetch(message)
+      return
+    }
+    if (message.action === 'clipboard-fetch') {
+      const index = message.index
+      // The host can only render an offer it accepted; anything else is a
+      // stale fetch from a superseded selection.
+      if (!this.lazyActive || typeof index !== 'number' ||
+          !Number.isInteger(index) || index < 0 ||
+          index >= this.lazyFiles.length) {
+        this.connection()?.sendFileAction('clipboard-fetch-failed', {
+          index: typeof index === 'number' ? index : 0,
+        })
+        return
+      }
+      this.fetchQueue.push({
+        index,
+        tag: typeof message.tag === 'number' ? message.tag : 0,
+      })
+      void this.pumpFetch()
+      return
+    }
+    if (message.action === 'clipboard-rendered') {
+      // The host materialised our offered files under these paths; the
+      // reverse sync must skip them.
+      this.echo.rememberPaths(message.paths ?? [])
+      return
+    }
+
     if (!this.busy) return
     if (message.action === 'accept' && this.offerPending && message.id) {
       this.clearWatchdog()
@@ -160,7 +277,16 @@ export class ClipboardFileSync {
         // Skip the file that failed and keep the rest of the selection
         // moving; one unreadable file used to abort the whole copy.
         this.active = null
+        if (this.mode === 'fetch') {
+          this.fetchFailed()
+          return
+        }
         this.sendNext()
+        return
+      }
+      if (this.mode === 'fetch') {
+        this.active = null
+        this.finishFetch()
         return
       }
       this.paths.push(message.path)
@@ -178,6 +304,10 @@ export class ClipboardFileSync {
         this.offerPending = false
         this.active = null
         if (!activeMatch) this.queue.shift()
+        if (this.mode === 'fetch') {
+          this.fetchFailed()
+          return
+        }
         this.sendNext()
         return
       }
@@ -186,10 +316,233 @@ export class ClipboardFileSync {
       if (message.ok === false) {
         this.finish('clipboard_files_failed')
       } else {
+        // Remember the host paths this machine just wrote; the remote will
+        // report them back and the reverse sync must not download them.
+        this.echo.rememberPaths(this.paths)
         if (this.pasteAfterDrop) this.pasteHere()
         this.finish(null)
       }
     }
+  }
+
+  /// Offer descriptors without reading a single byte. The host registers them
+  /// on its clipboard and fetches on the first paste.
+  private offer(
+    files: { id: string; name: string; size: number }[],
+  ): void {
+    // A newer local selection supersedes the previous offer. Avoid starting a
+    // stale upload while the host is mid-render of the old list.
+    this.generation += 1
+    this.abortFetchTransfer()
+    this.fetchQueue = []
+    this.lazyFiles = files.map((file) => ({
+      id: file.id,
+      name: file.name,
+      size: file.size,
+    }))
+    this.lazyDest = LAZY_DEST
+    this.lazyActive = false
+    this.lazyStream = false
+    this.lazyOfferPending = true
+    this.clearOfferTimer()
+    this.connection()?.sendFileAction('clipboard-offer', {
+      files: this.lazyFiles.map((file) => ({
+        name: file.name,
+        size: file.size,
+      })),
+      dest: this.lazyDest,
+    })
+    this.offerTimer = window.setTimeout(() => {
+      this.offerTimer = null
+      if (!this.lazyOfferPending) return
+      this.lazyOfferPending = false
+      this.lazyActive = false
+      this.lazyStream = false
+      this.lazyFiles = []
+      this.lastKey = ''
+      this.onError('clipboard_files_failed')
+    }, LAZY_OFFER_TIMEOUT_MS)
+    // The descriptors are ours; recognise them if they come back as files.
+    this.echo.rememberFiles(this.lazyFiles)
+  }
+
+  private handleOfferReply(message: FileMessage): void {
+    if (!this.lazyOfferPending) return
+    this.clearOfferTimer()
+    this.lazyOfferPending = false
+    if (message.ok === false && message.compat === true) {
+      // The host's clipboard belongs to an inner RDP session. mstsc only
+      // redirects real CF_HDROP files, so upload the bytes now; the next poll
+      // will take the eager path because the session drops its capability.
+      this.lazyActive = false
+      this.lazyStream = false
+      this.lazyFiles = []
+      this.fetchQueue = []
+      this.lastKey = ''
+      this.onNestedRdp?.()
+      this.onError('clipboard_files_compat')
+      return
+    }
+    if (message.ok === false) {
+      this.lazyActive = false
+      this.lazyStream = false
+      this.lazyFiles = []
+      this.fetchQueue = []
+      this.onError('clipboard_files_failed')
+      return
+    }
+    this.lazyActive = true
+    // The host streams only when it saw this viewer's `clipboard_stream`
+    // hello flag; the flag in the reply is the authoritative answer.
+    this.lazyStream = message.stream === true
+  }
+
+  /// Answer one host `fetch` with the requested range from this machine's
+  /// clipboard. A failure is reported in-band (error code 1) so the host's
+  /// waiting Read fails at once rather than waiting out its 64 KiB timeout.
+  private async answerFetch(message: FileMessage): Promise<void> {
+    const connection = this.connection()
+    if (!connection) return
+    const resolution = resolveClipboardFetch(message, this.lazyFiles)
+    if (!resolution.ok) {
+      if (resolution.id > 0) {
+        connection.sendClipboardRange(
+          resolution.id,
+          resolution.error,
+          resolution.offset,
+          new Uint8Array(0),
+        )
+      }
+      return
+    }
+    const { id, target } = resolution
+    const failed = () => connection.sendClipboardRange(
+      id, 1, target.offset, new Uint8Array(0),
+    )
+    if (!this.lazyActive || !this.lazyStream) {
+      failed()
+      return
+    }
+    let bytes: Uint8Array
+    try {
+      bytes = new Uint8Array(await fetchClipboardFile(
+        this.token(),
+        target.fileId,
+        target.offset,
+        target.length,
+      ))
+    } catch {
+      // The file left the local clipboard between copy and paste.
+      failed()
+      return
+    }
+    // The host asked for exactly min(length, size-offset); a short reply is a
+    // failed local read, not end of file, and must not truncate the paste.
+    const expected = Math.min(target.length, target.size - target.offset)
+    if (!this.lazyActive || !this.lazyStream ||
+        bytes.byteLength !== expected) {
+      failed()
+      return
+    }
+    connection.sendClipboardRange(id, 0, target.offset, bytes)
+  }
+
+  /// One upload at a time, exactly like the eager path, but with the tag the
+  /// host attached to its fetch so the bytes land in the right offer slot.
+  private async pumpFetch(): Promise<void> {
+    if (this.fetchActive !== null || this.busy || this.processing) return
+    const next = this.fetchQueue.shift()
+    if (!next) return
+    const connection = this.connection()
+    const token = this.token()
+    const file = this.lazyFiles[next.index]
+    if (!connection || !file || !file.id) {
+      connection?.sendFileAction('clipboard-fetch-failed', {
+        index: next.index,
+      })
+      return
+    }
+    const generation = this.generation
+    this.processing = true
+    let data: ArrayBuffer
+    try {
+      data = await fetchClipboardFile(token, file.id)
+    } catch {
+      this.processing = false
+      // The local clipboard changed before the paste: fail this file at once
+      // instead of letting the host wait out its 15 s budget.
+      connection.sendFileAction('clipboard-fetch-failed', {
+        index: next.index,
+      })
+      void this.pumpFetch()
+      return
+    }
+    this.processing = false
+    if (generation !== this.generation) {
+      void this.pumpFetch()
+      return
+    }
+    this.fetchActive = next.index
+    this.lazyTag = next.tag
+    this.mode = 'fetch'
+    this.queue = [{ name: file.name, size: file.size, data }]
+    this.paths = []
+    this.pasteAfterDrop = false
+    this.busy = true
+    this.sendNext()
+  }
+
+  private fetchFailed(): void {
+    const index = this.fetchActive
+    if (index !== null) {
+      this.connection()?.sendFileAction('clipboard-fetch-failed', { index })
+    }
+    this.finishFetch()
+  }
+
+  private finishFetch(): void {
+    this.clearWatchdog()
+    this.busy = false
+    this.processing = false
+    this.active = null
+    this.queue = []
+    this.paths = []
+    this.fetchActive = null
+    this.mode = null
+    this.offerPending = false
+    void this.pumpFetch()
+  }
+
+  /// Abandon an in-flight host fetch without touching the current lazy offer.
+  private abortFetchTransfer(): void {
+    if (this.mode !== 'fetch') return
+    if (this.active) {
+      this.connection()?.sendFileAction('cancel', { id: this.active.id })
+    }
+    if (this.fetchActive !== null) {
+      this.connection()?.sendFileAction('clipboard-fetch-failed', {
+        index: this.fetchActive,
+      })
+    }
+    this.clearWatchdog()
+    this.busy = false
+    this.processing = false
+    this.active = null
+    this.queue = []
+    this.fetchActive = null
+    this.mode = null
+    this.offerPending = false
+  }
+
+  private dropLazyOffer(): void {
+    this.generation += 1
+    this.abortFetchTransfer()
+    this.fetchQueue = []
+    this.lazyFiles = []
+    this.lazyActive = false
+    this.lazyStream = false
+    this.lazyOfferPending = false
+    this.clearOfferTimer()
   }
 
   /// Ctrl+V in the remote desktop after a drop. The remote application that
@@ -208,6 +561,10 @@ export class ClipboardFileSync {
   private sendNext(): void {
     if (this.queue.length === 0) {
       this.offerPending = false
+      if (this.mode === 'fetch') {
+        this.finishFetch()
+        return
+      }
       if (this.paths.length === 0) {
         this.finish('clipboard_files_failed')
         return
@@ -220,10 +577,15 @@ export class ClipboardFileSync {
     }
     const next = this.queue[0]
     this.offerPending = true
-    this.connection()?.sendFileAction('offer', {
+    const extra: Record<string, unknown> = {
       name: next.name,
       size: next.size,
-    })
+    }
+    if (this.mode === 'fetch') {
+      extra.dest = this.lazyDest
+      extra.clipboard_tag = this.lazyTag
+    }
+    this.connection()?.sendFileAction('offer', extra)
     this.armWatchdog()
   }
 
@@ -239,6 +601,13 @@ export class ClipboardFileSync {
     if (this.watchdog !== null) {
       window.clearTimeout(this.watchdog)
       this.watchdog = null
+    }
+  }
+
+  private clearOfferTimer(): void {
+    if (this.offerTimer !== null) {
+      window.clearTimeout(this.offerTimer)
+      this.offerTimer = null
     }
   }
 
@@ -270,12 +639,20 @@ export class ClipboardFileSync {
 
   private finish(error: string | null): void {
     this.clearWatchdog()
-    // Abort the host-side upload too; otherwise its .part file lingers and
-    // the next offer would reuse the same destination name.
-    if (error && this.active) {
-      this.connection()?.sendFileAction('cancel', { id: this.active.id })
+    if (error) {
+      // Abort the host-side upload too; otherwise its .part file lingers and
+      // the next offer would reuse the same destination name. The fetch path
+      // also tells the host which slot failed so its render does not wait out
+      // the 15 s budget.
+      if (this.mode === 'fetch') {
+        this.abortFetchTransfer()
+      } else if (this.active) {
+        this.connection()?.sendFileAction('cancel', { id: this.active.id })
+      }
+      this.onError(error)
+      this.dropLazyOffer()
+      this.lastKey = ''
     }
-    if (error) this.onError(error)
     this.busy = false
     this.processing = false
     this.offerPending = false
@@ -283,12 +660,15 @@ export class ClipboardFileSync {
     this.queue = []
     this.paths = []
     this.pasteAfterDrop = false
-    if (error) this.lastKey = ''
+    this.fetchActive = null
+    this.mode = null
+    if (this.fetchQueue.length > 0) void this.pumpFetch()
   }
 
   /// Drop an in-flight transfer when the session goes away.
   reset(): void {
     this.finish(null)
+    this.dropLazyOffer()
     this.lastKey = ''
   }
 }

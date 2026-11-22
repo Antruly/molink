@@ -14,6 +14,7 @@
 #include <cstring>
 #include <deque>
 #include <mutex>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -27,6 +28,8 @@
 #include "compression.h"
 #include "capture/replay_policy.h"
 #include "capture/video_push.h"
+#include "clipboard_pull.h"
+#include "input/input_event.h"
 #if MOLINK_HAVE_WEBRTC
 #include "webrtc/rtc_session.h"
 #endif
@@ -52,9 +55,97 @@ struct clipboard_sync_state {
   std::deque<std::string> order;
   std::atomic<bool> fetch_pending{false};
   std::atomic<bool> files_pending{false};
+  /// File-list signatures (path per line) announced or written recently.
+  /// Suppressing a signature for two minutes is what stops a selection this
+  /// machine just put on the clipboard from travelling back to the viewer that
+  /// supplied it (`file (1)(2)` ping-pong).
+  std::unordered_map<std::string, uint64_t> files_recent;
+  /// The list most recently announced (or written for a viewer). Unlike the
+  /// two-minute echo window this is not time bounded: the periodic poll must
+  /// not re-announce an unchanged clipboard every two minutes, which would
+  /// make a viewer download its own files back.
+  std::string last_files_signature;
+  bool has_last_files = false;
 };
 
 clipboard_sync_state g_clipboard_sync;
+
+constexpr uint64_t kClipboardFileEchoMs = 2ull * 60 * 1000;
+constexpr std::size_t kClipboardFileEchoMax = 64;
+/// One clipboard-pull range is at most this many bytes. The viewer uses the
+/// same size, so a normal download is one packet per request.
+constexpr uint64_t kClipboardPullChunkBytes = 256ull * 1024;
+// The same advisory caps the viewer applies. The host advertises at most this
+// prefix so a folder-sized CF_HDROP cannot turn into a huge JSON message; the
+// rest is still available through the files panel.
+constexpr std::size_t kClipboardPullMaxFiles = 8;
+constexpr uint64_t kClipboardPullMaxFileBytes = 256ull * 1024 * 1024;
+constexpr uint64_t kClipboardPullMaxTotalBytes = 2ull * 1024 * 1024 * 1024;
+
+std::string clipboard_files_signature(
+    const std::vector<clipboard_file>& files) {
+  std::string signature;
+  for (const clipboard_file& file : files) {
+    signature += file.path;
+    signature += '\n';
+  }
+  return signature;
+}
+
+/// False when this exact file list was published (or written by a viewer)
+/// within the echo window. Marks a new list as seen.
+bool clipboard_take_files_signature(const std::string& signature) {
+  if (signature.empty()) return false;
+  const uint64_t now = now_ms();
+  std::lock_guard<std::mutex> lock(g_clipboard_sync.mutex);
+  if (g_clipboard_sync.has_last_files &&
+      g_clipboard_sync.last_files_signature == signature) {
+    return false;
+  }
+  g_clipboard_sync.last_files_signature = signature;
+  g_clipboard_sync.has_last_files = true;
+  auto& recent = g_clipboard_sync.files_recent;
+  const auto it = recent.find(signature);
+  if (it != recent.end() && now >= it->second &&
+      now - it->second < kClipboardFileEchoMs) {
+    return false;
+  }
+  // Bound the table: drop expired entries when it grows.
+  if (recent.size() >= kClipboardFileEchoMax) {
+    for (auto entry = recent.begin(); entry != recent.end();) {
+      if (now < entry->second || now - entry->second >= kClipboardFileEchoMs) {
+        entry = recent.erase(entry);
+      } else {
+        ++entry;
+      }
+    }
+  }
+  recent[signature] = now;
+  return true;
+}
+
+/// The clipboard now holds text (or nothing). A later copy of the same files
+/// is a new action and must be announced again.
+void clipboard_reset_files_signature() {
+  std::lock_guard<std::mutex> lock(g_clipboard_sync.mutex);
+  g_clipboard_sync.last_files_signature.clear();
+  g_clipboard_sync.has_last_files = false;
+}
+
+/// Remembers files the host just materialised for a viewer so the clipboard
+/// watcher does not publish them straight back.
+void clipboard_mark_files_written(const std::vector<std::string>& paths) {
+  std::vector<clipboard_file> files;
+  files.reserve(paths.size());
+  for (const std::string& path : paths) {
+    if (path.empty()) continue;
+    clipboard_file file;
+    file.path = path;
+    files.push_back(std::move(file));
+  }
+  const std::string signature = clipboard_files_signature(files);
+  if (!signature.empty()) clipboard_take_files_signature(signature);
+}
 
 std::string clipboard_hash(const std::string& text) {
   uint32_t hash = 2166136261u;
@@ -175,69 +266,189 @@ bool bool_field(const uvcpp_json& j, const char* key, bool fallback) {
   return it->get<bool>();
 }
 
-input_injector::status inject_one(input_injector& input, const uvcpp_json& event,
-                                  std::string& err) {
-  if (!event.is_object()) {
+/// `MOLINK_CLIPBOARD_STREAM=0` is the kill switch for the virtual-file path:
+/// even a viewer that advertises the capability falls back to the eager
+/// upload, without needing another build.
+bool clipboard_stream_capable(const uvcpp_json& j) {
+  const char* env = std::getenv("MOLINK_CLIPBOARD_STREAM");
+  if (env != nullptr && std::string(env) == "0") return false;
+  return bool_field(j, "clipboard_stream", false);
+}
+
+/// Publish a host clipboard file list to every authenticated viewer.
+///
+/// One list is sent in two shapes:
+///  * `clipboard-sync.files` names the files with a session-scoped 1-based id.
+///    New viewers pull the bytes with `clipboard-pull` and never see a host
+///    path; this is the path that works through nested RDP.
+///  * the older `clipboard/files` message keeps the files panel (and older
+///    clients) working, and is the fallback for a plain browser page that
+///    cannot write the local clipboard.
+///
+/// The signature is checked first so a list this machine just wrote for a
+/// viewer (or already published) does not echo back.
+void send_clipboard_files_to(
+    const std::shared_ptr<session_registry>& registry, const session_info& peer,
+    const std::vector<clipboard_file>& files, bool nested_rdp) {
+  if (!peer.authenticated || !peer.transport) return;
+  uvcpp_json legacy_list = uvcpp_json::array();
+  for (const clipboard_file& file : files) {
+    uvcpp_json legacy;
+    legacy["name"] = file.name;
+    legacy["path"] = file.path;
+    legacy["size"] = file.size;
+    legacy_list.push_back(std::move(legacy));
+  }
+
+  // The id list is capped exactly like the viewer caps it: 8 files, 256 MiB
+  // each, 2 GiB total. The viewer learns how many were left out.
+  std::size_t advertised = 0;
+  uint64_t total = 0;
+  for (const clipboard_file& file : files) {
+    if (advertised >= kClipboardPullMaxFiles) break;
+    if (file.size > kClipboardPullMaxFileBytes) break;
+    if (total + file.size > kClipboardPullMaxTotalBytes) break;
+    total += file.size;
+    ++advertised;
+  }
+  const std::size_t omitted = files.size() - advertised;
+
+  if (peer.clipboard_pull) {
+    // Only a client that advertised clipboard_pull gets the id list. An
+    // older client's `clipboard-sync` handler writes `text` unconditionally,
+    // so a files-only message would clear its text clipboard.
+    std::vector<clipboard_offer_entry> offers;
+    offers.reserve(advertised);
+    uvcpp_json pull_list = uvcpp_json::array();
+    for (std::size_t i = 0; i < advertised; ++i) {
+      clipboard_offer_entry offer;
+      offer.id = static_cast<uint32_t>(i + 1);
+      offer.name = files[i].name;
+      offer.size = files[i].size;
+      offers.push_back(offer);
+
+      uvcpp_json item;
+      item["id"] = static_cast<uint64_t>(offer.id);
+      item["name"] = offer.name;
+      item["size"] = offer.size;
+      // Kept for the browser fallback (the files panel downloads by path).
+      item["path"] = files[i].path;
+      pull_list.push_back(std::move(item));
+    }
+    registry->set_clipboard_offer(peer.id, std::move(offers), nested_rdp);
+    uvcpp_json out;
+    out["type"] = "clipboard-sync";
+    out["files"] = pull_list;
+    if (nested_rdp) out["nested_rdp"] = true;
+    if (omitted > 0) out["omitted"] = static_cast<uint64_t>(omitted);
+    send_json(peer.transport.get(), out);
+  }
+
+  uvcpp_json legacy_out;
+  legacy_out["type"] = "clipboard";
+  legacy_out["action"] = "files";
+  legacy_out["files"] = legacy_list;
+  send_json(peer.transport.get(), legacy_out);
+}
+
+void publish_clipboard_files(
+    const std::shared_ptr<session_registry>& registry,
+    const std::function<void(std::function<void()>)>& post,
+    std::vector<clipboard_file> files, bool nested_rdp) {
+  files.erase(std::remove_if(files.begin(), files.end(),
+                             [](const clipboard_file& file) {
+                               return file.path.empty() || file.name.empty();
+                             }),
+              files.end());
+  if (files.empty()) return;
+  const std::string signature = clipboard_files_signature(files);
+  if (!clipboard_take_files_signature(signature)) return;
+
+  auto deliver = [registry, files = std::move(files), nested_rdp] {
+    for (const session_info& peer : registry->snapshot()) {
+      send_clipboard_files_to(registry, peer, files, nested_rdp);
+    }
+  };
+  if (post) {
+    post(std::move(deliver));
+  } else {
+    deliver();
+  }
+}
+
+/// Decodes the JSON wire form into the platform-neutral `input_event` the
+/// injector test covers. Validation errors are filled in here so `inject_one`
+/// never reports an empty `bad_input`.
+bool decode_input_event(const uvcpp_json& j, input_event& out,
+                        std::string& err) {
+  if (!j.is_object()) {
     err = "input event must be an object";
-    return input_injector::status::rejected;
+    return false;
   }
-  const std::string kind = string_field(event, "k");
-
+  out = input_event{};
+  const std::string kind = string_field(j, "k");
+  out.kind_name = kind;
   if (kind == "sas") {
-    // Ctrl+Alt+Del cannot be synthesized with SendInput; the SYSTEM service
-    // generates it (SoftwareSASGeneration policy).
-    std::string sas_error;
-    if (!send_secure_attention(sas_error)) {
-      err = sas_error;
-      return input_injector::status::rejected;
-    }
-    return input_injector::status::ok;
+    out.type = input_event::kind::sas;
+    return true;
   }
-
   if (kind == "move") {
-    double x = 0;
-    double y = 0;
-    if (!number_field(event, "x", x) || !number_field(event, "y", y)) {
+    out.type = input_event::kind::move;
+    if (!number_field(j, "x", out.x) || !number_field(j, "y", out.y)) {
       err = "move needs normalized x and y";
-      return input_injector::status::rejected;
+      return false;
     }
-    return input.move(x, y);
+    out.has_xy = true;
+    return true;
   }
   if (kind == "button") {
+    out.type = input_event::kind::button;
     double button = 1;
-    if (!number_field(event, "button", button)) {
+    if (!number_field(j, "button", button)) {
       err = "button needs a button number";
-      return input_injector::status::rejected;
+      return false;
     }
-    return input.button(static_cast<int>(button),
-                        bool_field(event, "down", true));
+    out.button = static_cast<int>(button);
+    out.has_button = true;
+    out.down = bool_field(j, "down", true);
+    return true;
   }
   if (kind == "wheel") {
-    double dx = 0;
-    double dy = 0;
-    number_field(event, "dx", dx);
-    number_field(event, "dy", dy);
-    return input.wheel(static_cast<int>(dx), static_cast<int>(dy));
+    out.type = input_event::kind::wheel;
+    number_field(j, "dx", out.dx);
+    number_field(j, "dy", out.dy);
+    return true;
   }
   if (kind == "key") {
-    const std::string code = string_field(event, "code");
-    if (code.empty()) {
+    out.type = input_event::kind::key;
+    out.code = string_field(j, "code");
+    if (out.code.empty()) {
       err = "key needs a code";
-      return input_injector::status::rejected;
+      return false;
     }
-    return input.key(code, bool_field(event, "down", true));
+    out.down = bool_field(j, "down", true);
+    return true;
   }
   if (kind == "text") {
-    const std::string value = string_field(event, "text");
-    if (value.empty() || value.size() > 4096) {
+    out.type = input_event::kind::text;
+    out.text = string_field(j, "text");
+    if (out.text.empty() || out.text.size() > 4096) {
       err = "text must be 1..4096 bytes";
-      return input_injector::status::rejected;
+      return false;
     }
-    return input.text(value);
+    return true;
   }
-
   err = "unknown input event kind: " + kind;
-  return input_injector::status::rejected;
+  return false;
+}
+
+input_injector::status inject_one(input_injector& input, const uvcpp_json& event,
+                                  std::string& err) {
+  input_event decoded;
+  if (!decode_input_event(event, decoded, err)) {
+    return input_injector::status::rejected;
+  }
+  return inject_input_event(input, decoded, err, &send_secure_attention);
 }
 
 bool send_frame_payload(session_transport* transport,
@@ -1186,6 +1397,24 @@ void send_welcome(session_transport* transport, const session_info& session,
   }
   j["clipboard"] = opt.clipboard != nullptr && opt.clipboard->available();
   j["clipboard_backend"] = opt.clipboard ? opt.clipboard->backend() : "none";
+  // The host can serve a viewer's `clipboard-pull` range requests: files the
+  // host user copied can be pasted on the viewer's machine without staging
+  // them there first.
+  j["clipboard_pull"] = opt.clipboard != nullptr && opt.clipboard->available();
+  const bool nested_rdp = opt.clipboard != nullptr && opt.clipboard->nested_rdp();
+  j["clipboard_nested_rdp"] = nested_rdp;
+  // Delayed file rendering: the viewer may send descriptors and let the host
+  // fetch the bytes on the first paste. Clients that do not ask keep uploading
+  // eagerly. The limits are advisory; the host enforces them too.
+  j["clipboard_lazy"] =
+      opt.clipboard != nullptr && opt.clipboard->supports_lazy_files();
+  j["clipboard_lazy_files"] = static_cast<uint64_t>(kMaxLazyFiles);
+  j["clipboard_lazy_bytes"] = static_cast<uint64_t>(kMaxLazyBytes);
+  // Negotiated, not merely supported: both sides must be able to stream. A
+  // client that did not advertise it in hello keeps the eager upload path.
+  j["clipboard_stream"] = opt.clipboard != nullptr &&
+                          opt.clipboard->supports_lazy_files() &&
+                          session.clipboard_stream;
   j["device_id"] = opt.device_id;
   if (!opt.cert_fingerprint.empty()) {
     j["tls_fingerprint"] = opt.cert_fingerprint;
@@ -1254,6 +1483,126 @@ void session_controller::update_file_retry_timer() {
   }
 }
 
+void session_controller::send_lazy_offer_reply(bool ok, bool stream,
+                                               const std::string& message,
+                                               bool compat) {
+  std::shared_ptr<session_transport> transport = transport_.lock();
+  if (!transport) return;
+  uvcpp_json out;
+  out["type"] = "file";
+  out["action"] = "clipboard-offer";
+  out["ok"] = ok;
+  out["lazy"] = ok;
+  // True when the host will fetch byte ranges instead of asking for an
+  // upload. The page then keeps answering `fetch` and never uploads.
+  out["stream"] = ok && stream;
+  // An inner RDP session cannot render a delayed/virtual offer. The viewer
+  // must materialise the files first (upload-then-CF_HDROP) so mstsc can
+  // redirect them into the nested desktop.
+  if (compat) out["compat"] = true;
+  if (!ok) out["message"] = message;
+  send_json(transport.get(), out);
+}
+
+void session_controller::request_lazy_range(std::size_t index, uint32_t id,
+                                            uint64_t offset,
+                                            uint32_t length) {
+  std::shared_ptr<session_transport> transport = transport_.lock();
+  std::shared_ptr<session_info> session = session_.lock();
+  std::shared_ptr<remote_file_source> source = stream_source_;
+  const auto fail = [&source](uint32_t request_id, uint64_t at) {
+    if (source) source->note_range(request_id, 1, at, nullptr, 0);
+  };
+  // A posted request can outlive its read or its offer; do not ask the
+  // viewer for bytes nothing is waiting on.
+  if (!source || index >= source->size() || !source->has_pending(id)) {
+    return;
+  }
+  if (!transport || !session || !session->authenticated || !options_.lazy ||
+      !options_.lazy->active_for(session->id)) {
+    fail(id, offset);
+    return;
+  }
+  const lazy_clipboard_file& file = source->files()[index];
+  uvcpp_json out;
+  out["type"] = "file";
+  out["action"] = "fetch";
+  out["id"] = static_cast<uint64_t>(id);
+  // `index` is not part of the essential contract (name would identify the
+  // file), but two folders can contribute the same base name in one selection.
+  out["index"] = static_cast<uint64_t>(index);
+  out["name"] = file.name;
+  out["offset"] = offset;
+  out["length"] = static_cast<uint64_t>(length);
+  send_json(transport.get(), out);
+}
+
+void session_controller::request_lazy_file(std::size_t index) {
+  std::shared_ptr<session_transport> transport = transport_.lock();
+  std::shared_ptr<session_info> session = session_.lock();
+  std::shared_ptr<lazy_blob_source> source = lazy_source_;
+  if (!source || index >= source->size()) {
+    if (source) source->note_failed(index);
+    return;
+  }
+  if (!transport || !session || !session->authenticated || !options_.lazy ||
+      !options_.lazy->active_for(session->id)) {
+    source->note_failed(index);
+    return;
+  }
+  const lazy_clipboard_file& file = source->files()[index];
+  uvcpp_json out;
+  out["type"] = "file";
+  out["action"] = "clipboard-fetch";
+  out["index"] = static_cast<uint64_t>(index);
+  out["tag"] = lazy_tag_base_ + static_cast<int>(index);
+  out["name"] = file.name;
+  out["size"] = file.size;
+  send_json(transport.get(), out);
+}
+
+void session_controller::on_upload_event(int tag,
+                                         file_transfer::upload_event event,
+                                         uint32_t id, uint64_t received,
+                                         uint64_t size,
+                                         const std::string& path) {
+  (void)id;
+  (void)size;
+  std::shared_ptr<lazy_blob_source> source = lazy_source_;
+  if (!source) return;
+  const int index = tag - lazy_tag_base_;
+  if (index < 0 || static_cast<std::size_t>(index) >= source->size()) return;
+  switch (event) {
+    case file_transfer::upload_event::accepted:
+      break;
+    case file_transfer::upload_event::progress:
+      source->note_progress(static_cast<std::size_t>(index), received);
+      break;
+    case file_transfer::upload_event::failed:
+      source->note_failed(static_cast<std::size_t>(index));
+      break;
+    case file_transfer::upload_event::done: {
+      source->note_done(static_cast<std::size_t>(index), path);
+      // The host is about to put a real path on CF_HDROP for this viewer.
+      // Suppress the clipboard watcher so it is not announced straight back.
+      if (!path.empty()) clipboard_mark_files_written({path});
+      // Tell the originating viewer which host paths were materialised, so
+      // its reverse clipboard sync suppresses the echo instead of downloading
+      // its own files back (the source of the (1)(2) loop).
+      std::shared_ptr<session_transport> transport = transport_.lock();
+      if (transport && !path.empty()) {
+        uvcpp_json out;
+        out["type"] = "file";
+        out["action"] = "clipboard-rendered";
+        out["paths"] = uvcpp_json::array();
+        out["paths"].push_back(path);
+        send_json(transport.get(), out);
+      }
+      break;
+    }
+  }
+}
+
 bool session_controller::start(const std::string* initial_token) {
   std::shared_ptr<session_transport> transport = transport_.lock();
   if (!transport) return false;
@@ -1289,6 +1638,13 @@ bool session_controller::start(const std::string* initial_token) {
           return self->send_file_chunk(id, offset, data, len);
         }
         return false;
+      });
+  files_->watch_uploads(
+      [weak](int tag, file_transfer::upload_event event, uint32_t id,
+             uint64_t received, uint64_t size, const std::string& path) {
+        if (auto self = weak.lock()) {
+          self->on_upload_event(tag, event, id, received, size, path);
+        }
       });
   transport->set_handlers(
       [weak](const std::string& text) {
@@ -1361,9 +1717,52 @@ void session_controller::send_welcome_message() {
   std::shared_ptr<session_info> session = session_.lock();
   if (transport && session) {
     send_welcome(transport.get(), *session, options_, resume_token_);
+    if (!announced_initial_files_) {
+      announced_initial_files_ = true;
+      announce_current_clipboard_files();
+    }
     attach_chat();
     attach_call();
   }
+}
+
+void session_controller::announce_current_clipboard_files() {
+  if (!options_.clipboard || !options_.clipboard->available()) return;
+  const std::shared_ptr<session_info> session = session_.lock();
+  if (!session || !session->authenticated) return;
+  const uint32_t session_id = session->id;
+  std::shared_ptr<session_registry> registry = registry_;
+  auto post = options_.post;
+  std::shared_ptr<clipboard_service> clipboard = options_.clipboard;
+  options_.clipboard->request_files(
+      [registry, post, clipboard, session_id](
+          std::vector<clipboard_file> files) {
+        files.erase(std::remove_if(files.begin(), files.end(),
+                                   [](const clipboard_file& file) {
+                                     return file.path.empty() ||
+                                            file.name.empty();
+                                   }),
+                    files.end());
+        if (files.empty()) return;
+        // This session gets the list directly, but the periodic watcher must
+        // not announce the same unchanged list a moment later. Mark it as
+        // published here; `send_clipboard_files_to` still runs even when it
+        // was already published (a late joiner needs its own copy).
+        clipboard_take_files_signature(clipboard_files_signature(files));
+        const bool nested = clipboard && clipboard->nested_rdp();
+        auto deliver = [registry, session_id, files = std::move(files),
+                        nested] {
+          const std::shared_ptr<session_info> live =
+              registry->find(session_id);
+          if (!live) return;
+          send_clipboard_files_to(registry, *live, files, nested);
+        };
+        if (post) {
+          post(std::move(deliver));
+        } else {
+          deliver();
+        }
+      });
 }
 
 void session_controller::issue_resume_token() {
@@ -1589,6 +1988,43 @@ bool session_controller::send_file_chunk(uint32_t id, uint64_t offset,
   return false;
 }
 
+void session_controller::send_clipboard_file_reply(uint32_t id,
+                                                   uint32_t status,
+                                                   uint64_t offset,
+                                                   const uint8_t* data,
+                                                   std::size_t len) {
+  std::shared_ptr<session_transport> transport = transport_.lock();
+  if (!transport || !transport->is_open()) return;
+  std::vector<uint8_t> payload(16 + len);
+  auto put_u32 = [&payload](std::size_t at, uint32_t value) {
+    payload[at] = static_cast<uint8_t>(value & 0xff);
+    payload[at + 1] = static_cast<uint8_t>((value >> 8) & 0xff);
+    payload[at + 2] = static_cast<uint8_t>((value >> 16) & 0xff);
+    payload[at + 3] = static_cast<uint8_t>((value >> 24) & 0xff);
+  };
+  put_u32(0, id);
+  put_u32(4, status);
+  for (int i = 0; i < 8; ++i) {
+    payload[8 + static_cast<std::size_t>(i)] =
+        static_cast<uint8_t>((offset >> (8 * i)) & 0xff);
+  }
+  if (len != 0 && data != nullptr) {
+    std::memcpy(payload.data() + 16, data, len);
+  }
+  std::vector<uint8_t> out;
+  std::string err;
+  if (!protocol::encode_packet_into(
+          out, static_cast<uint8_t>(protocol::packet_type::clipboard_file), 0,
+          0, 0, epoch_us(), payload.data(), payload.size(), err)) {
+    return;
+  }
+  // File content, so it rides the file channel: a 256 KiB reply must not
+  // head-of-line block input and control messages. When a WebRTC data channel
+  // is up it has its own "file" channel; use it like an ordinary transfer.
+  if (send_realtime_file(session_, out)) return;
+  transport->send_binary(transport_channel::file, out.data(), out.size());
+}
+
 void session_controller::send_audio(std::vector<uint8_t> pcm) {
   std::shared_ptr<session_transport> transport = transport_.lock();
   if (!transport || !transport->is_open() || pcm.empty()) return;
@@ -1730,6 +2166,8 @@ void session_controller::on_text(const std::string& text) {
       session->av1_stream =
           bool_field(j, "av1_stream", false) || hello_av1_native;
       session->seq_clock = bool_field(j, "seq_clock", false);
+      session->clipboard_stream = clipboard_stream_capable(j);
+      session->clipboard_pull = bool_field(j, "clipboard_pull", false);
       session->video_push = bool_field(j, "video_push", false);
       session->h264_stream = bool_field(j, "h264_stream", false);
       session->vp9_stream = bool_field(j, "vp9_stream", false);
@@ -1900,6 +2338,10 @@ void session_controller::on_text(const std::string& text) {
         string_field(j, "name").substr(0, 64);
     session->client_id =
         string_field(j, "device_id").substr(0, 64);
+    // A no-code session never sends a hello, so this request carries the one
+    // capability the clipboard path needs.
+    session->clipboard_stream = clipboard_stream_capable(j);
+    session->clipboard_pull = bool_field(j, "clipboard_pull", false);
     const std::weak_ptr<session_controller> weak = weak_from_this();
     const uint32_t id = options_.access_requests->add(
         info,
@@ -2173,6 +2615,7 @@ void session_controller::on_text(const std::string& text) {
     }
 
     if (options_.clipboard) options_.clipboard->set_text(text);
+    clipboard_reset_files_signature();
     for (const session_info& peer : registry_->snapshot()) {
       if (peer.id == session->id || !peer.authenticated || !peer.transport) {
         continue;
@@ -2279,6 +2722,7 @@ void session_controller::on_text(const std::string& text) {
         return;
       }
       options_.clipboard->set_text(std::move(text_value));
+      clipboard_reset_files_signature();
       return;
     }
     if (action == "get") {
@@ -2388,9 +2832,12 @@ void session_controller::on_text(const std::string& text) {
     const std::string mode = normalize_video_mode(value);
     if (options_.capture) {
       // "stream" pins the video path and "tiles" disables it; "auto" leaves
-      // stream_always_ false so the supervisor's stream_policy decides. The
-      // supervisor applies the rest on its next tick.
-      options_.capture->set_stream_always(stream_always_for_video_mode(mode));
+      // stream_always_ false so the supervisor's stream_policy decides. A
+      // tiles codec preference still wins over the stream mode: it is the
+      // viewer's manual choice from the toolbar. The supervisor applies the
+      // rest on its next tick.
+      const std::string preference = options_.auth->settings().stream_codec;
+      options_.capture->set_stream_always(stream_always_for(mode, preference));
     }
     uvcpp_json shared;
     shared["type"] = "video-mode";
@@ -2427,19 +2874,22 @@ void session_controller::on_text(const std::string& text) {
       return;
     }
     if (options_.auth) options_.auth->set_stream_codec(value);
-    // A codec switch has to be visible at once. Apply the new codec to the
+    // A codec (or path) switch has to be visible at once. Apply it to the
     // capture here instead of waiting for the supervisor's one-second tick;
-    // the supervisor still re-evaluates the viewer set and corrects it if some
-    // other viewer cannot decode this codec. The encoder is re-initialised on
-    // the new codec and the first frame is a keyframe.
+    // the supervisor still re-reads the preference every tick, so the change
+    // takes effect without reconnecting and is corrected if another viewer
+    // cannot decode a codec. Picking "tiles" is a request to stop streaming,
+    // so it releases stream_always_ and skips the stream nudge.
     if (options_.capture) {
+      const std::string mode = options_.auth->settings().video_mode;
+      options_.capture->set_stream_always(stream_always_for(mode, value));
       if (value != "auto") {
         options_.capture->set_av1_stream_allowed(value == "av1");
         options_.capture->set_h264_stream_allowed(value == "h264");
         options_.capture->set_vp9_stream_allowed(value == "vp9");
         options_.capture->set_vp8_stream_allowed(value == "vp8");
       }
-      options_.capture->request_stream(15000);
+      if (value != "tiles") options_.capture->request_stream(15000);
     }
     // The preference is host-global: every tab has to show the same value or
     // the last writer wins forever.
@@ -2588,15 +3038,205 @@ void session_controller::on_text(const std::string& text) {
         it != j.end() && it->is_number()) {
       id = static_cast<uint32_t>(it->get<uint64_t>());
     }
+    if (action == "clipboard-pull") {
+      // A viewer is downloading a file that was copied on this host (possibly
+      // inside a nested RDP session). Re-enumerate CF_HDROP *now*: RDP
+      // redirection replaces its temporary files, so a path cached at
+      // announcement time may already be gone.
+      uint64_t offset = 0;
+      uint64_t length = kClipboardPullChunkBytes;
+      if (const auto it = j.find("offset");
+          it != j.end() && it->is_number()) {
+        const double value = it->get<double>();
+        if (value >= 0) offset = static_cast<uint64_t>(value);
+      }
+      if (const auto it = j.find("length");
+          it != j.end() && it->is_number()) {
+        const double value = it->get<double>();
+        if (value > 0) length = static_cast<uint64_t>(value);
+      }
+      if (length > kClipboardPullChunkBytes) length = kClipboardPullChunkBytes;
+      const uint32_t file_id = id;
+      if (!options_.clipboard || !options_.clipboard->available()) {
+        send_clipboard_file_reply(
+            file_id, static_cast<uint32_t>(clipboard_pull_status::gone),
+            offset, nullptr, 0);
+        return;
+      }
+      const uint32_t session_id = session->id;
+      std::weak_ptr<session_controller> weak = weak_from_this();
+      auto post = options_.post;
+      auto registry_ref = registry_;
+      options_.clipboard->request_files(
+          [weak, post, registry_ref, session_id, file_id, offset,
+           length](std::vector<clipboard_file> current) {
+            const std::vector<clipboard_offer_entry> offered =
+                registry_ref->clipboard_offer(session_id);
+            clipboard_pull_result result = read_clipboard_pull(
+                current, offered, file_id, offset, length,
+                kClipboardPullChunkBytes);
+            auto deliver = [weak, file_id, result = std::move(result)] {
+              if (auto self = weak.lock()) {
+                self->send_clipboard_file_reply(
+                    file_id, static_cast<uint32_t>(result.status),
+                    result.offset,
+                    result.data.empty() ? nullptr : result.data.data(),
+                    result.data.size());
+              }
+            };
+            if (post) {
+              post(std::move(deliver));
+            } else {
+              deliver();
+            }
+          });
+      return;
+    }
     if (action == "offer") {
       uint64_t size = 0;
       if (const auto it = j.find("size");
           it != j.end() && it->is_number()) {
         size = it->get<uint64_t>();
       }
-      files_->offer(string_field(j, "name"), size,
-                    string_field(j, "dest"));
+      // The delayed clipboard path tags the upload it asked for. An ordinary
+      // offer carries no tag and the listener ignores it.
+      int tag = -1;
+      if (const auto it = j.find("clipboard_tag");
+          it != j.end() && it->is_number()) {
+        tag = it->get<int>();
+      }
+      files_->offer(string_field(j, "name"), size, string_field(j, "dest"),
+                    tag);
       update_file_retry_timer();
+    } else if (action == "clipboard-offer") {
+      // The viewer copied files on its own machine. Register the descriptors
+      // only; the bytes are fetched when a remote application first pastes.
+      if (!options_.lazy || !options_.clipboard ||
+          !options_.clipboard->supports_lazy_files()) {
+        send_lazy_offer_reply(false, false,
+                              "this host cannot render files on demand");
+        return;
+      }
+      std::vector<lazy_clipboard_file> offered;
+      const auto files_it = j.find("files");
+      if (files_it == j.end() || !files_it->is_array()) {
+        send_lazy_offer_reply(false, false, "files must be an array");
+        return;
+      }
+      // Cap the parse before the validator reports the real reason, so a huge
+      // array cannot make this loop the expensive part.
+      for (const auto& item : *files_it) {
+        if (offered.size() >= kMaxLazyFiles) break;
+        if (!item.is_object()) {
+          send_lazy_offer_reply(false, false,
+                                "each file must be an object");
+          return;
+        }
+        lazy_clipboard_file file;
+        file.name = string_field(item, "name");
+        if (const auto size_it = item.find("size");
+            size_it != item.end() && size_it->is_number()) {
+          file.size = size_it->get<uint64_t>();
+        }
+        offered.push_back(std::move(file));
+      }
+      // A nested RDP session owns the clipboard: mstsc only redirects real
+      // CF_HDROP files, so nothing can trigger a delayed render. Reject the
+      // offer with `compat`, which tells the viewer to upload the files now.
+      if (options_.clipboard->nested_rdp()) {
+        send_lazy_offer_reply(
+            false, false,
+            "the clipboard belongs to an inner RDP session; files must be "
+            "materialised before they can be pasted there",
+            true);
+        return;
+      }
+      // `source` posts to this session's event loop; the clipboard thread
+      // then waits on its condition variable, never on the network. A viewer
+      // that advertised `clipboard_stream` gets a range source, so a paste
+      // writes Explorer's target file directly and nothing is staged under
+      // ~/moLink. Everyone else keeps the upload-then-CF_HDROP path.
+      const bool stream = session->clipboard_stream;
+      std::weak_ptr<session_controller> weak = weak_from_this();
+      auto post = options_.post;
+      std::shared_ptr<lazy_blob_source> source;
+      std::shared_ptr<remote_file_source> new_stream;
+      if (stream) {
+        new_stream = std::make_shared<remote_file_source>(
+            offered, [weak, post](std::size_t index, uint32_t id,
+                                  uint64_t offset, uint32_t length) {
+              if (weak.expired()) return false;
+              auto deliver = [weak, index, id, offset, length] {
+                if (auto self = weak.lock()) {
+                  self->request_lazy_range(index, id, offset, length);
+                }
+              };
+              if (post) {
+                post(std::move(deliver));
+              } else {
+                deliver();
+              }
+              return true;
+            });
+        source = new_stream;
+      } else {
+        source = std::make_shared<lazy_file_source>(
+            offered, [weak, post](std::size_t index) {
+              auto deliver = [weak, index] {
+                if (auto self = weak.lock()) self->request_lazy_file(index);
+              };
+              if (post) {
+                post(std::move(deliver));
+              } else {
+                deliver();
+              }
+            });
+      }
+      const lazy_offer_error error = options_.lazy->offer(
+          session->id, string_field(j, "dest"), offered, source);
+      if (error != lazy_offer_error::none) {
+        // The previous offer (if any) is still live; leave its routing alone.
+        send_lazy_offer_reply(
+            false, stream,
+            error == lazy_offer_error::too_many_files
+                ? "at most 8 files per clipboard offer"
+                : (error == lazy_offer_error::too_large
+                       ? "clipboard files exceed 2 GiB"
+                       : "invalid clipboard file list"));
+        return;
+      }
+      lazy_source_ = std::move(source);
+      if (stream) {
+        stream_source_ = std::move(new_stream);
+      } else {
+        stream_source_.reset();
+        // Each eager offer owns a tag range; a late upload from the previous
+        // offer lands outside this range and is ignored.
+        if (lazy_tag_base_ > (1 << 24)) lazy_tag_base_ = 0;
+        lazy_tag_base_ += kLazyTagStride;
+      }
+      std::string install_error;
+      if (!options_.clipboard->install_lazy(options_.lazy, install_error)) {
+        options_.lazy->clear_session(session->id);
+        lazy_source_.reset();
+        stream_source_.reset();
+        send_lazy_offer_reply(false, stream, install_error);
+        return;
+      }
+      send_lazy_offer_reply(true, stream, std::string());
+    } else if (action == "clipboard-fetch-failed") {
+      // The viewer could not read the local file any more (the clipboard
+      // changed). Fail that file at once instead of waiting out the timeout.
+      uint64_t index = 0;
+      if (const auto it = j.find("index");
+          it != j.end() && it->is_number()) {
+        index = it->get<uint64_t>();
+      }
+      if (lazy_source_ && index < lazy_source_->size()) {
+        lazy_source_->note_failed(static_cast<std::size_t>(index));
+      }
+    } else if (action == "mkdir") {
+      files_->mkdir(string_field(j, "path"), string_field(j, "dest"));
     } else if (action == "complete") {
       files_->complete(id);
       update_file_retry_timer();
@@ -2622,6 +3262,9 @@ void session_controller::on_text(const std::string& text) {
         }
       }
       const std::vector<std::string> resolved = files_->resolve_files(requested);
+      // These files came from a viewer. Mark them before touching the
+      // clipboard so the watcher cannot announce our own reply back.
+      clipboard_mark_files_written(resolved);
       const bool applied =
           options_.clipboard && options_.clipboard->available() &&
           !resolved.empty() && options_.clipboard->set_files(resolved);
@@ -2726,7 +3369,12 @@ void session_controller::on_text(const std::string& text) {
       note_pointer(j);
     }
     if (rejected) {
-      send_error(transport.get(), "bad_input", input_error);
+      // Injection failures used to leave this empty, so the page could only
+      // show the raw `bad_input` code. The injector now names the value, but
+      // keep a last-resort message for an older or future backend.
+      send_error(transport.get(), "bad_input",
+                 input_error.empty() ? "input event was rejected"
+                                     : input_error);
     } else if (failed) {
       // SendInput fails silently on the secure desktop and for elevated
       // windows; tell the client instead of dropping every event without a
@@ -2809,6 +3457,33 @@ void session_controller::on_binary(const uint8_t* data, std::size_t len) {
                     pkt.payload.size() - 16);
       break;
     }
+    case protocol::packet_type::clipboard_range: {
+      // Reply to a virtual-file `fetch`: u32 request id, u32 error code,
+      // u64 offset, then the bytes. An error code makes the waiting Read()
+      // fail at once instead of sitting until its timeout.
+      if (!session->authenticated) {
+        send_error(transport.get(), "unauthorized",
+                   "send a hello message with a valid token");
+        break;
+      }
+      if (pkt.payload.size() < 16) {
+        send_error(transport.get(), "bad_packet",
+                   "clipboard range header is truncated");
+        break;
+      }
+      uint32_t id = 0;
+      uint32_t code = 0;
+      uint64_t offset = 0;
+      std::memcpy(&id, pkt.payload.data(), sizeof(id));
+      std::memcpy(&code, pkt.payload.data() + 4, sizeof(code));
+      std::memcpy(&offset, pkt.payload.data() + 8, sizeof(offset));
+      if (stream_source_) {
+        stream_source_->note_range(id, code, offset,
+                                   pkt.payload.data() + 16,
+                                   pkt.payload.size() - 16);
+      }
+      break;
+    }
     case protocol::packet_type::input:
       send_error(transport.get(), "not_implemented",
                  "input injection is not implemented");
@@ -2838,6 +3513,14 @@ void session_controller::on_close(int code, const std::string& reason) {
   if (options_.call) options_.call->hangup(session->id);
   stop_voice();
   if (file_retry_timer_) file_retry_timer_->stop();
+  // Wake any clipboard thread blocked on this session's lazy offer before the
+  // transport goes away, then release the host clipboard if we owned it.
+  stream_source_.reset();
+  lazy_source_.reset();
+  if (options_.lazy && options_.lazy->clear_session(session->id) &&
+      options_.clipboard) {
+    options_.clipboard->uninstall_lazy();
+  }
   if (files_) files_->close_all();
   if (session->access_request_id != 0 && options_.access_requests) {
     options_.access_requests->remove(session->access_request_id);
@@ -2894,6 +3577,9 @@ void session_supervisor::start() {
     const std::string device = options_.device_id;
     options_.clipboard->watch([registry, post, device](std::string text) {
       if (text.empty() || text.size() > 192 * 1024) return;
+      // The clipboard is text now; a later copy of the same file list is a
+      // new action and must be announced again.
+      clipboard_reset_files_signature();
       const std::string hash = clipboard_hash(text);
       if (!clipboard_take_hash(hash)) return;
       auto deliver = [registry, text = std::move(text), hash, device] {
@@ -2913,34 +3599,16 @@ void session_supervisor::start() {
         deliver();
       }
     });
-    // Files copied on the host (Explorer Ctrl+C) appear in every viewer's
-    // transfer drawer without pressing anything, like RDP's file clipboard.
+    // Files copied on the host (Explorer Ctrl+C) are announced to every viewer
+    // as session-scoped ids, plus the legacy path list for the files panel.
+    // Publish only on a real change; the signature table also stops a list
+    // this machine just materialised for a viewer from echoing back.
+    const std::shared_ptr<clipboard_service> clipboard = options_.clipboard;
     options_.clipboard->watch_files(
-        [registry, post](std::vector<clipboard_file> files) {
+        [registry, post, clipboard](std::vector<clipboard_file> files) {
           if (files.empty()) return;
-          auto deliver = [registry, files = std::move(files)] {
-            uvcpp_json list = uvcpp_json::array();
-            for (const clipboard_file& file : files) {
-              uvcpp_json item;
-              item["name"] = file.name;
-              item["path"] = file.path;
-              item["size"] = file.size;
-              list.push_back(std::move(item));
-            }
-            for (const session_info& peer : registry->snapshot()) {
-              if (!peer.authenticated || !peer.transport) continue;
-              uvcpp_json out;
-              out["type"] = "clipboard";
-              out["action"] = "files";
-              out["files"] = list;
-              send_json(peer.transport.get(), out);
-            }
-          };
-          if (post) {
-            post(deliver);
-          } else {
-            deliver();
-          }
+          publish_clipboard_files(registry, post, std::move(files),
+                                  clipboard && clipboard->nested_rdp());
         });
   }
   thread_ = std::thread([this] { run(); });
@@ -3171,18 +3839,21 @@ void session_supervisor::run() {
       }
       const std::string video_mode =
           options_.auth ? options_.auth->settings().video_mode : "tiles";
-      if (options_.capture) {
-        // "stream" forces the stream; "auto" and "tiles" release it, and the
-        // capture's stream_policy decides from the movement average.
-        const int enter_percent =
-            options_.auth ? options_.auth->settings().stream_enter_percent : 15;
-        apply_video_mode(*options_.capture, video_mode, enter_percent);
-      }
       // The secure desktop cannot use tiles: it is captured through the
       // helper at a few frames per second, so a pinned "tiles" is ignored
-      // there and the stream is always allowed.
+      // there and the stream is always forced.
       const bool secure_desktop =
           options_.capture && options_.capture->is_secure_desktop();
+      if (options_.capture) {
+        // "stream" forces the stream unless the viewer picked tiles by hand;
+        // "auto" and "tiles" release it, and the capture's stream_policy
+        // decides from the movement average. Re-read every tick so a toolbar
+        // choice takes effect without reconnecting.
+        const int enter_percent =
+            options_.auth ? options_.auth->settings().stream_enter_percent : 15;
+        apply_video_mode(*options_.capture, video_mode, preference,
+                         enter_percent, secure_desktop);
+      }
       const bool stream_allowed =
           secure_desktop ||
           (video_mode != "tiles" && preference != "tiles");
@@ -3383,6 +4054,7 @@ void session_supervisor::run() {
           [registry_ref, post, device](std::string text) {
             g_clipboard_sync.fetch_pending.store(false);
             if (text.empty() || text.size() > 192 * 1024) return;
+            clipboard_reset_files_signature();
             const std::string hash = clipboard_hash(text);
             if (!clipboard_take_hash(hash)) return;
             if (!post) return;
@@ -3407,35 +4079,13 @@ void session_supervisor::run() {
         !g_clipboard_sync.files_pending.exchange(true)) {
       auto registry_ref = registry_;
       auto post = options_.post;
+      const std::shared_ptr<clipboard_service> clipboard = options_.clipboard;
       options_.clipboard->request_files(
-          [registry_ref, post](std::vector<clipboard_file> files) {
+          [registry_ref, post, clipboard](std::vector<clipboard_file> files) {
             g_clipboard_sync.files_pending.store(false);
             if (files.empty()) return;
-            std::string key;
-            for (const clipboard_file& file : files) {
-              key += file.path;
-              key += '\n';
-            }
-            if (!clipboard_take_hash("files:" + clipboard_hash(key))) return;
-            if (!post) return;
-            post([registry_ref, files] {
-              uvcpp_json list = uvcpp_json::array();
-              for (const clipboard_file& file : files) {
-                uvcpp_json item;
-                item["name"] = file.name;
-                item["path"] = file.path;
-                item["size"] = file.size;
-                list.push_back(std::move(item));
-              }
-              for (const session_info& peer : registry_ref->snapshot()) {
-                if (!peer.authenticated || !peer.transport) continue;
-                uvcpp_json out;
-                out["type"] = "clipboard";
-                out["action"] = "files";
-                out["files"] = list;
-                send_json(peer.transport.get(), out);
-              }
-            });
+            publish_clipboard_files(registry_ref, post, std::move(files),
+                                    clipboard && clipboard->nested_rdp());
           });
     }
 

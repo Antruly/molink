@@ -28,14 +28,29 @@ class file_transfer {
   static constexpr std::size_t kChunkBytes = 256 * 1024;
   static constexpr uint64_t kMaxFileBytes = 8ull * 1024 * 1024 * 1024;
 
+  enum class upload_event { accepted, progress, done, failed };
+  /// Upload lifecycle for the delayed clipboard path. `tag` is the opaque
+  /// number the host put on the fetch request; ordinary uploads carry -1 and
+  /// are ignored by the clipboard listener. `path` is set for `done`.
+  using upload_watcher = std::function<void(int tag, upload_event event,
+                                            uint32_t id, uint64_t received,
+                                            uint64_t size,
+                                            const std::string& path)>;
+
   file_transfer(json_sender send_json, chunk_sender send_chunk);
   ~file_transfer();
+
+  void watch_uploads(upload_watcher watcher);
 
   /// `name` is a bare file name from the peer; `size` is the declared length.
   /// `destination` is the viewer's chosen folder; empty means ~/moLink. A
   /// relative parent inside `name` (a folder drag) is created underneath it.
   void offer(const std::string& name, uint64_t size,
-             const std::string& destination);
+             const std::string& destination, int tag = -1);
+  /// Creates an empty directory (and its parents) under the viewer's chosen
+  /// destination. `path` must be relative and is validated like an upload
+  /// name; a peer that sends only a bare file name never needs this.
+  void mkdir(const std::string& path, const std::string& destination);
   void chunk(uint32_t id, uint64_t offset, const uint8_t* data,
              std::size_t len);
   void complete(uint32_t id, clock::time_point now = clock::now());
@@ -71,6 +86,7 @@ class file_transfer {
  private:
   struct upload {
     uint32_t id = 0;
+    int tag = -1;
     std::string name;
     std::string temp_path;
     std::string final_dir;
@@ -99,9 +115,12 @@ class file_transfer {
   void fail(const std::string& action, uint32_t id, const std::string& why);
   void send_simple(const std::string& action, uint32_t id = 0);
   void drop_upload(uint32_t id, bool remove_file);
+  void notify_upload(const upload& item, upload_event event,
+                     const std::string& path = std::string());
 
   json_sender send_json_;
   chunk_sender send_chunk_;
+  upload_watcher upload_watcher_;
   std::map<uint32_t, upload> uploads_;
   std::map<uint32_t, download> downloads_;
   uint32_t next_id_ = 1;

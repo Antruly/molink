@@ -1,4 +1,5 @@
 import { formatHost } from './net'
+import { clipboardRangeQuery } from './clipboard-lazy'
 
 export interface DeviceCapabilities {
   screen_capture: boolean
@@ -517,6 +518,14 @@ export interface ServiceStatus {
   desired: boolean
   platform?: string
   autostart?: boolean
+  /// Windows: the ImagePath the service is actually registered with.
+  path?: string
+  /// Windows: where this build expects the helper binary.
+  expected?: string
+  /// Windows: `path` is wrong, or the binary it names is missing.
+  stale?: boolean
+  /// Windows: the core already has administrator rights, so no UAC prompt.
+  elevated?: boolean
   error?: string
 }
 
@@ -632,6 +641,8 @@ export interface ClipboardFileInfo {
   id: string
   name: string
   size: number
+  /// The local core staged this file from the remote: do not offer it back.
+  echo?: boolean
 }
 
 export interface ClipboardFilesResult {
@@ -648,15 +659,22 @@ export function fetchClipboardFiles(
 
 /// Contents of one file on the local clipboard. The id is opaque; the core
 /// refuses ids that are no longer in the clipboard.
+///
+/// With `offset`/`length` only that range is returned, which is how the host's
+/// virtual-file `fetch` is answered without reading (or uploading) the whole
+/// file.
 export async function fetchClipboardFile(
   token: string,
   id: string,
+  offset?: number,
+  length?: number,
 ): Promise<ArrayBuffer> {
   const headers = new Headers()
   if (token) headers.set('Authorization', `Bearer ${token}`)
   if (clientToken) headers.set('X-MoLink-Client', clientToken)
   const response = await fetch(
-    `${coreBaseUrl()}/api/clipboard-file?id=${encodeURIComponent(id)}`,
+    `${coreBaseUrl()}/api/clipboard-file?id=${encodeURIComponent(id)}` +
+      clipboardRangeQuery(offset, length),
     { headers, cache: 'no-store' },
   )
   if (!response.ok) {
@@ -670,6 +688,70 @@ export async function fetchClipboardFile(
     throw new ApiError(response.status, code || 'clipboard_file_failed')
   }
   return response.arrayBuffer()
+}
+
+/// One staged remote file. `path` is the final path it will have once applied;
+/// the bytes live in a private temp file until then.
+export interface StagedClipboardFile {
+  id: string
+  path: string
+}
+
+/// Declare a file that is about to be downloaded into the local staging area.
+/// Loopback only: the core refuses a remote page.
+export function stageClipboardFile(
+  token: string,
+  name: string,
+  size: number,
+  batch?: string,
+): Promise<StagedClipboardFile> {
+  return request<StagedClipboardFile>(
+    '/api/clipboard-stage',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(batch ? { name, size, batch } : { name, size }),
+    },
+    token,
+  )
+}
+
+/// Append one contiguous chunk. The core answers 409 when `offset` is not the
+/// number of bytes already received and 413 when the chunk crosses the
+/// declared size.
+export function appendClipboardStage(
+  token: string,
+  id: string,
+  offset: number,
+  data: Uint8Array,
+): Promise<void> {
+  return request<void>(
+    `/api/clipboard-stage/${encodeURIComponent(id)}?offset=${offset}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      // Copy into an ArrayBuffer so fetch does not see a possibly shared
+      // backing store (Fetch BodyInit rejects SharedArrayBuffer views).
+      body: new Uint8Array(data).buffer,
+    },
+    token,
+  )
+}
+
+/// After every file is complete, hand the ordered ids to the local clipboard.
+export function applyClipboardStage(
+  token: string,
+  ids: string[],
+): Promise<{ ok: boolean; count: number }> {
+  return request<{ ok: boolean; count: number }>(
+    '/api/clipboard-apply',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids }),
+    },
+    token,
+  )
 }
 
 export interface CallState {
@@ -734,6 +816,31 @@ export function saveAvatar(token: string, avatar: string): Promise<{ avatar: str
     },
     token,
   )
+}
+
+export interface FsEntry {
+  name: string
+  dir: boolean
+  size: number
+}
+
+/// A folder listing from the *local* core (`/api/fs/list`). It exists so the
+/// desktop client can navigate a path typed by hand, which the browser's File
+/// System Access API cannot do. Only valid when `/api/state` reported
+/// `local: true`; a remote page must never call it.
+export interface FsListing {
+  path: string
+  root: string
+  parent: string
+  entries: FsEntry[]
+}
+
+export function fetchLocalDirectory(
+  token: string,
+  path: string,
+): Promise<FsListing> {
+  const query = new URLSearchParams({ path })
+  return request<FsListing>(`/api/fs/list?${query.toString()}`, {}, token)
 }
 
 /// Ask the directory to join a shared code, or to issue a fresh one for this

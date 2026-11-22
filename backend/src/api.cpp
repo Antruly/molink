@@ -11,13 +11,16 @@
 #include <windows.h>
 #endif
 
+#include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <map>
 #include <mutex>
 #include <string>
 #include <system_error>
@@ -34,6 +37,7 @@
 #include "capture/nvenc_av1_encoder.h"
 #endif
 
+#include "clipboard_stage.h"
 #include "config.h"
 #include "discovery.h"
 #include "identity.h"
@@ -65,6 +69,123 @@ struct clipboard_files_snapshot {
 std::shared_ptr<clipboard_files_snapshot> clipboard_snapshot() {
   static auto snapshot = std::make_shared<clipboard_files_snapshot>();
   return snapshot;
+}
+
+/// Paths this core has just written to its own clipboard by applying a staged
+/// remote selection. The page's local-file sync reads /api/clipboard-files;
+/// marking these entries prevents it from offering the same files straight
+/// back to the remote (the (1)(2) echo loop). Entries expire after the same
+/// two minutes the page-side echo table uses.
+struct clipboard_echo_marks {
+  std::mutex mutex;
+  std::map<std::string, uint64_t> applied;
+};
+
+constexpr uint64_t kClipboardEchoTtlMs = 2ull * 60 * 1000;
+constexpr std::size_t kClipboardEchoMax = 64;
+
+std::string echo_path_key(std::string path) {
+#if defined(_WIN32)
+  std::transform(path.begin(), path.end(), path.begin(),
+                 [](unsigned char c) {
+                   return static_cast<char>(std::tolower(c));
+                 });
+#endif
+  for (char& c : path) {
+    if (c == '\\') c = '/';
+  }
+  return path;
+}
+
+std::shared_ptr<clipboard_echo_marks> clipboard_echoes() {
+  static auto marks = std::make_shared<clipboard_echo_marks>();
+  return marks;
+}
+
+namespace fs = std::filesystem;
+
+std::string local_home_directory() {
+#if defined(_WIN32)
+  const char* profile = std::getenv("USERPROFILE");
+  if (profile != nullptr && *profile != '\0') return profile;
+  const char* drive = std::getenv("HOMEDRIVE");
+  const char* path = std::getenv("HOMEPATH");
+  if (drive != nullptr && path != nullptr) return std::string(drive) + path;
+  return "C:\\";
+#else
+  const char* home = std::getenv("HOME");
+  return home != nullptr && *home != '\0' ? home : "/";
+#endif
+}
+
+/// Where files copied from a remote clipboard are materialised. They are cache
+/// data (the OS clipboard references them), not configuration, so they live
+/// under the platform cache directory: `~/.cache/molink/clipboard/<sha1>/` on
+/// Linux, `%LOCALAPPDATA%\moLink\cache\clipboard\<sha1>\` on Windows and
+/// `~/Library/Caches/moLink/clipboard/<sha1>/` on macOS.
+std::string clipboard_cache_directory() {
+#if defined(_WIN32)
+  const char* local = std::getenv("LOCALAPPDATA");
+  const std::string base =
+      local != nullptr && *local != '\0'
+          ? std::string(local) + "\\moLink\\cache"
+          : local_home_directory() + "\\AppData\\Local\\moLink\\cache";
+  return base + "\\clipboard";
+#elif defined(__APPLE__)
+  return local_home_directory() + "/Library/Caches/moLink/clipboard";
+#else
+  const char* xdg = std::getenv("XDG_CACHE_HOME");
+  const std::string base =
+      xdg != nullptr && *xdg != '\0' ? std::string(xdg)
+                                     : local_home_directory() + "/.cache";
+  return base + "/molink/clipboard";
+#endif
+}
+
+/// Resolve a path typed into the local pane. Empty and `~` name the user's
+/// home; `~/x` is home-relative; anything else is taken as typed (a relative
+/// path is relative to home). The local UI is loopback-only, so unlike the
+/// remote file channel this deliberately allows paths outside home.
+fs::path resolve_local_fs_path(const std::string& raw) {
+  const fs::path home = local_home_directory();
+  if (raw.empty() || raw == "~") return home;
+  if (raw.rfind("~/", 0) == 0 || raw.rfind("~\\", 0) == 0) {
+    return home / raw.substr(2);
+  }
+  const fs::path requested(raw);
+  return requested.is_relative() ? home / requested : requested;
+}
+
+void remember_clipboard_echoes(const std::vector<std::string>& paths) {
+  const auto marks = clipboard_echoes();
+  const uint64_t now = now_ms();
+  std::lock_guard<std::mutex> lock(marks->mutex);
+  for (const std::string& path : paths) {
+    marks->applied[echo_path_key(path)] = now;
+  }
+  for (auto it = marks->applied.begin(); it != marks->applied.end();) {
+    if (now > it->second && now - it->second >= kClipboardEchoTtlMs) {
+      it = marks->applied.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  while (marks->applied.size() > kClipboardEchoMax) {
+    auto oldest = marks->applied.begin();
+    for (auto it = marks->applied.begin(); it != marks->applied.end(); ++it) {
+      if (it->second < oldest->second) oldest = it;
+    }
+    marks->applied.erase(oldest);
+  }
+}
+
+bool clipboard_echo_path(const std::string& path) {
+  const auto marks = clipboard_echoes();
+  const uint64_t now = now_ms();
+  std::lock_guard<std::mutex> lock(marks->mutex);
+  const auto it = marks->applied.find(echo_path_key(path));
+  if (it == marks->applied.end()) return false;
+  return now >= it->second && now - it->second < kClipboardEchoTtlMs;
 }
 
 std::string clipboard_file_id(const clipboard_file& file) {
@@ -184,9 +305,101 @@ uint64_t uptime_ms(uint64_t started) {
   return now > started ? now - started : 0;
 }
 
+int stage_status_code(stage_error error) {
+  switch (error) {
+    case stage_error::unavailable:
+      return 503;
+    case stage_error::bad_request:
+      return 400;
+    case stage_error::not_found:
+      return 404;
+    case stage_error::conflict:
+      return 409;
+    case stage_error::too_large:
+      return 413;
+    case stage_error::io_error:
+      return 500;
+    case stage_error::apply_failed:
+      return 409;
+    case stage_error::none:
+      break;
+  }
+  return 500;
+}
+
+const char* stage_error_code(stage_error error) {
+  switch (error) {
+    case stage_error::unavailable:
+      return "stage_unavailable";
+    case stage_error::bad_request:
+      return "bad_stage_request";
+    case stage_error::not_found:
+      return "unknown_stage";
+    case stage_error::conflict:
+      return "offset_mismatch";
+    case stage_error::too_large:
+      return "file_too_large";
+    case stage_error::io_error:
+      return "stage_io_error";
+    case stage_error::apply_failed:
+      return "clipboard_apply_failed";
+    case stage_error::none:
+      break;
+  }
+  return "stage_failed";
+}
+
+void send_stage_error(uvcpp_web_response& resp, stage_error error) {
+  uvcpp_json body;
+  body["code"] = stage_error_code(error);
+  resp.status(stage_status_code(error)).json(body);
+  resp.end();
+}
+
+/// Strict decimal parse: no sign, no whitespace, no trailing characters.
+bool parse_offset(const std::string& text, uint64_t& value) {
+  if (text.empty()) return false;
+  uint64_t out = 0;
+  for (const char c : text) {
+    if (c < '0' || c > '9') return false;
+    const uint64_t digit = static_cast<uint64_t>(c - '0');
+    if (out > (UINT64_MAX - digit) / 10) return false;
+    out = out * 10 + digit;
+  }
+  value = out;
+  return true;
+}
+
 }  // namespace
 
 void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
+  // Remote clipboard files are downloaded into the config directory first;
+  // only after the whole selection arrived does it become the OS clipboard
+  // (CF_HDROP / text/uri-list). The files stay behind because the clipboard
+  // references them, not because staging needs them.
+  std::string stage_directory = clipboard_cache_directory();
+  if (stage_directory.empty()) {
+    // No cache location (unusual, but a stripped-down service account may
+    // have neither XDG_CACHE_HOME nor HOME): fall back to the config folder.
+    const std::string config_dir = config_directory();
+    if (!config_dir.empty()) {
+      stage_directory =
+          (std::filesystem::path(config_dir) / "clipboard-inbox").string();
+    }
+  }
+  const auto staging = std::make_shared<clipboard_stage>(
+      stage_directory,
+      [clipboard = deps.clipboard](const std::vector<std::string>& paths) {
+        if (!clipboard || !clipboard->available() ||
+            !clipboard->set_files(paths)) {
+          return false;
+        }
+        // These bytes came from the remote; the local file sync must not
+        // offer them straight back.
+        remember_clipboard_echoes(paths);
+        return true;
+      });
+
   // ---- Remote access gate ---------------------------------------------
   // The listener is always on 0.0.0.0 for hot toggling; a connection accepted
   // before the switch was turned off is still rejected on every request.
@@ -308,7 +521,8 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
       resp.set_header("Access-Control-Allow-Methods",
                       "GET, POST, OPTIONS");
       resp.set_header("Access-Control-Allow-Headers",
-                      "Authorization, Content-Type, X-MoLink-Token");
+                      "Authorization, Content-Type, X-MoLink-Token, "
+                      "X-MoLink-Client");
       resp.set_header("Access-Control-Max-Age", "600");
     }
     resp.set_header("X-Content-Type-Options", "nosniff");
@@ -811,6 +1025,79 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
              resp.status(204).end();
            });
 
+  // The local pane lists a folder the browser itself cannot read. Loopback
+  // only: a page served by a remote core must never enumerate this machine's
+  // filesystem. The page calls this only when /api/state reported
+  // `local: true`, so the listing describes the browser's own machine.
+  app.get("/api/fs/list",
+          [](uvcpp_web_request& req, uvcpp_web_response& resp,
+             uvcpp_web_next) {
+            if (!is_loopback_peer(req.peer_ip())) {
+              resp.status(403).json_str(R"({"code":"loopback_only"})");
+              resp.end();
+              return;
+            }
+            const std::string* requested = req.query("path");
+            const std::string raw = requested != nullptr ? *requested : "";
+            const fs::path target = resolve_local_fs_path(raw);
+            std::error_code ec;
+            const fs::path canonical = fs::weakly_canonical(target, ec);
+            if (ec || !fs::is_directory(canonical, ec) || ec) {
+              resp.status(400).json_str(
+                  R"({"code":"bad_path","message":"not a readable folder"})");
+              resp.end();
+              return;
+            }
+            uvcpp_json entries = uvcpp_json::array();
+            std::size_t count = 0;
+            fs::directory_iterator it(
+                canonical, fs::directory_options::skip_permission_denied, ec);
+            if (!ec) {
+              for (const fs::directory_entry& entry : it) {
+                if (count >= 2000) break;
+                std::error_code entry_ec;
+                const bool dir = entry.is_directory(entry_ec);
+                if (entry_ec) continue;
+                uvcpp_json item;
+                item["name"] = entry.path().filename().string();
+                item["dir"] = dir;
+                item["size"] =
+                    dir ? 0 : static_cast<uint64_t>(
+                                  entry.file_size(entry_ec));
+                entries.push_back(std::move(item));
+                ++count;
+              }
+            }
+            std::sort(entries.begin(), entries.end(),
+                      [](const uvcpp_json& a, const uvcpp_json& b) {
+                        const bool ad = a.value("dir", false);
+                        const bool bd = b.value("dir", false);
+                        if (ad != bd) return ad;
+                        std::string an = a.value("name", std::string());
+                        std::string bn = b.value("name", std::string());
+                        std::transform(
+                            an.begin(), an.end(), an.begin(),
+                            [](unsigned char c) {
+                              return static_cast<char>(std::tolower(c));
+                            });
+                        std::transform(
+                            bn.begin(), bn.end(), bn.begin(),
+                            [](unsigned char c) {
+                              return static_cast<char>(std::tolower(c));
+                            });
+                        return an < bn;
+                      });
+            const fs::path parent = canonical.parent_path();
+            uvcpp_json j;
+            j["path"] = canonical.string();
+            j["root"] = local_home_directory();
+            j["parent"] =
+                parent.empty() || parent == canonical ? "" : parent.string();
+            j["entries"] = std::move(entries);
+            resp.set_header("Cache-Control", "no-store").json(j);
+            resp.end();
+          });
+
   // The local shell watches its own clipboard for files. The page cannot
   // touch the OS clipboard's file list, so it polls this snapshot and then
   // uploads the contents to the remote session. Loopback only: a remote
@@ -839,6 +1126,9 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
               item["id"] = clipboard_file_id(file);
               item["name"] = file.name;
               item["size"] = file.size;
+              // True when this core just staged the file from the remote; the
+              // page skips it so the two clipboard directions cannot ping-pong.
+              item["echo"] = clipboard_echo_path(file.path);
               list.push_back(std::move(item));
             }
             uvcpp_json j;
@@ -884,6 +1174,9 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
             // copying a video from Explorer fail with a silent 413.
             constexpr uint64_t kMaxClipboardFile =
                 256ull * 1024ull * 1024ull;
+            // One virtual-file fetch is 64 KiB; 8 MiB leaves room for a
+            // caller that reads larger slices through the same route.
+            constexpr uint64_t kMaxRangeBytes = 8ull * 1024ull * 1024ull;
             std::error_code ec;
             const std::filesystem::path fs_path(path);
             if (!std::filesystem::is_regular_file(fs_path, ec) || ec) {
@@ -892,7 +1185,46 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
               return;
             }
             const uint64_t size = std::filesystem::file_size(fs_path, ec);
-            if (ec || size > kMaxClipboardFile) {
+            if (ec) {
+              resp.status(404).json_str(R"({"code":"missing_file"})");
+              resp.end();
+              return;
+            }
+            // `offset` / `length` turn this into a range read for the virtual
+            // clipboard stream. Without them the whole file is returned, as
+            // before.
+            uint64_t offset = 0;
+            uint64_t length = 0;
+            const std::string* offset_query = req.query("offset");
+            const std::string* length_query = req.query("length");
+            if (offset_query != nullptr &&
+                !parse_offset(*offset_query, offset)) {
+              resp.status(400).json_str(R"({"code":"bad_offset"})");
+              resp.end();
+              return;
+            }
+            if (length_query != nullptr) {
+              if (!parse_offset(*length_query, length) ||
+                  length > kMaxRangeBytes) {
+                resp.status(400).json_str(R"({"code":"bad_length"})");
+                resp.end();
+                return;
+              }
+            }
+            if (offset > size) {
+              resp.status(416).json_str(
+                  R"({"code":"offset_out_of_range"})");
+              resp.end();
+              return;
+            }
+            const uint64_t available = size - offset;
+            const uint64_t take =
+                // Parenthesised: the Windows headers still define a min macro.
+                length_query != nullptr ? (std::min)(length, available)
+                                        : available;
+            // The whole-file form keeps the old 256 MiB ceiling. A bounded
+            // range is already capped above, so it needs no second limit.
+            if (length_query == nullptr && take > kMaxClipboardFile) {
               resp.status(413).json_str(R"({"code":"file_too_large"})");
               resp.end();
               return;
@@ -903,12 +1235,176 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
               resp.end();
               return;
             }
-            std::string data((std::istreambuf_iterator<char>(in)),
-                             std::istreambuf_iterator<char>());
+            std::string data;
+            if (take != 0) {
+              in.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+              if (!in) {
+                resp.status(416).json_str(
+                    R"({"code":"offset_out_of_range"})");
+                resp.end();
+                return;
+              }
+              data.resize(static_cast<std::size_t>(take));
+              in.read(data.data(), static_cast<std::streamsize>(take));
+              const std::streamsize got = in.gcount();
+              data.resize(got > 0 ? static_cast<std::size_t>(got) : 0);
+            }
             resp.set_header("Cache-Control", "no-store")
                 .body(data, "application/octet-stream")
                 .end();
           });
+
+  // ---- Remote clipboard files -> this machine's clipboard ---------------
+  // Three loopback-only steps: declare a file, append its bytes in order, then
+  // apply the completed set. A remote web page cannot use these routes; its
+  // requests come from a non-loopback peer and are refused below.
+  app.post("/api/clipboard-stage",
+           [staging](uvcpp_web_request& req, uvcpp_web_response& resp,
+                     uvcpp_web_next) {
+             if (!is_loopback_peer(req.peer_ip())) {
+               resp.status(403).json_str(R"({"code":"loopback_only"})");
+               resp.end();
+               return;
+             }
+             uvcpp_json body;
+             try {
+               body = uvcpp_json::parse(req.body_str());
+             } catch (...) {
+               resp.status(400).json_str(
+                   R"({"code":"bad_stage_request"})");
+               resp.end();
+               return;
+             }
+             if (!body.is_object() || !body.contains("name") ||
+                 !body["name"].is_string() || !body.contains("size") ||
+                 !body["size"].is_number_integer()) {
+               resp.status(400).json_str(
+                   R"({"code":"bad_stage_request"})");
+               resp.end();
+               return;
+             }
+             uint64_t size = 0;
+             try {
+               size = body["size"].get<uint64_t>();
+             } catch (...) {
+               resp.status(400).json_str(
+                   R"({"code":"bad_stage_request"})");
+               resp.end();
+               return;
+             }
+             std::string batch;
+             if (body.contains("batch") && body["batch"].is_string()) {
+               batch = body["batch"].get<std::string>();
+             }
+             std::string id;
+             std::string path;
+             const stage_error error =
+                 staging->begin(body["name"].get<std::string>(), size, id,
+                                path, batch);
+             if (error != stage_error::none) {
+               send_stage_error(resp, error);
+               return;
+             }
+             uvcpp_json out;
+             out["id"] = id;
+             out["path"] = path;
+             resp.set_header("Cache-Control", "no-store").json(out);
+             resp.end();
+           });
+
+  app.post("/api/clipboard-stage/:id",
+           [staging](uvcpp_web_request& req, uvcpp_web_response& resp,
+                     uvcpp_web_next) {
+             if (!is_loopback_peer(req.peer_ip())) {
+               resp.status(403).json_str(R"({"code":"loopback_only"})");
+               resp.end();
+               return;
+             }
+             const std::string* id = req.param("id");
+             const std::string* offset_text = req.query("offset");
+             uint64_t offset = 0;
+             if (id == nullptr || id->empty() || offset_text == nullptr ||
+                 !parse_offset(*offset_text, offset)) {
+               resp.status(400).json_str(
+                   R"({"code":"bad_stage_offset"})");
+               resp.end();
+               return;
+             }
+             uint64_t received = 0;
+             const stage_error error =
+                 staging->append(*id, offset, req.body_data(),
+                                 req.body_size(), received);
+             if (error != stage_error::none) {
+               send_stage_error(resp, error);
+               return;
+             }
+             uvcpp_json out;
+             out["ok"] = true;
+             out["received"] = received;
+             resp.set_header("Cache-Control", "no-store").json(out);
+             resp.end();
+           });
+
+  app.post("/api/clipboard-apply",
+           [staging, clipboard = deps.clipboard](
+               uvcpp_web_request& req, uvcpp_web_response& resp,
+               uvcpp_web_next) {
+             if (!is_loopback_peer(req.peer_ip())) {
+               resp.status(403).json_str(R"({"code":"loopback_only"})");
+               resp.end();
+               return;
+             }
+             uvcpp_json body;
+             try {
+               body = uvcpp_json::parse(req.body_str());
+             } catch (...) {
+               resp.status(400).json_str(
+                   R"({"code":"bad_stage_request"})");
+               resp.end();
+               return;
+             }
+             if (!body.is_object() || !body.contains("ids") ||
+                 !body["ids"].is_array()) {
+               resp.status(400).json_str(
+                   R"({"code":"bad_stage_request"})");
+               resp.end();
+               return;
+             }
+             std::vector<std::string> ids;
+             for (const auto& item : body["ids"]) {
+               if (!item.is_string()) {
+                 resp.status(400).json_str(
+                     R"({"code":"bad_stage_request"})");
+                 resp.end();
+                 return;
+               }
+               ids.push_back(item.get<std::string>());
+             }
+             if (ids.empty() || ids.size() > 256) {
+               resp.status(400).json_str(
+                   R"({"code":"bad_stage_request"})");
+               resp.end();
+               return;
+             }
+             std::size_t count = 0;
+             const stage_error error = staging->apply(ids, count);
+             if (error == stage_error::apply_failed &&
+                 (!clipboard || !clipboard->available())) {
+               resp.status(503).json_str(
+                   R"({"code":"clipboard_unavailable"})");
+               resp.end();
+               return;
+             }
+             if (error != stage_error::none) {
+               send_stage_error(resp, error);
+               return;
+             }
+             uvcpp_json out;
+             out["ok"] = true;
+             out["count"] = count;
+             resp.set_header("Cache-Control", "no-store").json(out);
+             resp.end();
+           });
 
   // Voice call control for the person at this machine (the host UI polls).
   app.get("/api/call",
@@ -1251,6 +1747,15 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
                           : true;
             j["platform"] = status.platform;
             j["autostart"] = status.autostart;
+            // Windows-only diagnostics: what the service is registered with,
+            // what this build expects, and whether the core can re-register
+            // without another UAC prompt. Linux has no ImagePath to compare.
+            if (status.platform == "windows") {
+              j["path"] = status.registered_path;
+              j["expected"] = status.expected_path;
+              j["stale"] = status.stale;
+              j["elevated"] = status.elevated;
+            }
             if (!status.error.empty()) j["error"] = status.error;
             resp.set_header("Cache-Control", "no-store").json(j);
             resp.end();

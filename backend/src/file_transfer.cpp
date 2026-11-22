@@ -64,13 +64,20 @@ fs::path home_root() {
   return ec ? fs::path(home_directory()) : root;
 }
 
-/// Resolve a peer-supplied path. Relative paths are relative to home; an empty
-/// path is home itself. Anything that escapes home is rejected, including
-/// through a symlink.
+/// Resolve a peer-supplied path. `~` and `~/x` are the host user's home;
+/// relative paths are relative to home; an empty path is home itself. Anything
+/// that escapes home is rejected, including through a symlink.
 std::optional<fs::path> resolve_path(const std::string& raw) {
   const fs::path root = home_root();
-  fs::path requested = raw.empty() ? root : fs::path(raw);
-  if (requested.is_relative()) requested = root / requested;
+  fs::path requested;
+  if (raw.empty() || raw == "~") {
+    requested = root;
+  } else if (raw.rfind("~/", 0) == 0 || raw.rfind("~\\", 0) == 0) {
+    requested = root / raw.substr(2);
+  } else {
+    requested = fs::path(raw);
+    if (requested.is_relative()) requested = root / requested;
+  }
   std::error_code ec;
   const fs::path canonical = fs::weakly_canonical(requested, ec);
   if (ec || !within_root(root, canonical)) return std::nullopt;
@@ -104,11 +111,6 @@ std::string clean_file_name(const std::string& name) {
     out.resize(cut);
   }
   return out;
-}
-
-std::string safe_file_name(const std::string& raw) {
-  fs::path parsed(raw);
-  return clean_file_name(parsed.filename().string());
 }
 
 std::string unique_path_in(const fs::path& dir, const std::string& name) {
@@ -170,39 +172,94 @@ std::string resolve_destination(const std::string& requested) {
   return target.lexically_normal().string();
 }
 
-/// Splits an upload name into a relative parent (from a folder drag) and the
-/// file name. Every segment is cleaned like a bare file name and `..` is
-/// rejected, so a crafted name cannot climb out of the destination folder.
-bool split_upload_name(const std::string& raw, std::string& parent,
-                       std::string& base) {
+/// Windows reserves these device names in every directory, with or without an
+/// extension (`CON.txt` is still the console). A peer-supplied path that names
+/// one is rejected on every platform so a file copied from a Linux host cannot
+/// become unusable (or alias a device) when it reaches Windows.
+bool is_reserved_name(const std::string& segment) {
+  std::string name = segment;
+  while (!name.empty() && (name.back() == ' ' || name.back() == '.')) {
+    name.pop_back();
+  }
+  if (name.empty()) return false;
+  const std::size_t dot = name.find('.');
+  if (dot != std::string::npos) name.resize(dot);
+  std::string upper;
+  upper.reserve(name.size());
+  for (unsigned char c : name) {
+    upper.push_back(static_cast<char>(std::toupper(c)));
+  }
+  if (upper == "CON" || upper == "PRN" || upper == "AUX" || upper == "NUL") {
+    return true;
+  }
+  return upper.size() == 4 &&
+         (upper.compare(0, 3, "COM") == 0 || upper.compare(0, 3, "LPT") == 0) &&
+         upper[3] >= '1' && upper[3] <= '9';
+}
+
+/// Parses a peer-supplied path into cleaned segments. Absolute paths (`/x`,
+/// `\\server\share`), drive letters (`C:`), empty or `.` segments and `..`
+/// are rejected before any filesystem call, so the result can only ever name
+/// a relative chain of normal file names.
+bool parse_relative_path(const std::string& raw,
+                         std::vector<std::string>& segments) {
+  segments.clear();
+  if (raw.empty() || raw.size() > 4096) return false;
   std::string text = raw;
   for (char& c : text) {
     if (c == '\\') c = '/';
   }
-  std::size_t cut = text.rfind('/');
-  const std::string dirs = cut == std::string::npos ? std::string()
-                                                    : text.substr(0, cut);
-  const std::string name =
-      cut == std::string::npos ? text : text.substr(cut + 1);
-  parent.clear();
+  if (text.front() == '/') return false;
+  if (text.size() >= 2 && std::isalpha(static_cast<unsigned char>(text[0])) &&
+      text[1] == ':') {
+    return false;
+  }
+  while (!text.empty() && text.back() == '/') text.pop_back();
+  if (text.empty()) return false;
   std::size_t start = 0;
-  while (start <= dirs.size()) {
-    const std::size_t end = dirs.find('/', start);
+  while (start <= text.size()) {
+    const std::size_t end = text.find('/', start);
     const std::string segment =
-        dirs.substr(start, end == std::string::npos ? std::string::npos
+        text.substr(start, end == std::string::npos ? std::string::npos
                                                     : end - start);
-    if (!segment.empty() && segment != ".") {
-      if (segment == "..") return false;
-      const std::string clean = clean_file_name(segment);
-      if (clean.empty() || clean == ".") return false;
-      if (!parent.empty()) parent += '/';
-      parent += clean;
-    }
+    if (segment.empty() || segment == "." || segment == "..") return false;
+    if (is_reserved_name(segment)) return false;
+    const std::string clean = clean_file_name(segment);
+    if (clean.empty() || clean == "." || clean == "..") return false;
+    segments.push_back(clean);
+    if (segments.size() > 64) return false;
     if (end == std::string::npos) break;
     start = end + 1;
   }
-  base = clean_file_name(name);
-  return !base.empty();
+  return !segments.empty();
+}
+
+/// Resolves `segments` under `root`, refusing any existing symlink in the
+/// chain that points outside it. Called before `create_directories`, so the
+/// check sees the symlinks that would otherwise redirect the create.
+bool prepare_directory(const fs::path& root,
+                       const std::vector<std::string>& segments,
+                       fs::path& out) {
+  std::error_code ec;
+  fs::path base = fs::weakly_canonical(root, ec);
+  if (ec) base = root;
+  out = base;
+  for (const std::string& segment : segments) {
+    out /= segment;
+    std::error_code check_ec;
+    const fs::path canonical = fs::weakly_canonical(out, check_ec);
+    if (check_ec || !within_root(base, canonical)) return false;
+  }
+  return true;
+}
+
+std::string join_segments(const std::vector<std::string>& segments) {
+  std::string out;
+  for (const std::string& segment : segments) {
+    if (!out.empty()) out += '/';
+    out += segment;
+  }
+  return out;
 }
 
 }  // namespace
@@ -211,6 +268,17 @@ file_transfer::file_transfer(json_sender send_json, chunk_sender send_chunk)
     : send_json_(std::move(send_json)), send_chunk_(std::move(send_chunk)) {}
 
 file_transfer::~file_transfer() { close_all(); }
+
+void file_transfer::watch_uploads(upload_watcher watcher) {
+  upload_watcher_ = std::move(watcher);
+}
+
+void file_transfer::notify_upload(const upload& item, upload_event event,
+                                  const std::string& path) {
+  if (upload_watcher_) {
+    upload_watcher_(item.tag, event, item.id, item.received, item.size, path);
+  }
+}
 
 void file_transfer::fail(const std::string& action, uint32_t id,
                          const std::string& why) {
@@ -233,7 +301,7 @@ void file_transfer::send_simple(const std::string& action, uint32_t id) {
 }
 
 void file_transfer::offer(const std::string& name, uint64_t size,
-                          const std::string& destination) {
+                          const std::string& destination, int tag) {
   if (uploads_.size() >= 8) {
     fail("reject", 0, "too many active uploads");
     return;
@@ -248,26 +316,30 @@ void file_transfer::offer(const std::string& name, uint64_t size,
     return;
   }
   // A folder drag sends `sub/dir/file`; keep the relative parents and create
-  // them under the destination.
-  std::string parent;
-  std::string base;
-  if (!split_upload_name(name, parent, base)) {
+  // them under the destination. The segment parser rejects absolute paths,
+  // drive letters, `..` and reserved device names before anything is created.
+  std::vector<std::string> segments;
+  if (!parse_relative_path(name, segments)) {
     fail("reject", 0, "invalid file name");
     return;
   }
-  fs::path final_dir(dir);
-  if (!parent.empty()) {
-    final_dir /= parent;
-    std::error_code dir_ec;
-    fs::create_directories(final_dir, dir_ec);
-    if (dir_ec) {
-      fail("reject", 0, "could not create the destination folder");
-      return;
-    }
+  const std::string base = segments.back();
+  segments.pop_back();
+  fs::path final_dir;
+  if (!prepare_directory(dir, segments, final_dir)) {
+    fail("reject", 0, "invalid file path");
+    return;
+  }
+  std::error_code dir_ec;
+  fs::create_directories(final_dir, dir_ec);
+  if (dir_ec) {
+    fail("reject", 0, "could not create the destination folder");
+    return;
   }
   const uint32_t id = next_id_++;
   upload item;
   item.id = id;
+  item.tag = tag;
   item.name = base;
   item.final_dir = final_dir.string();
   item.temp_path = (fs::path(dir) / (".upload-" + std::to_string(id) + ".part"))
@@ -288,6 +360,38 @@ void file_transfer::offer(const std::string& name, uint64_t size,
   j["chunk"] = kChunkBytes;
   j["dir"] = dir;
   send_json_(dump_json(j));
+  notify_upload(uploads_.at(id), upload_event::accepted);
+}
+
+void file_transfer::mkdir(const std::string& path,
+                          const std::string& destination) {
+  std::vector<std::string> segments;
+  if (!parse_relative_path(path, segments)) {
+    fail("mkdir", 0, "invalid folder path");
+    return;
+  }
+  const std::string dir = resolve_destination(destination);
+  if (dir.empty()) {
+    fail("mkdir", 0, "could not create the receive folder");
+    return;
+  }
+  fs::path target;
+  if (!prepare_directory(dir, segments, target)) {
+    fail("mkdir", 0, "invalid folder path");
+    return;
+  }
+  std::error_code ec;
+  fs::create_directories(target, ec);
+  if (ec || !fs::is_directory(target, ec)) {
+    fail("mkdir", 0, "could not create the folder");
+    return;
+  }
+  uvcpp_json j;
+  j["type"] = "file";
+  j["action"] = "mkdir";
+  j["ok"] = true;
+  j["path"] = join_segments(segments);
+  send_json_(dump_json(j));
 }
 
 void file_transfer::chunk(uint32_t id, uint64_t offset, const uint8_t* data,
@@ -302,6 +406,9 @@ void file_transfer::chunk(uint32_t id, uint64_t offset, const uint8_t* data,
   }
   item.out.write(reinterpret_cast<const char*>(data),
                  static_cast<std::streamsize>(len));
+  // Delayed clipboard rendering may read the staging file from another
+  // thread; flush each chunk so a reader never waits on this buffer.
+  item.out.flush();
   if (!item.out) {
     fail("cancel", id, "could not write the file");
     drop_upload(id, true);
@@ -309,6 +416,7 @@ void file_transfer::chunk(uint32_t id, uint64_t offset, const uint8_t* data,
   }
   item.received += len;
   item.last_activity = clock::now();
+  notify_upload(item, upload_event::progress);
   if (item.complete_deadline && item.received == item.size) complete(id);
 }
 
@@ -338,6 +446,7 @@ void file_transfer::complete(uint32_t id, clock::time_point now) {
     drop_upload(id, true);
     return;
   }
+  notify_upload(item, upload_event::done, final_path);
   uploads_.erase(it);
   uvcpp_json j;
   j["type"] = "file";
@@ -586,6 +695,7 @@ void file_transfer::fail_pending() {
 void file_transfer::drop_upload(uint32_t id, bool remove_file) {
   auto it = uploads_.find(id);
   if (it == uploads_.end()) return;
+  notify_upload(it->second, upload_event::failed);
   it->second.out.close();
   if (remove_file) {
     std::error_code ec;

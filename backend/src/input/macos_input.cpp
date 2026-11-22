@@ -1,4 +1,5 @@
 #include "input/input.h"
+#include "input/key_alias.h"
 
 #if defined(__APPLE__)
 
@@ -49,9 +50,14 @@ const NamedKey kNamedKeys[] = {
     {"Delete", 117}, {"F4", 118}, {"End", 119}, {"F2", 120},
     {"PageDown", 121}, {"F1", 122}, {"ArrowLeft", 123}, {"ArrowRight", 124},
     {"ArrowDown", 125}, {"ArrowUp", 126},
+    // ISO section key (the <> key next to the left Shift).
+    {"IntlBackslash", 10},
 };
 
-bool resolve_key(const std::string& code, CGKeyCode& keycode) {
+bool resolve_key(const std::string& raw_code, CGKeyCode& keycode) {
+  // Also accept OSLeft/OSRight, Win/Super/超 and bare letters/digits from
+  // older browsers and virtual keyboards.
+  const std::string code = canonical_key_code(raw_code);
   for (const NamedKey& named : kNamedKeys) {
     if (code == named.code) {
       keycode = named.keycode;

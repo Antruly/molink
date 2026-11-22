@@ -5,7 +5,9 @@
 #include <X11/Xatom.h>
 #include <X11/Xlib.h>
 
+#include <fcntl.h>
 #include <poll.h>
+#include <unistd.h>
 
 #include <atomic>
 #include <cctype>
@@ -134,16 +136,19 @@ class x11_clipboard final : public clipboard_service {
     if (text.size() > kMaxClipboardBytes) text.resize(kMaxClipboardBytes);
     std::lock_guard<std::mutex> lock(queue_mutex_);
     pending_sets_.push_back(std::move(text));
+    wake();
   }
 
   void request_text(text_callback callback) override {
     std::lock_guard<std::mutex> lock(queue_mutex_);
     pending_gets_.push_back(std::move(callback));
+    wake();
   }
 
   void request_files(files_callback callback) override {
     std::lock_guard<std::mutex> lock(queue_mutex_);
     pending_file_gets_.push_back(std::move(callback));
+    wake();
   }
 
   /// X11 has no change counter that is portable enough, so the owner is asked
@@ -155,30 +160,82 @@ class x11_clipboard final : public clipboard_service {
       std::lock_guard<std::mutex> lock(watch_mutex_);
       watch_callback_ = std::move(callback);
     }
+    start_watch_thread();
+  }
+
+  /// X11 has no clipboard change counter either, so the same poll asks for
+  /// text/uri-list. A text copy answers with an empty list, which re-arms the
+  /// signature so the next file copy is reported even if its paths match.
+  void watch_files(files_watcher callback) override {
+    if (callback == nullptr) return;
+    {
+      std::lock_guard<std::mutex> lock(watch_mutex_);
+      files_callback_ = std::move(callback);
+    }
+    start_watch_thread();
+  }
+
+  void start_watch_thread() {
     if (watch_running_.exchange(true)) return;
     watch_thread_ = std::thread([this] {
       while (watch_running_.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(800));
         if (!watch_running_.load()) break;
-        auto promise = std::make_shared<std::promise<std::string>>();
-        std::future<std::string> future = promise->get_future();
-        request_text([promise](std::string value) {
+        auto text_promise = std::make_shared<std::promise<std::string>>();
+        std::future<std::string> text_future = text_promise->get_future();
+        request_text([text_promise](std::string value) {
           try {
-            promise->set_value(std::move(value));
+            text_promise->set_value(std::move(value));
           } catch (...) {
             // Already satisfied or abandoned; nothing to do.
           }
         });
-        if (future.wait_for(std::chrono::milliseconds(400)) !=
+        if (text_future.wait_for(std::chrono::milliseconds(400)) ==
+            std::future_status::ready) {
+          std::string text = text_future.get();
+          if (!text.empty()) {
+            std::lock_guard<std::mutex> lock(watch_mutex_);
+            if (text != last_text_) {
+              last_text_ = text;
+              last_files_.clear();
+              if (watch_callback_) watch_callback_(text);
+            }
+          }
+        }
+        // The file list and the text share the one CLIPBOARD selection, but
+        // asking for text/uri-list when the clipboard holds text is cheap:
+        // the owner answers with no target.
+        auto files_promise =
+            std::make_shared<std::promise<std::vector<clipboard_file>>>();
+        std::future<std::vector<clipboard_file>> files_future =
+            files_promise->get_future();
+        request_files([files_promise](std::vector<clipboard_file> value) {
+          try {
+            files_promise->set_value(std::move(value));
+          } catch (...) {
+            // Already satisfied or abandoned.
+          }
+        });
+        if (files_future.wait_for(std::chrono::milliseconds(500)) !=
             std::future_status::ready) {
           continue;
         }
-        std::string text = future.get();
-        if (text.empty()) continue;
+        std::vector<clipboard_file> files = files_future.get();
+        std::string signature;
+        for (const clipboard_file& file : files) {
+          signature += file.path;
+          signature += '\n';
+        }
+        if (files.empty()) {
+          std::lock_guard<std::mutex> lock(watch_mutex_);
+          last_files_.clear();
+          continue;
+        }
         std::lock_guard<std::mutex> lock(watch_mutex_);
-        if (text == last_text_) continue;
-        last_text_ = text;
-        if (watch_callback_) watch_callback_(text);
+        if (signature == last_files_) continue;
+        last_files_ = signature;
+        last_text_.clear();
+        if (files_callback_) files_callback_(std::move(files));
       }
     });
   }
@@ -187,6 +244,7 @@ class x11_clipboard final : public clipboard_service {
     if (paths.empty()) return false;
     std::lock_guard<std::mutex> lock(queue_mutex_);
     pending_file_sets_.push_back(paths);
+    wake();
     return true;
   }
 
@@ -216,10 +274,28 @@ class x11_clipboard final : public clipboard_service {
     gnome_copied_ =
         XInternAtom(display_, "x-special/gnome-copied-files", False);
 
+    // Clipboard commands are queued from other threads. Without a wakeup the
+    // service loop would only notice them when its 100 ms poll timed out,
+    // which added ~80 ms to every clipboard read (and to each 256 KiB
+    // clipboard-pull range on a Linux host).
+    if (::pipe(wake_fds_) == 0) {
+      for (int fd : wake_fds_) {
+        const int flags = ::fcntl(fd, F_GETFL, 0);
+        if (flags >= 0) ::fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+      }
+    }
+
     running_.store(true);
     available_.store(true);
     thread_ = std::thread([this] { run(); });
     return true;
+  }
+
+  void wake() {
+    if (wake_fds_[1] < 0) return;
+    const char byte = 1;
+    // A full pipe already means a wakeup is pending.
+    (void)::write(wake_fds_[1], &byte, 1);
   }
 
   static int ignore_error(Display*, XErrorEvent*) { return 0; }
@@ -228,6 +304,10 @@ class x11_clipboard final : public clipboard_service {
     if (!running_.exchange(false)) return;
     if (thread_.joinable()) thread_.join();
     available_.store(false);
+    for (int& fd : wake_fds_) {
+      if (fd >= 0) ::close(fd);
+      fd = -1;
+    }
     if (display_ != nullptr) {
       XCloseDisplay(display_);
       display_ = nullptr;
@@ -239,11 +319,19 @@ class x11_clipboard final : public clipboard_service {
     while (running_.load()) {
       pump_commands();
 
-      struct pollfd descriptor;
-      descriptor.fd = fd;
-      descriptor.events = POLLIN;
-      descriptor.revents = 0;
-      ::poll(&descriptor, 1, 100);
+      struct pollfd descriptors[2];
+      descriptors[0].fd = fd;
+      descriptors[0].events = POLLIN;
+      descriptors[0].revents = 0;
+      descriptors[1].fd = wake_fds_[0];
+      descriptors[1].events = POLLIN;
+      descriptors[1].revents = 0;
+      ::poll(descriptors, wake_fds_[0] >= 0 ? 2 : 1, 100);
+      if (wake_fds_[0] >= 0 && (descriptors[1].revents & POLLIN) != 0) {
+        char drain[64];
+        while (::read(wake_fds_[0], drain, sizeof(drain)) > 0) {
+        }
+      }
 
       while (XPending(display_) > 0) {
         XEvent event;
@@ -574,9 +662,13 @@ class x11_clipboard final : public clipboard_service {
   Atom gnome_copied_ = None;
 
   std::thread thread_;
+  /// Self-pipe used to interrupt the poll when another thread queues work.
+  int wake_fds_[2] = {-1, -1};
   std::mutex watch_mutex_;
   text_watcher watch_callback_;
+  files_watcher files_callback_;
   std::string last_text_;
+  std::string last_files_;
   std::atomic<bool> watch_running_{false};
   std::thread watch_thread_;
   std::atomic<bool> running_{false};

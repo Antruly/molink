@@ -18,6 +18,7 @@ import {
   kBackpressureGapFreshMs,
 } from './p2p-video-health'
 import { logDiag } from './diag-log'
+import { isInputErrorCode, redactDiagnosticText } from './input-errors'
 import { H264StreamDecoder, h264StreamSupported } from './h264-stream'
 import {
   VpxStreamDecoder,
@@ -101,6 +102,22 @@ export interface Welcome {
   input_backend?: string
   clipboard?: boolean
   clipboard_backend?: string
+  /** The host can delay file rendering: send descriptors, fetch on paste. */
+  clipboard_lazy?: boolean
+  /** The host serves `clipboard-pull` range requests (clipboard-sync.files). */
+  clipboard_pull?: boolean
+  /** The host's clipboard belongs to an inner RDP session. */
+  clipboard_nested_rdp?: boolean
+  /** Maximum files in one delayed offer (host default 8). */
+  clipboard_lazy_files?: number
+  /** Maximum total bytes in one delayed offer (host default 2 GiB). */
+  clipboard_lazy_bytes?: number
+  /**
+   * Negotiated virtual-file streaming: true only when this viewer advertised
+   * `clipboard_stream` and the host can serve range reads. Pasting then
+   * writes straight into the destination folder; nothing is staged.
+   */
+  clipboard_stream?: boolean
   audio?: boolean
   audio_format?: {
     sample_rate: number
@@ -154,9 +171,23 @@ export interface ClipboardFileEntry {
   size: number
 }
 
+/// One file announced in `clipboard-sync.files`. `id` is the host's
+/// session-scoped handle for a `clipboard-pull`; `path` is only present for
+/// the browser fallback and is never needed by the pull path.
+export interface ClipboardPullFile {
+  id: number
+  name: string
+  size: number
+  path?: string
+}
+
 export interface FileMessage {
   action: string
   ok?: boolean
+  /// Present on the synthetic file event built from an `error` frame, so the
+  /// transfer panel can tell an old host's `bad_file_action` apart from a
+  /// genuine failure.
+  code?: string
   id?: number
   name?: string
   size?: number
@@ -167,6 +198,22 @@ export interface FileMessage {
   count?: number
   entries?: FileEntry[]
   message?: string
+  /// Delayed clipboard: index/tag of the file the host is asking for, and
+  /// where it should be stored. The tag is echoed back on the upload offer so
+  /// a stale upload cannot complete a newer offer.
+  index?: number
+  tag?: number
+  dest?: string
+  /// Virtual-file stream: the offer reply says `stream: true`, and a `fetch`
+  /// names a byte range of one offered file. `id` is the host's range id.
+  stream?: boolean
+  offset?: number
+  length?: number
+  /// The host rejected a delayed offer because its clipboard belongs to an
+  /// inner RDP session; upload the files instead.
+  compat?: boolean
+  files?: { name: string; size: number }[]
+  paths?: string[]
 }
 
 export type SessionEvent =
@@ -175,6 +222,21 @@ export type SessionEvent =
   | { kind: 'file'; message: FileMessage }
   | { kind: 'file-chunk'; id: number; offset: number; data: Uint8Array }
   | { kind: 'clipboard-files'; files: ClipboardFileEntry[] }
+  /// The host announced files that can be pulled by id (clipboard-sync.files).
+  /// `omitted` counts files the host left out of the capped list.
+  | {
+      kind: 'clipboard-pull-files'
+      files: ClipboardPullFile[]
+      omitted?: number
+    }
+  /// One range reply for a clipboard-pull (packet type 0x18).
+  | {
+      kind: 'clipboard-pull-chunk'
+      id: number
+      status: number
+      offset: number
+      data: Uint8Array
+    }
   | { kind: 'audio'; data: Uint8Array }
   | {
       kind: 'call'
@@ -184,6 +246,9 @@ export type SessionEvent =
       message?: string
     }
   | { kind: 'voice'; data: Uint8Array }
+  /// A short-lived, non-fatal message for the view (for example one input
+  /// event the host rejected). It must not change the session phase.
+  | { kind: 'notice'; message: string }
 
 export type SessionEventListener = (event: SessionEvent) => void
 
@@ -269,6 +334,9 @@ interface ControlMessage {
   value?: string
   id?: number
   code?: string
+  /// Which subsystem an `error` frame belongs to (the host sets "input" for
+  /// a `not_implemented` input backend).
+  what?: string
   message?: string
   session?: string
   serial?: number
@@ -321,7 +389,10 @@ interface ControlMessage {
   sender_name?: string
   sender_id?: string
   sender_session?: number
-  files?: ClipboardFileEntry[]
+  /// `clipboard` action=files sends paths; `clipboard-sync` sends ids.
+  files?: (ClipboardFileEntry | ClipboardPullFile)[]
+  /// `clipboard-sync`: files the host left out of its capped id list.
+  omitted?: number
   host_microphone?: boolean
   started_ms?: number
 }
@@ -617,6 +688,15 @@ export class MolinkClient {
   /// host) must not be mistaken for an ICE failure and retried.
   private lastErrorCode = ''
   private lastErrorMessage = ''
+  /// Last time an input error was shown to the user. Rejected key/mouse events
+  /// are not session errors, but a broken client could otherwise flood the UI.
+  private lastInputNoticeAt = 0
+  /// Throttle for the high-rate pointer-move diagnostic entries.
+  private lastMoveLogAt = 0
+  /// Non-pointer payloads sent since the last input error. A host that
+  /// predates the detailed `unknown key code` message still lets the page
+  /// name the keys it just sent.
+  private recentInputPayloads: string[] = []
   /// Estimated local-minus-host wall-clock difference plus the fastest network
   /// transit, in milliseconds, measured from frame capture timestamps. Frame
   /// freshness must not assume the two machines have synchronized clocks: a
@@ -865,6 +945,10 @@ export class MolinkClient {
           type: 'request-access',
           name: clientName || 'moLink web',
           client: 'molink-web',
+          // No hello follows an approved request, so the capabilities the
+          // clipboard needs travel here.
+          clipboard_stream: true,
+          clipboard_pull: true,
           ...(clientId ? { device_id: clientId } : {}),
         })
       } else {
@@ -886,6 +970,15 @@ export class MolinkClient {
           vp9_stream: this.vp9Capable,
           vp8_stream: this.vp8Capable,
           av1_native: this.av1NativeCapable,
+          // This page can answer a range fetch for a file on its local
+          // clipboard, which lets the host paste virtual files straight into
+          // the destination folder. The host confirms by echoing
+          // `clipboard_stream` in welcome; without it the upload path stays.
+          clipboard_stream: true,
+          // This page understands clipboard-sync.files and downloads the
+          // bytes with clipboard-pull. Older clients only get the legacy path
+          // list.
+          clipboard_pull: true,
           // A browser with WebRTC lets the host send H.264 as a real video
           // track instead of MOLK frames.
           webrtc: typeof RTCPeerConnection !== 'undefined',
@@ -1346,6 +1439,32 @@ export class MolinkClient {
   }
 
   sendInput(payload: Record<string, unknown>): void {
+    // Record what actually left the page. Without this a `bad_input` reply
+    // cannot be traced back to the key that caused it -- the diagnostic log is
+    // the only console a WebView user can export. Pointer moves arrive at the
+    // frame rate, so only one sample per five seconds is kept; typing is
+    // summarised by length rather than stored verbatim.
+    const kind = typeof payload.k === 'string' ? payload.k : ''
+    if (kind === 'move') {
+      const now = performance.now()
+      if (now - this.lastMoveLogAt >= 5000) {
+        this.lastMoveLogAt = now
+        logDiag('info', 'input.send', undefined, {
+          load: JSON.stringify({ type: 'input', ...payload }),
+        })
+      }
+    } else {
+      const record: Record<string, unknown> = { type: 'input', ...payload }
+      if (kind === 'text' && typeof record.text === 'string') {
+        record.text = `<${record.text.length} chars>`
+      }
+      const load = JSON.stringify(record)
+      logDiag('info', 'input.send', undefined, { load })
+      // Keep the last few events so a legacy `bad_input` reply can still say
+      // which codes were in flight.
+      this.recentInputPayloads.push(JSON.stringify(payload))
+      if (this.recentInputPayloads.length > 12) this.recentInputPayloads.shift()
+    }
     this.sendJson({ type: 'input', ...payload })
   }
 
@@ -1510,6 +1629,34 @@ export class MolinkClient {
     this.sendRawPacket(packet)
   }
 
+  /// Answer one virtual-file range fetch. `error` 0 means `data` holds the
+  /// bytes for `[offset, offset+length)`; anything else makes the host's
+  /// waiting paste fail immediately.
+  sendClipboardRange(
+    id: number,
+    error: number,
+    offset: number,
+    data: Uint8Array,
+  ): void {
+    if (!this.isLive()) return
+    const payload = new Uint8Array(16 + data.byteLength)
+    const view = new DataView(payload.buffer)
+    view.setUint32(0, id >>> 0, true)
+    view.setUint32(4, error >>> 0, true)
+    view.setBigUint64(8, BigInt(offset), true)
+    payload.set(data, 16)
+    const packet = encodePacket({
+      version: PROTOCOL_VERSION,
+      type: PacketType.clipboardRange,
+      flags: 0,
+      session: 0,
+      seq: 0,
+      tsUs: Date.now() * 1000,
+      payload,
+    })
+    this.sendRawPacket(packet)
+  }
+
   /** Real-time clipboard update; the core forwards it to other sessions. */
   sendClipboardSync(text: string): void {
     if (!this.isLive() || text === '') return
@@ -1662,15 +1809,39 @@ export class MolinkClient {
         if (message.action === 'files') {
           this.handlers.onSessionEvent?.({
             kind: 'clipboard-files',
-            files: message.files ?? [],
+            // The legacy `clipboard/files` message always carries paths; the
+            // union only exists because `clipboard-sync` reuses the field.
+            files: (message.files ?? []) as ClipboardFileEntry[],
           })
         } else {
           this.handlers.onClipboard?.(message.text ?? '')
         }
         break
-      case 'clipboard-sync':
-        this.handlers.onClipboard?.(message.text ?? '')
+      case 'clipboard-sync': {
+        // Files and text share the message. An empty text must not clear the
+        // local clipboard (files-only announcements used to do exactly that).
+        const text = message.text ?? ''
+        if (text !== '') this.handlers.onClipboard?.(text)
+        const files = Array.isArray(message.files)
+          ? (message.files as ClipboardPullFile[]).filter(
+              (file) =>
+                typeof file?.id === 'number' && file.id > 0 &&
+                typeof file.name === 'string' && file.name !== '' &&
+                typeof file.size === 'number',
+            )
+          : []
+        if (files.length > 0 || (message.omitted ?? 0) > 0) {
+          this.handlers.onSessionEvent?.({
+            kind: 'clipboard-pull-files',
+            files,
+            omitted:
+              typeof message.omitted === 'number' && message.omitted > 0
+                ? message.omitted
+                : undefined,
+          })
+        }
         break
+      }
       case 'chat':
         if (message.action === 'history') {
           this.handlers.onSessionEvent?.({
@@ -1826,6 +1997,62 @@ export class MolinkClient {
         break
       case 'error': {
         const code = typeof message.code === 'string' ? message.code : ''
+        const text =
+            typeof message.message === 'string' ? message.message : ''
+        // A host that predates folder uploads or a custom destination answers
+        // an unknown file action with an error frame. It belongs to the file
+        // panel, not the session banner, so forward it as a file event and
+        // leave the connection healthy.
+        if (code === 'bad_file_action' || code === 'bad_action' ||
+            code === 'unknown_action' || /unknown file action/i.test(text)) {
+          this.handlers.onSessionEvent?.({
+            kind: 'file',
+            message: { action: 'error', code, message: text },
+          })
+          break
+        }
+        // An input event the host refused (an unknown key code, a pointer
+        // already released, SendInput unavailable) says nothing about the
+        // session. Never turn it into a session error: that used to raise the
+        // red banner with a Reconnect button while the link was healthy.
+        if (isInputErrorCode(code) ||
+            (code === 'not_implemented' && message.what === 'input')) {
+          const sent = this.recentInputPayloads
+          const keys: string[] = []
+          for (const raw of sent) {
+            try {
+              const event = JSON.parse(raw) as { code?: unknown; k?: unknown }
+              const key = typeof event.code === 'string'
+                ? event.code
+                : typeof event.k === 'string' ? event.k : ''
+              if (key !== '' && !keys.includes(key)) keys.push(key)
+            } catch {
+              // A malformed record only weakens the hint, never the session.
+            }
+          }
+          this.recentInputPayloads = []
+          // New hosts name the exact key ("unknown key code: MetaLeft").
+          // Older ones send an empty message, so fall back to the codes that
+          // were just sent instead of showing a bare `bad_input`.
+          const named = text !== '' && text !== code
+            ? text
+            : `${code || 'bad_input'}${keys.length > 0 ? ` (${keys.join(', ')})` : ''}`
+          const detail = redactDiagnosticText(named)
+          logDiag('warn', 'input.rejected', detail, {
+            code: code || undefined,
+            keys: keys.join(',') || undefined,
+            sent: sent.join(' ') || undefined,
+          })
+          const now = Date.now()
+          if (now - this.lastInputNoticeAt >= 5000) {
+            this.lastInputNoticeAt = now
+            this.handlers.onSessionEvent?.({
+              kind: 'notice',
+              message: detail,
+            })
+          }
+          break
+        }
         // The host rejected our credentials (wrong or exhausted code); a
         // fresh code will arrive from the UI, so drop the stale resume token.
         if (code === 'unauthorized' || code === 'ip_banned' ||
@@ -1919,6 +2146,24 @@ export class MolinkClient {
           this.handlers.onSessionEvent?.({
             kind: 'file-chunk',
             id: view.getUint32(0, true),
+            offset: Number(view.getBigUint64(8, true)),
+            data: payload.subarray(16),
+          })
+        }
+        return
+      }
+      if (packet.type === PacketType.clipboardFile) {
+        const payload = packet.payload
+        if (payload.byteLength >= 16) {
+          const view = new DataView(
+            payload.buffer,
+            payload.byteOffset,
+            payload.byteLength,
+          )
+          this.handlers.onSessionEvent?.({
+            kind: 'clipboard-pull-chunk',
+            id: view.getUint32(0, true),
+            status: view.getUint32(4, true),
             offset: Number(view.getBigUint64(8, true)),
             data: payload.subarray(16),
           })
@@ -3077,6 +3322,8 @@ export class MolinkClient {
       vp9_stream: this.vp9Capable,
       vp8_stream: this.vp8Capable,
       av1_native: this.av1NativeCapable,
+      clipboard_stream: true,
+      clipboard_pull: true,
       client: 'molink-web',
       protocol: 1,
     }

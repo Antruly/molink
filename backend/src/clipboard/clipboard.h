@@ -8,6 +8,8 @@
 
 namespace molink {
 
+class lazy_clipboard;
+
 /// One entry of the clipboard's file list (CF_HDROP on Windows).
 struct clipboard_file {
   std::string name;
@@ -56,6 +58,38 @@ class clipboard_service {
     if (callback) callback({});
   }
   virtual bool set_files(const std::vector<std::string>&) { return false; }
+
+  /// Delayed rendering: the host becomes the clipboard owner but sends no
+  /// file bytes until a remote application pastes. Only platforms with a
+  /// delayed-render clipboard implement this; everyone else keeps the
+  /// upload-then-set path.
+  virtual bool supports_lazy_files() const { return false; }
+
+  /// Takes ownership of the clipboard for the offer `lazy` currently holds.
+  /// The backend keeps the registry and asks it for the descriptors when the
+  /// OS renders. Returns false when this backend cannot delay file formats.
+  virtual bool install_lazy(std::shared_ptr<lazy_clipboard> lazy,
+                            std::string& error) {
+    (void)lazy;
+    error = "delayed file clipboard rendering is unavailable";
+    return false;
+  }
+
+  /// Releases the delayed-render ownership. The current offer must already
+  /// have been cleared (its source failed) or the waiter may block for the
+  /// render timeout.
+  virtual void uninstall_lazy() {}
+
+  /// True while this backend owns the clipboard for a lazy offer and is
+  /// serving descriptors instead of real paths.
+  virtual bool lazy_rendering() const { return false; }
+
+  /// True when the current clipboard is owned by an inner RDP client (the
+  /// host is running mstsc and the user is working inside the nested session).
+  /// mstsc's redirection understands CF_HDROP but not OLE virtual-file
+  /// streams, so the host must ask the viewer to upload real files before the
+  /// paste instead of installing a delayed offer.
+  virtual bool nested_rdp() const { return false; }
 };
 
 /// nullptr when the build has no X11 support or no display is reachable.

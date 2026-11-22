@@ -1,4 +1,5 @@
 #include "input/input.h"
+#include "input/key_alias.h"
 
 #if defined(_WIN32)
 
@@ -49,9 +50,40 @@ const NamedKey kNamedKeys[] = {
     {"Quote", VK_OEM_7, false},        {"Backquote", VK_OEM_3, false},
     {"Comma", VK_OEM_COMMA, false},    {"Period", VK_OEM_PERIOD, false},
     {"Slash", VK_OEM_2, false},
+    // Common codes the first table missed. Numpad digits are not extended;
+    // NumpadDivide is (it sits in the navigation block).
+    {"Numpad0", VK_NUMPAD0, false},    {"Numpad1", VK_NUMPAD1, false},
+    {"Numpad2", VK_NUMPAD2, false},    {"Numpad3", VK_NUMPAD3, false},
+    {"Numpad4", VK_NUMPAD4, false},    {"Numpad5", VK_NUMPAD5, false},
+    {"Numpad6", VK_NUMPAD6, false},    {"Numpad7", VK_NUMPAD7, false},
+    {"Numpad8", VK_NUMPAD8, false},    {"Numpad9", VK_NUMPAD9, false},
+    {"NumpadDecimal", VK_DECIMAL, false},
+    {"NumpadAdd", VK_ADD, false},      {"NumpadSubtract", VK_SUBTRACT, false},
+    {"NumpadMultiply", VK_MULTIPLY, false},
+    {"NumpadDivide", VK_DIVIDE, true}, {"NumpadComma", VK_SEPARATOR, false},
+    {"NumpadEqual", VK_OEM_NEC_EQUAL, false},
+    {"IntlBackslash", VK_OEM_102, false},
+    {"IntlRo", VK_OEM_102, false},      {"IntlYen", VK_OEM_5, false},
+    // ISO-level 3 key; Windows reports AltGraph as a modifier.
+    {"AltGraph", VK_RMENU, true},
+    {"AudioVolumeMute", VK_VOLUME_MUTE, false},
+    {"AudioVolumeDown", VK_VOLUME_DOWN, false},
+    {"AudioVolumeUp", VK_VOLUME_UP, false},
+    {"MediaTrackNext", VK_MEDIA_NEXT_TRACK, false},
+    {"MediaTrackPrevious", VK_MEDIA_PREV_TRACK, false},
+    {"MediaStop", VK_MEDIA_STOP, false},
+    {"MediaPlayPause", VK_MEDIA_PLAY_PAUSE, false},
+    {"BrowserBack", VK_BROWSER_BACK, false},
+    {"BrowserForward", VK_BROWSER_FORWARD, false},
+    {"BrowserRefresh", VK_BROWSER_REFRESH, false},
+    {"BrowserHome", VK_BROWSER_HOME, false},
+    {"Sleep", VK_SLEEP, false},         {"Help", VK_HELP, false},
 };
 
-bool resolve_key(const std::string& code, WORD& virtual_key, bool& extended) {
+bool resolve_key(const std::string& raw_code, WORD& virtual_key, bool& extended) {
+  // Also accept OSLeft/OSRight, Win/Super/超 and bare letters/digits from
+  // older browsers and virtual keyboards.
+  const std::string code = canonical_key_code(raw_code);
   if (code.size() == 4 && code.rfind("Key", 0) == 0) {
     virtual_key = static_cast<WORD>(code[3]);  // 'A'..'Z'
     extended = false;
