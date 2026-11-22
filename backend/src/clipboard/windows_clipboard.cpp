@@ -16,18 +16,26 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
+#include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <cwchar>
 #include <cwctype>
+#include <deque>
 #include <filesystem>
+#include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
+#include "clipboard/windows_data_object.h"
 #include "clipboard_lazy.h"
 
 namespace molink {
@@ -35,6 +43,40 @@ namespace {
 
 constexpr UINT kLazyStopMessage = WM_APP + 0x51;
 constexpr wchar_t kLazyWindowClass[] = L"moLinkLazyClipboard";
+
+/// A describe request must not stall the caller behind a stream read for long;
+/// the caller falls back to CF_HDROP when the data-object thread is busy.
+constexpr uint64_t kObjectDescribeTimeoutMs = 2000;
+/// One clipboard-pull range may spend at most this long inside IStream::Read.
+/// The viewer's own 0x18 timeout is longer, so the host reports first.
+constexpr uint64_t kObjectReadTimeoutMs = 15000;
+/// One file's whole pull may spend at most this long inside the data object.
+constexpr uint64_t kObjectReadTotalMs = 60000;
+
+bool clipboard_log_enabled() {
+  static const bool enabled = [] {
+    const char* value = std::getenv("MOLINK_CLIPBOARD_LOG");
+    return value != nullptr && std::string(value) == "1";
+  }();
+  return enabled;
+}
+
+void clipboard_log(const char* format, ...) {
+  if (!clipboard_log_enabled()) return;
+  std::fprintf(stderr, "molink: clipboard ");
+  va_list args;
+  va_start(args, format);
+  std::vfprintf(stderr, format, args);
+  va_end(args);
+  std::fprintf(stderr, "\n");
+}
+
+uint64_t steady_ms() {
+  return static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+}
 
 std::wstring to_wide(const std::string& text) {
   if (text.empty()) return std::wstring();
@@ -66,7 +108,7 @@ bool open_clipboard_retry(HWND owner, int attempts = 10) {
 }
 
 /// mstsc's main window class. Its presence means an inner Windows session is
-/// connected; clipboard redirection then only understands CF_HDROP.
+/// connected; the viewer is told so it can show an "inner RDP" badge.
 BOOL CALLBACK find_rdp_window(HWND window, LPARAM found) {
   wchar_t name[64] = {};
   if (GetClassNameW(window, name,
@@ -78,17 +120,6 @@ BOOL CALLBACK find_rdp_window(HWND window, LPARAM found) {
     return FALSE;
   }
   return TRUE;
-}
-
-UINT file_descriptor_format() {
-  static const UINT format =
-      RegisterClipboardFormatW(L"FileGroupDescriptorW");
-  return format;
-}
-
-UINT file_contents_format() {
-  static const UINT format = RegisterClipboardFormatW(L"FileContents");
-  return format;
 }
 
 /// Builds the CF_HDROP block for a list of real paths.
@@ -441,6 +472,363 @@ class remote_file_stream final : public IStream {
   uint64_t size_ = 0;
   std::mutex mutex_;
   uint64_t position_ = 0;
+};
+
+/// Reads the *host's* clipboard through its OLE data object.
+///
+/// mstsc (and msrdc) expose a file copied inside an inner RDP session as a
+/// virtual file: FileGroupDescriptorW names the entries and FileContents
+/// answers byte ranges. Reading that stream is the whole point -- the file is
+/// never materialised on this machine. All of it lives on one dedicated STA
+/// thread because `IDataObject::GetData` and `IStream::Read` may block on the
+/// RDP channel; the libuv loop and the clipboard watcher never call into OLE.
+///
+/// The object is cached per clipboard sequence number. A new sequence means
+/// mstsc replaced its offer, so every cached stream is released before the new
+/// generation is announced. Each entry carries a token that names its
+/// generation; a read with a stale token is answered with `gone` instead of
+/// bytes from the wrong file.
+class clipboard_object_reader final {
+ public:
+  clipboard_object_reader() : thread_([this] { run(); }) {}
+
+  ~clipboard_object_reader() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      stopping_ = true;
+    }
+    cv_.notify_all();
+    if (thread_.joinable()) thread_.join();
+  }
+
+  clipboard_object_reader(const clipboard_object_reader&) = delete;
+  clipboard_object_reader& operator=(const clipboard_object_reader&) = delete;
+
+  /// Enumerates the data object. Returns false when this clipboard is not a
+  /// virtual-file offer (or the worker did not answer in time), which tells
+  /// the caller to use CF_HDROP.
+  bool describe(std::vector<clipboard_file>& files, uint64_t timeout_ms) {
+    if (wedged_->load()) return false;
+    auto request = std::make_shared<job>();
+    request->type = job::kind::describe;
+    request->sequence = GetClipboardSequenceNumber();
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (stopping_ || queue_.size() >= 8) return false;
+      queue_.push_back(request);
+    }
+    cv_.notify_one();
+
+    std::unique_lock<std::mutex> lock(request->mutex);
+    if (!request->cv.wait_for(lock, std::chrono::milliseconds(timeout_ms),
+                              [&request] { return request->done; })) {
+      clipboard_log("data-object describe timed out");
+      return false;
+    }
+    if (!request->ok || request->files.empty()) return false;
+    files = std::move(request->files);
+    return true;
+  }
+
+  /// Queues a range read. The callback runs on the worker (or on the timeout
+  /// thread when the RDP channel does not answer).
+  void read(const clipboard_file& file, uint64_t offset, uint64_t length,
+            clipboard_service::file_range_callback callback,
+            uint32_t per_read_timeout_ms, uint32_t total_timeout_ms) {
+    if (!callback) return;
+    uint32_t generation = 0;
+    uint32_t index = 0;
+    if (!clipboard_stream_token_split(file.stream_id, generation, index)) {
+      callback(2, offset, {});
+      return;
+    }
+    if (wedged_->load()) {
+      callback(2, offset, {});
+      return;
+    }
+    // A whole upstream file may take longer than one range; after the total
+    // budget the clipboard has effectively moved on.
+    {
+      std::lock_guard<std::mutex> lock(budget_mutex_);
+      const uint64_t now = steady_ms();
+      const auto key = std::make_pair(generation, index);
+      const auto it = read_started_.find(key);
+      if (it == read_started_.end()) {
+        read_started_[key] = now;
+      } else if (now >= it->second && now - it->second > total_timeout_ms) {
+        read_started_.erase(it);
+        clipboard_log("data-object read budget exhausted generation=%u index=%u",
+                      generation, index);
+        callback(2, offset, {});
+        return;
+      }
+    }
+
+    auto state = std::make_shared<read_state>();
+    auto request = std::make_shared<job>();
+    request->type = job::kind::read;
+    request->file = file;
+    request->offset = offset;
+    request->length = length;
+    request->callback = std::move(callback);
+    request->state = state;
+    bool posted = false;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (!stopping_) {
+        queue_.push_back(request);
+        posted = true;
+      }
+    }
+    if (!posted) {
+      if (request->callback) request->callback(2, offset, {});
+      return;
+    }
+    cv_.notify_one();
+
+    // IStream::Read cannot be interrupted portably. Answer the viewer on time
+    // and let the worker discard the late result; `wedged_` makes every
+    // request until it recovers fail fast instead of queueing behind it.
+    std::thread([state, request, offset, per_read_timeout_ms, wedged = wedged_] {
+      std::unique_lock<std::mutex> lock(state->mutex);
+      if (state->cv.wait_for(lock,
+                             std::chrono::milliseconds(per_read_timeout_ms),
+                             [&state] { return state->done; })) {
+        return;
+      }
+      state->done = true;
+      lock.unlock();
+      request->timed_out.store(true);
+      wedged->store(true);
+      if (request->callback) request->callback(2, offset, {});
+    }).detach();
+  }
+
+ private:
+  struct read_state {
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool done = false;
+  };
+
+  struct job {
+    enum class kind { describe, read } type = kind::describe;
+    // describe
+    DWORD sequence = 0;
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool done = false;
+    bool ok = false;
+    std::vector<clipboard_file> files;
+    // read
+    clipboard_file file;
+    uint64_t offset = 0;
+    uint64_t length = 0;
+    clipboard_service::file_range_callback callback;
+    std::shared_ptr<read_state> state;
+    std::atomic<bool> timed_out{false};
+  };
+
+  void run() {
+    const HRESULT result = OleInitialize(nullptr);
+    ole_ = SUCCEEDED(result);
+    clipboard_log("data-object worker started (ole=%s)",
+                  ole_ ? "ok" : "unavailable");
+    for (;;) {
+      std::shared_ptr<job> next;
+      {
+        std::unique_lock<std::mutex> lock(mutex_);
+        cv_.wait(lock, [this] { return stopping_ || !queue_.empty(); });
+        if (stopping_ && queue_.empty()) break;
+        next = queue_.front();
+        queue_.pop_front();
+      }
+      if (next->type == job::kind::describe) {
+        handle_describe(*next);
+      } else {
+        handle_read(*next);
+      }
+    }
+    release_cache();
+    if (ole_) OleUninitialize();
+  }
+
+  void handle_describe(job& request) {
+    std::vector<clipboard_file> files;
+    bool ok = false;
+    if (ole_) {
+      const DWORD sequence = GetClipboardSequenceNumber();
+      // A describe posted before the clipboard moved on must not replace the
+      // newer generation a later caller already used.
+      if (request.sequence == 0 || request.sequence == sequence) {
+        ok = refresh_cache(sequence, files);
+      }
+    }
+    {
+      std::lock_guard<std::mutex> lock(request.mutex);
+      request.ok = ok;
+      request.files = std::move(files);
+      request.done = true;
+    }
+    request.cv.notify_all();
+    wedged_->store(false);
+  }
+
+  void handle_read(job& request) {
+    const uint64_t started = steady_ms();
+    uint32_t status = 2;
+    std::vector<uint8_t> data;
+    uint32_t generation = 0;
+    uint32_t index = 0;
+    if (!clipboard_stream_token_split(request.file.stream_id, generation,
+                                      index)) {
+      status = 2;
+    } else if (object_ == nullptr || !cache_valid_ ||
+               generation != generation_ ||
+               GetClipboardSequenceNumber() != cached_sequence_) {
+      // The clipboard moved on (mstsc replaced its offer). Releasing here is
+      // what makes the generation model observable to the viewer as status 2.
+      release_cache();
+      status = 2;
+    } else if (index >= public_files_.size()) {
+      status = 2;
+    } else {
+      const clipboard_file& advertised = public_files_[index];
+      if (advertised.name != request.file.name ||
+          advertised.size != request.file.size ||
+          request.offset > advertised.size) {
+        status = 2;
+      } else {
+        IStream* stream = stream_for(descriptions_[index].lindex);
+        status = stream == nullptr
+                     ? 1
+                     : read_data_object_stream(stream, request.offset,
+                                               request.length, data);
+      }
+    }
+
+    bool deliver = false;
+    {
+      std::lock_guard<std::mutex> lock(request.state->mutex);
+      if (!request.state->done) {
+        request.state->done = true;
+        deliver = true;
+      }
+    }
+    if (deliver) {
+      clipboard_log(
+          "data-object read index=%u offset=%llu length=%llu status=%u "
+          "elapsed=%llums",
+          index, static_cast<unsigned long long>(request.offset),
+          static_cast<unsigned long long>(request.length), status,
+          static_cast<unsigned long long>(steady_ms() - started));
+      if (request.callback) {
+        request.callback(status, request.offset, std::move(data));
+      }
+    } else {
+      clipboard_log("data-object read index=%u finished after its timeout; "
+                    "reply discarded",
+                    index);
+    }
+    wedged_->store(false);
+  }
+
+  IStream* stream_for(long lindex) {
+    const auto existing = streams_.find(lindex);
+    if (existing != streams_.end()) return existing->second->stream;
+    auto stream = std::make_unique<data_object_stream>();
+    if (!open_data_object_stream(object_, lindex, *stream)) {
+      clipboard_log("data-object stream lindex=%ld unavailable", lindex);
+      return nullptr;
+    }
+    IStream* raw = stream->stream;
+    streams_.emplace(lindex, std::move(stream));
+    return raw;
+  }
+
+  bool refresh_cache(DWORD sequence, std::vector<clipboard_file>& out) {
+    if (cache_valid_ && cached_sequence_ == sequence) {
+      out = public_files_;
+      return !out.empty();
+    }
+    release_cache();
+    cache_valid_ = true;
+    cached_sequence_ = sequence;
+
+    IDataObject* object = nullptr;
+    const HRESULT result = OleGetClipboard(&object);
+    if (FAILED(result) || object == nullptr) {
+      clipboard_log("OleGetClipboard failed (0x%08lx)",
+                    static_cast<unsigned long>(result));
+      return false;
+    }
+    std::vector<data_object_file> descriptions;
+    if (!describe_data_object(object, descriptions)) {
+      object->Release();
+      clipboard_log("clipboard offers no FileContents streams; using CF_HDROP");
+      return false;
+    }
+
+    generation_ += 1;
+    if (generation_ == 0) generation_ = 1;
+    object_ = object;
+    descriptions_ = std::move(descriptions);
+    public_files_.clear();
+    public_files_.reserve(descriptions_.size());
+    for (std::size_t i = 0; i < descriptions_.size(); ++i) {
+      clipboard_file file;
+      file.name = descriptions_[i].name;
+      file.size = descriptions_[i].size;
+      file.stream_id = clipboard_stream_token(
+          generation_, static_cast<uint32_t>(i));
+      public_files_.push_back(std::move(file));
+    }
+    clipboard_log("data-object files=%zu generation=%u",
+                  public_files_.size(), generation_);
+    out = public_files_;
+    return !out.empty();
+  }
+
+  void release_cache() {
+    if (object_ != nullptr) {
+      object_->Release();
+      object_ = nullptr;
+    }
+    streams_.clear();
+    descriptions_.clear();
+    public_files_.clear();
+    cache_valid_ = false;
+    cached_sequence_ = 0;
+    {
+      std::lock_guard<std::mutex> lock(budget_mutex_);
+      read_started_.clear();
+    }
+  }
+
+  std::thread thread_;
+  std::mutex mutex_;
+  std::condition_variable cv_;
+  std::deque<std::shared_ptr<job>> queue_;
+  bool stopping_ = false;
+
+  /// Set when a read outlived kObjectReadTimeoutMs. The worker still owns the
+  /// blocked IStream; every new request fails fast until it returns.
+  std::shared_ptr<std::atomic<bool>> wedged_ =
+      std::make_shared<std::atomic<bool>>(false);
+
+  /// Worker-thread-only cache.
+  bool ole_ = false;
+  bool cache_valid_ = false;
+  DWORD cached_sequence_ = 0;
+  uint32_t generation_ = 0;
+  IDataObject* object_ = nullptr;
+  std::vector<data_object_file> descriptions_;
+  std::vector<clipboard_file> public_files_;
+  std::map<long, std::unique_ptr<data_object_stream>> streams_;
+
+  /// Shared with the caller threads that enforce the per-file total budget.
+  std::mutex budget_mutex_;
+  std::map<std::pair<uint32_t, uint32_t>, uint64_t> read_started_;
 };
 
 /// OLE data object for the lazy offer. Explorer and RDP-style consumers query
@@ -847,7 +1235,18 @@ class windows_clipboard final : public clipboard_service {
         if (files.empty()) continue;
         std::string signature;
         for (const clipboard_file& file : files) {
-          signature += file.path;
+          if (!file.path.empty()) {
+            signature += file.path;
+          } else {
+            // Inner RDP virtual file: the path is intentionally empty, so the
+            // name/size/generation pair is what makes a new copy visible.
+            signature += "@stream:";
+            signature += file.name;
+            signature += ':';
+            signature += std::to_string(file.size);
+            signature += ':';
+            signature += std::to_string(file.stream_id);
+          }
           signature += '\n';
         }
         std::lock_guard<std::mutex> lock(watch_mutex_);
@@ -955,6 +1354,16 @@ class windows_clipboard final : public clipboard_service {
       return;
     }
     std::vector<clipboard_file> files;
+    // Prefer the OLE data object: an inner RDP session exposes its files as
+    // FileGroupDescriptorW + FileContents streams, so this is the path that
+    // does not materialise anything on this machine. A real Explorer
+    // selection has no FileContents stream and falls through to CF_HDROP.
+    if (reader_.describe(files, kObjectDescribeTimeoutMs)) {
+      clipboard_log("request_files source=data-object count=%zu",
+                    files.size());
+      if (callback) callback(std::move(files));
+      return;
+    }
     bool opened = false;
     for (int attempt = 0; attempt < 5; ++attempt) {
       if (OpenClipboard(nullptr)) {
@@ -993,7 +1402,19 @@ class windows_clipboard final : public clipboard_service {
       }
       CloseClipboard();
     }
+    clipboard_log("request_files source=%s count=%zu",
+                  files.empty() ? "none" : "hdrop", files.size());
     if (callback) callback(std::move(files));
+  }
+
+  /// A `clipboard-pull` for an entry that came from the OLE data object. The
+  /// read runs on the data-object thread, never here.
+  void read_file_range(const clipboard_file& file, uint64_t offset,
+                       uint64_t length,
+                       file_range_callback callback) override {
+    reader_.read(file, offset, length, std::move(callback),
+                 static_cast<uint32_t>(kObjectReadTimeoutMs),
+                 static_cast<uint32_t>(kObjectReadTotalMs));
   }
 
   bool set_files(const std::vector<std::string>& paths) override {
@@ -1242,6 +1663,11 @@ class windows_clipboard final : public clipboard_service {
   DWORD sequence_ = 0;
   std::atomic<bool> running_{false};
   std::thread watcher_;
+
+  /// OLE data-object reader (inner RDP virtual files). Declared after the
+  /// watcher so it starts only once this object is fully constructed; its
+  /// destructor runs after the watcher thread has been joined.
+  clipboard_object_reader reader_;
 
   /// nested_rdp() cache; the probe opens the clipboard and inspects the owner
   /// process, so the supervisor's 400 ms poll must not pay it every tick.

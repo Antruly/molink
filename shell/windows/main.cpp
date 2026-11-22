@@ -447,6 +447,11 @@ class WebMessageHandler final
     }
     const std::wstring action(raw);
     CoTaskMemFree(raw);
+    // TODO(keyboard grab): not implemented in the Windows shell yet. The X11
+    // grab in shell/native has no direct equivalent here; Win+R/Win+E would
+    // need an LL hook (SetWindowsHookEx(WH_KEYBOARD_LL)) plus the same
+    // focus/blur/escape release rules, and no page-side switch is exposed for
+    // Windows until that exists.
     if (action == L"minimize") {
       ShowWindow(g_window, SW_MINIMIZE);
     } else if (action == L"maximize") {

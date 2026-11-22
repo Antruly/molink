@@ -221,6 +221,7 @@ set(MOLINK_CORE_SOURCES
   src/surface/surface_compositor.cpp
   src/clipboard/x11_clipboard.cpp
   src/clipboard/windows_clipboard.cpp
+  src/clipboard/windows_data_object.cpp
   src/clipboard_stage.cpp
   src/clipboard_lazy.cpp
   src/clipboard_pull.cpp
@@ -777,6 +778,7 @@ if(WIN32)
   add_executable(molink-core-windows-clipboard-stream-test
     tests/windows_clipboard_stream_test.cpp
     src/clipboard/windows_clipboard.cpp
+    src/clipboard/windows_data_object.cpp
     src/clipboard_lazy.cpp
   )
   target_include_directories(molink-core-windows-clipboard-stream-test
@@ -789,6 +791,22 @@ if(WIN32)
     COMMAND molink-core-windows-clipboard-stream-test)
   set_tests_properties(windows_clipboard_stream PROPERTIES
     SKIP_RETURN_CODE 77)
+
+  # Reads a fake IDataObject exactly the way the host reads mstsc's nested-RDP
+  # offer: FileGroupDescriptorW first, FileContents streams second, and
+  # CF_HDROP only when the stream formats are absent. It never touches the
+  # real clipboard, so it runs unconditionally on Windows.
+  add_executable(molink-core-windows-data-object-test
+    tests/windows_data_object_test.cpp
+    src/clipboard/windows_data_object.cpp
+  )
+  target_include_directories(molink-core-windows-data-object-test PRIVATE src)
+  target_link_libraries(molink-core-windows-data-object-test
+    PRIVATE ole32 oleaut32 uuid)
+  set_target_properties(molink-core-windows-data-object-test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+  add_test(NAME windows_data_object
+    COMMAND molink-core-windows-data-object-test)
 endif()
 
 add_executable(molink-core-tile-scale-test

@@ -504,9 +504,12 @@ X11 的屏幕抓取**不包含鼠标光标**，服务端单独发送形状与位
 
   嵌套 RDP 探测：Windows 主机检查剪贴板 owner 是否为 `mstsc.exe`/`msrdc.exe`，或
   CF_HDROP 路径是否位于 RDP 重定向临时目录。命中时 `welcome.clipboard_nested_rdp=true`
-  且 `clipboard_lazy`/`clipboard_stream` 为 false；若客户端仍发 `clipboard-offer`，
-  主机回 `{"ok":false,"compat":true}`，客户端改为“先落盘再 CF_HDROP”的直传路径，
-  因为 mstsc 的重定向不认 OLE 虚拟文件流。
+  仅作为 UI 标记，**不再**关闭 `clipboard_lazy`/`clipboard_stream`：主机 `request_files`
+  时先取 `OleGetClipboard` 的 `FileGroupDescriptorW` + `FileContents`，
+  内层 RDP 复制出来的文件以虚拟流形式直接按 `(id, offset, length)` 读出，宿主磁盘
+  不产生副本；只有数据对象没有 `FileContents` 时才退回 CF_HDROP 路径。反向（客户端
+  → 内层 RDP 粘贴）默认仍用“先落盘再 CF_HDROP”（`MOLINK_RDP_STREAM_PUSH=1` 可强制
+  尝试数据对象流）。旧主机会回 `{"ok":false,"compat":true}`，新客户端只提示，不切换模式。
 
 **音频**
 

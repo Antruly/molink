@@ -185,6 +185,10 @@ interface AppState {
   /// Keep the host's reconnect credential across restarts, so a single-use
   /// verification code is not needed again. On by default.
   rememberDevice: boolean
+  /// X11-only: while the remote picture is focused, grab the keyboard so the
+  /// desktop's Super/Alt shortcuts reach the remote. Off by default because it
+  /// also takes Alt+Tab and friends away from the local desktop.
+  keyboardGrab: boolean
   /// What the window's close button does while a session tab is open:
   /// ask once, hide to the tray, or close the session tab.
   windowCloseBehavior: 'ask' | 'tray' | 'tab'
@@ -229,6 +233,7 @@ interface AppState {
   setAutoAudio: (enabled: boolean) => void
   setRemoteClipboardFiles: (enabled: boolean) => void
   setRememberDevice: (enabled: boolean) => void
+  setKeyboardGrab: (enabled: boolean) => void
   setWindowCloseBehavior: (behavior: 'ask' | 'tray' | 'tab') => void
   setQualityMode: (mode: QualityMode) => void
   setFrameRate: (fps: FpsSetting) => void
@@ -327,6 +332,7 @@ const CONNECT_DRAFT_KEY = 'molink.connectDraft'
 /// Read by session-store too; kept in one place so the module and the UI can
 /// never disagree about the default.
 const REMEMBER_DEVICE_KEY = kRememberDeviceKey
+const KEYBOARD_GRAB_KEY = 'molink.keyboardGrab'
 const EMPTY_STATS: Stats = {
   fps: 0,
   wireFps: 0,
@@ -651,6 +657,11 @@ export const useAppStore = create<AppState>((set, get) => {
     // the settings switch still lets a user opt out.
     remoteClipboardFiles: readStorage(REMOTE_CLIPBOARD_FILES_KEY) !== '0',
     rememberDevice: readStorage(REMEMBER_DEVICE_KEY) !== '0',
+    // The shell's origin changes with its ephemeral port, so the cookie copy
+    // is what actually survives a restart.
+    keyboardGrab:
+      readStorage(KEYBOARD_GRAB_KEY) === '1' ||
+      readCookie('molink_keyboardGrab') === '1',
     windowCloseBehavior: (() => {
       const saved = readStorage(CLOSE_BEHAVIOR_KEY)
       return saved === 'tray' || saved === 'tab' ? saved : 'ask'
@@ -719,6 +730,12 @@ export const useAppStore = create<AppState>((set, get) => {
       // in-memory copy survives so the open tab can still reconnect.
       sessionStore.setRememberDevice(enabled)
       schedulePersist()
+    },
+
+    setKeyboardGrab: (enabled) => {
+      writeStorage(KEYBOARD_GRAB_KEY, enabled ? '1' : '0')
+      writeCookie('molink_keyboardGrab', enabled ? '1' : '0')
+      set({ keyboardGrab: enabled })
     },
 
     setWindowCloseBehavior: (behavior) => {

@@ -39,7 +39,11 @@ clipboard_pull_result read_clipboard_pull(
   const std::size_t index = static_cast<std::size_t>(id - 1);
   if (index >= current.size()) return gone(offset);
   const clipboard_file& file = current[index];
-  if (file.path.empty() || file.name != offered[index].name) {
+  // An inner RDP virtual file has no path: its bytes come from the OLE data
+  // object and the caller reads them through the clipboard backend. Anything
+  // with neither a path nor a stream id cannot be read.
+  const bool stream = file.stream_id != 0;
+  if ((!stream && file.path.empty()) || file.name != offered[index].name) {
     return gone(offset);
   }
   // A rewritten RDP temporary file can keep its name but change size. The
@@ -52,8 +56,11 @@ clipboard_pull_result read_clipboard_pull(
   const uint64_t take = std::min({length, available, max_chunk});
   clipboard_pull_result result;
   result.offset = offset;
+  result.length = take;
+  result.stream = stream;
   result.status = clipboard_pull_status::ok;
   if (take == 0) return result;
+  if (stream) return result;
 
   std::error_code ec;
   if (!fs::is_regular_file(fs::path(file.path), ec) || ec) {

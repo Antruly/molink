@@ -260,6 +260,14 @@ export class SessionConnection {
       onWelcome: (welcome) => {
         this.clipboardLazy = lazyCapability(welcome)
         this.clipboardPull = welcome.clipboard_pull === true
+        if (welcome.clipboard_nested_rdp === true) {
+          // The host is running an inner RDP client. This is a badge, not a
+          // capability cut: nested files now stream through the OLE data
+          // object and lazy/stream mode stays available.
+          logDiag('info', 'clipboard.nested', 'inner RDP session owns the clipboard', {
+            target: this.target || undefined,
+          })
+        }
         const format = welcome.audio_format
         this.audioFormat =
           format !== undefined && format !== null
@@ -577,9 +585,12 @@ export class SessionConnection {
         capability: () => this.clipboardLazy,
         echo: this.clipboardEcho,
         onNestedRdp: () => {
-          // The host's clipboard is owned by an inner RDP session; it cannot
-          // render virtual files, so fall back to uploading real ones.
-          this.clipboardLazy = null
+          // Informational only. Current hosts read a file copied inside the
+          // nested desktop through the OLE data object, so the lazy/stream
+          // capability must stay enabled.
+          logDiag('info', 'clipboard.nested', 'inner RDP session owns the clipboard', {
+            target: this.target || undefined,
+          })
         },
       },
     )
@@ -649,7 +660,10 @@ export class SessionConnection {
           capability: () => this.clipboardLazy,
           echo: this.clipboardEcho,
           onNestedRdp: () => {
-            this.clipboardLazy = null
+            // Same informational contract as the polling file sync.
+            logDiag('info', 'clipboard.nested', 'inner RDP session owns the clipboard', {
+              target: this.target || undefined,
+            })
           },
         },
       )

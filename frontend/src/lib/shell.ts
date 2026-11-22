@@ -39,6 +39,38 @@ interface WebKitWindow {
   chrome?: {
     webview?: { postMessage(message: string): void }
   }
+  /// Injected by the Linux shell on every page load: false means Wayland (or
+  /// a GTK build without X11), where an application cannot grab the keyboard.
+  __molinkGrabSupported?: boolean
+}
+
+export type KeyboardGrabStatus = 'unknown' | 'on' | 'off' | 'unsupported' | 'failed'
+
+let grabSupport: 'unknown' | 'available' | 'unsupported' = 'unknown'
+let lastGrabStatus: KeyboardGrabStatus = 'unknown'
+const grabListeners = new Set<() => void>()
+
+function readGrabSupport(): void {
+  const target = window as unknown as WebKitWindow
+  if (target.__molinkGrabSupported === false) {
+    grabSupport = 'unsupported'
+  } else if (target.__molinkGrabSupported === true) {
+    grabSupport = 'available'
+  }
+}
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('molink-grab', ((event: Event) => {
+    const detail = (event as CustomEvent<unknown>).detail
+    if (typeof detail !== 'string') return
+    lastGrabStatus = detail as KeyboardGrabStatus
+    if (detail === 'unsupported') {
+      grabSupport = 'unsupported'
+    } else if (detail === 'on' || detail === 'off' || detail === 'failed') {
+      grabSupport = 'available'
+    }
+    for (const listener of grabListeners) listener()
+  }) as EventListener)
 }
 
 function postShellCommand(command: string): void {
@@ -55,6 +87,41 @@ function postShellCommand(command: string): void {
 /// Sends a window action to the native shell. No-op in a plain browser.
 export function windowAction(action: WindowAction): void {
   postShellCommand(action)
+}
+
+/// The Linux shell exposes an X11 keyboard grab over the WebKit bridge. A
+/// plain browser, a popout page without the bridge and the Windows shell are
+/// all "not applicable"; Wayland is "not available" (the switch is greyed).
+export function keyboardGrabApplicable(): boolean {
+  const target = window as unknown as WebKitWindow
+  return shellInfo.platform === 'linux' && Boolean(target.webkit?.messageHandlers?.molink)
+}
+
+export function keyboardGrabAvailable(): boolean {
+  if (!keyboardGrabApplicable()) return false
+  readGrabSupport()
+  return grabSupport !== 'unsupported'
+}
+
+/// Current on/off/unsupported state reported by the shell, for the settings
+/// hint. "unknown" until the first status arrives.
+export function keyboardGrabStatus(): KeyboardGrabStatus {
+  return lastGrabStatus
+}
+
+export function subscribeKeyboardGrab(listener: () => void): () => void {
+  grabListeners.add(listener)
+  return () => {
+    grabListeners.delete(listener)
+  }
+}
+
+/// Asks the shell to take/release the X11 keyboard grab. The shell still owns
+/// every safety release; this only expresses the page's wish.
+export function setKeyboardGrab(on: boolean): void {
+  if (!keyboardGrabApplicable()) return
+  if (on && !keyboardGrabAvailable()) return
+  postShellCommand(on ? 'grab-keyboard' : 'release-keyboard')
 }
 
 /// Opens a URL in the system browser (not an in-app window).

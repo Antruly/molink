@@ -15,7 +15,17 @@ struct clipboard_file {
   std::string name;
   std::string path;
   uint64_t size = 0;
+  /// Non-zero when the bytes live behind an OLE data object instead of a path
+  /// on this machine (an inner RDP session's virtual file). `path` is empty in
+  /// that case and `read_file_range` answers the ranges. Opaque to callers.
+  uint64_t stream_id = 0;
 };
+
+/// True when the entry can be read at all. A virtual entry has no path but a
+/// stream id; a real entry has a path.
+inline bool clipboard_file_has_bytes(const clipboard_file& file) {
+  return !file.path.empty() || file.stream_id != 0;
+}
 
 /// Text clipboard synchronization with the local display.
 ///
@@ -59,6 +69,23 @@ class clipboard_service {
   }
   virtual bool set_files(const std::vector<std::string>&) { return false; }
 
+  /// Result of one virtual-file range read. `status` uses the clipboard-pull
+  /// wire codes: 0 ok, 1 read error, 2 clipboard changed / entry gone.
+  using file_range_callback = std::function<void(
+      uint32_t status, uint64_t offset, std::vector<uint8_t> data)>;
+
+  /// Reads a byte range of an entry whose `stream_id` is non-zero.
+  ///
+  /// The bytes may only be obtainable through an RDP channel, and
+  /// `IStream::Read` can block, so the backend runs the read on its own worker
+  /// thread and invokes `callback` there (or on its timeout thread). Callers
+  /// must hop back to their own loop before touching app state. A backend that
+  /// does not implement virtual files reports `gone` immediately.
+  virtual void read_file_range(const clipboard_file&, uint64_t offset,
+                               uint64_t, file_range_callback callback) {
+    if (callback) callback(2, offset, {});
+  }
+
   /// Delayed rendering: the host becomes the clipboard owner but sends no
   /// file bytes until a remote application pastes. Only platforms with a
   /// delayed-render clipboard implement this; everyone else keeps the
@@ -86,9 +113,10 @@ class clipboard_service {
 
   /// True when the current clipboard is owned by an inner RDP client (the
   /// host is running mstsc and the user is working inside the nested session).
-  /// mstsc's redirection understands CF_HDROP but not OLE virtual-file
-  /// streams, so the host must ask the viewer to upload real files before the
-  /// paste instead of installing a delayed offer.
+  /// This is informational (and lets the viewer show an "inner RDP" badge); it
+  /// no longer disables delayed/virtual files. Reading a file copied inside
+  /// the nested session now goes through the OLE data object's
+  /// FileGroupDescriptorW/FileContents formats, so no host-side copy is made.
   virtual bool nested_rdp() const { return false; }
 };
 

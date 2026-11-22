@@ -61,7 +61,11 @@ import {
 import { keyToCode, normalizeKeyCode } from '../lib/key-code'
 import { Codec, codecName } from '../lib/protocol'
 import { collectDropEntries, stageDroppedFiles } from '../lib/file-drop'
-import { shellInfo, windowAction } from '../lib/shell'
+import {
+  setKeyboardGrab,
+  shellInfo,
+  windowAction,
+} from '../lib/shell'
 import { openSessionWindow } from '../lib/windows'
 import {
   QualityPanel,
@@ -353,10 +357,23 @@ export function SessionView({
   const theme = useAppStore((state) => state.theme)
   const toggleTheme = useAppStore((state) => state.toggleTheme)
   const setSettingsOpen = useAppStore((state) => state.setSettingsOpen)
+  const settingsOpen = useAppStore((state) => state.settingsOpen)
+  const keyboardGrab = useAppStore((state) => state.keyboardGrab)
 
   const welcome = tab.welcome
   const synthetic = welcome?.tiles.synthetic === true
   const inputAvailable = welcome?.input === true && !synthetic
+  // X11 keyboard grab: the remote picture owns the keyboard only while it is
+  // focused and no local dialog is open. The shell additionally releases on
+  // window blur, minimize, unmount and Ctrl+Alt+Shift+Escape.
+  const grabEligible =
+    keyboardGrab &&
+    tab.phase === 'live' &&
+    tab.controlEnabled &&
+    inputAvailable &&
+    !settingsOpen
+  const [surfaceFocused, setSurfaceFocused] = useState(false)
+  const grabWanted = grabEligible && surfaceFocused
   const clipboardAvailable = welcome?.clipboard === true
   // The host walks the quality ladder itself when the preset is "auto".
   const hostAutoQuality = welcome?.auto_quality === true
@@ -1846,6 +1863,9 @@ export function SessionView({
     if (!point) return
     event.preventDefault()
     event.currentTarget.focus()
+    // focus() fires onFocus only when the surface was not already focused;
+    // clicking after the local escape combo must re-arm the grab explicitly.
+    if (grabEligible) setKeyboardGrab(true)
     event.currentTarget.setPointerCapture(event.pointerId)
     connection()?.sendInput({ k: 'move', ...point })
     if (event.button <= 2) {
@@ -1965,6 +1985,11 @@ export function SessionView({
       }
       buttons.clear()
     }
+    // The shell's escape combo (Ctrl+Alt+Shift+Escape) swallows the Escape
+    // key, so without this the remote would keep the modifiers held. The
+    // shell calls it whenever it drops the grab.
+    ;(window as unknown as { __molinkReleaseKeys?: () => void })
+      .__molinkReleaseKeys = releaseAll
     // Sending the window to the background must release what it was holding.
     // The host would otherwise keep Ctrl/Alt down until the tab comes back.
     const onVisibility = () => {
@@ -1986,6 +2011,10 @@ export function SessionView({
       // choice: this effect also unwinds when the view is unmounted for a tab
       // switch, and turning control off there made every switch lose it.
       releaseAll()
+      const bridge = window as unknown as { __molinkReleaseKeys?: () => void }
+      if (bridge.__molinkReleaseKeys === releaseAll) {
+        delete bridge.__molinkReleaseKeys
+      }
     }
   }, [tab.controlEnabled, tab.id, connection])
 
@@ -2010,6 +2039,39 @@ export function SessionView({
       window.removeEventListener('focus', focusSurface)
     }
   }, [tab.controlEnabled, tab.id])
+
+  // X11 grab follows the remote picture's focus. The shell releases on its own
+  // on blur/minimize/unmap; this keeps the page's request in step and covers
+  // opening settings, a tab switch or a hidden window.
+  useEffect(() => {
+    if (!grabWanted) {
+      setKeyboardGrab(false)
+      return
+    }
+    if (!document.hasFocus() || document.visibilityState !== 'visible') {
+      setKeyboardGrab(false)
+      return
+    }
+    setKeyboardGrab(true)
+    const onFocus = () => setKeyboardGrab(true)
+    const onVisibility = () => {
+      setKeyboardGrab(document.visibilityState === 'visible')
+    }
+    window.addEventListener('focus', onFocus)
+    document.addEventListener('visibilitychange', onVisibility)
+    // No window-blur release: the shell sees the focus loss and drops the grab
+    // itself after its 300 ms debounce, which is what keeps the grab from
+    // collapsing on X11's immediate post-grab focus flicker. Keys already stop
+    // going remote because the forwarding effect checks document.hasFocus().
+    return () => {
+      window.removeEventListener('focus', onFocus)
+      document.removeEventListener('visibilitychange', onVisibility)
+      setKeyboardGrab(false)
+    }
+  }, [grabWanted])
+
+  // A tab switch unmounts this view; never leave the desktop keyboard grabbed.
+  useEffect(() => () => setKeyboardGrab(false), [])
 
   const copyFromRemote = () => {
     setActionError(null)
@@ -2257,6 +2319,14 @@ export function SessionView({
         <div
           ref={surfaceRef}
           tabIndex={-1}
+          onFocus={() => {
+            setSurfaceFocused(true)
+            if (grabEligible) setKeyboardGrab(true)
+          }}
+          onBlur={() => {
+            setSurfaceFocused(false)
+            setKeyboardGrab(false)
+          }}
           onPointerDown={onPointerDown}
           onPointerUp={onPointerUp}
           onPointerMove={onPointerMove}

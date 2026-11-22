@@ -24,6 +24,11 @@ import {
 } from '../lib/api'
 import { FPS_CHOICES, parseFpsSetting } from '../lib/frame-rate'
 import {
+  keyboardGrabApplicable,
+  keyboardGrabAvailable,
+  subscribeKeyboardGrab,
+} from '../lib/shell'
+import {
   DEFAULT_VIDEO_MODE,
   VIDEO_MODE_OPTIONS,
   normalizeVideoMode,
@@ -68,10 +73,12 @@ function Toggle({
   checked,
   onChange,
   label,
+  disabled = false,
 }: {
   checked: boolean
   onChange: (checked: boolean) => void
   label: string
+  disabled?: boolean
 }) {
   return (
     <button
@@ -79,12 +86,14 @@ function Toggle({
       role="switch"
       aria-checked={checked}
       aria-label={label}
+      disabled={disabled}
       onClick={() => onChange(!checked)}
       className={
         'relative h-6 w-11 shrink-0 rounded-full border transition ' +
         (checked
           ? 'border-accent/50 bg-accent/80'
-          : 'border-line bg-panel')
+          : 'border-line bg-panel') +
+        (disabled ? ' cursor-not-allowed opacity-40' : '')
       }
     >
       <span
@@ -582,6 +591,12 @@ export function PreferencesControls({
   )
   const rememberDevice = useAppStore((state) => state.rememberDevice)
   const setRememberDevice = useAppStore((state) => state.setRememberDevice)
+  const keyboardGrab = useAppStore((state) => state.keyboardGrab)
+  const setKeyboardGrab = useAppStore((state) => state.setKeyboardGrab)
+  const grabApplicable = keyboardGrabApplicable()
+  const [grabAvailable, setGrabAvailable] = useState(() =>
+    keyboardGrabAvailable(),
+  )
   const localMode = useAppStore((state) => state.localMode)
   const qualityMode = useAppStore((state) => state.qualityMode)
   const setQualityMode = useAppStore((state) => state.setQualityMode)
@@ -597,6 +612,15 @@ export function PreferencesControls({
   const showDisplay = section === 'display' || section === 'all'
   const showNetwork = section === 'network' || section === 'all'
   const showService = section === 'service' || section === 'all'
+
+  // The shell injects its X11/Wayland verdict after the page loads; refresh
+  // whenever it (re)publishes it.
+  useEffect(() => {
+    if (!grabApplicable) return
+    const refresh = () => setGrabAvailable(keyboardGrabAvailable())
+    refresh()
+    return subscribeKeyboardGrab(refresh)
+  }, [grabApplicable])
 
   return (
     <div className="space-y-5">
@@ -672,6 +696,28 @@ export function PreferencesControls({
               ]}
             />
           </div>
+
+          {grabApplicable ? (
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <div className="flex items-center gap-2 text-[12px] font-medium text-ink">
+                  <KeyRound size={14} className="text-accent" />
+                  {t('settings.keyboardGrab')}
+                </div>
+                <div className="mt-1 text-[11px] leading-relaxed text-muted">
+                  {grabAvailable
+                    ? t('settings.keyboardGrabHint')
+                    : t('settings.keyboardGrabUnsupported')}
+                </div>
+              </div>
+              <Toggle
+                checked={keyboardGrab && grabAvailable}
+                disabled={!grabAvailable}
+                onChange={setKeyboardGrab}
+                label={t('settings.keyboardGrab')}
+              />
+            </div>
+          ) : null}
         </>
       ) : null}
 
