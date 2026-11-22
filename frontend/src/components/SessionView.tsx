@@ -5,6 +5,7 @@ import {
   ClipboardCopy,
   ClipboardPaste,
   ClipboardX,
+  Command,
   ExternalLink,
   FolderOpen,
   Cpu,
@@ -51,6 +52,12 @@ import {
   fpsPlan,
   parseFpsSetting,
 } from '../lib/frame-rate'
+import {
+  KEY_COMBOS,
+  keySequence,
+  shouldForwardKeys,
+  type KeyCombo,
+} from '../lib/key-combos'
 import { Codec, codecName } from '../lib/protocol'
 import { collectDropEntries, stageDroppedFiles } from '../lib/file-drop'
 import { shellInfo, windowAction } from '../lib/shell'
@@ -244,19 +251,26 @@ function ToolbarMenu({
   label,
   title,
   items,
+  disabled = false,
+  footer,
 }: {
   icon: ReactNode
   label: string
   title: string
   items: ToolbarMenuItem[]
+  disabled?: boolean
+  footer?: ReactNode
 }) {
   const [open, setOpen] = useState(false)
   const [spot, setSpot] = useState<{ left: number; top: number } | null>(null)
   const button = useRef<HTMLButtonElement>(null)
   const holder = useRef<HTMLDivElement>(null)
   const surface = useRef<HTMLDivElement>(null)
+  // Losing control disables the menu; the derived flag hides a stale popup
+  // whose items would silently do nothing.
+  const expanded = open && !disabled
   useEffect(() => {
-    if (!open) return
+    if (!expanded) return
     const close = (event: Event) => {
       const target = event.target as Node
       // The popup is portalled to the body, so it is not inside `holder`.
@@ -271,18 +285,21 @@ function ToolbarMenu({
       document.removeEventListener('pointerdown', close, true)
       window.removeEventListener('resize', onScroll)
     }
-  }, [open])
+  }, [expanded])
   // The toolbar scrolls horizontally (`overflow-x: auto`), which clips any
   // absolutely positioned child. The menu is therefore portalled to the body
   // and placed from the button's viewport rect.
   const toggle = () => {
+    if (disabled) return
     if (open) {
       setOpen(false)
       return
     }
     const rect = button.current?.getBoundingClientRect()
     if (!rect) return
-    const width = 200
+    // Match the menu's maximum width so a long label or the footer note does
+    // not run past the right edge of the window.
+    const width = 256
     setSpot({
       left: Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)),
       top: rect.bottom + 6,
@@ -295,16 +312,20 @@ function ToolbarMenu({
         ref={button}
         type="button"
         onClick={toggle}
-        className="btn btn-quiet flex h-7 shrink-0 items-center gap-0.5 !px-1.5"
+        disabled={disabled}
+        className={
+          'btn btn-quiet flex h-7 shrink-0 items-center gap-0.5 !px-1.5' +
+          (disabled ? ' opacity-40' : '')
+        }
         title={title}
         aria-label={title}
         aria-haspopup="menu"
-        aria-expanded={open}
+        aria-expanded={expanded}
       >
         {icon}
         <ChevronDown size={10} />
       </button>
-      {open && spot
+      {expanded && spot
         ? createPortal(
             <div
               ref={surface}
@@ -312,7 +333,7 @@ function ToolbarMenu({
               aria-label={label}
               data-toolbar-menu="true"
               style={{ position: 'fixed', left: spot.left, top: spot.top }}
-              className="z-[100] min-w-44 rounded-md border border-line bg-surface p-1 text-[12px] text-ink shadow-lg"
+              className="z-[100] max-w-[16rem] min-w-44 rounded-md border border-line bg-surface p-1 text-[12px] text-ink shadow-lg"
             >
               {items.map((item) => (
                 <button
@@ -334,6 +355,11 @@ function ToolbarMenu({
                   <span className="flex-1">{item.label}</span>
                 </button>
               ))}
+              {footer ? (
+                <div className="mt-1 border-t border-line px-2 py-1.5 text-[10px] leading-snug text-muted">
+                  {footer}
+                </div>
+              ) : null}
             </div>,
             document.body,
           )
@@ -1890,12 +1916,19 @@ export function SessionView({
       event.code && event.code !== 'Unidentified'
         ? event.code
         : keyToCode(event.key)
+    // Only the window that owns the pointer/keyboard may drive the host: a
+    // hidden tab or an unfocused window keeps every key local. Local form
+    // fields and open dialogs keep the existing local behaviour.
+    const forwardState = (target: EventTarget | null) => ({
+      hasFocus: document.hasFocus(),
+      visible: document.visibilityState === 'visible',
+      controlEnabled: tab.controlEnabled,
+      localTarget: isLocalInputTarget(target),
+      settingsOpen: useAppStore.getState().settingsOpen,
+    })
     const down = (event: KeyboardEvent) => {
       if (event.repeat || event.isComposing) return
-      if (isLocalInputTarget(event.target)) return
-      // Settings and other local dialogs keep their shortcuts (Esc closes
-      // them) even when focus happens to sit on the page background.
-      if (useAppStore.getState().settingsOpen) return
+      if (!shouldForwardKeys(forwardState(event.target))) return
       const code = codeFor(event)
       if (!code) return
       event.preventDefault()
@@ -1906,9 +1939,16 @@ export function SessionView({
       if (event.isComposing) return
       const code = codeFor(event)
       if (!code) return
-      // A remote key may be released after focus moved into a local field;
-      // still release it so the remote does not keep it held down.
-      if (isLocalInputTarget(event.target) && !keys.has(code)) return
+      const held = keys.has(code)
+      // A remote key may be released after focus moved into a local field or
+      // a dialog opened; still release it so the remote does not keep it held
+      // down. A keyup from a background window is not new input, though: blur
+      // already released everything and nothing is sent from here.
+      if (!held && !shouldForwardKeys(forwardState(event.target))) return
+      if (!document.hasFocus() || document.visibilityState !== 'visible') {
+        keys.delete(code)
+        return
+      }
       event.preventDefault()
       keys.delete(code)
       connection()?.sendInput({ k: 'key', code, down: false })
@@ -1923,16 +1963,23 @@ export function SessionView({
       }
       buttons.clear()
     }
+    // Sending the window to the background must release what it was holding.
+    // The host would otherwise keep Ctrl/Alt down until the tab comes back.
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') releaseAll()
+    }
     // Capture phase: a focused local widget or a stopPropagation() elsewhere
     // in the page must not swallow remote keys. The target guard above keeps
     // chat/settings typing local.
     window.addEventListener('keydown', down, true)
     window.addEventListener('keyup', up, true)
     window.addEventListener('blur', releaseAll)
+    document.addEventListener('visibilitychange', onVisibility)
     return () => {
       window.removeEventListener('keydown', down, true)
       window.removeEventListener('keyup', up, true)
       window.removeEventListener('blur', releaseAll)
+      document.removeEventListener('visibilitychange', onVisibility)
       // Release anything still held on the host, but keep the user's control
       // choice: this effect also unwinds when the view is unmounted for a tab
       // switch, and turning control off there made every switch lose it.
@@ -1977,6 +2024,43 @@ export function SessionView({
       .then((text) => connection()?.setClipboard(text))
       .catch(() => setActionError(String(t('error.clipboard_read_failed'))))
   }
+
+  // The desktop eats Win/Alt shortcuts before the page sees them, so these are
+  // sent as ordinary key events straight from the toolbar. Nothing new goes on
+  // the wire: the host already maps MetaLeft to VK_LWIN.
+  const sendKeyCombo = (combo: KeyCombo) => {
+    if (!tab.controlEnabled || !inputAvailable) return
+    if (combo.confirmKey && !window.confirm(String(t(combo.confirmKey)))) {
+      return
+    }
+    // A toolbar click normally means this window owns the keyboard, but a
+    // popout or a webview that lost focus can still report no focus. Ask the
+    // window to take it back before the sequence leaves the page.
+    if (!document.hasFocus()) window.focus()
+    if (document.visibilityState !== 'visible') return
+    for (const step of keySequence(combo.keys)) {
+      connection()?.sendInput({ k: 'key', code: step.code, down: step.down })
+    }
+  }
+
+  const comboMenu = inputAvailable ? (
+    <ToolbarMenu
+      icon={<Command size={13} />}
+      label={t('session.comboKeys')}
+      title={
+        tab.controlEnabled
+          ? t('session.comboKeys')
+          : t('session.comboNeedsControl')
+      }
+      disabled={!tab.controlEnabled}
+      footer={t('session.comboHint')}
+      items={KEY_COMBOS.map((combo) => ({
+        key: combo.id,
+        label: `${combo.display} · ${t(combo.labelKey)}`,
+        onSelect: () => sendKeyCombo(combo),
+      }))}
+    />
+  ) : null
 
   const openPopout = () => {
     if (
@@ -2767,6 +2851,7 @@ export function SessionView({
                   ]}
                 />
               ) : null}
+              {compactBar ? comboMenu : null}
               {!compactBar ? (
                 <>
               <button
@@ -2846,6 +2931,7 @@ export function SessionView({
                   >
                     <Keyboard size={13} />
                   </button>
+                  {comboMenu}
                 </>
               ) : null}
               {!popout && localMode ? (
