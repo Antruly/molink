@@ -12,6 +12,7 @@
 
 #include <webapp/uvcpp_web_json.h>
 
+#include "directory_listing.h"
 #include "util.h"
 
 namespace molink {
@@ -64,24 +65,18 @@ fs::path home_root() {
   return ec ? fs::path(home_directory()) : root;
 }
 
-/// Resolve a peer-supplied path. `~` and `~/x` are the host user's home;
-/// relative paths are relative to home; an empty path is home itself. Anything
-/// that escapes home is rejected, including through a symlink.
+/// Resolve a peer-supplied path to an absolute path on this machine. `~` and
+/// `~/x` are the host user's home; relative paths are relative to home; an
+/// empty path is home itself. Absolute paths (POSIX, Windows drive or UNC)
+/// are taken as typed: the file channel deliberately has no home sandbox, so
+/// the viewer can browse and fetch any file the host user can read. `..` is
+/// collapsed lexically and can never climb above a volume root.
 std::optional<fs::path> resolve_path(const std::string& raw) {
-  const fs::path root = home_root();
-  fs::path requested;
-  if (raw.empty() || raw == "~") {
-    requested = root;
-  } else if (raw.rfind("~/", 0) == 0 || raw.rfind("~\\", 0) == 0) {
-    requested = root / raw.substr(2);
-  } else {
-    requested = fs::path(raw);
-    if (requested.is_relative()) requested = root / requested;
-  }
-  std::error_code ec;
-  const fs::path canonical = fs::weakly_canonical(requested, ec);
-  if (ec || !within_root(root, canonical)) return std::nullopt;
-  return canonical;
+  if (raw.empty()) return fs::path(home_directory());
+  const std::optional<std::string> normalized =
+      fslist::normalize_browse_path(raw, home_directory());
+  if (!normalized) return std::nullopt;
+  return fs::path(*normalized);
 }
 
 /// The character filter shared by file names and path segments.
@@ -126,20 +121,6 @@ std::string unique_path_in(const fs::path& dir, const std::string& name) {
   }
   return (dir / (stem.string() + "-" + std::to_string(now_ms()) + extension))
       .string();
-}
-
-uint64_t file_mtime_ms(const fs::path& path) {
-  std::error_code ec;
-  const auto time = fs::last_write_time(path, ec);
-  if (ec) return 0;
-  const auto delta = time - decltype(time)::clock::now();
-  const auto system =
-      std::chrono::system_clock::now() +
-      std::chrono::duration_cast<std::chrono::system_clock::duration>(delta);
-  return static_cast<uint64_t>(
-      std::chrono::duration_cast<std::chrono::milliseconds>(
-          system.time_since_epoch())
-          .count());
 }
 
 std::string receive_directory() {
@@ -467,58 +448,103 @@ void file_transfer::cancel(uint32_t id) {
   send_simple("cancelled", id);
 }
 
-void file_transfer::browse(const std::string& path) {
-  const std::optional<fs::path> resolved = resolve_path(path);
-  if (!resolved) {
-    fail("listing", 0, "path is outside the home folder");
-    return;
+namespace {
+
+uvcpp_json root_json(const fslist::root& root) {
+  uvcpp_json item;
+  item["name"] = root.name;
+  item["path"] = root.path;
+  item["kind"] = fslist::root_kind_name(root.kind);
+  return item;
+}
+
+uvcpp_json entry_json(const fslist::entry& entry) {
+  uvcpp_json item;
+  item["name"] = entry.name;
+  item["dir"] = entry.dir;
+  item["size"] = entry.dir ? 0 : entry.size;
+  item["mtime"] = entry.mtime;
+  item["hidden"] = entry.hidden;
+  item["system"] = entry.system;
+  item["link"] = entry.link;
+  if (!entry.error.empty()) item["error"] = entry.error;
+  return item;
+}
+
+uvcpp_json roots_array(const std::vector<fslist::root>& roots) {
+  uvcpp_json array = uvcpp_json::array();
+  for (const fslist::root& root : roots) array.push_back(root_json(root));
+  return array;
+}
+
+}  // namespace
+
+void file_transfer::browse(const std::string& path, bool roots) {
+  const std::string home = home_directory();
+  const std::vector<fslist::root> volumes = fslist::system_roots(home);
+  uvcpp_json volumes_json = roots_array(volumes);
+  std::vector<fslist::entry> entries;
+  std::string parent;
+  std::string display_path;
+  bool truncated = false;
+
+  // An empty request (or an explicit `roots`) opens the volume list. The
+  // panel returns here with its "up" button once a drive/share root is
+  // reached.
+  if (!roots && !path.empty()) {
+    const std::optional<std::string> normalized =
+        fslist::normalize_browse_path(path, home);
+    if (!normalized) {
+      fail("listing", 0, "invalid path");
+      return;
+    }
+    std::string why;
+    const std::optional<fslist::listing> listed =
+        fslist::list_directory(*normalized, why);
+    if (!listed) {
+      fail("listing", 0, why);
+      return;
+    }
+    display_path = listed->path;
+    parent = listed->parent;
+    entries = listed->entries;
+    truncated = listed->truncated;
+  } else {
+    // The roots are formatted as ordinary directory rows with an absolute
+    // `path`, so a click navigates exactly like any other folder.
+    for (const fslist::root& root : volumes) {
+      fslist::entry item;
+      item.name = root.name;
+      item.dir = true;
+      entries.push_back(std::move(item));
+    }
   }
-  std::error_code ec;
-  if (!fs::is_directory(*resolved, ec)) {
-    fail("listing", 0, "not a folder");
-    return;
-  }
-  const fs::path root = home_root();
-  std::vector<uvcpp_json> entries;
-  std::size_t count = 0;
-  fs::directory_iterator it(*resolved,
-                            fs::directory_options::skip_permission_denied,
-                            ec);
-  if (ec) {
-    fail("listing", 0, "could not read the folder");
-    return;
-  }
-  for (const fs::directory_entry& entry : it) {
-    if (count >= 2000) break;
-    std::error_code entry_ec;
-    const fs::path canonical = fs::weakly_canonical(entry.path(), entry_ec);
-    if (entry_ec || !within_root(root, canonical)) continue;
-    const bool dir = entry.is_directory(entry_ec);
-    if (entry_ec) continue;
-    uvcpp_json item;
-    item["name"] = entry.path().filename().string();
-    item["dir"] = dir;
-    item["size"] = dir ? 0 : static_cast<uint64_t>(entry.file_size(entry_ec));
-    item["mtime"] = file_mtime_ms(entry.path());
-    entries.push_back(std::move(item));
-    ++count;
-  }
-  std::sort(entries.begin(), entries.end(),
-            [](const uvcpp_json& a, const uvcpp_json& b) {
-              const bool ad = a.value("dir", false);
-              const bool bd = b.value("dir", false);
-              if (ad != bd) return ad;
-              return lowered(a.value("name", std::string())) <
-                     lowered(b.value("name", std::string()));
-            });
+
   uvcpp_json list = uvcpp_json::array();
-  for (uvcpp_json& item : entries) list.push_back(std::move(item));
+  for (const fslist::entry& entry : entries) {
+    uvcpp_json item = entry_json(entry);
+    if (display_path.empty()) {
+      // Roots view: pair the row with its volume root so a click can go
+      // straight there. `entries` is built in the same order as `volumes`.
+      const std::size_t index = list.size();
+      if (index < volumes.size()) {
+        item["path"] = volumes[index].path;
+        item["kind"] = fslist::root_kind_name(volumes[index].kind);
+        item["root"] = true;
+      }
+    }
+    list.push_back(std::move(item));
+  }
+
   uvcpp_json j;
   j["type"] = "file";
   j["action"] = "listing";
   j["ok"] = true;
-  j["path"] = resolved->string();
-  j["root"] = root.string();
+  j["path"] = display_path;
+  j["parent"] = parent;
+  j["root"] = home;
+  j["roots"] = std::move(volumes_json);
+  j["truncated"] = truncated;
   j["entries"] = std::move(list);
   send_json_(dump_json(j));
 }
@@ -532,7 +558,7 @@ void file_transfer::request(const std::string& path,
   }
   const std::optional<fs::path> resolved = resolve_path(path);
   if (!resolved) {
-    fail("sending", 0, "path is outside the home folder");
+    fail("sending", 0, "invalid path");
     return;
   }
   std::error_code ec;

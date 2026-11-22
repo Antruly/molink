@@ -13,10 +13,12 @@ namespace molink {
 
 /// Per-session file transfer.
 ///
-/// Uploads (remote client -> host) land in ~/Downloads/moLink. Downloads and
-/// directory listings are confined to the host user's home directory. Data
-/// moves in binary `file_data` packets; control messages are JSON `file`
-/// actions. Downloads are pull-driven so a fast disk cannot flood the socket.
+/// Uploads (remote client -> host) land in ~/moLink unless the viewer picks a
+/// destination. Downloads and directory listings cover every folder the host
+/// user can read: there is no home sandbox, so Windows drives, UNC shares and
+/// POSIX `/etc` are all browsable. Data moves in binary `file_data` packets;
+/// control messages are JSON `file` actions. Downloads are pull-driven so a
+/// fast disk cannot flood the socket.
 class file_transfer {
  public:
   using json_sender = std::function<void(std::string)>;
@@ -56,8 +58,11 @@ class file_transfer {
   void complete(uint32_t id, clock::time_point now = clock::now());
   void cancel(uint32_t id);
 
-  /// Empty `path` means the home directory. Paths outside home are rejected.
-  void browse(const std::string& path);
+  /// Lists a folder anywhere on the host. An empty `path` (or `roots=true`)
+  /// answers with the volume/root list; every other answer also carries the
+  /// current `roots`, so the panel can offer a drive selector without a
+  /// second round trip.
+  void browse(const std::string& path, bool roots = false);
   void request(const std::string& path,
                clock::time_point now = clock::now());
   static constexpr int kRetryIntervalMs = 100;
@@ -78,7 +83,7 @@ class file_transfer {
   /// Drop partial uploads when the session closes.
   void close_all();
 
-  /// Resolve peer-supplied paths to existing files inside the home folder.
+  /// Resolve peer-supplied paths to existing files anywhere on the host.
   /// Used by the "copy to the remote clipboard" action.
   std::vector<std::string> resolve_files(
       const std::vector<std::string>& paths) const;

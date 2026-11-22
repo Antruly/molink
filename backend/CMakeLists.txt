@@ -199,6 +199,7 @@ set(MOLINK_CORE_SOURCES
   src/main.cpp
   src/api.cpp
   src/chat_hub.cpp
+  src/directory_listing.cpp
   src/file_transfer.cpp
   src/call_hub.cpp
   src/server_client.cpp
@@ -1039,6 +1040,7 @@ if(MOLINK_BUILD_CORE AND UVP_UVCPP_TARGET)
   add_executable(molink-core-file-transfer-backpressure-test
     tests/file_transfer_backpressure_test.cpp
     src/file_transfer.cpp
+    src/directory_listing.cpp
     src/util.cpp
   )
   target_include_directories(molink-core-file-transfer-backpressure-test PRIVATE
@@ -1055,6 +1057,24 @@ if(MOLINK_BUILD_CORE AND UVP_UVCPP_TARGET)
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
   add_test(NAME file_transfer_backpressure
     COMMAND molink-core-file-transfer-backpressure-test)
+
+  # Path normalisation, volume enumeration and the "any folder" listing. The
+  # path rules are pure string code, so the Windows cases run on every host.
+  add_executable(molink-core-file-browse-test
+    tests/file_browse_test.cpp
+    src/file_transfer.cpp
+    src/directory_listing.cpp
+    src/util.cpp
+  )
+  target_include_directories(molink-core-file-browse-test PRIVATE
+    src ${UVP_UVCPP_PREFIX}/include)
+  if(WIN32)
+    target_link_libraries(molink-core-file-browse-test PRIVATE
+      ws2_32 iphlpapi)
+  endif()
+  set_target_properties(molink-core-file-browse-test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+  add_test(NAME file_browse COMMAND molink-core-file-browse-test)
 endif()
 
 # NVENC smoke test: encodes one rectangle and writes the AV1 OBU. Exit 77 on

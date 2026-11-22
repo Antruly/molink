@@ -74,6 +74,105 @@ export function normalizeRemotePath(raw: string): string {
   return out === '' ? '.' : out
 }
 
+/// Which path grammar a string uses. The panel needs this before it offers to
+/// make the other side "jump to the same path": a Windows host cannot open a
+/// POSIX path and vice versa.
+export type PathFlavor = 'windows' | 'posix' | 'unknown'
+
+export function pathFlavor(path: string): PathFlavor {
+  if (path === '') return 'unknown'
+  if (/^[A-Za-z]:[\\/]/.test(path)) return 'windows'
+  if (/^[\\/]{2}/.test(path)) return 'windows'
+  if (path.includes('\\')) return 'windows'
+  if (path.startsWith('/')) return 'posix'
+  return 'unknown'
+}
+
+/// Joins a name onto a displayed folder path using that path's separator, so
+/// a Windows host never receives a mixed `C:\Users/me` path.
+export function joinPath(base: string, name: string): string {
+  if (base === '') return name
+  const separator = base.includes('\\') ? '\\' : '/'
+  const trimmed = base.replace(/[\\/]+$/, '')
+  if (trimmed === '') return separator + name
+  return trimmed + separator + name
+}
+
+/// The parent shown by the up button. A volume root (and a UNC share root)
+/// has no parent, which the remote panel turns into its drive list.
+export function parentPath(path: string): string {
+  if (path === '') return ''
+  const separator = path.includes('\\') ? '\\' : '/'
+  const text = path.replace(/[\\/]+$/, '')
+  if (text === '') return ''
+  // UNC share root: \\server\share has no browsable parent.
+  if (/^[\\/]{2}[^\\/]+[\\/][^\\/]+$/.test(text)) return ''
+  const cut = Math.max(text.lastIndexOf('/'), text.lastIndexOf('\\'))
+  if (cut < 0) return ''
+  const parent = text.slice(0, cut)
+  if (parent === '') return separator
+  if (/^[A-Za-z]:$/.test(parent)) return parent + separator
+  return parent
+}
+
+export interface PathCrumb {
+  name: string
+  path: string
+}
+
+/// Clickable breadcrumb prefixes. The volume/drive root is the first crumb;
+/// the roots view itself (`''`) has no crumbs.
+export function pathCrumbs(path: string): PathCrumb[] {
+  if (path === '') return []
+  const separator = path.includes('\\') ? '\\' : '/'
+  const flavor = pathFlavor(path)
+  if (flavor === 'windows' && /^[\\/]{2}/.test(path)) {
+    const parts = path.split(/[\\/]+/).filter(Boolean)
+    if (parts.length < 2) return []
+    const out: PathCrumb[] = []
+    let current = `\\\\${parts[0]}\\${parts[1]}`
+    out.push({ name: current, path: current })
+    for (let index = 2; index < parts.length; index += 1) {
+      current += separator + parts[index]
+      out.push({ name: parts[index]!, path: current })
+    }
+    return out
+  }
+  if (flavor === 'windows') {
+    const drive = /^[A-Za-z]:/.exec(path)?.[0]
+    if (!drive) return []
+    const out: PathCrumb[] = [{ name: drive, path: drive + separator }]
+    const parts = path.slice(2).split(/[\\/]+/).filter(Boolean)
+    let current = drive + separator
+    for (const part of parts) {
+      current += part
+      out.push({ name: part, path: current })
+      current += separator
+    }
+    return out
+  }
+  if (path.startsWith('/')) {
+    const out: PathCrumb[] = [{ name: '/', path: '/' }]
+    const parts = path.split('/').filter(Boolean)
+    let current = ''
+    for (const part of parts) {
+      current += '/' + part
+      out.push({ name: part, path: current })
+    }
+    return out
+  }
+  return []
+}
+
+/// Joins a '/'-separated relative upload path onto a native absolute folder.
+export function joinRelative(base: string, relative: string): string {
+  const separator = base.includes('\\') ? '\\' : '/'
+  const parts = relative.split(/[\\/]+/).filter(Boolean)
+  if (parts.length === 0) return base
+  return joinPath(base, parts.join(separator))
+}
+
+
 /// Resolve what the user typed into the remote path box.
 ///
 /// Empty means the host's home. `~` / `~/x` are expanded against @p root, the

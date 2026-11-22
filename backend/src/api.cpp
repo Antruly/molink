@@ -22,6 +22,7 @@
 #include <iterator>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -39,6 +40,7 @@
 
 #include "clipboard_stage.h"
 #include "config.h"
+#include "directory_listing.h"
 #include "discovery.h"
 #include "identity.h"
 #include "ui_store.h"
@@ -140,20 +142,6 @@ std::string clipboard_cache_directory() {
                                      : local_home_directory() + "/.cache";
   return base + "/molink/clipboard";
 #endif
-}
-
-/// Resolve a path typed into the local pane. Empty and `~` name the user's
-/// home; `~/x` is home-relative; anything else is taken as typed (a relative
-/// path is relative to home). The local UI is loopback-only, so unlike the
-/// remote file channel this deliberately allows paths outside home.
-fs::path resolve_local_fs_path(const std::string& raw) {
-  const fs::path home = local_home_directory();
-  if (raw.empty() || raw == "~") return home;
-  if (raw.rfind("~/", 0) == 0 || raw.rfind("~\\", 0) == 0) {
-    return home / raw.substr(2);
-  }
-  const fs::path requested(raw);
-  return requested.is_relative() ? home / requested : requested;
 }
 
 void remember_clipboard_echoes(const std::vector<std::string>& paths) {
@@ -368,6 +356,46 @@ bool parse_offset(const std::string& text, uint64_t& value) {
   }
   value = out;
   return true;
+}
+
+uvcpp_json fs_entry_json(const fslist::entry& entry) {
+  uvcpp_json item;
+  item["name"] = entry.name;
+  item["dir"] = entry.dir;
+  item["size"] = entry.dir ? 0 : entry.size;
+  item["mtime"] = entry.mtime;
+  item["hidden"] = entry.hidden;
+  item["system"] = entry.system;
+  item["link"] = entry.link;
+  if (!entry.error.empty()) item["error"] = entry.error;
+  return item;
+}
+
+uvcpp_json fs_root_json(const fslist::root& root) {
+  uvcpp_json item;
+  item["name"] = root.name;
+  item["path"] = root.path;
+  item["kind"] = fslist::root_kind_name(root.kind);
+  return item;
+}
+
+uvcpp_json fs_roots_json(const std::vector<fslist::root>& roots) {
+  uvcpp_json array = uvcpp_json::array();
+  for (const fslist::root& root : roots) array.push_back(fs_root_json(root));
+  return array;
+}
+
+/// Resolve a path for the loopback-only local file routes. Unlike the remote
+/// file channel this has always allowed any absolute path; the loopback peer
+/// check is what keeps a remote page away from these routes.
+std::optional<std::filesystem::path> local_absolute_path(
+    const std::string& raw) {
+  const std::string home = local_home_directory();
+  if (raw.empty()) return std::filesystem::path(home);
+  const std::optional<std::string> normalized =
+      fslist::normalize_browse_path(raw, home);
+  if (!normalized) return std::nullopt;
+  return std::filesystem::path(*normalized);
 }
 
 }  // namespace
@@ -1037,66 +1065,375 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
               resp.end();
               return;
             }
-            const std::string* requested = req.query("path");
-            const std::string raw = requested != nullptr ? *requested : "";
-            const fs::path target = resolve_local_fs_path(raw);
-            std::error_code ec;
-            const fs::path canonical = fs::weakly_canonical(target, ec);
-            if (ec || !fs::is_directory(canonical, ec) || ec) {
-              resp.status(400).json_str(
-                  R"({"code":"bad_path","message":"not a readable folder"})");
-              resp.end();
-              return;
-            }
+            const std::string home = local_home_directory();
+            const std::vector<fslist::root> roots =
+                fslist::system_roots(home);
+            uvcpp_json roots_json = fs_roots_json(roots);
             uvcpp_json entries = uvcpp_json::array();
-            std::size_t count = 0;
-            fs::directory_iterator it(
-                canonical, fs::directory_options::skip_permission_denied, ec);
-            if (!ec) {
-              for (const fs::directory_entry& entry : it) {
-                if (count >= 2000) break;
-                std::error_code entry_ec;
-                const bool dir = entry.is_directory(entry_ec);
-                if (entry_ec) continue;
-                uvcpp_json item;
-                item["name"] = entry.path().filename().string();
-                item["dir"] = dir;
-                item["size"] =
-                    dir ? 0 : static_cast<uint64_t>(
-                                  entry.file_size(entry_ec));
+            const bool want_roots = req.query("roots") != nullptr ||
+                                    (req.query("path") != nullptr &&
+                                     req.query("path")->empty());
+            std::string path;
+            std::string parent;
+            if (want_roots) {
+              // Volume list: every root is a directory row with an absolute
+              // `path`, exactly like the remote channel's roots view.
+              for (const fslist::root& root : roots) {
+                uvcpp_json item = fs_root_json(root);
+                item["dir"] = true;
+                item["size"] = 0;
+                item["mtime"] = 0;
+                item["hidden"] = false;
+                item["system"] = false;
+                item["link"] = false;
+                item["root"] = true;
                 entries.push_back(std::move(item));
-                ++count;
+              }
+            } else {
+              const std::string* requested = req.query("path");
+              const std::optional<fs::path> target =
+                  local_absolute_path(requested != nullptr ? *requested : "");
+              if (!target) {
+                resp.status(400).json_str(
+                    R"({"code":"bad_path","message":"invalid path"})");
+                resp.end();
+                return;
+              }
+              std::string why;
+              const std::optional<fslist::listing> listed =
+                  fslist::list_directory(fslist::native_path(*target), why);
+              if (!listed) {
+                uvcpp_json error;
+                error["code"] = "bad_path";
+                error["message"] = why;
+                resp.status(400).json(error);
+                resp.end();
+                return;
+              }
+              path = listed->path;
+              parent = listed->parent;
+              for (const fslist::entry& entry : listed->entries) {
+                entries.push_back(fs_entry_json(entry));
               }
             }
-            std::sort(entries.begin(), entries.end(),
-                      [](const uvcpp_json& a, const uvcpp_json& b) {
-                        const bool ad = a.value("dir", false);
-                        const bool bd = b.value("dir", false);
-                        if (ad != bd) return ad;
-                        std::string an = a.value("name", std::string());
-                        std::string bn = b.value("name", std::string());
-                        std::transform(
-                            an.begin(), an.end(), an.begin(),
-                            [](unsigned char c) {
-                              return static_cast<char>(std::tolower(c));
-                            });
-                        std::transform(
-                            bn.begin(), bn.end(), bn.begin(),
-                            [](unsigned char c) {
-                              return static_cast<char>(std::tolower(c));
-                            });
-                        return an < bn;
-                      });
-            const fs::path parent = canonical.parent_path();
             uvcpp_json j;
-            j["path"] = canonical.string();
-            j["root"] = local_home_directory();
-            j["parent"] =
-                parent.empty() || parent == canonical ? "" : parent.string();
+            j["path"] = path;
+            j["root"] = home;
+            j["parent"] = parent;
+            j["roots"] = std::move(roots_json);
             j["entries"] = std::move(entries);
             resp.set_header("Cache-Control", "no-store").json(j);
             resp.end();
           });
+
+  // The local pane reads and writes files through these routes when the page
+  // is served by the local core (the desktop shell). The browser's File System
+  // Access API does not exist there, so without this "send from any folder"
+  // and "receive into the current folder" cannot work. Loopback only, like
+  // /api/fs/list: a remote page must never read or write this machine.
+  app.get("/api/fs/read",
+          [](uvcpp_web_request& req, uvcpp_web_response& resp,
+             uvcpp_web_next) {
+            if (!is_loopback_peer(req.peer_ip())) {
+              resp.status(403).json_str(R"({"code":"loopback_only"})");
+              resp.end();
+              return;
+            }
+            const std::string* requested = req.query("path");
+            const std::optional<fs::path> target = local_absolute_path(
+                requested != nullptr ? *requested : "");
+            if (!target) {
+              resp.status(400).json_str(R"({"code":"bad_path"})");
+              resp.end();
+              return;
+            }
+            std::error_code ec;
+            const fs::path file = *target;
+            if (!fs::is_regular_file(file, ec) || ec) {
+              resp.status(404).json_str(R"({"code":"missing_file"})");
+              resp.end();
+              return;
+            }
+            const uint64_t size = fs::file_size(file, ec);
+            if (ec) {
+              resp.status(404).json_str(R"({"code":"missing_file"})");
+              resp.end();
+              return;
+            }
+            constexpr uint64_t kMaxReadBytes = 8ull * 1024ull * 1024ull;
+            uint64_t offset = 0;
+            uint64_t length = 0;
+            const std::string* offset_query = req.query("offset");
+            const std::string* length_query = req.query("length");
+            if (offset_query != nullptr &&
+                !parse_offset(*offset_query, offset)) {
+              resp.status(400).json_str(R"({"code":"bad_offset"})");
+              resp.end();
+              return;
+            }
+            if (length_query == nullptr ||
+                !parse_offset(*length_query, length) ||
+                length > kMaxReadBytes) {
+              resp.status(400).json_str(R"({"code":"bad_length"})");
+              resp.end();
+              return;
+            }
+            if (offset > size) {
+              resp.status(416).json_str(
+                  R"({"code":"offset_out_of_range"})");
+              resp.end();
+              return;
+            }
+            const uint64_t take = (std::min)(length, size - offset);
+            std::ifstream in(file, std::ios::binary);
+            if (!in) {
+              resp.status(404).json_str(R"({"code":"missing_file"})");
+              resp.end();
+              return;
+            }
+            std::string data;
+            if (take != 0) {
+              in.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+              if (!in) {
+                resp.status(416).json_str(
+                    R"({"code":"offset_out_of_range"})");
+                resp.end();
+                return;
+              }
+              data.resize(static_cast<std::size_t>(take));
+              in.read(data.data(), static_cast<std::streamsize>(take));
+              const std::streamsize got = in.gcount();
+              data.resize(got > 0 ? static_cast<std::size_t>(got) : 0);
+            }
+            resp.set_header("Cache-Control", "no-store")
+                .body(data, "application/octet-stream")
+                .end();
+          });
+
+  app.post("/api/fs/write",
+           [](uvcpp_web_request& req, uvcpp_web_response& resp,
+              uvcpp_web_next) {
+             if (!is_loopback_peer(req.peer_ip())) {
+               resp.status(403).json_str(R"({"code":"loopback_only"})");
+               resp.end();
+               return;
+             }
+             const std::string* requested = req.query("path");
+             const std::optional<fs::path> target = local_absolute_path(
+                 requested != nullptr ? *requested : "");
+             const std::string* offset_query = req.query("offset");
+             uint64_t offset = 0;
+             if (!target || offset_query == nullptr ||
+                 !parse_offset(*offset_query, offset)) {
+               resp.status(400).json_str(R"({"code":"bad_write"})");
+               resp.end();
+               return;
+             }
+             constexpr std::size_t kMaxWriteBytes = 8 * 1024 * 1024;
+             if (req.body_size() > kMaxWriteBytes) {
+               resp.status(413).json_str(R"({"code":"too_large"})");
+               resp.end();
+               return;
+             }
+             const std::string* truncate_query = req.query("truncate");
+             const bool truncate =
+                 truncate_query != nullptr && *truncate_query == "1";
+             std::error_code ec;
+             const fs::path file = *target;
+             if (!file.parent_path().empty()) {
+               fs::create_directories(file.parent_path(), ec);
+               if (ec) {
+                 resp.status(400).json_str(R"({"code":"bad_write"})");
+                 resp.end();
+                 return;
+               }
+             }
+             std::fstream out;
+             if (offset == 0 && truncate) {
+               out.open(file, std::ios::binary | std::ios::out |
+                                  std::ios::trunc);
+             } else {
+               out.open(file, std::ios::binary | std::ios::in |
+                                  std::ios::out);
+             }
+             if (!out) {
+               resp.status(404).json_str(R"({"code":"missing_file"})");
+               resp.end();
+               return;
+             }
+             out.seekp(static_cast<std::streamoff>(offset), std::ios::beg);
+             if (!out) {
+               resp.status(416).json_str(
+                   R"({"code":"offset_out_of_range"})");
+               resp.end();
+               return;
+             }
+             out.write(req.body_data(),
+                       static_cast<std::streamsize>(req.body_size()));
+             out.flush();
+             if (!out) {
+               resp.status(500).json_str(R"({"code":"write_failed"})");
+               resp.end();
+               return;
+             }
+             uvcpp_json j;
+             j["ok"] = true;
+             j["received"] =
+                 offset + static_cast<uint64_t>(req.body_size());
+             resp.set_header("Cache-Control", "no-store").json(j);
+             resp.end();
+           });
+
+  app.post("/api/fs/move",
+           [](uvcpp_web_request& req, uvcpp_web_response& resp,
+              uvcpp_web_next) {
+             if (!is_loopback_peer(req.peer_ip())) {
+               resp.status(403).json_str(R"({"code":"loopback_only"})");
+               resp.end();
+               return;
+             }
+             uvcpp_json body;
+             try {
+               body = uvcpp_json::parse(req.body_str());
+             } catch (...) {
+               resp.status(400).json_str(R"({"code":"bad_move"})");
+               resp.end();
+               return;
+             }
+             if (!body.is_object() || !body.contains("from") ||
+                 !body.contains("to") || !body["from"].is_string() ||
+                 !body["to"].is_string()) {
+               resp.status(400).json_str(R"({"code":"bad_move"})");
+               resp.end();
+               return;
+             }
+             const std::optional<fs::path> from =
+                 local_absolute_path(body["from"].get<std::string>());
+             const std::optional<fs::path> to =
+                 local_absolute_path(body["to"].get<std::string>());
+             if (!from || !to) {
+               resp.status(400).json_str(R"({"code":"bad_move"})");
+               resp.end();
+               return;
+             }
+             std::error_code ec;
+             if (!fs::is_regular_file(*from, ec) || ec) {
+               resp.status(404).json_str(R"({"code":"missing_file"})");
+               resp.end();
+               return;
+             }
+             if (!to->parent_path().empty()) {
+               fs::create_directories(to->parent_path(), ec);
+               if (ec) {
+                 resp.status(400).json_str(R"({"code":"bad_move"})");
+                 resp.end();
+                 return;
+               }
+             }
+             const std::string final_path =
+                 fslist::unique_destination(fslist::native_path(*to));
+             fs::rename(*from, fs::path(final_path), ec);
+             if (ec) {
+               resp.status(500).json_str(R"({"code":"move_failed"})");
+               resp.end();
+               return;
+             }
+             uvcpp_json j;
+             j["ok"] = true;
+             j["path"] = final_path;
+             resp.set_header("Cache-Control", "no-store").json(j);
+             resp.end();
+           });
+
+  app.post("/api/fs/mkdir",
+           [](uvcpp_web_request& req, uvcpp_web_response& resp,
+              uvcpp_web_next) {
+             if (!is_loopback_peer(req.peer_ip())) {
+               resp.status(403).json_str(R"({"code":"loopback_only"})");
+               resp.end();
+               return;
+             }
+             uvcpp_json body;
+             try {
+               body = uvcpp_json::parse(req.body_str());
+             } catch (...) {
+               resp.status(400).json_str(R"({"code":"bad_mkdir"})");
+               resp.end();
+               return;
+             }
+             if (!body.is_object() || !body.contains("path") ||
+                 !body["path"].is_string()) {
+               resp.status(400).json_str(R"({"code":"bad_mkdir"})");
+               resp.end();
+               return;
+             }
+             const std::optional<fs::path> target =
+                 local_absolute_path(body["path"].get<std::string>());
+             if (!target) {
+               resp.status(400).json_str(R"({"code":"bad_mkdir"})");
+               resp.end();
+               return;
+             }
+             std::error_code ec;
+             fs::create_directories(*target, ec);
+             if (ec || !fs::is_directory(*target, ec)) {
+               resp.status(500).json_str(R"({"code":"mkdir_failed"})");
+               resp.end();
+               return;
+             }
+             uvcpp_json j;
+             j["ok"] = true;
+             j["path"] = fslist::native_path(*target);
+             resp.set_header("Cache-Control", "no-store").json(j);
+             resp.end();
+           });
+
+  app.post("/api/fs/remove",
+           [](uvcpp_web_request& req, uvcpp_web_response& resp,
+              uvcpp_web_next) {
+             if (!is_loopback_peer(req.peer_ip())) {
+               resp.status(403).json_str(R"({"code":"loopback_only"})");
+               resp.end();
+               return;
+             }
+             uvcpp_json body;
+             try {
+               body = uvcpp_json::parse(req.body_str());
+             } catch (...) {
+               resp.status(400).json_str(R"({"code":"bad_remove"})");
+               resp.end();
+               return;
+             }
+             if (!body.is_object() || !body.contains("path") ||
+                 !body["path"].is_string()) {
+               resp.status(400).json_str(R"({"code":"bad_remove"})");
+               resp.end();
+               return;
+             }
+             const std::optional<fs::path> target =
+                 local_absolute_path(body["path"].get<std::string>());
+             if (!target) {
+               resp.status(400).json_str(R"({"code":"bad_remove"})");
+               resp.end();
+               return;
+             }
+             std::error_code ec;
+             if (!fs::is_regular_file(*target, ec) || ec) {
+               // Already gone is success: the caller is cleaning up a staged
+               // download and only wants the file not to remain.
+               uvcpp_json j;
+               j["ok"] = true;
+               resp.set_header("Cache-Control", "no-store").json(j);
+               resp.end();
+               return;
+             }
+             fs::remove(*target, ec);
+             uvcpp_json j;
+             j["ok"] = !ec;
+             if (ec) j["message"] = "could not remove the file";
+             resp.set_header("Cache-Control", "no-store").json(j);
+             resp.end();
+           });
 
   // The local shell watches its own clipboard for files. The page cannot
   // touch the OS clipboard's file list, so it polls this snapshot and then
