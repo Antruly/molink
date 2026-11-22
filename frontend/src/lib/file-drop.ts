@@ -14,6 +14,9 @@ export interface StagedFile {
 type Listener = (files: StagedFile[]) => void
 
 const listeners = new Set<Listener>()
+/// A drop on the remote picture sends the files straight to the folder the
+/// file panel is looking at, instead of staging them in the panel's local pane.
+const remoteListeners = new Set<Listener>()
 
 export function onDroppedFiles(listener: Listener): () => void {
   listeners.add(listener)
@@ -25,6 +28,21 @@ export function onDroppedFiles(listener: Listener): () => void {
 export function stageDroppedFiles(files: StagedFile[]): void {
   if (files.length === 0) return
   for (const listener of listeners) listener(files)
+}
+
+/// The session surface (which owns the remote picture) hands a drop to the
+/// file-transfer panel. The panel picks the destination: the folder it is
+/// showing, or the remembered one when its drawer was never opened.
+export function onRemoteDropFiles(listener: Listener): () => void {
+  remoteListeners.add(listener)
+  return () => {
+    remoteListeners.delete(listener)
+  }
+}
+
+export function stageRemoteDrop(files: StagedFile[]): void {
+  if (files.length === 0) return
+  for (const listener of remoteListeners) listener(files)
 }
 
 interface FileSystemEntryLike {

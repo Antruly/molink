@@ -665,7 +665,17 @@
     "unsupportedDest": "对方版本不支持自定义目标目录，文件已放到默认位置。",
     "timeout": "对方没有响应。",
     "rate": "{{rate}}/s",
-    "cancel": "取消"
+    "cancel": "取消",
+    "dropToRemote": "松手传到 {{path}}",
+    "dropPickRemote": "松手后选择远端目录",
+    "dropNeedTarget": "还没有远端目录：请先打开一个远端目录，再拖入。",
+    "dragOutTitle": "正在准备拖出 {{name}}…",
+    "dragOutReady": "拖出已就绪",
+    "dragOutSlow": "准备时间较长，完成前请按住不放；也可以取消后点「下载」。",
+    "dragOutFailed": "拖出准备失败，文件未完整取回。",
+    "dragOutNeedClient": "拖出需要本机 moLink 桌面客户端，请在桌面客户端里打开这个会话。",
+    "dragOutFallback": "浏览器不支持拖出，已改为下载到浏览器的下载目录。",
+    "dragOutDownload": "拖出（下载）"
   },
   "update": {
     "available": "可更新",

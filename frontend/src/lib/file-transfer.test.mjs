@@ -5,6 +5,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  dropTarget,
+  droppedTree,
   joinPath,
   joinRelative,
   normalizeRemotePath,
@@ -119,4 +121,29 @@ test('a drive switch parses like any other absolute path', () => {
     { name: 'D:', path: 'D:\\' },
     { name: 'games', path: 'D:\\games' },
   ])
+})
+
+test('a dropped tree keeps folder names and expands nested folders', () => {
+  const tree = droppedTree([
+    'a.txt',
+    'photos/b.jpg',
+    'photos/2024/c.jpg',
+    'docs/notes.txt',
+  ])
+  assert.deepEqual(tree.dirs, ['docs', 'photos', 'photos/2024'])
+  assert.deepEqual(tree.selection, [
+    { path: 'a.txt', dir: false },
+    { path: 'photos', dir: true },
+    { path: 'docs', dir: true },
+  ])
+})
+
+test('a drop lands in the shown folder, else the remembered one', () => {
+  assert.equal(dropTarget('/home/me/docs', '/home/me/old'), '/home/me/docs')
+  // The roots view has no writable path; the remembered folder is the guess.
+  assert.equal(dropTarget('', '/home/me/old'), '/home/me/old')
+  assert.equal(dropTarget(null, '  /home/me/old  '), '/home/me/old')
+  // Nothing is known: the page must ask instead of guessing.
+  assert.equal(dropTarget('', ''), '')
+  assert.equal(dropTarget(null, null), '')
 })

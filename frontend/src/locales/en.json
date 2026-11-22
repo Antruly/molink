@@ -665,7 +665,17 @@
     "unsupportedDest": "The other side does not support a custom destination; files went to its default folder.",
     "timeout": "The other side did not answer.",
     "rate": "{{rate}}/s",
-    "cancel": "Cancel"
+    "cancel": "Cancel",
+    "dropToRemote": "Drop to send to {{path}}",
+    "dropPickRemote": "Drop, then choose a remote folder",
+    "dropNeedTarget": "No remote folder yet: open one in the file panel, then drop again.",
+    "dragOutTitle": "Preparing {{name}} to drag out…",
+    "dragOutReady": "Ready to drag out",
+    "dragOutSlow": "This is taking a while; keep the button held if you can, or cancel and use Download.",
+    "dragOutFailed": "Could not prepare the drag-out; the files were not fetched completely.",
+    "dragOutNeedClient": "Drag-out needs the local moLink desktop app. Open this session there.",
+    "dragOutFallback": "This browser cannot drag out; downloading to the browser downloads folder instead.",
+    "dragOutDownload": "Drag out (download)"
   },
   "update": {
     "available": "Update",
