@@ -22,6 +22,7 @@ import {
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { ApiError, lookupDevice } from '../lib/api'
+import { deviceEndpoints, primaryHost } from '../lib/device-address'
 import { deviceNoteKey } from '../lib/device-note'
 import { formatDisplayId } from '../lib/format'
 import { useAppStore, type RecentConnection } from '../store/app'
@@ -100,7 +101,15 @@ export function HomeView() {
   const allowRemote = serverState?.allow_remote_access === true
   const identityMode =
     identityChoice ?? (serverInfo?.registered ? 'id' : 'name')
-  const localIp = device?.addresses?.[0] ?? ''
+  // The core sorts private LAN addresses first; the first one is the primary
+  // address shown here and used as the connect-form example.
+  const localEndpoint =
+    deviceEndpoints(
+      device?.addresses,
+      device?.port,
+      window.location.hostname,
+    )[0] ?? ''
+  const localHost = primaryHost(device?.addresses, window.location.hostname)
   const identityValue =
     identityMode === 'name'
       ? device?.device_name || device?.device_id || ''
@@ -108,15 +117,13 @@ export function HomeView() {
         ? serverInfo?.display_id ||
           serverInfo?.device_id ||
           t('home.idNotRegistered')
-        : localIp
-          ? `${localIp}:${device?.port ?? ''}`
-          : t('home.ipUnavailable')
+        : localEndpoint || t('home.ipUnavailable')
   const identityCopyable =
     identityMode === 'name'
       ? Boolean(device?.device_name || device?.device_id)
       : identityMode === 'id'
         ? Boolean(serverInfo?.registered)
-        : Boolean(localIp)
+        : Boolean(localEndpoint)
 
   useEffect(() => {
     if (!localMode) return
@@ -469,7 +476,7 @@ export function HomeView() {
                       {t('home.idNotRegistered')}
                     </div>
                   ) : null}
-                  {identityMode === 'ip' && allowRemote && !localIp ? (
+                  {identityMode === 'ip' && allowRemote && !localEndpoint ? (
                     <div className="mt-2 text-[11px] text-warn">
                       {t('home.ipUnavailable')}
                     </div>
@@ -770,7 +777,7 @@ export function HomeView() {
                     value={host}
                     onChange={(event) => setHost(event.target.value)}
                     className="field font-mono"
-                    placeholder="192.168.1.20"
+                    placeholder={localHost}
                     spellCheck={false}
                     autoComplete="off"
                   />

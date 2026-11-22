@@ -517,6 +517,14 @@ export interface ServiceStatus {
   desired: boolean
   platform?: string
   autostart?: boolean
+  /// Windows: the ImagePath the service is actually registered with.
+  path?: string
+  /// Windows: where this build expects the helper binary.
+  expected?: string
+  /// Windows: `path` is wrong, or the binary it names is missing.
+  stale?: boolean
+  /// Windows: the core already has administrator rights, so no UAC prompt.
+  elevated?: boolean
   error?: string
 }
 

@@ -1485,6 +1485,15 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
                           : true;
             j["platform"] = status.platform;
             j["autostart"] = status.autostart;
+            // Windows-only diagnostics: what the service is registered with,
+            // what this build expects, and whether the core can re-register
+            // without another UAC prompt. Linux has no ImagePath to compare.
+            if (status.platform == "windows") {
+              j["path"] = status.registered_path;
+              j["expected"] = status.expected_path;
+              j["stale"] = status.stale;
+              j["elevated"] = status.elevated;
+            }
             if (!status.error.empty()) j["error"] = status.error;
             resp.set_header("Cache-Control", "no-store").json(j);
             resp.end();

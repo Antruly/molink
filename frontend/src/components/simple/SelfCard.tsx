@@ -10,6 +10,7 @@ import {
   ShieldCheck,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
+import { deviceEndpoints } from '../../lib/device-address'
 import { useAppStore } from '../../store/app'
 import { Avatar, AvatarPicker } from './Avatar'
 
@@ -31,9 +32,10 @@ export function SelfCard() {
   const [nameDraft, setNameDraft] = useState<string | null>(null)
   const [editing, setEditing] = useState(false)
   const [codeVisible, setCodeVisible] = useState(false)
-  const [copied, setCopied] = useState<'id' | 'code' | null>(null)
+  const [copied, setCopied] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [pickerOpen, setPickerOpen] = useState(false)
+  const [showAllAddresses, setShowAllAddresses] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
 
   const storedName = security?.device_name ?? device?.device_name ?? ''
@@ -48,9 +50,13 @@ export function SelfCard() {
   const directoryId = serverInfo?.display_id || ''
   const localId = device?.device_id ?? ''
   const shownId = registered && directoryId ? directoryId : localId
-  const ipAddress = device?.addresses?.[0]
-    ? `${device.addresses[0]}:${device.port}`
-    : ''
+  const endpoints = deviceEndpoints(
+    device?.addresses,
+    device?.port,
+    window.location.hostname,
+  )
+  const primaryEndpoint = endpoints[0] ?? ''
+  const extraEndpoints = endpoints.slice(1)
   const code = device?.code
   const avatar = device?.avatar
 
@@ -59,10 +65,12 @@ export function SelfCard() {
     window.setTimeout(() => setNotice(null), 2400)
   }
 
-  const copy = async (value: string, kind: 'id' | 'code') => {
+  const copy = async (value: string, kind: string, stripDashes = false) => {
     if (!value) return
     try {
-      await navigator.clipboard.writeText(value.replace(/-/g, ''))
+      await navigator.clipboard.writeText(
+        stripDashes ? value.replace(/-/g, '') : value,
+      )
       setCopied(kind)
       window.setTimeout(() => setCopied(null), 1500)
     } catch {
@@ -162,15 +170,75 @@ export function SelfCard() {
               <button
                 type="button"
                 className="grid h-6 w-6 shrink-0 place-items-center rounded text-muted hover:bg-panel hover:text-ink"
-                onClick={() => void copy(shownId, 'id')}
+                onClick={() => void copy(shownId, 'id', true)}
                 title={t('simple.copyId')}
               >
                 {copied === 'id' ? <Check size={12} className="text-accent" /> : <Copy size={12} />}
               </button>
             ) : null}
           </div>
-          {ipAddress ? (
-            <div className="mt-0.5 font-mono text-[10px] text-muted">{ipAddress}</div>
+          {primaryEndpoint ? (
+            <div className="mt-0.5">
+              <div className="flex items-center gap-1 font-mono text-[10px] text-muted">
+                <span className="min-w-0 truncate">{primaryEndpoint}</span>
+                <button
+                  type="button"
+                  className="grid h-5 w-5 shrink-0 place-items-center rounded text-muted hover:bg-panel hover:text-ink"
+                  onClick={() => void copy(primaryEndpoint, 'address:0')}
+                  title={t('simple.copyAddress')}
+                  aria-label={t('simple.copyAddress')}
+                >
+                  {copied === 'address:0' ? (
+                    <Check size={10} className="text-accent" />
+                  ) : (
+                    <Copy size={10} />
+                  )}
+                </button>
+                {extraEndpoints.length > 0 ? (
+                  <button
+                    type="button"
+                    className="shrink-0 rounded px-1 text-[10px] text-accent hover:bg-panel"
+                    onClick={() => setShowAllAddresses((value) => !value)}
+                  >
+                    {showAllAddresses
+                      ? t('simple.hideAddresses')
+                      : t('simple.moreAddresses', {
+                          count: extraEndpoints.length,
+                        })}
+                  </button>
+                ) : null}
+              </div>
+              {showAllAddresses
+                ? extraEndpoints.map((endpoint, index) => (
+                    <div
+                      key={`${endpoint}-${index}`}
+                      className="flex items-center gap-1 font-mono text-[10px] text-muted"
+                    >
+                      <span className="min-w-0 truncate">{endpoint}</span>
+                      <button
+                        type="button"
+                        className="grid h-5 w-5 shrink-0 place-items-center rounded text-muted hover:bg-panel hover:text-ink"
+                        onClick={() =>
+                          void copy(endpoint, `address:${index + 1}`)
+                        }
+                        title={t('simple.copyAddress')}
+                        aria-label={t('simple.copyAddress')}
+                      >
+                        {copied === `address:${index + 1}` ? (
+                          <Check size={10} className="text-accent" />
+                        ) : (
+                          <Copy size={10} />
+                        )}
+                      </button>
+                    </div>
+                  ))
+                : null}
+              {endpoints.length > 1 ? (
+                <div className="mt-1 text-[10px] leading-relaxed text-muted/80">
+                  {t('simple.multipleAddressesHint')}
+                </div>
+              ) : null}
+            </div>
           ) : null}
         </div>
       </div>

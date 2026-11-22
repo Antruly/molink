@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <iterator>
+#include <vector>
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -30,6 +31,66 @@ namespace {
 
 #if defined(_WIN32)
 constexpr wchar_t kServiceName[] = L"moLinkSession";
+
+std::string utf8(const std::wstring& value) {
+  if (value.empty()) return std::string();
+  const int length = WideCharToMultiByte(
+      CP_UTF8, 0, value.c_str(), static_cast<int>(value.size()), nullptr, 0,
+      nullptr, nullptr);
+  if (length <= 0) return std::string();
+  std::string out(static_cast<std::size_t>(length), '\0');
+  WideCharToMultiByte(CP_UTF8, 0, value.c_str(),
+                      static_cast<int>(value.size()), out.data(), length,
+                      nullptr, nullptr);
+  return out;
+}
+
+std::wstring expected_service_executable() {
+  wchar_t base[MAX_PATH * 2] = {};
+  const DWORD length = GetEnvironmentVariableW(
+      L"ProgramData", base, static_cast<DWORD>(std::size(base)));
+  if (length == 0 || length >= std::size(base)) return std::wstring();
+  std::wstring path(base, length);
+  while (!path.empty() && (path.back() == L'\\' || path.back() == L'/')) {
+    path.pop_back();
+  }
+  if (path.empty()) return std::wstring();
+  return path + L"\\moLink\\service\\molink-service.exe";
+}
+
+std::wstring registered_service_executable(SC_HANDLE service) {
+  DWORD needed = 0;
+  QueryServiceConfigW(service, nullptr, 0, &needed);
+  if (needed == 0) return std::wstring();
+  std::vector<BYTE> buffer(needed);
+  auto* config = reinterpret_cast<QUERY_SERVICE_CONFIGW*>(buffer.data());
+  if (!QueryServiceConfigW(service, config, needed, &needed)) {
+    return std::wstring();
+  }
+  if (config->lpBinaryPathName == nullptr) return std::wstring();
+  std::wstring path(config->lpBinaryPathName);
+  while (!path.empty() && (path.front() == L'"' || path.front() == L' ')) {
+    path.erase(path.begin());
+  }
+  while (!path.empty() &&
+         (path.back() == L'"' || path.back() == L' ' || path.back() == L'\t')) {
+    path.pop_back();
+  }
+  return path;
+}
+
+bool process_is_elevated() {
+  HANDLE token = nullptr;
+  if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
+    return false;
+  }
+  TOKEN_ELEVATION elevation{};
+  DWORD size = 0;
+  const BOOL ok = GetTokenInformation(token, TokenElevation, &elevation,
+                                      sizeof(elevation), &size);
+  CloseHandle(token);
+  return ok != 0 && elevation.TokenIsElevated != 0;
+}
 
 std::wstring service_executable() {
   wchar_t path[MAX_PATH * 4] = {};
@@ -210,7 +271,36 @@ bool write_unit(const std::string& path, const std::string& text,
 }
 #endif
 
+/// Registry ImagePath values are sometimes quoted, and Windows paths compare
+/// case-insensitively. Normalise both sides so the staleness rule does not
+/// trip over `"C:\..."` or a different drive-letter case.
+std::string normalized_service_path(std::string path) {
+  while (!path.empty() && (path.front() == '"' || path.front() == ' ')) {
+    path.erase(path.begin());
+  }
+  while (!path.empty() &&
+         (path.back() == '"' || path.back() == ' ' || path.back() == '\t')) {
+    path.pop_back();
+  }
+  for (char& c : path) {
+    if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    if (c == '/') c = '\\';
+  }
+  return path;
+}
+
 }  // namespace
+
+bool service_status_is_stale(const std::string& registered,
+                             const std::string& expected,
+                             bool registered_exists) {
+  const std::string wanted = normalized_service_path(expected);
+  if (wanted.empty()) return false;
+  const std::string actual = normalized_service_path(registered);
+  if (actual.empty()) return true;
+  if (actual != wanted) return true;
+  return !registered_exists;
+}
 
 bool running_in_console_session() {
 #if defined(_WIN32)
@@ -228,13 +318,16 @@ service_status_info query_session_service() {
 #if defined(_WIN32)
   info.available = true;
   info.platform = "windows";
+  info.elevated = process_is_elevated();
+  const std::wstring expected = expected_service_executable();
+  info.expected_path = utf8(expected);
   SC_HANDLE manager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
   if (manager == nullptr) {
     info.error = "OpenSCManager failed";
     return info;
   }
-  SC_HANDLE service = OpenServiceW(manager, kServiceName,
-                                   SERVICE_QUERY_STATUS);
+  SC_HANDLE service = OpenServiceW(
+      manager, kServiceName, SERVICE_QUERY_STATUS | SERVICE_QUERY_CONFIG);
   if (service == nullptr) {
     const DWORD code = GetLastError();
     if (code != ERROR_SERVICE_DOES_NOT_EXIST) {
@@ -247,6 +340,13 @@ service_status_info query_session_service() {
   if (QueryServiceStatus(service, &status)) {
     info.installed = true;
     info.running = status.dwCurrentState == SERVICE_RUNNING;
+    const std::wstring registered = registered_service_executable(service);
+    info.registered_path = utf8(registered);
+    const bool exists =
+        !registered.empty() &&
+        GetFileAttributesW(registered.c_str()) != INVALID_FILE_ATTRIBUTES;
+    info.stale = service_status_is_stale(info.registered_path,
+                                         info.expected_path, exists);
   } else {
     info.error = "QueryServiceStatus failed";
   }

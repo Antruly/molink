@@ -728,6 +728,21 @@ set_target_properties(molink-core-video-mode-test PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 add_test(NAME video_mode COMMAND molink-core-video-mode-test)
 
+# Service registration: the path staleness rule is pure and shared with the
+# status endpoint (Win32/systemd orchestration stays in the core).
+add_executable(molink-core-service-control-test
+  tests/service_control_test.cpp
+  src/service_control.cpp
+)
+target_include_directories(molink-core-service-control-test PRIVATE src)
+if(WIN32)
+  target_link_libraries(molink-core-service-control-test PRIVATE
+    advapi32 shell32 wtsapi32)
+endif()
+set_target_properties(molink-core-service-control-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME service_control COMMAND molink-core-service-control-test)
+
 # The weight-based QoS controller: viewer feedback in, budget scale out.
 add_executable(molink-core-stream-qos-test
   tests/stream_qos_test.cpp
