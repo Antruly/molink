@@ -167,6 +167,8 @@ app_settings load_settings() {
       settings.encrypt_lan = parse_bool(value, false);
     } else if (key == "service_desired_running") {
       settings.service_desired_running = parse_bool(value, true);
+    } else if (key == "diag_logs_enabled") {
+      settings.diag_logs_enabled = parse_bool(value, true);
     } else if (key == "av1_enabled") {
       settings.av1_enabled = parse_bool(value, true);
     } else if (key == "av1_full_frame") {
@@ -293,6 +295,8 @@ void save_settings(const app_settings& settings) {
   stream << "encrypt_lan=" << (settings.encrypt_lan ? 1 : 0) << "\n";
   stream << "service_desired_running="
          << (settings.service_desired_running ? 1 : 0) << "\n";
+  stream << "diag_logs_enabled=" << (settings.diag_logs_enabled ? 1 : 0)
+         << "\n";
   stream << "av1_enabled=" << (settings.av1_enabled ? 1 : 0) << "\n";
   stream << "av1_full_frame=" << (settings.av1_full_frame ? 1 : 0) << "\n";
   stream << "av1_device=" << settings.av1_device << "\n";

@@ -469,6 +469,27 @@ class WebMessageHandler final
         ShellExecuteW(g_window, L"open", url.c_str(), nullptr, nullptr,
                       SW_SHOWNORMAL);
       }
+    } else if (action == L"open-log-dir") {
+      // Same directory the core writes: %ProgramData%\moLink\logs.
+      std::wstring dir;
+      PWSTR program_data = nullptr;
+      if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_ProgramData, 0, nullptr,
+                                         &program_data))) {
+        dir = program_data;
+        CoTaskMemFree(program_data);
+      }
+      if (dir.empty()) {
+        wchar_t buffer[MAX_PATH] = {};
+        if (GetEnvironmentVariableW(L"PROGRAMDATA", buffer, MAX_PATH) > 0) {
+          dir = buffer;
+        }
+      }
+      if (!dir.empty()) {
+        dir += L"\\moLink\\logs";
+        CreateDirectoryW(dir.c_str(), nullptr);
+        ShellExecuteW(g_window, L"open", dir.c_str(), nullptr, nullptr,
+                      SW_SHOWNORMAL);
+      }
     } else if (action.rfind(L"update-url:", 0) == 0) {
       start_update(action.substr(11));
     } else if (action == L"drag") {

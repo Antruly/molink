@@ -32,6 +32,7 @@
 #include "clipboard_lazy.h"
 #include "config.h"
 #include "surface/frame_surface.h"
+#include "diag_log.h"
 #include "discovery.h"
 #include "identity.h"
 #include "tls_identity.h"
@@ -397,6 +398,28 @@ int main(int argc, char** argv) {
   if (stored_settings.long_term_code.empty()) {
     stored_settings.long_term_code = identity.token;
   }
+  // Local diagnostics are on by default and survive restarts. Cleanup runs
+  // once here and again on the first write of each day; a disabled logger
+  // neither creates the directory nor deletes existing files.
+  diag().set_enabled(stored_settings.diag_logs_enabled);
+  if (stored_settings.diag_logs_enabled) {
+    diag().cleanup_old_files();
+    std::vector<diag_field> fields;
+    fields.push_back({"version", MOLINK_VERSION});
+    fields.push_back({"platform", device_platform()});
+    fields.push_back({"device", identity.device_id});
+    diag().log(diag_level::info, "app.start", std::string(), fields);
+  }
+  // The first write of a new day also prunes, but a host that stays idle
+  // overnight should still drop the eighth-oldest file at the day boundary.
+  // The check inside cleanup_old_files() respects the recording switch.
+  std::thread([] {
+    while (!g_stop) {
+      std::this_thread::sleep_for(std::chrono::minutes(30));
+      if (g_stop) break;
+      diag().cleanup_old_files();
+    }
+  }).detach();
   auto auth = std::make_shared<auth_state>(std::move(stored_settings));
   // Self-signed per-device certificate. It is generated once and reused so a
   // client's fingerprint pin survives restarts. TLS is opt-in (LAN default

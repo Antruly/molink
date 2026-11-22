@@ -18,6 +18,8 @@
 #include <thread>
 #include <utility>
 
+#include "diag_log.h"
+
 namespace molink {
 namespace {
 
@@ -288,7 +290,9 @@ av1_stream_encoder* capture_base::stream_for_frame_moving(
       stream_switch_allowed(dragging, congested, any_stream_codec,
                             stream_policy_.streaming, encoder_blocked);
   bool mode_changed = false;
+  const char* switch_trigger = "movement";
   if (forced || secure_desktop) {
+    switch_trigger = secure_desktop ? "secure-desktop" : "forced";
     stream_policy_.armed = true;
     mode_changed = stream_policy_.force(true, now);
   } else {
@@ -304,6 +308,7 @@ av1_stream_encoder* capture_base::stream_for_frame_moving(
     const bool hold_stream = !dragging && !congested && any_stream_codec &&
                              (explicit_stream || starved);
     if (hold_stream) {
+      switch_trigger = explicit_stream ? "explicit" : "starved";
       stream_policy_.note(moving, now, /*allow_switch=*/false);
       stream_policy_.exiting = false;
       if (!stream_policy_.streaming &&
@@ -326,6 +331,18 @@ av1_stream_encoder* capture_base::stream_for_frame_moving(
   // Mirror the epoch for the session layer: it sends stream-epoch_id with the
   // first frame of the new mode so the decoder drops the old references.
   stream_epoch_.store(stream_policy_.epoch());
+  if (mode_changed) {
+    std::vector<diag_field> fields;
+    fields.push_back({"mode", stream_policy_.streaming ? "stream" : "tiles"});
+    fields.push_back({"trigger", switch_trigger});
+    fields.push_back(
+        {"moving_pct",
+         std::to_string(static_cast<int>(stream_policy_.average() * 100.0))});
+    fields.push_back({"epoch", std::to_string(stream_policy_.epoch())});
+    fields.push_back({"dragging", dragging ? "1" : "0"});
+    fields.push_back({"congested", congested ? "1" : "0"});
+    diag().log(diag_level::info, "video.mode", std::string(), fields);
+  }
   // A switch that cannot produce an encoder must leave the viewer on tiles
   // instead of parking the policy in "streaming" with no stream to send.
   const auto rollback_stream = [&](const char* reason) {
@@ -336,6 +353,9 @@ av1_stream_encoder* capture_base::stream_for_frame_moving(
     std::fprintf(stderr,
                  "host: stream switch rollback (%s) epoch=%u\n", reason,
                  stream_policy_.epoch());
+    diag().log(diag_level::warn, "video.mode", "stream switch rolled back",
+               {{"reason", reason},
+                {"epoch", std::to_string(stream_policy_.epoch())}});
   };
   // Mirror the mode for other threads: a session that joins now uses it to
   // wait for the stream keyframe instead of replaying a tile keyframe.
@@ -433,6 +453,10 @@ av1_stream_encoder* capture_base::stream_for_frame_moving(
       applied_budget_kbps_ = next_budget_kbps_;
       switch_pending_ = false;
       stream_keyframe_pending_.store(true);
+      diag().log(diag_level::info, "video.encoder", "switched",
+                 {{"codec", video_codec_name(video_codec_)},
+                  {"kbps", std::to_string(applied_budget_kbps_)},
+                  {"backend", backend()}});
     } else {
       // Make before break: building the new encoder can take a second on the
       // CPU VP9/VP8 path. Keep the old one producing frames meanwhile, so the
@@ -511,7 +535,13 @@ av1_stream_encoder* capture_base::stream_for_frame_moving(
     applied_budget_kbps_ = stream_encoder_ ? budget_kbps : -1;
     if (stream_encoder_) {
       stream_keyframe_pending_.store(true);
+      diag().log(diag_level::info, "video.encoder", "built",
+                 {{"codec", video_codec_name(video_codec_)},
+                  {"kbps", std::to_string(applied_budget_kbps_)},
+                  {"backend", backend()}});
     } else {
+      diag().log(diag_level::warn, "video.encoder", "no encoder could be built",
+                 {{"backend", backend()}});
       // No rung could be built: stay on tiles and roll the policy back, so a
       // session does not wait for a stream keyframe that will never come.
       rollback_stream("no encoder");

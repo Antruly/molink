@@ -124,6 +124,15 @@ export function setKeyboardGrab(on: boolean): void {
   postShellCommand(on ? 'grab-keyboard' : 'release-keyboard')
 }
 
+/// Asks the native shell to open the local diagnostics directory. The shell
+/// resolves the path itself, so a remote host's path is never trusted here.
+/// Returns false in a plain browser, where there is nothing to open.
+export function openLogDirectory(): boolean {
+  if (!shellInfo.enabled) return false
+  postShellCommand('open-log-dir')
+  return true
+}
+
 /// Opens a URL in the system browser (not an in-app window).
 export function openExternal(url: string): void {
   if (!url) return

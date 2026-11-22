@@ -36,6 +36,10 @@ export interface DiagExportOptions {
 }
 
 const STORAGE_KEY = 'molink.diag.v1'
+const ENABLED_KEY = 'molink.diag.enabled.v1'
+/// Entries older than this are pruned on load and on every save. The host
+/// keeps its own files for the same seven days.
+export const DIAG_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 export const MAX_DIAG_ENTRIES = 600
 const MAX_STORAGE_BYTES = 256 * 1024
 const MAX_MSG_LENGTH = 500
@@ -43,14 +47,100 @@ const MAX_VALUE_LENGTH = 300
 const MAX_DATA_KEYS = 16
 const SAVE_DELAY_MS = 400
 
+/// The subset of Storage this module needs; tests can supply a fake.
+export interface DiagStorage {
+  getItem(key: string): string | null
+  setItem(key: string, value: string): void
+  removeItem(key: string): void
+}
+
+let storageOverride: DiagStorage | null = null
+let recordingEnabled = readEnabled()
 let entries: DiagEntry[] = readStored()
 let saveTimer: number | null = null
 let captureInstalled = false
 
 const listeners = new Set<() => void>()
 
+function activeStorage(): DiagStorage | null {
+  if (storageOverride !== null) return storageOverride
+  if (typeof window === 'undefined') return null
+  try {
+    return window.localStorage
+  } catch {
+    return null
+  }
+}
+
+function readEnabled(store: DiagStorage | null = activeStorage()): boolean {
+  if (store === null) return true
+  try {
+    // Default on: only an explicit '0' switches recording off.
+    return store.getItem(ENABLED_KEY) !== '0'
+  } catch {
+    return true
+  }
+}
+
+/// Whether diagnostics are being written to local storage. The in-memory
+/// ring keeps recording either way; the host has its own switch.
+export function isDiagRecordingEnabled(store?: DiagStorage): boolean {
+  return store !== undefined ? readEnabled(store) : recordingEnabled
+}
+
+/// Persists the recording switch. Turning it off never deletes what is
+/// already stored; only an explicit "clear" does that.
+export function setDiagRecordingEnabled(
+  enabled: boolean,
+  store?: DiagStorage,
+): void {
+  recordingEnabled = enabled
+  const target = store ?? activeStorage()
+  try {
+    target?.setItem(ENABLED_KEY, enabled ? '1' : '0')
+  } catch {
+    // Quota or blocked storage: the in-memory setting still applies.
+  }
+  notify()
+}
+
+/// Test hook: replace the storage backend (pass null to restore the window).
+export function __setDiagStorageForTest(store: DiagStorage | null): void {
+  storageOverride = store
+  recordingEnabled = readEnabled(store)
+  entries = readStored()
+  notify()
+}
+
+/// Drops entries outside the retention window. Exported for the unit tests.
+export function pruneDiagEntries(
+  list: readonly DiagEntry[],
+  now: number,
+  maxAgeMs = DIAG_RETENTION_MS,
+): DiagEntry[] {
+  return list.filter((entry) => now - entry.t <= maxAgeMs)
+}
+
+/// Credentials must not reach the ring buffer or local storage. The host
+/// redacts its own lines; the page applies the same rules to messages and
+/// field values before they are stored. Error names such as `unauthorized`
+/// are deliberately left alone -- only labelled values and token-shaped runs
+/// are masked.
+export function redactDiagnosticText(value: string): string {
+  // "unknown key code: MetaLeft" is the one diagnostic whose whole point is
+  // the value after the colon; hide the phrase from the code rule.
+  const guard = '\u0000KEYCODE\u0000'
+  let text = value.replace(/key\s+code/gi, guard)
+  text = text
+    .replace(/\b(token|session|code|password|passwd|secret)\s*[=:]\s*\S+/gi,
+      '$1=***')
+    .replace(/\b[0-9a-fA-F]{32,}\b/g, '***')
+    .replace(/\b[A-Z0-9]{3}-[A-Z0-9]{3}-[A-Z0-9]{3}\b/g, '***')
+  return text.split(guard).join('key code')
+}
+
 function truncate(value: string, limit: number): string {
-  const oneLine = value.replace(/\s+/g, ' ').trim()
+  const oneLine = redactDiagnosticText(value).replace(/\s+/g, ' ').trim()
   return oneLine.length > limit ? `${oneLine.slice(0, limit)}…` : oneLine
 }
 
@@ -105,16 +195,17 @@ function normalizeStored(raw: unknown): DiagEntry | null {
 }
 
 function readStored(): DiagEntry[] {
-  if (typeof window === 'undefined') return []
+  const store = activeStorage()
+  if (store === null) return []
   try {
-    const raw = window.localStorage.getItem(STORAGE_KEY)
+    const raw = store.getItem(STORAGE_KEY)
     if (raw === null || raw === '') return []
     const parsed: unknown = JSON.parse(raw)
     if (!Array.isArray(parsed)) return []
     const loaded = parsed
       .map(normalizeStored)
       .filter((entry): entry is DiagEntry => entry !== null)
-    return loaded.slice(-MAX_DIAG_ENTRIES)
+    return pruneDiagEntries(loaded, Date.now()).slice(-MAX_DIAG_ENTRIES)
   } catch {
     return []
   }
@@ -142,22 +233,24 @@ export function flushDiag(): void {
     window.clearTimeout(saveTimer)
     saveTimer = null
   }
-  if (typeof window === 'undefined') return
-  let stored = entries
+  const store = activeStorage()
+  // Recording off means memory only: no file is created and no write happens.
+  if (store === null || !recordingEnabled) return
+  let stored = pruneDiagEntries(entries, Date.now())
   let text = JSON.stringify(stored)
   while (byteLength(text) > MAX_STORAGE_BYTES && stored.length > 1) {
     stored = stored.slice(Math.ceil(stored.length / 10))
     text = JSON.stringify(stored)
   }
   try {
-    window.localStorage.setItem(STORAGE_KEY, text)
+    store.setItem(STORAGE_KEY, text)
   } catch {
     // Quota or blocked storage: keep logging in memory only.
   }
 }
 
 function scheduleSave(): void {
-  if (typeof window === 'undefined') return
+  if (typeof window === 'undefined' || !recordingEnabled) return
   if (saveTimer !== null) return
   saveTimer = window.setTimeout(() => {
     saveTimer = null
@@ -215,9 +308,10 @@ export function clearDiag(): void {
     window.clearTimeout(saveTimer)
     saveTimer = null
   }
-  if (typeof window !== 'undefined') {
+  const store = activeStorage()
+  if (store !== null) {
     try {
-      window.localStorage.removeItem(STORAGE_KEY)
+      store.removeItem(STORAGE_KEY)
     } catch {
       // ignore
     }
@@ -282,6 +376,60 @@ export function buildDiagText(options: DiagExportOptions = {}): string {
   if (options.note) header.push(`note: ${options.note}`)
   header.push('---')
   return [...header, ...selected.map(formatDiagLine), ''].join('\n')
+}
+
+export interface CopyLogOptions {
+  /** This machine's core/shell version. */
+  version?: string
+  /** The host's version from its welcome, when connected. */
+  hostVersion?: string
+  /** False when no session is live: the host section says so. */
+  connected: boolean
+  /** The host's `logs tail` text. */
+  hostTail?: string
+  /** How many local lines to include (default 200). */
+  localLines?: number
+}
+
+/// The one-click "copy recent diagnostics" document. It is deliberately
+/// plain text so it can be pasted into a chat unchanged, and it opens with
+/// the build pair and the exact local time a maintainer asks for first.
+/// ISO 8601 with the local offset, e.g. 2026-11-23T06:38:52.536+08:00.
+function localIsoString(date = new Date()): string {
+  const pad = (value: number, width = 2) => String(value).padStart(width, '0')
+  const offset = -date.getTimezoneOffset()
+  const sign = offset >= 0 ? '+' : '-'
+  const abs = Math.abs(offset)
+  return (
+    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
+    `T${pad(date.getHours())}:${pad(date.getMinutes())}:` +
+    `${pad(date.getSeconds())}.${pad(date.getMilliseconds(), 3)}` +
+    `${sign}${pad(Math.floor(abs / 60))}:${pad(abs % 60)}`
+  )
+}
+
+export function buildCopyLogText(options: CopyLogOptions): string {
+  const localLines = Math.max(1, options.localLines ?? 200)
+  const local = entries.slice(-localLines)
+  const hostBody = options.connected
+    ? (options.hostTail ?? '').replace(/\s+$/, '')
+    : ''
+  const hostLines =
+    options.connected && hostBody !== '' ? hostBody : options.connected
+      ? '(no host entries)'
+      : 'not connected'
+  return [
+    '=== moLink diag ===',
+    `version: ${options.version || 'unknown'} / host ${
+      options.connected ? options.hostVersion || 'unknown' : 'unknown'
+    }`,
+    `time: ${localIsoString()}`,
+    '--- local ---',
+    ...local.map(formatDiagLine),
+    '--- host ---',
+    hostLines,
+    '',
+  ].join('\n')
 }
 
 /// Uncaught errors and unhandled rejections are the ones most likely to show

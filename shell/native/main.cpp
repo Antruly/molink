@@ -1458,6 +1458,29 @@ void start_drag_out(JSCContext* context, const std::string& json) {
              state->uris.size());
 }
 
+/// Opens the same directory the core writes diagnostics into. The page only
+/// sends the command name, never a path: resolving it here keeps a remote or
+/// compromised page from asking the shell to open an arbitrary location.
+void open_log_directory(GtkWidget* window) {
+  std::string dir;
+  const char* xdg = std::getenv("XDG_DATA_HOME");
+  const char* home = std::getenv("HOME");
+  if (xdg != nullptr && xdg[0] != '\0') {
+    dir = std::string(xdg) + "/molink/logs";
+  } else if (home != nullptr && home[0] != '\0') {
+    dir = std::string(home) + "/.local/share/molink/logs";
+  } else {
+    dir = "/tmp/molink/logs";
+  }
+  std::error_code ec;
+  fs::create_directories(dir, ec);
+  gchar* uri = g_filename_to_uri(dir.c_str(), nullptr, nullptr);
+  if (uri != nullptr) {
+    gtk_show_uri_on_window(GTK_WINDOW(window), uri, GDK_CURRENT_TIME, nullptr);
+    g_free(uri);
+  }
+}
+
 void on_script_message(WebKitUserContentManager*, WebKitJavascriptResult* result,
                        gpointer data) {
   GtkWidget* window = GTK_WIDGET(data);
@@ -1503,6 +1526,8 @@ void on_script_message(WebKitUserContentManager*, WebKitJavascriptResult* result
       gtk_show_uri_on_window(GTK_WINDOW(window), url.c_str(),
                              GDK_CURRENT_TIME, nullptr);
     }
+  } else if (action == "open-log-dir") {
+    open_log_directory(window);
   } else if (action == "close") {
     if (g_url_mode) {
       gtk_widget_destroy(window);

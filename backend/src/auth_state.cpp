@@ -444,6 +444,12 @@ void auth_state::set_service_desired_running(bool enabled) {
   persist_locked();
 }
 
+void auth_state::set_diag_logs_enabled(bool enabled) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  settings_.diag_logs_enabled = enabled;
+  persist_locked();
+}
+
 void auth_state::set_av1_encoding(bool enabled, std::string device,
                                   std::string speed, int qp,
                                   int max_area_percent, int threads,

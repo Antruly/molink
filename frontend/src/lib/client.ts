@@ -49,6 +49,21 @@ export interface DisplayInfo {
   primary?: boolean
 }
 
+/// Reply to `logs action=info` and `logs action=tail` from the host.
+export interface HostLogInfo {
+  enabled: boolean
+  directory: string
+  retentionDays: number
+  currentBytes: number
+  file: string
+}
+
+export interface HostLogTail {
+  tail: string
+  size: number
+  lines: number
+}
+
 export interface Welcome {
   session: string
   session_id: number
@@ -728,6 +743,16 @@ export class MolinkClient {
   /// Session token from the last welcome. Reconnecting with it does not spend
   /// another use of the host's temporary verification code.
   private resumeToken = ''
+  /// One in-flight diagnostics request each; a second request supersedes the
+  /// first, which resolves as null instead of hanging.
+  private pendingLogTail:
+    | ((value: HostLogTail | null) => void)
+    | null = null
+  private pendingLogInfo:
+    | ((value: HostLogInfo | null) => void)
+    | null = null
+  private logTailTimer: number | null = null
+  private logInfoTimer: number | null = null
   /// The target the token belongs to. Forgetting a rejected credential must
   /// delete exactly this host/port entry and no other machine's.
   private resumeHost = ''
@@ -1240,11 +1265,69 @@ export class MolinkClient {
     if (ws && ws.readyState <= WebSocket.OPEN) {
       ws.close(1000, 'client closing')
     }
+    // A settings dialog waiting for a host answer must not hang for four
+    // seconds after the session is already gone.
+    if (this.logTailTimer !== null) {
+      window.clearTimeout(this.logTailTimer)
+      this.logTailTimer = null
+    }
+    if (this.logInfoTimer !== null) {
+      window.clearTimeout(this.logInfoTimer)
+      this.logInfoTimer = null
+    }
+    const pendingTail = this.pendingLogTail
+    const pendingInfo = this.pendingLogInfo
+    this.pendingLogTail = null
+    this.pendingLogInfo = null
+    pendingTail?.(null)
+    pendingInfo?.(null)
   }
 
   isLive(): boolean {
     if (this.wt !== null && this.wt.isOpen) return true
     return this.ws !== null && this.ws.readyState === WebSocket.OPEN
+  }
+
+  /// Asks the host for its recent diagnostic lines. Resolves null when no
+  /// session is live or the host does not answer within four seconds.
+  requestLogTail(lines = 500): Promise<HostLogTail | null> {
+    if (!this.isLive()) return Promise.resolve(null)
+    if (this.pendingLogTail !== null) this.pendingLogTail(null)
+    if (this.logTailTimer !== null) window.clearTimeout(this.logTailTimer)
+    return new Promise((resolve) => {
+      this.pendingLogTail = resolve
+      this.logTailTimer = window.setTimeout(() => {
+        this.logTailTimer = null
+        const pending = this.pendingLogTail
+        this.pendingLogTail = null
+        pending?.(null)
+      }, 4000)
+      this.sendJson({ type: 'logs', action: 'tail', lines })
+    })
+  }
+
+  /// Directory, retention and current size of the host's log.
+  requestLogInfo(): Promise<HostLogInfo | null> {
+    if (!this.isLive()) return Promise.resolve(null)
+    if (this.pendingLogInfo !== null) this.pendingLogInfo(null)
+    if (this.logInfoTimer !== null) window.clearTimeout(this.logInfoTimer)
+    return new Promise((resolve) => {
+      this.pendingLogInfo = resolve
+      this.logInfoTimer = window.setTimeout(() => {
+        this.logInfoTimer = null
+        const pending = this.pendingLogInfo
+        this.pendingLogInfo = null
+        pending?.(null)
+      }, 4000)
+      this.sendJson({ type: 'logs', action: 'info' })
+    })
+  }
+
+  /// Mirrors this page's recording switch onto the host. Only called from the
+  /// settings control, so a viewer never silently re-enables a host the user
+  /// switched off.
+  setLoggingEnabled(enabled: boolean): void {
+    this.sendJson({ type: 'logs', action: enabled ? 'enable' : 'disable' })
   }
 
   /// Records a frame's capture time so frame ages can be measured on the
@@ -1986,6 +2069,44 @@ export class MolinkClient {
           this.hasImage = false
           this.epochKeyframePendingAt = performance.now()
           this.handlers.onStreamEpoch?.(epoch, mode)
+        }
+        break
+      }
+      case 'logs': {
+        const reply = message as unknown as Record<string, unknown>
+        if (reply.action === 'tail') {
+          const pending = this.pendingLogTail
+          this.pendingLogTail = null
+          if (this.logTailTimer !== null) {
+            window.clearTimeout(this.logTailTimer)
+            this.logTailTimer = null
+          }
+          pending?.({
+            tail: typeof reply.tail === 'string' ? reply.tail : '',
+            size: typeof reply.size === 'number' ? reply.size : 0,
+            lines: typeof reply.lines === 'number' ? reply.lines : 0,
+          })
+        } else if (reply.action === 'info') {
+          const pending = this.pendingLogInfo
+          this.pendingLogInfo = null
+          if (this.logInfoTimer !== null) {
+            window.clearTimeout(this.logInfoTimer)
+            this.logInfoTimer = null
+          }
+          pending?.({
+            enabled: reply.enabled === true,
+            directory:
+              typeof reply.directory === 'string' ? reply.directory : '',
+            retentionDays:
+              typeof reply.retention_days === 'number'
+                ? reply.retention_days
+                : 7,
+            currentBytes:
+              typeof reply.current_bytes === 'number'
+                ? reply.current_bytes
+                : 0,
+            file: typeof reply.file === 'string' ? reply.file : '',
+          })
         }
         break
       }
