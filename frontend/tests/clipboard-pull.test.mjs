@@ -1,18 +1,76 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
+  AUTO_PULL_MAX_FILE_BYTES,
   PULL_CHUNK_BYTES,
   PULL_MAX_FILES,
   PULL_MAX_FILE_BYTES,
+  VIRTUAL_MAX_FILE_BYTES,
   batchKeyMaterial,
   checkPullChunk,
   clipboardBatchId,
   fallbackBatchId,
+  planAutoPullFiles,
+  planExplicitPullFiles,
   planPullFiles,
+  planVirtualFiles,
   pullChunkLength,
+  summarizePullFiles,
 } from '../src/lib/clipboard-pull.ts'
 
 const MiB = 1024 * 1024
+
+test('the automatic fallback refuses a selection over its caps', () => {
+  const small = planAutoPullFiles([
+    { id: 1, name: 'a.txt', size: 1 * MiB },
+    { id: 2, name: 'b.txt', size: 2 * MiB },
+  ])
+  assert.equal(small.files.length, 2)
+  assert.equal(small.omitted, 0)
+
+  const big = planAutoPullFiles([
+    { id: 1, name: 'movie.mp4', size: AUTO_PULL_MAX_FILE_BYTES + 1 },
+  ])
+  assert.equal(big.files.length, 0)
+  assert.equal(big.omitted, 1)
+
+  const total = planAutoPullFiles(
+    Array.from({ length: 5 }, (_, index) => ({
+      id: index + 1,
+      name: `${index}.bin`,
+      size: 60 * MiB,
+    })),
+  )
+  assert.equal(total.files.length, 4)
+  assert.equal(total.omitted, 1)
+})
+
+test('the explicit button accepts a 500 MB file', () => {
+  const plan = planExplicitPullFiles([
+    { id: 1, name: 'movie.mp4', size: 500 * MiB },
+  ])
+  assert.equal(plan.files.length, 1)
+  assert.equal(plan.omitted, 0)
+})
+
+test('the virtual plan mounts large files without moving bytes', () => {
+  const plan = planVirtualFiles([
+    { id: 1, name: 'movie.mp4', size: 500 * MiB },
+    { id: 2, name: 'huge.iso', size: VIRTUAL_MAX_FILE_BYTES },
+  ])
+  assert.equal(plan.files.length, 2)
+  assert.equal(plan.files[0].size, 500 * MiB)
+  assert.equal(plan.omitted, 0)
+})
+
+test('the prompt summary counts the whole selection', () => {
+  const summary = summarizePullFiles([
+    { id: 1, name: 'a.bin', size: 10 },
+    { id: 2, name: 'b.bin', size: 20 },
+    { id: 0, name: 'bad', size: 1 },
+  ])
+  assert.deepEqual(summary, { count: 2, bytes: 30 })
+})
 
 test('valid pull descriptors survive, junk is ignored', () => {
   const plan = planPullFiles([

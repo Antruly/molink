@@ -1,7 +1,10 @@
 import {
   ApiError,
+  abortClipboardStage,
   appendClipboardStage,
   applyClipboardStage,
+  clearVirtualClipboard,
+  offerVirtualClipboard,
   stageClipboardFile,
 } from './api'
 import { stageableClipboardFile } from './clipboard-local'
@@ -10,8 +13,11 @@ import {
   PULL_CONCURRENCY,
   checkPullChunk,
   clipboardBatchId,
-  planPullFiles,
+  planExplicitPullFiles,
+  planAutoPullFiles,
+  planVirtualFiles,
   pullChunkLength,
+  summarizePullFiles,
   type PullFile,
 } from './clipboard-pull'
 import type { ClipboardFileEntry, FileMessage } from './client'
@@ -21,6 +27,7 @@ import {
   type DownloadProgress,
 } from './download-state'
 import type { SessionConnection } from './session-connection'
+import { VirtualClipboardBridge } from './virtual-clipboard'
 
 /// Selection caps shared with the host's advisory limits. Files are streamed
 /// to the staging folder, so the total is a traffic/policy cap, not a memory
@@ -28,6 +35,21 @@ import type { SessionConnection } from './session-connection'
 export const MAX_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
 export const MAX_FILE_BYTES = 256 * 1024 * 1024
 const TRANSFER_TIMEOUT_MS = 30_000
+
+/// What the over-limit banner shows. `phase` drives the button: an idle offer
+/// waits for an explicit click, `downloading` shows progress and a cancel
+/// button, `failed` offers a retry.
+export interface ClipboardOfferPrompt {
+  count: number
+  bytes: number
+  /// Entries the host (or our own caps) left out of the offer.
+  omitted: number
+  phase: 'idle' | 'downloading' | 'failed'
+  received: number
+  /// Set when the virtual clipboard was expected but could not be used, so
+  /// the banner can say the files are being downloaded instead.
+  note?: 'virtual_unavailable'
+}
 
 interface ActiveFile extends DownloadProgress {
   entry: ClipboardFileEntry
@@ -103,11 +125,32 @@ export class RemoteClipboardSync {
   private pullLastKey = ''
   private pullStarting = false
   private pullCancelled = false
-  /// An announcement that arrived while another transfer owned the shared
-  /// channel. The host deduplicates announcements, so dropping it would lose
-  /// that copy permanently.
-  private pendingOffer: { files: unknown; omitted: number } | null = null
   private readonly usePull: () => boolean
+
+  // Virtual clipboard path (FUSE): the local core mounts the host's files and
+  // this class relays range reads. No bytes move on copy.
+  private readonly useVirtual: () => boolean
+  private readonly noteVirtualFallback: () => boolean
+  private readonly onPrompt?: (prompt: ClipboardOfferPrompt | null) => void
+  private virtual: VirtualClipboardBridge | null = null
+  private virtualMount = ''
+  private virtualStarting = false
+  private virtualLastKey = ''
+  /// Invalidates an in-flight offer/mount when the clipboard changes while the
+  /// local core is still mounting.
+  private virtualGeneration = 0
+  /// The last over-limit selection, kept so the banner's button can fetch it.
+  private explicitOffer: {
+    files: PullFile[]
+    omitted: number
+  } | null = null
+  private prompt: ClipboardOfferPrompt | null = null
+  private pullReceived = 0
+  private pullTotal = 0
+  private lastProgressAt = 0
+  /// Diagnostic only: the core stores it with the mount and logs it.
+  private readonly sessionId =
+    `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
 
   constructor(
     private readonly connection: () => SessionConnection | null,
@@ -115,9 +158,17 @@ export class RemoteClipboardSync {
     private readonly onError: (code: string) => void,
     private readonly onApplied?: (count: number) => void,
     private readonly echo?: ClipboardEcho,
-    options: { usePull?: () => boolean } = {},
+    options: {
+      usePull?: () => boolean
+      useVirtual?: () => boolean
+      noteVirtualFallback?: () => boolean
+      onPrompt?: (prompt: ClipboardOfferPrompt | null) => void
+    } = {},
   ) {
     this.usePull = options.usePull ?? (() => true)
+    this.useVirtual = options.useVirtual ?? (() => false)
+    this.noteVirtualFallback = options.noteVirtualFallback ?? (() => false)
+    this.onPrompt = options.onPrompt
   }
 
   /// The settings switch. Turning it off abandons an in-flight batch; those
@@ -139,7 +190,15 @@ export class RemoteClipboardSync {
   /// keep the two consumers from racing over `sending`/`eof`).
   setPaused(paused: boolean): void {
     this.paused = paused
-    if (paused) this.cancel()
+    // A virtual mount does not use `sending`/`eof`, so opening the files panel
+    // must not remove it. Only real downloads are abandoned.
+    if (paused) {
+      this.cancelDownloads()
+      if (this.prompt?.phase === 'downloading') {
+        this.explicitOffer = null
+        this.setPrompt(null)
+      }
+    }
   }
 
   /// Called for every `clipboard-files` event. `path` and `size` come from the
@@ -183,18 +242,18 @@ export class RemoteClipboardSync {
   }
 
   /// `clipboard-sync.files`: files copied on the host (possibly inside a
-  /// nested RDP session). They are downloaded by id into the local core's
-  /// staging folder and only become the OS clipboard once the whole set is
-  /// complete -- a failed pull never leaves a half selection on the clipboard.
+  /// nested RDP session).
+  ///
+  /// With a FUSE-capable local core the selection is mounted read-only and the
+  /// OS clipboard names the mount; nothing is transferred until the local user
+  /// pastes. Otherwise a small selection is downloaded into the staging folder,
+  /// and a selection over the automatic caps is only offered behind an explicit
+  /// button.
   handleOffer(rawFiles: unknown, hostOmitted = 0): void {
     if (!this.usePull()) return
     if (!this.enabled || this.paused || this.pendingCancel) return
     if (this.token() === '') return
-    if (this.busy || this.pullActive.size > 0 || this.pullStarting) {
-      this.pendingOffer = { files: rawFiles, omitted: hostOmitted }
-      return
-    }
-    const plan = planPullFiles(rawFiles)
+    const plan = planVirtualFiles(rawFiles)
     if (plan.files.length === 0) {
       if (plan.omitted + hostOmitted > 0) {
         this.onError('remote_clipboard_truncated')
@@ -209,9 +268,152 @@ export class RemoteClipboardSync {
     const key = fresh
       .map((file) => `${file.id}:${file.name}:${file.size}`)
       .join('|')
+    if (key === this.pullLastKey || key === this.virtualLastKey) return
+    if (this.busy || this.pullActive.size > 0 || this.pullStarting ||
+        this.virtualStarting) {
+      // The remote clipboard changed while a transfer or mount was running.
+      // That selection is no longer what the user copied: abandon it, delete
+      // half-written staging files, and mount/download the new one.
+      this.virtualGeneration += 1
+      this.virtualStarting = false
+      this.cancelDownloads()
+      this.clearVirtual()
+      this.explicitOffer = null
+      this.setPrompt(null)
+    }
+    const forwardedOmitted = plan.omitted + hostOmitted
+
+    if (this.useVirtual()) {
+      void this.beginVirtual(fresh, forwardedOmitted)
+      return
+    }
+    this.beginFallback(
+      fresh,
+      forwardedOmitted,
+      this.noteVirtualFallback() ? 'virtual_unavailable' : undefined,
+    )
+  }
+
+  /// Mount the selection with the local core (no bytes) and open the relay.
+  private async beginVirtual(
+    fresh: PullFile[],
+    hostOmitted: number,
+  ): Promise<void> {
+    const key = fresh
+      .map((file) => `${file.id}:${file.name}:${file.size}`)
+      .join('|')
+    if (key === this.virtualLastKey && this.virtualMount !== '') return
+    const generation = ++this.virtualGeneration
+    this.virtualStarting = true
+    this.busy = true
+    let mount = ''
+    try {
+      const result = await offerVirtualClipboard(
+        this.token(), fresh, this.sessionId,
+      )
+      mount = result.mount
+      if (generation !== this.virtualGeneration) {
+        // The remote clipboard changed (or the session ended) while the core
+        // was mounting. Do not leave a stale generation on the clipboard.
+        void clearVirtualClipboard(this.token(), mount).catch(() => undefined)
+        return
+      }
+      // The core already stopped the previous generation; drop the old relay.
+      this.closeVirtualBridge()
+      const bridge = new VirtualClipboardBridge(
+        () => this.connection(),
+        () => this.virtualClosed(),
+      )
+      await bridge.open(result.mount)
+      if (generation !== this.virtualGeneration) {
+        bridge.close()
+        void clearVirtualClipboard(this.token(), mount).catch(() => undefined)
+        return
+      }
+      this.virtual = bridge
+      this.virtualMount = result.mount
+      this.virtualLastKey = key
+      this.virtualStarting = false
+      this.busy = false
+      this.setPrompt(null)
+      if (hostOmitted + result.omitted > 0) {
+        this.onError('remote_clipboard_truncated')
+      }
+    } catch (error) {
+      if (mount !== '') {
+        void clearVirtualClipboard(this.token(), mount).catch(() => undefined)
+      }
+      // A newer announcement owns the flags now; do not stomp them.
+      if (generation !== this.virtualGeneration) return
+      this.virtualStarting = false
+      this.busy = false
+      const availableFallback = this.isVirtualUnavailable(error)
+      // The core cleared the old generation before failing, so the download
+      // path is the only way to leave the user with something pasteable.
+      this.beginFallback(
+        fresh,
+        hostOmitted,
+        availableFallback ? 'virtual_unavailable' : undefined,
+      )
+      if (!availableFallback) this.onError('remote_clipboard_failed')
+    }
+  }
+
+  private isVirtualUnavailable(error: unknown): boolean {
+    if (error instanceof ApiError) {
+      return (
+        error.code === 'clipboard_virtual_unavailable' ||
+        error.code === 'clipboard_virtual_mount_failed' ||
+        error.code === 'clipboard_unavailable'
+      )
+    }
+    return (
+      error instanceof Error &&
+      (error.message === 'clipboard_virtual_unavailable' ||
+        error.message === 'clipboard_virtual_timeout')
+    )
+  }
+
+  /// Download when the whole selection fits the automatic caps; otherwise
+  /// leave it behind the banner's explicit button.
+  private beginFallback(
+    fresh: PullFile[],
+    hostOmitted: number,
+    note?: 'virtual_unavailable',
+  ): void {
+    const summary = summarizePullFiles(fresh)
+    const auto = planAutoPullFiles(fresh)
+    const over = auto.omitted > 0 || hostOmitted > 0
+    if (over) {
+      this.explicitOffer = { files: fresh, omitted: hostOmitted }
+      this.setPrompt({
+        count: summary.count,
+        bytes: summary.bytes,
+        omitted: auto.omitted + hostOmitted,
+        phase: 'idle',
+        received: 0,
+        note,
+      })
+      return
+    }
+    this.startPull(fresh, hostOmitted, note)
+  }
+
+  /// The download path, shared by the automatic fallback and the explicit
+  /// button. Runs in the background, one 256 KiB range at a time.
+  private startPull(
+    fresh: PullFile[],
+    hostOmitted: number,
+    note?: 'virtual_unavailable',
+  ): void {
+    const key = fresh
+      .map((file) => `${file.id}:${file.name}:${file.size}`)
+      .join('|')
     if (key === this.pullLastKey) return
     this.pullLastKey = key
-    if (plan.omitted + hostOmitted > 0) {
+    // Keep the selection so a failed attempt can be retried from the banner.
+    this.explicitOffer = { files: fresh.slice(), omitted: hostOmitted }
+    if (hostOmitted > 0) {
       this.onError('remote_clipboard_truncated')
     }
     this.busy = true
@@ -221,6 +423,18 @@ export class RemoteClipboardSync {
     this.pullQueue = []
     this.pullStages = []
     this.pullPaths = []
+    this.pullReceived = 0
+    this.pullTotal = fresh.reduce((sum, file) => sum + file.size, 0)
+    if (this.prompt !== null || note !== undefined) {
+      this.setPrompt({
+        count: fresh.length,
+        bytes: this.pullTotal,
+        omitted: hostOmitted,
+        phase: 'downloading',
+        received: 0,
+        note,
+      })
+    }
     const nonce = `${Date.now().toString(36)}` +
       `${Math.random().toString(36).slice(2)}`
     void clipboardBatchId(fresh, nonce).then((batch) => {
@@ -237,6 +451,111 @@ export class RemoteClipboardSync {
     })
   }
 
+  /// The banner's "取出" button: download the over-limit selection now.
+  downloadOffer(): void {
+    if (!this.enabled || this.explicitOffer === null) return
+    if (this.busy || this.pullActive.size > 0 || this.pullStarting) return
+    const plan = planExplicitPullFiles(this.explicitOffer.files)
+    if (plan.files.length === 0) {
+      this.onError('remote_clipboard_too_large')
+      return
+    }
+    this.startPull(
+      plan.files,
+      this.explicitOffer.omitted + plan.omitted,
+      this.isVirtualUnavailableNote() ? 'virtual_unavailable' : undefined,
+    )
+  }
+
+  /// Stop an in-flight download but keep the over-limit offer so the button
+  /// can retry it.
+  cancelOffer(): void {
+    this.cancelDownloads()
+    if (this.explicitOffer !== null) {
+      const summary = summarizePullFiles(this.explicitOffer.files)
+      this.setPrompt({
+        count: summary.count,
+        bytes: summary.bytes,
+        omitted: this.explicitOffer.omitted,
+        phase: 'idle',
+        received: 0,
+        note: this.isVirtualUnavailableNote() ? 'virtual_unavailable' : undefined,
+      })
+    } else {
+      this.setPrompt(null)
+    }
+  }
+
+  /// Hide the banner (the files remain available through the files panel).
+  dismissOffer(): void {
+    this.cancelDownloads()
+    this.explicitOffer = null
+    this.setPrompt(null)
+  }
+
+  private isVirtualUnavailableNote(): boolean {
+    return this.prompt?.note === 'virtual_unavailable'
+  }
+
+  private setPrompt(prompt: ClipboardOfferPrompt | null): void {
+    this.prompt = prompt
+    this.onPrompt?.(prompt)
+  }
+
+  private emitDownloadProgress(force = false): void {
+    if (this.prompt === null || this.prompt.phase !== 'downloading') return
+    const now = Date.now()
+    if (!force && now - this.lastProgressAt < 200) return
+    this.lastProgressAt = now
+    this.setPrompt({ ...this.prompt, received: this.pullReceived })
+  }
+
+  /// The remote clipboard became text (or the session ended). The mount paths
+  /// no longer describe the current clipboard, so unmount immediately.
+  handleRemoteText(): void {
+    // Invalidate a mount request that may still be in flight.
+    this.virtualGeneration += 1
+    this.virtualStarting = false
+    this.cancelDownloads()
+    if (this.virtual !== null || this.virtualMount !== '') {
+      this.clearVirtual()
+    }
+    this.explicitOffer = null
+    this.pullLastKey = ''
+    this.setPrompt(null)
+  }
+
+  /// The user turned virtual paste off. Drop any mount immediately instead of
+  /// waiting for the next clipboard change.
+  disableVirtual(): void {
+    this.virtualGeneration += 1
+    this.virtualStarting = false
+    this.clearVirtual()
+  }
+
+  private clearVirtual(): void {
+    const mount = this.virtualMount
+    this.virtualMount = ''
+    this.virtualLastKey = ''
+    this.closeVirtualBridge()
+    if (mount !== '' && this.token() !== '') {
+      void clearVirtualClipboard(this.token(), mount).catch(() => undefined)
+    }
+  }
+
+  private closeVirtualBridge(): void {
+    const bridge = this.virtual
+    this.virtual = null
+    bridge?.close()
+  }
+
+  private virtualClosed(): void {
+    // The core sees the socket close and detaches the mount itself.
+    this.virtual = null
+    this.virtualMount = ''
+    this.virtualLastKey = ''
+  }
+
   /// One 0x18 range reply. Returns true when it belongs to this class.
   handlePullChunk(
     id: number,
@@ -245,7 +564,10 @@ export class RemoteClipboardSync {
     data: Uint8Array,
   ): boolean {
     const active = this.pullActive.get(id)
-    if (!active || active.stageId === '') return false
+    if (!active || active.stageId === '') {
+      // No download owns this id: it is a virtual-file read.
+      return this.virtual?.handleChunk(id, status, offset, data) === true
+    }
     if (active.appending) {
       // The host sent a second range before the first append settled.
       this.failPull('remote_clipboard_incomplete')
@@ -278,6 +600,8 @@ export class RemoteClipboardSync {
         active.appending = false
         active.offset += chunk.byteLength
         active.received += chunk.byteLength
+        this.pullReceived += chunk.byteLength
+        this.emitDownloadProgress()
         // Check the bytes, not the requested size: a zero-byte file never
         // sent a request and is completed in beginPull().
         if (active.offset >= active.entry.size) {
@@ -394,27 +718,22 @@ export class RemoteClipboardSync {
       // local->remote poll must not offer them straight back.
       this.echo?.rememberPaths(paths)
       this.onApplied?.(result.count)
+      this.emitDownloadProgress(true)
+      this.explicitOffer = null
+      this.setPrompt(null)
       this.busy = false
       this.pullStages = []
       this.pullPaths = []
       this.pullBatch = ''
-      this.drainPendingOffer()
     } catch (error) {
       this.failPull(failureCode(error))
     }
   }
 
-  /// Run an announcement that was deferred while another transfer was using
-  /// the channel.
-  private drainPendingOffer(): void {
-    if (this.pendingOffer === null || this.busy) return
-    const offer = this.pendingOffer
-    this.pendingOffer = null
-    this.handleOffer(offer.files, offer.omitted)
-  }
 
   private failPull(code: string): void {
     this.pullCancelled = true
+    this.abortStaged(this.pullStages)
     for (const active of this.pullActive.values()) {
       window.clearTimeout(active.timer)
       active.timer = 0
@@ -426,16 +745,54 @@ export class RemoteClipboardSync {
     this.pullStarting = false
     this.busy = false
     this.pullLastKey = ''
+    if (this.prompt !== null) {
+      this.setPrompt({
+        ...this.prompt,
+        phase: 'failed',
+        received: this.pullReceived,
+      })
+    }
     this.onError(code)
     // A different announcement may have arrived during the failed batch; it
     // is still worth processing. The host deduplicates announcements, so the
     // same one cannot loop here.
-    this.drainPendingOffer()
   }
 
-  /// Stop the pull path without reporting an error (setting off, panel open,
-  /// session gone).
-  private cancelPull(): void {
+  /// Delete half-written staging files immediately. Entries otherwise expire
+  /// lazily after 30 minutes, which is too late when the clipboard changed
+  /// mid-download and the user can see the partial file in the cache.
+  private abortStaged(ids: ReadonlyArray<string | undefined>): void {
+    if (this.token() === '') return
+    for (const id of ids) {
+      if (typeof id === 'string' && id !== '') {
+        void abortClipboardStage(this.token(), id).catch(() => undefined)
+      }
+    }
+  }
+
+  /// Abandon both download paths. A virtual mount does not share the
+  /// `sending`/`eof` channel, so it survives the files panel opening.
+  private cancelDownloads(): void {
+    const active = this.active
+    if (active) {
+      active.cancelled = true
+      active.finishing = true
+      window.clearTimeout(active.timer)
+      if (active.id !== 0) {
+        this.connection()?.sendFileAction('cancel', { id: active.id })
+      } else if (active.requesting) {
+        // The host has not answered `request` yet; claim its answer so the
+        // files panel cannot mistake it for one of its own downloads.
+        this.pendingCancel = true
+      }
+    }
+    this.abortStaged(this.stagingIds)
+    this.abortStaged(this.pullStages)
+    this.active = null
+    this.queue = []
+    this.stagingIds = []
+    this.busy = false
+    this.lastKey = ''
     if (
       this.pullActive.size === 0 && this.pullQueue.length === 0 &&
       !this.pullStarting
@@ -443,18 +800,16 @@ export class RemoteClipboardSync {
       return
     }
     this.pullCancelled = true
-    for (const active of this.pullActive.values()) {
-      window.clearTimeout(active.timer)
-      active.timer = 0
+    for (const pull of this.pullActive.values()) {
+      window.clearTimeout(pull.timer)
+      pull.timer = 0
     }
     this.pullActive.clear()
     this.pullQueue = []
     this.pullStages = []
     this.pullPaths = []
     this.pullStarting = false
-    this.busy = false
     this.pullLastKey = ''
-    this.pendingOffer = null
   }
 
   /// The session's `file` events. Returns true when this class owns the
@@ -559,27 +914,15 @@ export class RemoteClipboardSync {
     return true
   }
 
-  /// Stop the current batch (panel opened, setting off, session gone).
+  /// Stop everything (setting off, session gone). The virtual mount is
+  /// released so its clipboard paths cannot outlive the transport.
   cancel(): void {
-    const active = this.active
-    if (active) {
-      active.cancelled = true
-      active.finishing = true
-      window.clearTimeout(active.timer)
-      if (active.id !== 0) {
-        this.connection()?.sendFileAction('cancel', { id: active.id })
-      } else if (active.requesting) {
-        // The host has not answered `request` yet; claim its answer so the
-        // files panel cannot mistake it for one of its own downloads.
-        this.pendingCancel = true
-      }
-    }
-    this.active = null
-    this.queue = []
-    this.stagingIds = []
-    this.busy = false
-    this.pendingOffer = null
-    this.cancelPull()
+    this.virtualGeneration += 1
+    this.virtualStarting = false
+    this.cancelDownloads()
+    this.clearVirtual()
+    this.explicitOffer = null
+    this.setPrompt(null)
   }
 
   reset(): void {
@@ -688,8 +1031,8 @@ export class RemoteClipboardSync {
       const result = await applyClipboardStage(this.token(), ids)
       this.onApplied?.(result.count)
       this.busy = false
-      this.drainPendingOffer()
     } catch (error) {
+      this.abortStaged(ids)
       this.busy = false
       this.lastKey = ''
       this.onError(failureCode(error))
@@ -708,12 +1051,12 @@ export class RemoteClipboardSync {
         this.pendingCancel = true
       }
     }
+    this.abortStaged(this.stagingIds)
     this.active = null
     this.queue = []
     this.stagingIds = []
     this.busy = false
     this.lastKey = ''
     this.onError(code)
-    this.drainPendingOffer()
   }
 }

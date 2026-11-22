@@ -334,6 +334,39 @@ void test_no_config_directory() {
 
 }  // namespace
 
+void test_abort_removes_temp() {
+  const fs::path dir = fs::temp_directory_path() / "molink-clipboard-stage-abort";
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+  fs::create_directories(dir, ec);
+
+  clipboard_stage stage(dir.string(), [](const std::vector<std::string>&) {
+    return true;
+  });
+  std::string id;
+  std::string path;
+  expect(stage.begin("half.bin", 10, id, path) == stage_error::none,
+         "the partial entry is accepted");
+  uint64_t received = 0;
+  expect(stage.append(id, 0, "12345", 5, received) == stage_error::none,
+         "the partial bytes are accepted");
+  stage.abort(id);
+  expect(stage.pending() == 0, "abort drops the staging entry");
+
+  bool has_file = false;
+  for (const auto& entry : fs::directory_iterator(dir)) {
+    (void)entry;
+    has_file = true;
+  }
+  expect(!has_file, "abort deletes the half-written file");
+
+  std::size_t count = 0;
+  expect(stage.apply({id}, count) == stage_error::not_found,
+         "an aborted id can no longer be applied");
+
+  fs::remove_all(dir, ec);
+}
+
 int main() {
   test_sanitize_name();
   test_append_and_apply();
@@ -344,6 +377,7 @@ int main() {
   test_apply_failure_can_retry();
   test_batch_directory();
   test_no_config_directory();
+  test_abort_removes_temp();
   std::printf("%d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;
 }

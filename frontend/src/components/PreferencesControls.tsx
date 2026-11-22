@@ -560,6 +560,12 @@ export function PreferencesControls({
   const setRemoteClipboardFiles = useAppStore(
     (state) => state.setRemoteClipboardFiles,
   )
+  const clipboardVirtualFiles = useAppStore(
+    (state) => state.clipboardVirtualFiles,
+  )
+  const setClipboardVirtualFiles = useAppStore(
+    (state) => state.setClipboardVirtualFiles,
+  )
   const rememberDevice = useAppStore((state) => state.rememberDevice)
   const setRememberDevice = useAppStore((state) => state.setRememberDevice)
   const keyboardGrab = useAppStore((state) => state.keyboardGrab)
@@ -744,22 +750,40 @@ export function PreferencesControls({
           </div>
 
           {localMode ? (
-            <div className="flex items-center justify-between gap-4">
-              <div>
-                <div className="flex items-center gap-2 text-[12px] font-medium text-ink">
-                  <ClipboardCopy size={14} className="text-accent" />
-                  {t('settings.remoteClipboardFiles')}
+            <>
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <div className="flex items-center gap-2 text-[12px] font-medium text-ink">
+                    <ClipboardCopy size={14} className="text-accent" />
+                    {t('settings.remoteClipboardFiles')}
+                  </div>
+                  <div className="mt-1 text-[11px] leading-relaxed text-muted">
+                    {t('settings.remoteClipboardFilesHint')}
+                  </div>
                 </div>
-                <div className="mt-1 text-[11px] leading-relaxed text-muted">
-                  {t('settings.remoteClipboardFilesHint')}
-                </div>
+                <Toggle
+                  checked={remoteClipboardFiles}
+                  onChange={setRemoteClipboardFiles}
+                  label={t('settings.remoteClipboardFiles')}
+                />
               </div>
-              <Toggle
-                checked={remoteClipboardFiles}
-                onChange={setRemoteClipboardFiles}
-                label={t('settings.remoteClipboardFiles')}
-              />
-            </div>
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <div className="flex items-center gap-2 text-[12px] font-medium text-ink">
+                    <ClipboardCopy size={14} className="text-accent" />
+                    {t('settings.clipboardVirtualFiles')}
+                  </div>
+                  <div className="mt-1 text-[11px] leading-relaxed text-muted">
+                    {t('settings.clipboardVirtualFilesHint')}
+                  </div>
+                </div>
+                <Toggle
+                  checked={clipboardVirtualFiles}
+                  onChange={setClipboardVirtualFiles}
+                  label={t('settings.clipboardVirtualFiles')}
+                />
+              </div>
+            </>
           ) : null}
 
           <div className="space-y-2">

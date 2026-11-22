@@ -2,6 +2,10 @@
 # Build a Linux .deb from the local source tree.
 # Layout: /opt/molink/{bin,lib,web}; the shell finds core and web relative to
 # the executable, and the core finds bundled libraries through ../lib.
+#
+# Virtual clipboard paste (FUSE) is built when libfuse3-dev is installed; the
+# runtime packages declare libfuse3-3 and fuse3 (fusermount3). Without the dev
+# package the core still builds and falls back to downloading.
 set -euo pipefail
 trap 'rm -rf "${WORK:-}"' EXIT
 
@@ -20,9 +24,20 @@ AV1_ARG=()
 if [ -n "${MOLINK_AV1_SDK:-}" ]; then
   AV1_ARG+=("-DMOLINK_AV1_SDK=$MOLINK_AV1_SDK")
 fi
+# Capture the configure output: the FUSE virtual clipboard is optional at build
+# time, and a release must not silently ship without it.
 cmake -S "$ROOT/backend" -B "$ROOT/backend/build" -DCMAKE_BUILD_TYPE=Release \
   -DMOLINK_ENABLE_AV1=ON -DMOLINK_ENABLE_JPEG=ON -DMOLINK_ENABLE_VPX=ON \
-  ${AV1_ARG[@]+"${AV1_ARG[@]}"} ${MOLINK_EXTRA_CMAKE_ARGS:-} >/dev/null
+  ${AV1_ARG[@]+"${AV1_ARG[@]}"} ${MOLINK_EXTRA_CMAKE_ARGS:-} \
+  | tee "$WORK/configure.log"
+if ! grep -q "FUSE virtual clipboard enabled" "$WORK/configure.log"; then
+  if [ "${MOLINK_REQUIRE_FUSE:-0}" = "1" ]; then
+    echo "error: libfuse3-dev is missing, refusing to build a package without" \
+         "virtual clipboard files (set MOLINK_REQUIRE_FUSE=0 to override)" >&2
+    exit 1
+  fi
+  echo "warning: libfuse3-dev not found; the package will download clipboard files"
+fi
 cmake --build "$ROOT/backend/build" --parallel
 
 echo "== build frontend"
@@ -105,7 +120,7 @@ Package: molink
 Version: $VERSION
 Architecture: $ARCH
 Maintainer: moLink Contributors <molink@example.invalid>
-Depends: libgtk-3-0t64 | libgtk-3-0, libwebkit2gtk-4.1-0, libx11-6, libxext6, libxtst6, libxfixes3, libxdamage1, libxrender1, libxi6, libxkbcommon0, zlib1g, libuv1t64 | libuv1, libsqlite3-0, libssl3t64 | libssl3, libjpeg-turbo8 | libjpeg8
+Depends: libgtk-3-0t64 | libgtk-3-0, libwebkit2gtk-4.1-0, libx11-6, libxext6, libxtst6, libxfixes3, libxdamage1, libxrender1, libxi6, libxkbcommon0, zlib1g, libuv1t64 | libuv1, libsqlite3-0, libssl3t64 | libssl3, libjpeg-turbo8 | libjpeg8, libfuse3-3, fuse3
 Section: net
 Priority: optional
 Description: Web-first remote desktop

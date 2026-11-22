@@ -48,8 +48,10 @@ class clipboard_stage {
   using files_applier = std::function<bool(const std::vector<std::string>&)>;
   using clock_fn = std::function<uint64_t()>;
 
-  /// Matches the clipboard-file download cap; larger copies stay manual.
-  static constexpr uint64_t kMaxFileBytes = 256ull * 1024 * 1024;
+  /// Largest single file the explicit "取出" path may download. The automatic
+  /// fallback uses much smaller caps (64 MiB / 256 MiB total); this only bounds
+  /// a selection the user explicitly asked to transfer.
+  static constexpr uint64_t kMaxFileBytes = 4ull * 1024 * 1024 * 1024;
   /// A staging entry nobody finished is dropped on the next request after
   /// this long. Applied files are no longer entries and are kept.
   static constexpr uint64_t kEntryTtlMs = 30ull * 60 * 1000;
@@ -84,6 +86,11 @@ class clipboard_stage {
   /// success the entries are removed; the files stay because the clipboard
   /// references them.
   stage_error apply(const std::vector<std::string>& ids, std::size_t& count);
+
+  /// Discards an unfinished entry and deletes its temp file. Called when the
+  /// clipboard changes mid-download, so a half file does not linger until the
+  /// TTL sweep. Unknown ids (already applied or swept) are ignored.
+  void abort(const std::string& id);
 
   /// Drop entries older than kEntryTtlMs (called lazily by every operation).
   void sweep();
