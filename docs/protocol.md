@@ -52,6 +52,9 @@
 | `0x12` | `FILE_DATA` | `u32 id` + `u32 保留` + `u64 offset` + 文件字节 |
 | `0x13` | `AUDIO` | 交错 little-endian 16-bit PCM（格式见 welcome） |
 | `0x14` | `VOICE` | 语音通话 PCM：48 kHz 单声道 little-endian 16-bit |
+| `0x15` | `TILE_CLOCK` | 每格最新像素时间戳映射 |
+| `0x16` | `TILE_SEQ` | 每格已应用序列映射 |
+| `0x17` | `CLIPBOARD_RANGE` | 虚拟文件范围回复（客户端→主机）：`u32 id` + `u32 错误码` + `u64 offset` + 字节 |
 | `0x7F` | `CONTROL` | 会话级 JSON 控制 |
 | `0x80` | `PING` | 空 |
 | `0x81` | `PONG` | 空 |
@@ -453,6 +456,19 @@ X11 的屏幕抓取**不包含鼠标光标**，服务端单独发送形状与位
   返回内容。id 是不透明哈希，文件不在当前剪贴板时返回 404。页面把文件按上面的上传
   流程传到远端后，再发 `clipboard-set`，因此远端（包括启用剪贴板重定向的 RDP 客户端）
   可以直接粘贴。端到端同步只在本机壳层/本机浏览器可用。
+- 虚拟文件流（Windows 主机，RDP 式粘贴）：客户端在 `hello` 里声明
+  `"clipboard_stream": true`，主机在 `welcome` 里回 `"clipboard_stream": true`
+  （双方都支持才为真）。之后：
+  1. 客户端只发 `{"type":"file","action":"clipboard-offer","files":[...]}`，不上传字节；
+  2. 主机在用户真正粘贴时发
+     `{"type":"file","action":"fetch","id":N,"index":I,"name":"a.txt","offset":O,"length":L}`；
+  3. 客户端用 `GET /api/clipboard-file?id=..&offset=..&length=..`（仅回环）读取本机
+     剪贴板文件的该范围，再用 `0x17` 回复：成功时错误码为 0，字节紧跟在 16 字节头后；
+     文件已不在剪贴板时错误码为 1。
+  主机按 64 KiB 一块读取，单块 10 s、一次 `Read` 共 60 s 预算。成功路径上主机不再把
+  文件写进 `~/moLink`，Explorer 直接把内容写进用户选择的目标目录，并显示复制进度。
+  未声明该能力（或 `MOLINK_CLIPBOARD_STREAM=0`）时退回上面的整文件上传路径。
+  `clipboard-file` 的 `offset`/`length` 可省略；省略时行为与旧版一致（整个文件）。
 
 **音频**
 

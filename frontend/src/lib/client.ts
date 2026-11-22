@@ -107,6 +107,12 @@ export interface Welcome {
   clipboard_lazy_files?: number
   /** Maximum total bytes in one delayed offer (host default 2 GiB). */
   clipboard_lazy_bytes?: number
+  /**
+   * Negotiated virtual-file streaming: true only when this viewer advertised
+   * `clipboard_stream` and the host can serve range reads. Pasting then
+   * writes straight into the destination folder; nothing is staged.
+   */
+  clipboard_stream?: boolean
   audio?: boolean
   audio_format?: {
     sample_rate: number
@@ -183,6 +189,11 @@ export interface FileMessage {
   index?: number
   tag?: number
   dest?: string
+  /// Virtual-file stream: the offer reply says `stream: true`, and a `fetch`
+  /// names a byte range of one offered file. `id` is the host's range id.
+  stream?: boolean
+  offset?: number
+  length?: number
   files?: { name: string; size: number }[]
   paths?: string[]
 }
@@ -883,6 +894,9 @@ export class MolinkClient {
           type: 'request-access',
           name: clientName || 'moLink web',
           client: 'molink-web',
+          // No hello follows an approved request, so the one capability the
+          // clipboard needs travels here.
+          clipboard_stream: true,
           ...(clientId ? { device_id: clientId } : {}),
         })
       } else {
@@ -904,6 +918,11 @@ export class MolinkClient {
           vp9_stream: this.vp9Capable,
           vp8_stream: this.vp8Capable,
           av1_native: this.av1NativeCapable,
+          // This page can answer a range fetch for a file on its local
+          // clipboard, which lets the host paste virtual files straight into
+          // the destination folder. The host confirms by echoing
+          // `clipboard_stream` in welcome; without it the upload path stays.
+          clipboard_stream: true,
           // A browser with WebRTC lets the host send H.264 as a real video
           // track instead of MOLK frames.
           webrtc: typeof RTCPeerConnection !== 'undefined',
@@ -1519,6 +1538,34 @@ export class MolinkClient {
     const packet = encodePacket({
       version: PROTOCOL_VERSION,
       type: PacketType.fileData,
+      flags: 0,
+      session: 0,
+      seq: 0,
+      tsUs: Date.now() * 1000,
+      payload,
+    })
+    this.sendRawPacket(packet)
+  }
+
+  /// Answer one virtual-file range fetch. `error` 0 means `data` holds the
+  /// bytes for `[offset, offset+length)`; anything else makes the host's
+  /// waiting paste fail immediately.
+  sendClipboardRange(
+    id: number,
+    error: number,
+    offset: number,
+    data: Uint8Array,
+  ): void {
+    if (!this.isLive()) return
+    const payload = new Uint8Array(16 + data.byteLength)
+    const view = new DataView(payload.buffer)
+    view.setUint32(0, id >>> 0, true)
+    view.setUint32(4, error >>> 0, true)
+    view.setBigUint64(8, BigInt(offset), true)
+    payload.set(data, 16)
+    const packet = encodePacket({
+      version: PROTOCOL_VERSION,
+      type: PacketType.clipboardRange,
       flags: 0,
       session: 0,
       seq: 0,
@@ -3109,6 +3156,7 @@ export class MolinkClient {
       vp9_stream: this.vp9Capable,
       vp8_stream: this.vp8Capable,
       av1_native: this.av1NativeCapable,
+      clipboard_stream: true,
       client: 'molink-web',
       protocol: 1,
     }

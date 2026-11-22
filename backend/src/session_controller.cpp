@@ -175,6 +175,15 @@ bool bool_field(const uvcpp_json& j, const char* key, bool fallback) {
   return it->get<bool>();
 }
 
+/// `MOLINK_CLIPBOARD_STREAM=0` is the kill switch for the virtual-file path:
+/// even a viewer that advertises the capability falls back to the eager
+/// upload, without needing another build.
+bool clipboard_stream_capable(const uvcpp_json& j) {
+  const char* env = std::getenv("MOLINK_CLIPBOARD_STREAM");
+  if (env != nullptr && std::string(env) == "0") return false;
+  return bool_field(j, "clipboard_stream", false);
+}
+
 input_injector::status inject_one(input_injector& input, const uvcpp_json& event,
                                   std::string& err) {
   if (!event.is_object()) {
@@ -1192,7 +1201,12 @@ void send_welcome(session_transport* transport, const session_info& session,
   j["clipboard_lazy"] =
       opt.clipboard != nullptr && opt.clipboard->supports_lazy_files();
   j["clipboard_lazy_files"] = static_cast<uint64_t>(kMaxLazyFiles);
-  j["clipboard_lazy_bytes"] = kMaxLazyBytes;
+  j["clipboard_lazy_bytes"] = static_cast<uint64_t>(kMaxLazyBytes);
+  // Negotiated, not merely supported: both sides must be able to stream. A
+  // client that did not advertise it in hello keeps the eager upload path.
+  j["clipboard_stream"] = opt.clipboard != nullptr &&
+                          opt.clipboard->supports_lazy_files() &&
+                          session.clipboard_stream;
   j["device_id"] = opt.device_id;
   if (!opt.cert_fingerprint.empty()) {
     j["tls_fingerprint"] = opt.cert_fingerprint;
@@ -1261,7 +1275,7 @@ void session_controller::update_file_retry_timer() {
   }
 }
 
-void session_controller::send_lazy_offer_reply(bool ok,
+void session_controller::send_lazy_offer_reply(bool ok, bool stream,
                                                const std::string& message) {
   std::shared_ptr<session_transport> transport = transport_.lock();
   if (!transport) return;
@@ -1270,14 +1284,50 @@ void session_controller::send_lazy_offer_reply(bool ok,
   out["action"] = "clipboard-offer";
   out["ok"] = ok;
   out["lazy"] = ok;
+  // True when the host will fetch byte ranges instead of asking for an
+  // upload. The page then keeps answering `fetch` and never uploads.
+  out["stream"] = ok && stream;
   if (!ok) out["message"] = message;
+  send_json(transport.get(), out);
+}
+
+void session_controller::request_lazy_range(std::size_t index, uint32_t id,
+                                            uint64_t offset,
+                                            uint32_t length) {
+  std::shared_ptr<session_transport> transport = transport_.lock();
+  std::shared_ptr<session_info> session = session_.lock();
+  std::shared_ptr<remote_file_source> source = stream_source_;
+  const auto fail = [&source](uint32_t request_id, uint64_t at) {
+    if (source) source->note_range(request_id, 1, at, nullptr, 0);
+  };
+  // A posted request can outlive its read or its offer; do not ask the
+  // viewer for bytes nothing is waiting on.
+  if (!source || index >= source->size() || !source->has_pending(id)) {
+    return;
+  }
+  if (!transport || !session || !session->authenticated || !options_.lazy ||
+      !options_.lazy->active_for(session->id)) {
+    fail(id, offset);
+    return;
+  }
+  const lazy_clipboard_file& file = source->files()[index];
+  uvcpp_json out;
+  out["type"] = "file";
+  out["action"] = "fetch";
+  out["id"] = static_cast<uint64_t>(id);
+  // `index` is not part of the essential contract (name would identify the
+  // file), but two folders can contribute the same base name in one selection.
+  out["index"] = static_cast<uint64_t>(index);
+  out["name"] = file.name;
+  out["offset"] = offset;
+  out["length"] = static_cast<uint64_t>(length);
   send_json(transport.get(), out);
 }
 
 void session_controller::request_lazy_file(std::size_t index) {
   std::shared_ptr<session_transport> transport = transport_.lock();
   std::shared_ptr<session_info> session = session_.lock();
-  std::shared_ptr<lazy_file_source> source = lazy_source_;
+  std::shared_ptr<lazy_blob_source> source = lazy_source_;
   if (!source || index >= source->size()) {
     if (source) source->note_failed(index);
     return;
@@ -1305,7 +1355,7 @@ void session_controller::on_upload_event(int tag,
                                          const std::string& path) {
   (void)id;
   (void)size;
-  std::shared_ptr<lazy_file_source> source = lazy_source_;
+  std::shared_ptr<lazy_blob_source> source = lazy_source_;
   if (!source) return;
   const int index = tag - lazy_tag_base_;
   if (index < 0 || static_cast<std::size_t>(index) >= source->size()) return;
@@ -1820,6 +1870,7 @@ void session_controller::on_text(const std::string& text) {
       session->av1_stream =
           bool_field(j, "av1_stream", false) || hello_av1_native;
       session->seq_clock = bool_field(j, "seq_clock", false);
+      session->clipboard_stream = clipboard_stream_capable(j);
       session->video_push = bool_field(j, "video_push", false);
       session->h264_stream = bool_field(j, "h264_stream", false);
       session->vp9_stream = bool_field(j, "vp9_stream", false);
@@ -1990,6 +2041,9 @@ void session_controller::on_text(const std::string& text) {
         string_field(j, "name").substr(0, 64);
     session->client_id =
         string_field(j, "device_id").substr(0, 64);
+    // A no-code session never sends a hello, so this request carries the one
+    // capability the clipboard path needs.
+    session->clipboard_stream = clipboard_stream_capable(j);
     const std::weak_ptr<session_controller> weak = weak_from_this();
     const uint32_t id = options_.access_requests->add(
         info,
@@ -2705,14 +2759,14 @@ void session_controller::on_text(const std::string& text) {
       // only; the bytes are fetched when a remote application first pastes.
       if (!options_.lazy || !options_.clipboard ||
           !options_.clipboard->supports_lazy_files()) {
-        send_lazy_offer_reply(false,
+        send_lazy_offer_reply(false, false,
                               "this host cannot render files on demand");
         return;
       }
       std::vector<lazy_clipboard_file> offered;
       const auto files_it = j.find("files");
       if (files_it == j.end() || !files_it->is_array()) {
-        send_lazy_offer_reply(false, "files must be an array");
+        send_lazy_offer_reply(false, false, "files must be an array");
         return;
       }
       // Cap the parse before the validator reports the real reason, so a huge
@@ -2720,7 +2774,8 @@ void session_controller::on_text(const std::string& text) {
       for (const auto& item : *files_it) {
         if (offered.size() >= kMaxLazyFiles) break;
         if (!item.is_object()) {
-          send_lazy_offer_reply(false, "each file must be an object");
+          send_lazy_offer_reply(false, false,
+                                "each file must be an object");
           return;
         }
         lazy_clipboard_file file;
@@ -2731,45 +2786,79 @@ void session_controller::on_text(const std::string& text) {
         }
         offered.push_back(std::move(file));
       }
-      // `source` posts the fetch to this session's event loop; the clipboard
-      // thread then waits on its condition variable, never on the network.
+      // `source` posts to this session's event loop; the clipboard thread
+      // then waits on its condition variable, never on the network. A viewer
+      // that advertised `clipboard_stream` gets a range source, so a paste
+      // writes Explorer's target file directly and nothing is staged under
+      // ~/moLink. Everyone else keeps the upload-then-CF_HDROP path.
+      const bool stream = session->clipboard_stream;
       std::weak_ptr<session_controller> weak = weak_from_this();
       auto post = options_.post;
-      auto source = std::make_shared<lazy_file_source>(
-          offered, [weak, post](std::size_t index) {
-            auto deliver = [weak, index] {
-              if (auto self = weak.lock()) self->request_lazy_file(index);
-            };
-            if (post) {
-              post(std::move(deliver));
-            } else {
-              deliver();
-            }
-          });
+      std::shared_ptr<lazy_blob_source> source;
+      std::shared_ptr<remote_file_source> new_stream;
+      if (stream) {
+        new_stream = std::make_shared<remote_file_source>(
+            offered, [weak, post](std::size_t index, uint32_t id,
+                                  uint64_t offset, uint32_t length) {
+              if (weak.expired()) return false;
+              auto deliver = [weak, index, id, offset, length] {
+                if (auto self = weak.lock()) {
+                  self->request_lazy_range(index, id, offset, length);
+                }
+              };
+              if (post) {
+                post(std::move(deliver));
+              } else {
+                deliver();
+              }
+              return true;
+            });
+        source = new_stream;
+      } else {
+        source = std::make_shared<lazy_file_source>(
+            offered, [weak, post](std::size_t index) {
+              auto deliver = [weak, index] {
+                if (auto self = weak.lock()) self->request_lazy_file(index);
+              };
+              if (post) {
+                post(std::move(deliver));
+              } else {
+                deliver();
+              }
+            });
+      }
       const lazy_offer_error error = options_.lazy->offer(
           session->id, string_field(j, "dest"), offered, source);
       if (error != lazy_offer_error::none) {
+        // The previous offer (if any) is still live; leave its routing alone.
         send_lazy_offer_reply(
-            false, error == lazy_offer_error::too_many_files
-                       ? "at most 8 files per clipboard offer"
-                       : (error == lazy_offer_error::too_large
-                              ? "clipboard files exceed 2 GiB"
-                              : "invalid clipboard file list"));
+            false, stream,
+            error == lazy_offer_error::too_many_files
+                ? "at most 8 files per clipboard offer"
+                : (error == lazy_offer_error::too_large
+                       ? "clipboard files exceed 2 GiB"
+                       : "invalid clipboard file list"));
         return;
       }
       lazy_source_ = std::move(source);
-      // Each offer owns a tag range; a late upload from the previous offer
-      // lands outside this range and is ignored.
-      if (lazy_tag_base_ > (1 << 24)) lazy_tag_base_ = 0;
-      lazy_tag_base_ += kLazyTagStride;
+      if (stream) {
+        stream_source_ = std::move(new_stream);
+      } else {
+        stream_source_.reset();
+        // Each eager offer owns a tag range; a late upload from the previous
+        // offer lands outside this range and is ignored.
+        if (lazy_tag_base_ > (1 << 24)) lazy_tag_base_ = 0;
+        lazy_tag_base_ += kLazyTagStride;
+      }
       std::string install_error;
       if (!options_.clipboard->install_lazy(options_.lazy, install_error)) {
         options_.lazy->clear_session(session->id);
         lazy_source_.reset();
-        send_lazy_offer_reply(false, install_error);
+        stream_source_.reset();
+        send_lazy_offer_reply(false, stream, install_error);
         return;
       }
-      send_lazy_offer_reply(true, std::string());
+      send_lazy_offer_reply(true, stream, std::string());
     } else if (action == "clipboard-fetch-failed") {
       // The viewer could not read the local file any more (the clipboard
       // changed). Fail that file at once instead of waiting out the timeout.
@@ -2995,6 +3084,33 @@ void session_controller::on_binary(const uint8_t* data, std::size_t len) {
                     pkt.payload.size() - 16);
       break;
     }
+    case protocol::packet_type::clipboard_range: {
+      // Reply to a virtual-file `fetch`: u32 request id, u32 error code,
+      // u64 offset, then the bytes. An error code makes the waiting Read()
+      // fail at once instead of sitting until its timeout.
+      if (!session->authenticated) {
+        send_error(transport.get(), "unauthorized",
+                   "send a hello message with a valid token");
+        break;
+      }
+      if (pkt.payload.size() < 16) {
+        send_error(transport.get(), "bad_packet",
+                   "clipboard range header is truncated");
+        break;
+      }
+      uint32_t id = 0;
+      uint32_t code = 0;
+      uint64_t offset = 0;
+      std::memcpy(&id, pkt.payload.data(), sizeof(id));
+      std::memcpy(&code, pkt.payload.data() + 4, sizeof(code));
+      std::memcpy(&offset, pkt.payload.data() + 8, sizeof(offset));
+      if (stream_source_) {
+        stream_source_->note_range(id, code, offset,
+                                   pkt.payload.data() + 16,
+                                   pkt.payload.size() - 16);
+      }
+      break;
+    }
     case protocol::packet_type::input:
       send_error(transport.get(), "not_implemented",
                  "input injection is not implemented");
@@ -3026,6 +3142,7 @@ void session_controller::on_close(int code, const std::string& reason) {
   if (file_retry_timer_) file_retry_timer_->stop();
   // Wake any clipboard thread blocked on this session's lazy offer before the
   // transport goes away, then release the host clipboard if we owned it.
+  stream_source_.reset();
   lazy_source_.reset();
   if (options_.lazy && options_.lazy->clear_session(session->id) &&
       options_.clipboard) {

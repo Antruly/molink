@@ -1045,6 +1045,9 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
             // copying a video from Explorer fail with a silent 413.
             constexpr uint64_t kMaxClipboardFile =
                 256ull * 1024ull * 1024ull;
+            // One virtual-file fetch is 64 KiB; 8 MiB leaves room for a
+            // caller that reads larger slices through the same route.
+            constexpr uint64_t kMaxRangeBytes = 8ull * 1024ull * 1024ull;
             std::error_code ec;
             const std::filesystem::path fs_path(path);
             if (!std::filesystem::is_regular_file(fs_path, ec) || ec) {
@@ -1053,7 +1056,45 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
               return;
             }
             const uint64_t size = std::filesystem::file_size(fs_path, ec);
-            if (ec || size > kMaxClipboardFile) {
+            if (ec) {
+              resp.status(404).json_str(R"({"code":"missing_file"})");
+              resp.end();
+              return;
+            }
+            // `offset` / `length` turn this into a range read for the virtual
+            // clipboard stream. Without them the whole file is returned, as
+            // before.
+            uint64_t offset = 0;
+            uint64_t length = 0;
+            const std::string* offset_query = req.query("offset");
+            const std::string* length_query = req.query("length");
+            if (offset_query != nullptr &&
+                !parse_offset(*offset_query, offset)) {
+              resp.status(400).json_str(R"({"code":"bad_offset"})");
+              resp.end();
+              return;
+            }
+            if (length_query != nullptr) {
+              if (!parse_offset(*length_query, length) ||
+                  length > kMaxRangeBytes) {
+                resp.status(400).json_str(R"({"code":"bad_length"})");
+                resp.end();
+                return;
+              }
+            }
+            if (offset > size) {
+              resp.status(416).json_str(
+                  R"({"code":"offset_out_of_range"})");
+              resp.end();
+              return;
+            }
+            const uint64_t available = size - offset;
+            const uint64_t take =
+                length_query != nullptr ? std::min(length, available)
+                                        : available;
+            // The whole-file form keeps the old 256 MiB ceiling. A bounded
+            // range is already capped above, so it needs no second limit.
+            if (length_query == nullptr && take > kMaxClipboardFile) {
               resp.status(413).json_str(R"({"code":"file_too_large"})");
               resp.end();
               return;
@@ -1064,8 +1105,20 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
               resp.end();
               return;
             }
-            std::string data((std::istreambuf_iterator<char>(in)),
-                             std::istreambuf_iterator<char>());
+            std::string data;
+            if (take != 0) {
+              in.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+              if (!in) {
+                resp.status(416).json_str(
+                    R"({"code":"offset_out_of_range"})");
+                resp.end();
+                return;
+              }
+              data.resize(static_cast<std::size_t>(take));
+              in.read(data.data(), static_cast<std::streamsize>(take));
+              const std::streamsize got = in.gcount();
+              data.resize(got > 0 ? static_cast<std::size_t>(got) : 0);
+            }
             resp.set_header("Cache-Control", "no-store")
                 .body(data, "application/octet-stream")
                 .end();

@@ -1,7 +1,10 @@
 #include "clipboard_lazy.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <cstring>
+#include <limits>
 #include <utility>
 
 namespace molink {
@@ -21,7 +24,103 @@ bool valid_name(const std::string& name) {
   return name != "." && name != "..";
 }
 
+/// Request ids are process-global rather than per offer: a late reply from a
+/// replaced offer must never satisfy a new offer's fetch that happened to
+/// allocate the same number. Wrapping after 4 billion fetches is harmless in
+/// practice; zero stays reserved for "no request".
+uint32_t next_range_id() {
+  static std::atomic<uint32_t> counter{1};
+  for (;;) {
+    const uint32_t id = counter.fetch_add(1, std::memory_order_relaxed);
+    if (id != 0) return id;
+  }
+}
+
 }  // namespace
+
+bool lazy_blob_seek(uint64_t size, uint64_t position, int64_t move,
+                    lazy_seek_origin origin, uint64_t& new_position) {
+  int64_t base = 0;
+  switch (origin) {
+    case lazy_seek_origin::begin:
+      base = 0;
+      break;
+    case lazy_seek_origin::current:
+      base = static_cast<int64_t>(position);
+      break;
+    case lazy_seek_origin::end:
+      base = static_cast<int64_t>(size);
+      break;
+    default:
+      return false;
+  }
+  // The files this protocol carries are capped far below INT64_MAX; refusing
+  // an overflowing request is still cheaper than wrapping the offset.
+  if (move > 0 && base > std::numeric_limits<int64_t>::max() - move) {
+    return false;
+  }
+  if (move < 0 && base < std::numeric_limits<int64_t>::min() - move) {
+    return false;
+  }
+  const int64_t target = base + move;
+  if (target < 0) return false;
+  new_position = static_cast<uint64_t>(target);
+  return true;
+}
+
+bool read_lazy_blob(lazy_blob_source& source, std::size_t index,
+                    uint64_t& position, uint8_t* buffer, uint32_t bytes,
+                    uint32_t& read, std::string& error,
+                    uint64_t chunk_timeout_ms, uint64_t total_timeout_ms) {
+  read = 0;
+  error.clear();
+  if (buffer == nullptr && bytes != 0) {
+    error = "null read buffer";
+    return false;
+  }
+  if (index >= source.size()) {
+    error = "clipboard file index out of range";
+    return false;
+  }
+  const uint64_t size = source.files()[index].size;
+  const steady_clock::time_point deadline =
+      steady_clock::now() + std::chrono::milliseconds(total_timeout_ms);
+  while (read < bytes) {
+    if (position >= size) break;  // clean end of file
+    const uint64_t want =
+        std::min<uint64_t>({static_cast<uint64_t>(bytes - read), size - position,
+                            kLazyStreamBlockBytes});
+    const steady_clock::time_point now = steady_clock::now();
+    if (now >= deadline) {
+      error = "clipboard file read timed out";
+      return false;
+    }
+    const uint64_t left_ms = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now)
+            .count());
+    std::vector<uint8_t> chunk;
+    std::string range_error;
+    if (!source.read_range(index, position, static_cast<uint32_t>(want), chunk,
+                           range_error,
+                           std::min(chunk_timeout_ms, left_ms), left_ms)) {
+      error = range_error.empty() ? "clipboard file read failed" : range_error;
+      return false;
+    }
+    if (chunk.size() > want) {
+      error = "clipboard range reply is larger than requested";
+      return false;
+    }
+    if (!chunk.empty()) {
+      std::memcpy(buffer + read, chunk.data(), chunk.size());
+      read += static_cast<uint32_t>(chunk.size());
+      position += chunk.size();
+    }
+    // A short (or empty) chunk means the viewer reached end of file. Its
+    // descriptor size may be stale if the file shrank after it was copied.
+    if (chunk.size() < want) break;
+  }
+  return true;
+}
 
 lazy_offer_error validate_lazy_offer(
     const std::vector<lazy_clipboard_file>& files) {
@@ -195,6 +294,134 @@ bool lazy_file_source::closed() const {
   return closed_;
 }
 
+remote_file_source::remote_file_source(std::vector<lazy_clipboard_file> files,
+                                       range_request_fn request)
+    : files_(std::move(files)), request_(std::move(request)) {}
+
+remote_file_source::~remote_file_source() { fail_all("destroyed"); }
+
+bool remote_file_source::read_range(std::size_t index, uint64_t offset,
+                                    uint32_t length, std::vector<uint8_t>& out,
+                                    std::string& error,
+                                    uint64_t chunk_timeout_ms,
+                                    uint64_t total_timeout_ms) {
+  out.clear();
+  error.clear();
+  if (index >= files_.size()) {
+    error = "clipboard file index out of range";
+    return false;
+  }
+  const uint64_t size = files_[index].size;
+  if (offset >= size) return true;  // reading at EOF is not an error
+  const uint64_t available = size - offset;
+  const uint32_t want = static_cast<uint32_t>(
+      std::min<uint64_t>(static_cast<uint64_t>(length), available));
+  if (want == 0) return true;
+
+  auto wait = std::make_shared<pending>();
+  wait->offset = offset;
+  uint32_t id = 0;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (closed_) {
+      error = "clipboard offer is closed";
+      return false;
+    }
+    id = next_range_id();
+    pending_[id] = wait;
+  }
+
+  // Never call the transport while holding mutex_: the request posts to the
+  // session's event loop, and a very fast peer's reply re-enters note_range()
+  // from that loop.
+  const bool posted = request_ && request_(index, id, offset, want);
+  if (!posted) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    pending_.erase(id);
+    error = "clipboard range request was not sent";
+    return false;
+  }
+
+  const steady_clock::time_point started = steady_clock::now();
+  const steady_clock::time_point chunk_deadline =
+      started + std::chrono::milliseconds(chunk_timeout_ms);
+  const steady_clock::time_point total_deadline =
+      started + std::chrono::milliseconds(total_timeout_ms);
+  const steady_clock::time_point deadline =
+      std::min(chunk_deadline, total_deadline);
+
+  std::unique_lock<std::mutex> lock(mutex_);
+  for (;;) {
+    if (wait->done) {
+      pending_.erase(id);
+      if (wait->error != 0) {
+        error = "peer could not read the clipboard file";
+        return false;
+      }
+      if (wait->reply_offset != offset) {
+        error = "clipboard range reply has the wrong offset";
+        return false;
+      }
+      if (wait->data.size() > want) {
+        error = "clipboard range reply is larger than requested";
+        return false;
+      }
+      out = std::move(wait->data);
+      return true;
+    }
+    if (closed_) {
+      pending_.erase(id);
+      error = "clipboard offer is closed";
+      return false;
+    }
+    const steady_clock::time_point now = steady_clock::now();
+    if (now >= deadline) {
+      pending_.erase(id);
+      error = now >= total_deadline ? "clipboard file read timed out"
+                                    : "clipboard range reply timed out";
+      return false;
+    }
+    cv_.wait_until(lock, deadline);
+  }
+}
+
+void remote_file_source::note_range(uint32_t id, uint32_t error,
+                                    uint64_t offset, const uint8_t* data,
+                                    std::size_t length) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  const auto it = pending_.find(id);
+  if (it == pending_.end()) return;  // timed out, or a previous offer's reply
+  const std::shared_ptr<pending>& wait = it->second;
+  if (wait->done) return;
+  wait->reply_offset = offset;
+  wait->error = error;
+  if (error == 0) {
+    if (data == nullptr && length != 0) {
+      wait->error = 1;
+    } else if (length != 0) {
+      wait->data.assign(data, data + length);
+    }
+  }
+  wait->done = true;
+  cv_.notify_all();
+}
+
+bool remote_file_source::has_pending(uint32_t id) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return !closed_ && pending_.find(id) != pending_.end();
+}
+
+void remote_file_source::fail_all(const std::string&) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  closed_ = true;
+  cv_.notify_all();
+}
+
+bool remote_file_source::closed() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return closed_;
+}
+
 lazy_clipboard::lazy_clipboard(clock_fn clock) : clock_(std::move(clock)) {}
 
 uint64_t lazy_clipboard::now_ms() const {
@@ -208,7 +435,7 @@ uint64_t lazy_clipboard::now_ms() const {
 lazy_offer_error lazy_clipboard::offer(
     uint32_t session_id, std::string dest,
     std::vector<lazy_clipboard_file> files,
-    std::shared_ptr<lazy_file_source> source) {
+    std::shared_ptr<lazy_blob_source> source) {
   const lazy_offer_error error = validate_lazy_offer(files);
   if (error != lazy_offer_error::none) return error;
   if (session_id == 0 || !source) return lazy_offer_error::no_session;

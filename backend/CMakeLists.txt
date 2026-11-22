@@ -715,6 +715,28 @@ set_target_properties(molink-core-clipboard-lazy-test PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 add_test(NAME clipboard_lazy COMMAND molink-core-clipboard-lazy-test)
 
+# Windows-only: takes the OLE clipboard, then reads it back as Explorer does
+# (FileGroupDescriptorW + FileContents IStream). It is skipped unless
+# MOLINK_CLIPBOARD_WINDOWS_TEST=1 because it replaces the developer's clipboard.
+# The fetch table behind it is covered by clipboard_lazy_test on every OS.
+if(WIN32)
+  add_executable(molink-core-windows-clipboard-stream-test
+    tests/windows_clipboard_stream_test.cpp
+    src/clipboard/windows_clipboard.cpp
+    src/clipboard_lazy.cpp
+  )
+  target_include_directories(molink-core-windows-clipboard-stream-test
+    PRIVATE src)
+  target_link_libraries(molink-core-windows-clipboard-stream-test
+    PRIVATE ole32 oleaut32 uuid shell32 user32)
+  set_target_properties(molink-core-windows-clipboard-stream-test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+  add_test(NAME windows_clipboard_stream
+    COMMAND molink-core-windows-clipboard-stream-test)
+  set_tests_properties(windows_clipboard_stream PROPERTIES
+    SKIP_RETURN_CODE 77)
+endif()
+
 add_executable(molink-core-tile-scale-test
   tests/tile_scale_test.cpp
 )

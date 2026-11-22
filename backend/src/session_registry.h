@@ -35,6 +35,11 @@ struct session_info {
   /// The client advertised `seq_clock` in hello: it understands the per-cell
   /// applied-sequence map and can name the cells it missed.
   bool seq_clock = false;
+  /// The client advertised `clipboard_stream` in hello: it can answer a
+  /// range fetch for a file on its clipboard. The host then offers virtual
+  /// files (FileGroupDescriptorW + FileContents) and never stages them under
+  /// ~/moLink. Without it the eager upload path stays in use.
+  bool clipboard_stream = false;
   /// The client can take a WebRTC video track and data channel (Phase 4).
   bool webrtc = false;
   /// The peer for that track, once it exists. Shared because its callbacks hop

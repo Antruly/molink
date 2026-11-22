@@ -2,8 +2,9 @@ import { ApiError, fetchClipboardFile, fetchClipboardFiles } from './api'
 import { ClipboardEcho } from './clipboard-echo'
 import {
   LAZY_DEST,
+  clipboardFileMode,
   directUploadEligible,
-  lazyOfferEligible,
+  resolveClipboardFetch,
   type LazyCapability,
 } from './clipboard-lazy'
 import type { FileMessage } from './client'
@@ -56,6 +57,8 @@ export class ClipboardFileSync {
   private lazyFiles: QueuedFile[] = []
   private lazyDest = LAZY_DEST
   private lazyActive = false
+  /// The host accepted a streaming offer: answer `fetch` ranges, never upload.
+  private lazyStream = false
   private lazyOfferPending = false
   private lazyTag = 0
   private offerTimer: number | null = null
@@ -106,13 +109,23 @@ export class ClipboardFileSync {
       this.lastAttempt = Date.now()
 
       const capability = this.capability()
-      if (lazyOfferEligible(files, capability)) {
+      const mode = clipboardFileMode(files, capability)
+      if (mode === 'stream' || mode === 'lazy') {
+        // Descriptors only. In `stream` mode not a single byte is read here:
+        // the host fetches ranges when (and where) the user pastes.
+        if (mode === 'lazy' && !this.fallbackNotified) {
+          // The host must materialise the file under its staging folder
+          // before Explorer can copy it. Say so once, instead of letting the
+          // user wonder why a shortcut copy appears there.
+          this.fallbackNotified = true
+          this.onError('clipboard_files_staged')
+        }
         this.lastKey = key
         this.offer(files)
         return
       }
       // The host cannot delay, or the selection is outside its/our limits.
-      if (!directUploadEligible(files)) {
+      if (mode === 'none') {
         this.onError('clipboard_files_too_large')
         this.lastKey = key
         return
@@ -195,6 +208,12 @@ export class ClipboardFileSync {
     // running.
     if (message.action === 'clipboard-offer') {
       this.handleOfferReply(message)
+      return
+    }
+    if (message.action === 'fetch') {
+      // Virtual file: one byte range of an offered file. Independent of the
+      // upload queue, because Explorer reads several files concurrently.
+      void this.answerFetch(message)
       return
     }
     if (message.action === 'clipboard-fetch') {
@@ -315,6 +334,7 @@ export class ClipboardFileSync {
     }))
     this.lazyDest = LAZY_DEST
     this.lazyActive = false
+    this.lazyStream = false
     this.lazyOfferPending = true
     this.clearOfferTimer()
     this.connection()?.sendFileAction('clipboard-offer', {
@@ -329,6 +349,7 @@ export class ClipboardFileSync {
       if (!this.lazyOfferPending) return
       this.lazyOfferPending = false
       this.lazyActive = false
+      this.lazyStream = false
       this.lazyFiles = []
       this.lastKey = ''
       this.onError('clipboard_files_failed')
@@ -343,12 +364,66 @@ export class ClipboardFileSync {
     this.lazyOfferPending = false
     if (message.ok === false) {
       this.lazyActive = false
+      this.lazyStream = false
       this.lazyFiles = []
       this.fetchQueue = []
       this.onError('clipboard_files_failed')
       return
     }
     this.lazyActive = true
+    // The host streams only when it saw this viewer's `clipboard_stream`
+    // hello flag; the flag in the reply is the authoritative answer.
+    this.lazyStream = message.stream === true
+  }
+
+  /// Answer one host `fetch` with the requested range from this machine's
+  /// clipboard. A failure is reported in-band (error code 1) so the host's
+  /// waiting Read fails at once rather than waiting out its 64 KiB timeout.
+  private async answerFetch(message: FileMessage): Promise<void> {
+    const connection = this.connection()
+    if (!connection) return
+    const resolution = resolveClipboardFetch(message, this.lazyFiles)
+    if (!resolution.ok) {
+      if (resolution.id > 0) {
+        connection.sendClipboardRange(
+          resolution.id,
+          resolution.error,
+          resolution.offset,
+          new Uint8Array(0),
+        )
+      }
+      return
+    }
+    const { id, target } = resolution
+    const failed = () => connection.sendClipboardRange(
+      id, 1, target.offset, new Uint8Array(0),
+    )
+    if (!this.lazyActive || !this.lazyStream) {
+      failed()
+      return
+    }
+    let bytes: Uint8Array
+    try {
+      bytes = new Uint8Array(await fetchClipboardFile(
+        this.token(),
+        target.fileId,
+        target.offset,
+        target.length,
+      ))
+    } catch {
+      // The file left the local clipboard between copy and paste.
+      failed()
+      return
+    }
+    // The host asked for exactly min(length, size-offset); a short reply is a
+    // failed local read, not end of file, and must not truncate the paste.
+    const expected = Math.min(target.length, target.size - target.offset)
+    if (!this.lazyActive || !this.lazyStream ||
+        bytes.byteLength !== expected) {
+      failed()
+      return
+    }
+    connection.sendClipboardRange(id, 0, target.offset, bytes)
   }
 
   /// One upload at a time, exactly like the eager path, but with the tag the
@@ -444,6 +519,7 @@ export class ClipboardFileSync {
     this.fetchQueue = []
     this.lazyFiles = []
     this.lazyActive = false
+    this.lazyStream = false
     this.lazyOfferPending = false
     this.clearOfferTimer()
   }

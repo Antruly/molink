@@ -128,10 +128,15 @@ class session_controller final
   /// Host-side delayed clipboard rendering: ask this session's viewer for one
   /// offered file. Runs on the app loop (posted by the clipboard thread).
   void request_lazy_file(std::size_t index);
+  /// Streaming offer: ask the viewer for one byte range of one file. The
+  /// waiting thread is an IStream::Read (Explorer's paste), never this loop.
+  void request_lazy_range(std::size_t index, uint32_t id, uint64_t offset,
+                          uint32_t length);
   void on_upload_event(int tag, file_transfer::upload_event event,
                        uint32_t id, uint64_t received, uint64_t size,
                        const std::string& path);
-  void send_lazy_offer_reply(bool ok, const std::string& message);
+  void send_lazy_offer_reply(bool ok, bool stream,
+                             const std::string& message);
   void send_json_string(const std::string& text);
   bool send_file_chunk(uint32_t id, uint64_t offset, const uint8_t* data,
                        std::size_t len);
@@ -153,7 +158,10 @@ class session_controller final
   /// The source behind this session's current lazy offer. Uploads are tagged
   /// with a range owned by one offer, so a stale upload cannot complete a
   /// newer offer's file.
-  std::shared_ptr<lazy_file_source> lazy_source_;
+  std::shared_ptr<lazy_blob_source> lazy_source_;
+  /// Set when the current offer is a streaming one; the `clipboard_range`
+  /// binary packet is routed here.
+  std::shared_ptr<remote_file_source> stream_source_;
   int lazy_tag_base_ = 0;
   static constexpr int kLazyTagStride = 64;
   std::unique_ptr<uvcpp::uvcpp_timer> file_retry_timer_;

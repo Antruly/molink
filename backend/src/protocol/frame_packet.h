@@ -95,6 +95,12 @@ enum class packet_type : uint8_t {
   /// missed, so a lost frame is repaired on the next response instead of after
   /// the one-second timestamp window.
   tile_seq = 0x16,
+  /// Clipboard virtual-file range reply (client -> host): u32 request id,
+  /// u32 error code, u64 offset, then the bytes of that range. Answers a
+  /// JSON `{"type":"file","action":"fetch"}`. 0x15 is already tile_clock, so
+  /// this is the next free control-band value rather than the number an
+  /// early draft of the feature mentioned.
+  clipboard_range = 0x17,
   control = 0x7f,    ///< JSON control payload, session-scoped
   ping = 0x80,       ///< empty payload
   pong = 0x81,       ///< empty payload

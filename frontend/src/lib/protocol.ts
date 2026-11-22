@@ -30,6 +30,12 @@ export const PacketType = {
    * rows, u16 cell, u16 reserved, then cols*rows u32 capture sequences.
    */
   tileSeq: 0x16,
+  /**
+   * Virtual clipboard-file range reply (client -> host): u32 request id, u32
+   * error code, u64 offset, then the bytes of that range. Answers a JSON
+   * `{"type":"file","action":"fetch"}`. `tileClock` already owns 0x15.
+   */
+  clipboardRange: 0x17,
   control: 0x7f,
   ping: 0x80,
   pong: 0x81,

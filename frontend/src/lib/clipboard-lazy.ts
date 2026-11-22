@@ -16,10 +16,17 @@ export const MAX_DIRECT_TOTAL_BYTES = 256 * 1024 * 1024
 /// remote user pastes.
 export const LAZY_DEST = '~/moLink/clipboard-lazy'
 
+/// Largest range one virtual-file fetch may ask for. The host reads 64 KiB
+/// blocks; this only bounds a malformed or hostile request.
+export const MAX_CLIPBOARD_RANGE = 1024 * 1024
+
 export interface LazyCapability {
   maxFiles: number
   maxBytes: number
   maxFileBytes: number
+  /// Both sides can stream byte ranges: the host advertises
+  /// `clipboard_stream` only when this viewer asked for it in hello.
+  stream: boolean
 }
 
 function positiveInteger(value: unknown): number | null {
@@ -33,6 +40,7 @@ export function lazyCapability(
     clipboard_lazy?: unknown
     clipboard_lazy_files?: unknown
     clipboard_lazy_bytes?: unknown
+    clipboard_stream?: unknown
   } | null | undefined,
 ): LazyCapability | null {
   if (!welcome || welcome.clipboard_lazy !== true) return null
@@ -44,6 +52,7 @@ export function lazyCapability(
     maxFiles,
     maxBytes,
     maxFileBytes: Math.min(MAX_CLIPBOARD_FILE_BYTES, maxBytes),
+    stream: welcome.clipboard_stream === true,
   }
 }
 
@@ -82,4 +91,129 @@ export function directUploadEligible(
     if (total > MAX_DIRECT_TOTAL_BYTES) return false
   }
   return true
+}
+
+/// How a local selection reaches the remote clipboard.
+///
+/// `stream` and `lazy` both send descriptors only, so nothing is uploaded at
+/// copy time. `stream` additionally answers the host's range fetches instead
+/// of uploading a whole file on demand; `direct` is the old eager upload.
+export type ClipboardFileMode = 'stream' | 'lazy' | 'direct' | 'none'
+
+export function clipboardFileMode(
+  files: readonly ClipboardSize[],
+  capability: LazyCapability | null,
+): ClipboardFileMode {
+  if (lazyOfferEligible(files, capability)) {
+    return capability?.stream === true ? 'stream' : 'lazy'
+  }
+  if (directUploadEligible(files)) return 'direct'
+  return 'none'
+}
+
+/// One file of the offer, as the page remembers it.
+export interface OfferedClipboardFile {
+  id?: string
+  name: string
+  size: number
+}
+
+export interface ClipboardFetchTarget {
+  fileIndex: number
+  fileId: string
+  offset: number
+  length: number
+  /// Size the offer advertised; the reply must cover it exactly or report an
+  /// error, so a short local read cannot silently truncate the pasted file.
+  size: number
+}
+
+/// A `fetch` either names a readable range or must be answered with an error.
+export type ClipboardFetchResolution =
+  | { ok: true; id: number; target: ClipboardFetchTarget }
+  | { ok: false; id: number; offset: number; error: number }
+
+/// Maps a host `fetch` message (`id`, optional `index`, `name`, `offset`,
+/// `length`) onto the offered file it belongs to.
+///
+/// `id` here is the host's range-request id, not the local clipboard id. The
+/// index is preferred because two folders can contribute the same base name;
+/// the name is a cross-check against a stale message from a retired offer.
+export function resolveClipboardFetch(
+  message: {
+    id?: unknown
+    index?: unknown
+    name?: unknown
+    offset?: unknown
+    length?: unknown
+  },
+  files: readonly OfferedClipboardFile[],
+): ClipboardFetchResolution {
+  const id =
+    typeof message.id === 'number' && Number.isSafeInteger(message.id) &&
+    message.id > 0
+      ? message.id
+      : 0
+  const offset =
+    typeof message.offset === 'number' &&
+    Number.isSafeInteger(message.offset) && message.offset >= 0
+      ? message.offset
+      : 0
+  const length =
+    typeof message.length === 'number' && Number.isSafeInteger(message.length)
+      ? message.length
+      : 0
+  const fail = (): ClipboardFetchResolution => ({
+    ok: false,
+    id,
+    offset,
+    error: 1,
+  })
+  if (id === 0) return fail()
+  if (length <= 0 || length > MAX_CLIPBOARD_RANGE) return fail()
+
+  let index = -1
+  if (
+    typeof message.index === 'number' &&
+    Number.isInteger(message.index) &&
+    message.index >= 0 &&
+    message.index < files.length
+  ) {
+    index = message.index
+  } else if (typeof message.name === 'string') {
+    index = files.findIndex((file) => file.name === message.name)
+  }
+  if (index < 0) return fail()
+  const file = files[index]
+  if (!file || !file.id) return fail()
+  // A fetch for a different name under this index is a message from an offer
+  // this page has already replaced.
+  if (typeof message.name === 'string' && message.name !== file.name) {
+    return fail()
+  }
+  if (offset > file.size) return fail()
+  return {
+    ok: true,
+    id,
+    target: {
+      fileIndex: index,
+      fileId: file.id,
+      offset,
+      length,
+      size: file.size,
+    },
+  }
+}
+
+/// Query suffix for a range read through the local core's
+/// `/api/clipboard-file` route. Without a range it is empty (whole file).
+export function clipboardRangeQuery(
+  offset?: number,
+  length?: number,
+): string {
+  const params = new URLSearchParams()
+  if (offset !== undefined) params.set('offset', String(offset))
+  if (length !== undefined) params.set('length', String(length))
+  const text = params.toString()
+  return text === '' ? '' : `&${text}`
 }

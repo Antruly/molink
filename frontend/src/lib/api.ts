@@ -1,4 +1,5 @@
 import { formatHost } from './net'
+import { clipboardRangeQuery } from './clipboard-lazy'
 
 export interface DeviceCapabilities {
   screen_capture: boolean
@@ -658,15 +659,22 @@ export function fetchClipboardFiles(
 
 /// Contents of one file on the local clipboard. The id is opaque; the core
 /// refuses ids that are no longer in the clipboard.
+///
+/// With `offset`/`length` only that range is returned, which is how the host's
+/// virtual-file `fetch` is answered without reading (or uploading) the whole
+/// file.
 export async function fetchClipboardFile(
   token: string,
   id: string,
+  offset?: number,
+  length?: number,
 ): Promise<ArrayBuffer> {
   const headers = new Headers()
   if (token) headers.set('Authorization', `Bearer ${token}`)
   if (clientToken) headers.set('X-MoLink-Client', clientToken)
   const response = await fetch(
-    `${coreBaseUrl()}/api/clipboard-file?id=${encodeURIComponent(id)}`,
+    `${coreBaseUrl()}/api/clipboard-file?id=${encodeURIComponent(id)}` +
+      clipboardRangeQuery(offset, length),
     { headers, cache: 'no-store' },
   )
   if (!response.ok) {

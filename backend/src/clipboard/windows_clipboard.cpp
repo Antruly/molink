@@ -280,15 +280,168 @@ class lazy_file_stream final : public IStream {
   uint64_t position_ = 0;
 };
 
+/// IStream over a clipboard file whose bytes stay on the viewer's machine.
+///
+/// This is the RDP-style path: the host never stages the file. Each Read()
+/// posts a `fetch` for the next 64 KiB block and waits for the matching
+/// `clipboard_range` binary reply. Explorer calls Read() from its paste
+/// thread, so blocking here is exactly what drives the copy dialog's progress
+/// bar; the timeouts in read_lazy_blob guarantee it cannot hang forever.
+///
+/// The stream survives the data object: it owns a shared_ptr to the source,
+/// and a Clone shares that source while keeping its own seek position.
+class remote_file_stream final : public IStream {
+ public:
+  static IStream* open(std::shared_ptr<lazy_blob_source> source,
+                       std::size_t index) {
+    if (!source || index >= source->size()) return nullptr;
+    return new remote_file_stream(std::move(source), index);
+  }
+
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid,
+                                           void** object) override {
+    if (object == nullptr) return E_INVALIDARG;
+    *object = nullptr;
+    if (riid == IID_IUnknown || riid == IID_IStream ||
+        riid == IID_ISequentialStream) {
+      *object = static_cast<IStream*>(this);
+      AddRef();
+      return S_OK;
+    }
+    return E_NOINTERFACE;
+  }
+
+  ULONG STDMETHODCALLTYPE AddRef() override {
+    return static_cast<ULONG>(++references_);
+  }
+
+  ULONG STDMETHODCALLTYPE Release() override {
+    const ULONG value = static_cast<ULONG>(--references_);
+    if (value == 0) delete this;
+    return value;
+  }
+
+  HRESULT STDMETHODCALLTYPE Read(void* buffer, ULONG bytes,
+                                 ULONG* read) override {
+    if (read != nullptr) *read = 0;
+    if (bytes == 0) return S_OK;
+    if (buffer == nullptr) return STG_E_INVALIDPOINTER;
+    std::lock_guard<std::mutex> lock(mutex_);
+    uint32_t done = 0;
+    std::string error;
+    if (!read_lazy_blob(*source_, index_, position_,
+                        static_cast<uint8_t*>(buffer),
+                        static_cast<uint32_t>(bytes), done, error)) {
+      return STG_E_READFAULT;
+    }
+    if (read != nullptr) *read = done;
+    return S_OK;
+  }
+
+  HRESULT STDMETHODCALLTYPE Write(const void*, ULONG, ULONG*) override {
+    return STG_E_ACCESSDENIED;
+  }
+
+  HRESULT STDMETHODCALLTYPE Seek(LARGE_INTEGER move, DWORD origin,
+                                 ULARGE_INTEGER* new_position) override {
+    lazy_seek_origin kind = lazy_seek_origin::begin;
+    if (origin == STREAM_SEEK_SET) {
+      kind = lazy_seek_origin::begin;
+    } else if (origin == STREAM_SEEK_CUR) {
+      kind = lazy_seek_origin::current;
+    } else if (origin == STREAM_SEEK_END) {
+      kind = lazy_seek_origin::end;
+    } else {
+      return STG_E_INVALIDFUNCTION;
+    }
+    uint64_t target = 0;
+    if (!lazy_blob_seek(size_, position_, move.QuadPart, kind, target)) {
+      return STG_E_INVALIDFUNCTION;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    position_ = target;
+    if (new_position != nullptr) {
+      new_position->QuadPart = static_cast<ULONGLONG>(target);
+    }
+    return S_OK;
+  }
+
+  HRESULT STDMETHODCALLTYPE SetSize(ULARGE_INTEGER) override {
+    return STG_E_ACCESSDENIED;
+  }
+
+  HRESULT STDMETHODCALLTYPE CopyTo(IStream*, ULARGE_INTEGER, ULARGE_INTEGER*,
+                                   ULARGE_INTEGER*) override {
+    return E_NOTIMPL;
+  }
+
+  HRESULT STDMETHODCALLTYPE Commit(DWORD) override { return S_OK; }
+
+  HRESULT STDMETHODCALLTYPE Revert() override { return E_NOTIMPL; }
+
+  HRESULT STDMETHODCALLTYPE LockRegion(ULARGE_INTEGER, ULARGE_INTEGER,
+                                       DWORD) override {
+    return STG_E_INVALIDFUNCTION;
+  }
+
+  HRESULT STDMETHODCALLTYPE UnlockRegion(ULARGE_INTEGER, ULARGE_INTEGER,
+                                         DWORD) override {
+    return STG_E_INVALIDFUNCTION;
+  }
+
+  HRESULT STDMETHODCALLTYPE Stat(STATSTG* stat, DWORD) override {
+    if (stat == nullptr) return E_INVALIDARG;
+    ZeroMemory(stat, sizeof(STATSTG));
+    stat->type = STGTY_STREAM;
+    stat->cbSize.QuadPart = size_;
+    stat->grfMode = STGM_READ;
+    stat->grfLocksSupported = 0;
+    return S_OK;
+  }
+
+  HRESULT STDMETHODCALLTYPE Clone(IStream** output) override {
+    if (output == nullptr) return E_INVALIDARG;
+    *output = nullptr;
+    auto* clone = new remote_file_stream(source_, index_);
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      clone->position_ = position_;
+    }
+    *output = clone;
+    return S_OK;
+  }
+
+ private:
+  remote_file_stream(std::shared_ptr<lazy_blob_source> source,
+                     std::size_t index)
+      : source_(std::move(source)),
+        index_(index),
+        size_(source_->files()[index_].size) {}
+
+  std::atomic<ULONG> references_{1};
+  std::shared_ptr<lazy_blob_source> source_;
+  std::size_t index_ = 0;
+  uint64_t size_ = 0;
+  std::mutex mutex_;
+  uint64_t position_ = 0;
+};
+
 /// OLE data object for the lazy offer. Explorer and RDP-style consumers query
 /// CF_HDROP, FileGroupDescriptorW and FileContents from it. A FileContents
 /// request names one file through FORMATETC.lindex; its IStream is created
-/// only after the bytes for that file have arrived (or the render timeout
-/// expired).
+/// only after the bytes for that file have arrived (eager mode) or streams
+/// them range by range (streaming mode).
+///
+/// In streaming mode CF_HDROP is deliberately absent: advertising it would
+/// make Explorer copy every byte into a staged path first, which is the very
+/// detour this mode exists to avoid.
 class lazy_data_object final : public IDataObject {
  public:
   explicit lazy_data_object(std::shared_ptr<const lazy_offer> offer)
-      : offer_(std::move(offer)) {}
+      : offer_(std::move(offer)),
+        streaming_(offer_ && offer_->source && offer_->source->streaming()) {}
+
+  bool streaming() const { return streaming_; }
 
   HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid,
                                            void** object) override {
@@ -318,6 +471,10 @@ class lazy_data_object final : public IDataObject {
     if (format->dwAspect != DVASPECT_CONTENT) return DV_E_DVASPECT;
     const UINT cf = format->cfFormat;
     if (cf == CF_HDROP) {
+      // A virtual file paste must go through FileContents, not through a path
+      // the host does not have. Offering CF_HDROP would send Explorer to a
+      // staged copy instead.
+      if (streaming_) return DV_E_FORMATETC;
       if ((format->tymed & TYMED_HGLOBAL) == 0) return DV_E_TYMED;
       return get_hdrop(medium);
     }
@@ -351,7 +508,11 @@ class lazy_data_object final : public IDataObject {
     if (format == nullptr) return E_INVALIDARG;
     if (format->dwAspect != DVASPECT_CONTENT) return DV_E_DVASPECT;
     const UINT cf = format->cfFormat;
-    if (cf == CF_HDROP || cf == file_descriptor_format()) {
+    if (cf == CF_HDROP) {
+      if (streaming_) return DV_E_FORMATETC;
+      return (format->tymed & TYMED_HGLOBAL) != 0 ? S_OK : DV_E_TYMED;
+    }
+    if (cf == file_descriptor_format()) {
       return (format->tymed & TYMED_HGLOBAL) != 0 ? S_OK : DV_E_TYMED;
     }
     if (cf == file_contents_format()) {
@@ -382,13 +543,21 @@ class lazy_data_object final : public IDataObject {
       format.lindex = -1;
       format.ptd = nullptr;
     }
-    formats[0].cfFormat = static_cast<CLIPFORMAT>(CF_HDROP);
-    formats[0].tymed = TYMED_HGLOBAL;
-    formats[1].cfFormat = static_cast<CLIPFORMAT>(file_descriptor_format());
-    formats[1].tymed = TYMED_HGLOBAL;
-    formats[2].cfFormat = static_cast<CLIPFORMAT>(file_contents_format());
-    formats[2].tymed = TYMED_ISTREAM;
-    return SHCreateStdEnumFmtEtc(3, formats, output);
+    UINT count = 0;
+    if (!streaming_) {
+      formats[count].cfFormat = static_cast<CLIPFORMAT>(CF_HDROP);
+      formats[count].tymed = TYMED_HGLOBAL;
+      ++count;
+    }
+    formats[count].cfFormat =
+        static_cast<CLIPFORMAT>(file_descriptor_format());
+    formats[count].tymed = TYMED_HGLOBAL;
+    ++count;
+    formats[count].cfFormat =
+        static_cast<CLIPFORMAT>(file_contents_format());
+    formats[count].tymed = TYMED_ISTREAM;
+    ++count;
+    return SHCreateStdEnumFmtEtc(count, formats, output);
   }
 
   HRESULT STDMETHODCALLTYPE DAdvise(FORMATETC*, DWORD, IAdviseSink*,
@@ -428,6 +597,14 @@ class lazy_data_object final : public IDataObject {
   }
 
   HRESULT get_stream(std::size_t index, STGMEDIUM* medium) {
+    if (streaming_) {
+      IStream* stream = remote_file_stream::open(offer_->source, index);
+      if (stream == nullptr) return STG_E_READFAULT;
+      medium->tymed = TYMED_ISTREAM;
+      medium->pstm = stream;
+      medium->pUnkForRelease = nullptr;
+      return S_OK;
+    }
     std::string path;
     if (!offer_->source ||
         !offer_->source->ensure(index, path)) {
@@ -447,6 +624,7 @@ class lazy_data_object final : public IDataObject {
   HRESULT get_contents(std::size_t index, STGMEDIUM* medium) {
     constexpr uint64_t kMaxGlobalContents = 64ull * 1024 * 1024;
     if (offer_->files[index].size > kMaxGlobalContents) return DV_E_TYMED;
+    if (streaming_) return get_stream_contents(index, medium);
     std::string path;
     if (!offer_->source || !offer_->source->ensure(index, path)) {
       return STG_E_READFAULT;
@@ -491,8 +669,52 @@ class lazy_data_object final : public IDataObject {
     return S_OK;
   }
 
+  /// Some consumers ask for FileContents with TYMED_HGLOBAL even in streaming
+  /// mode. Serve modest files by reading the virtual stream into memory; the
+  /// 64 MiB cap above keeps a paste from allocating a whole video.
+  HRESULT get_stream_contents(std::size_t index, STGMEDIUM* medium) {
+    const uint64_t size = offer_->files[index].size;
+    IStream* stream = remote_file_stream::open(offer_->source, index);
+    if (stream == nullptr) return STG_E_READFAULT;
+    HGLOBAL memory =
+        GlobalAlloc(GMEM_MOVEABLE, static_cast<SIZE_T>(size == 0 ? 1 : size));
+    if (memory == nullptr) {
+      stream->Release();
+      return STG_E_MEDIUMFULL;
+    }
+    auto* target = static_cast<BYTE*>(GlobalLock(memory));
+    if (target == nullptr) {
+      GlobalFree(memory);
+      stream->Release();
+      return STG_E_MEDIUMFULL;
+    }
+    ULONG total = 0;
+    bool ok = true;
+    while (total < size) {
+      ULONG done = 0;
+      const HRESULT result =
+          stream->Read(target + total, static_cast<ULONG>(size - total), &done);
+      if (FAILED(result) || done == 0) {
+        ok = false;
+        break;
+      }
+      total += done;
+    }
+    GlobalUnlock(memory);
+    stream->Release();
+    if (!ok) {
+      GlobalFree(memory);
+      return STG_E_READFAULT;
+    }
+    medium->tymed = TYMED_HGLOBAL;
+    medium->hGlobal = memory;
+    medium->pUnkForRelease = nullptr;
+    return S_OK;
+  }
+
   std::atomic<ULONG> references_{1};
   std::shared_ptr<const lazy_offer> offer_;
+  bool streaming_ = false;
 };
 
 /// State shared with the message-only window created by the lazy thread.
@@ -520,6 +742,7 @@ LRESULT CALLBACK lazy_window_proc(HWND window, UINT message, WPARAM wparam,
           state->offer->source == nullptr) {
         return 0;
       }
+      if (state->offer->source->streaming()) return 0;
       if (static_cast<UINT>(wparam) == CF_HDROP) {
         std::vector<std::string> paths;
         if (!state->offer->source->ensure_all(paths)) return 0;
@@ -536,7 +759,8 @@ LRESULT CALLBACK lazy_window_proc(HWND window, UINT message, WPARAM wparam,
       // The owner is shutting down (or another app called EmptyClipboard with
       // rendering). Render the one delayed format we advertise.
       if (state != nullptr && state->offer != nullptr &&
-          state->offer->source != nullptr) {
+          state->offer->source != nullptr &&
+          !state->offer->source->streaming()) {
         std::vector<std::string> paths;
         if (state->offer->source->ensure_all(paths)) {
           HGLOBAL memory = make_hdrop(paths);
@@ -962,8 +1186,11 @@ void windows_clipboard::run_lazy_thread() {
     return;
   }
 
+  const bool streaming =
+      offer && offer->source && offer->source->streaming();
   bool ole_mode = false;
   bool installed = false;
+  std::string install_error;
   if (ole_available) {
     auto* object = new lazy_data_object(offer);
     for (int attempt = 0; attempt < 10 && !installed; ++attempt) {
@@ -976,13 +1203,17 @@ void windows_clipboard::run_lazy_thread() {
       }
     }
     object->Release();
+    if (!installed) install_error = "could not own the host clipboard";
+  } else if (streaming) {
+    install_error = "virtual files need OLE clipboard support";
   }
-  if (!installed) {
+  if (!installed && !streaming) {
     // Classic delayed rendering: CF_HDROP is declared with a null handle and
     // rendered in WM_RENDERFORMAT. FileGroupDescriptorW is supplied
     // immediately so applications can enumerate the offer. FileContents only
     // exists in the OLE model above, so classic mode serves Explorer's
-    // CF_HDROP paste path only.
+    // CF_HDROP paste path only -- and it is impossible in streaming mode,
+    // which must never stage the bytes.
     if (open_clipboard_retry(window)) {
       EmptyClipboard();
       HGLOBAL descriptor = make_file_descriptor(offer->files);
@@ -1007,7 +1238,8 @@ void windows_clipboard::run_lazy_thread() {
     lazy_ready_ = true;
     lazy_ok_ = installed;
     if (!installed) {
-      lazy_error_ = "could not own the host clipboard";
+      lazy_error_ = install_error.empty() ? "could not own the host clipboard"
+                                          : install_error;
     }
   }
   lazy_cv_.notify_all();

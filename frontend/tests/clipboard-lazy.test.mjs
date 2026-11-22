@@ -25,6 +25,7 @@ test('the welcome limits are used when they are sane', () => {
     maxFiles: DEFAULT_LAZY_FILES,
     maxBytes: DEFAULT_LAZY_BYTES,
     maxFileBytes: MAX_CLIPBOARD_FILE_BYTES,
+    stream: false,
   })
   assert.deepEqual(
     lazyCapability({
@@ -32,7 +33,12 @@ test('the welcome limits are used when they are sane', () => {
       clipboard_lazy_files: 3,
       clipboard_lazy_bytes: 1 * 1024 * 1024,
     }),
-    { maxFiles: 3, maxBytes: 1024 * 1024, maxFileBytes: 1024 * 1024 },
+    {
+      maxFiles: 3,
+      maxBytes: 1024 * 1024,
+      maxFileBytes: 1024 * 1024,
+      stream: false,
+    },
   )
 })
 
@@ -47,6 +53,7 @@ test('a malformed limit falls back instead of rejecting everything', () => {
       maxFiles: DEFAULT_LAZY_FILES,
       maxBytes: DEFAULT_LAZY_BYTES,
       maxFileBytes: MAX_CLIPBOARD_FILE_BYTES,
+      stream: false,
     },
   )
 })

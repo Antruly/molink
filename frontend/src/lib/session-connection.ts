@@ -1003,6 +1003,16 @@ export class SessionConnection {
     this.client.sendFileChunk(id, offset, data)
   }
 
+  /// Reply to a virtual-file range fetch (packet type 0x17).
+  sendClipboardRange(
+    id: number,
+    error: number,
+    offset: number,
+    data: Uint8Array,
+  ): void {
+    this.client.sendClipboardRange(id, error, offset, data)
+  }
+
   sendClientLog(text: string): void {
     this.client.sendClientLog(text)
   }
