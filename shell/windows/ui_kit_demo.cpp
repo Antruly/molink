@@ -308,6 +308,8 @@ struct app_state {
   bool auth_multi = false;
   std::wstring toast_text;
   ULONGLONG toast_until = 0;
+  /// 0 info, 1 warning, 2 error (matches `ui::toast_state::level`).
+  int toast_level = 0;
   ULONGLONG click_flash_until = 0;
 
   // Settings modal (web SettingsPanel: centred 768 px dialog).
@@ -622,6 +624,7 @@ struct connect_result {
 
 void save_theme_mode();
 void show_toast(const std::wstring& text);
+void show_toast(const std::wstring& text, int level);
 size_t caret_for_field(int field, float x);
 void clear_text_selection();
 void request_files_browse();
@@ -2977,6 +2980,7 @@ std::wstring local_clipboard_text() {
 }
 
 void show_toast(const std::wstring& text);
+void show_toast(const std::wstring& text, int level);
 
 void clipboard_get() {
   session_send("{\"type\":\"clipboard\",\"action\":\"get\"}");
@@ -2995,8 +2999,16 @@ void clipboard_set() {
 }
 
 void show_toast(const std::wstring& text) {
+  show_toast(text, 0);
+}
+
+/// Warn/error toasts stay up a little longer than a confirmation, like the
+/// Web's 6 s failure notices. Level 0 is the ordinary info toast.
+void show_toast(const std::wstring& text, int level) {
   g.toast_text = text;
-  g.toast_until = GetTickCount64() + 2500;
+  g.toast_level = level;
+  const ULONGLONG hold = level == 2 ? 6000 : (level == 1 ? 4000 : 2500);
+  g.toast_until = GetTickCount64() + hold;
 }
 
 /// Keep the Win32 clipboard listener in step with the session switch. The
@@ -3019,6 +3031,30 @@ void clipboard_toggle() {
                             : L"clipboard.sync switch=off");
 }
 
+/// Enumerates the local clipboard's CF_HDROP list (UTF-8 absolute paths).
+/// Directories are returned too; `session_client` filters them (the host's
+/// delayed-render offer carries files only).
+std::vector<std::string> local_clipboard_files() {
+  std::vector<std::string> paths;
+  if (!IsClipboardFormatAvailable(CF_HDROP)) return paths;
+  if (!OpenClipboard(g.window)) return paths;
+  HANDLE data = GetClipboardData(CF_HDROP);
+  if (data != nullptr) {
+    HDROP drop = static_cast<HDROP>(data);
+    const UINT count = DragQueryFileW(drop, 0xFFFFFFFFu, nullptr, 0);
+    for (UINT i = 0; i < count && paths.size() < 64; ++i) {
+      const UINT length = DragQueryFileW(drop, i, nullptr, 0);
+      if (length == 0) continue;
+      std::wstring path(static_cast<std::size_t>(length) + 1, L'\0');
+      if (DragQueryFileW(drop, i, path.data(), length + 1) == 0) continue;
+      path.resize(length);
+      paths.push_back(utf8_of(path));
+    }
+  }
+  CloseClipboard();
+  return paths;
+}
+
 /// Read the new local clipboard and decide whether it goes to the host.
 /// Called from WM_CLIPBOARDUPDATE: the listener fires only when the content
 /// changes, so no polling is involved.
@@ -3031,6 +3067,20 @@ void clipboard_local_changed() {
       !g.session->authenticated()) {
     return;
   }
+  // Files win over text, like the Web: Explorer's Ctrl+C lists CF_HDROP and
+  // the delayed-render offer is what makes a remote paste work without
+  // sending a byte until the user pastes.
+  const std::vector<std::string> files = local_clipboard_files();
+  if (!files.empty()) {
+    const bool offered = g.session->clipboard_files_changed(files);
+    native_log(L"clipboard.files direction=out files=" +
+               std::to_wstring(files.size()) +
+               (offered ? L" result=offered" : L" result=skipped"));
+    return;
+  }
+  // No files on the clipboard: a later copy of the same files is a fresh
+  // offer, even when the host's lazy clipboard was replaced by the text.
+  g.session->clipboard_files_cleared();
   const std::wstring wide = local_clipboard_text();
   const std::u16string text = u16_of(wide);
   const molink::clipboard::decision result =
@@ -5096,7 +5146,7 @@ void draw_tooltip(const D2D1_SIZE_F& size) {
 
 void draw_toast(const D2D1_SIZE_F& size) {
   if (g.toast_text.empty() || GetTickCount64() >= g.toast_until) return;
-  toast_state state{g.toast_text, g.toast_until};
+  toast_state state{g.toast_text, g.toast_until, g.toast_level};
   toast(g.target, *g.theme, g.small, size, state, GetTickCount64());
 }
 
@@ -7143,7 +7193,54 @@ void add_transfer_batch(const std::vector<std::wstring>& paths) {
 void handle_file_events() {
   if (g.session == nullptr) return;
   g.session->pump_files();
+  // A clipboard pull advances one 256 KiB range per reply; repaint the
+  // drawer's per-file rows while bytes are still moving.
+  if (g.session->clipboard_pull_active()) {
+    InvalidateRect(g.window, nullptr, FALSE);
+  }
   for (const molink::net::file_event& event : g.session->take_file_events()) {
+    if (event.action == L"clipboard-done") {
+      show_toast(event.message.empty()
+                     ? L"已接收剪贴板文件"
+                     : event.message,
+                 0);
+      g.files_open = true;
+      g.chat_open = false;
+      g.files_tab = 1;
+      InvalidateRect(g.window, nullptr, FALSE);
+      continue;
+    }
+    if (event.action == L"clipboard-warn") {
+      show_toast(event.message, 1);
+      InvalidateRect(g.window, nullptr, FALSE);
+      continue;
+    }
+    if (event.action == L"clipboard-error") {
+      show_toast(event.message.empty() ? L"剪贴板文件接收失败"
+                                       : event.message,
+                 2);
+      InvalidateRect(g.window, nullptr, FALSE);
+      continue;
+    }
+    if (event.action == L"clipboard-info") {
+      show_toast(event.message, 0);
+      InvalidateRect(g.window, nullptr, FALSE);
+      continue;
+    }
+    if (event.action == L"clipboard-offer") {
+      // Reply to our delayed offer. A current host sets `stream`; an older
+      // host would ask for an eager upload, which this shell does not do.
+      if (!event.ok) {
+        show_toast(event.message.empty()
+                       ? L"远端不支持剪贴板文件，未发送"
+                       : event.message,
+                   1);
+      } else if (!event.stream) {
+        show_toast(L"远端只支持整文件上传，剪贴板文件未发送", 1);
+      }
+      InvalidateRect(g.window, nullptr, FALSE);
+      continue;
+    }
     if (event.action == L"listing") {
       g.files_loading = false;
       if (!event.ok) {
