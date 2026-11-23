@@ -3405,8 +3405,8 @@ void draw_quality_panel(float window_w, float window_h) {
   const float inner = width - 20;
   float y = panel.top + 10;
 
-  // Header: 画质 + close.
-  text(g.target, g.small_bold, L"画质",
+  // Header: Web `session.presetTitle` + close.
+  text(g.target, g.small_bold, L"画质挡位",
        D2D1::RectF(x, y, x + 120, y + 24), g.theme->ink);
   g.qp_close = D2D1::RectF(panel.right - 34, y, panel.right - 10, y + 24);
   quiet_icon_button(g.target, *g.theme, g.qp_close, hv_qp_close, icon::close,
