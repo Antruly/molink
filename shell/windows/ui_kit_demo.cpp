@@ -6064,7 +6064,15 @@ bool create_resources(HWND window) {
   if (FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &g.factory))) {
     return false;
   }
-  if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, IID_IDWriteFactory,
+  // The Windows SDK declares IDWriteFactory with DWRITE_DECLARE_INTERFACE
+  // (a __declspec(uuid)) and publishes no `IID_IDWriteFactory` symbol, so
+  // MSVC must use __uuidof. MinGW's dwrite.h has the DEFINE_GUID instead.
+#ifdef _MSC_VER
+  const IID& dwrite_iid = __uuidof(IDWriteFactory);
+#else
+  const IID& dwrite_iid = IID_IDWriteFactory;
+#endif
+  if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, dwrite_iid,
                                  reinterpret_cast<IUnknown**>(&g.write)))) {
     return false;
   }
