@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "clipboard_files.h"
+#include "display_selector.h"
 #include "preset_message.h"
 #include "ui_kit.h"
 #include "ws_client.h"
@@ -179,6 +180,31 @@ class session_client {
   std::wstring live_codec_name() const;
   /// Sets the host's video path for every viewer (host-global setting).
   bool send_video_mode(const std::string& mode);
+  /// `welcome.displays`: every monitor the host can capture. Empty for an
+  /// older host that did not send the list (then the toolbar has no selector).
+  std::vector<molink::display::info> displays() const;
+  /// `welcome.display_index`, then every host `display` broadcast. The active
+  /// monitor is host-wide, so another viewer's switch moves this too.
+  int display_index() const { return display_index_.load(); }
+  /// Sends `{"type":"display","index":N}` and drops the decoder state so the
+  /// next picture starts from a keyframe. False when the socket is closed or
+  /// the host's list does not contain `index`.
+  bool send_display(int index);
+  /// Viewer health, once per `tick()`: delivered frames/s, wire bytes/s and
+  /// dropped frames. The auto controller reads these instead of re-deriving
+  /// them from the paint path.
+  double wire_fps() const { return wire_fps_.load(); }
+  double bandwidth_bps() const { return bandwidth_bps_.load(); }
+  int dropped_frames() const { return dropped_frames_.load(); }
+  /// The Web's automatic quality needs a real RTT; a zero before the first
+  /// pong is "unknown", not "perfect".
+  bool has_rtt() const { return has_rtt_.load(); }
+  int rtt_ms() const { return last_rtt_ms_.load(); }
+  /// `capture-stats`: the host's own frame rate and encode time. build_ms
+  /// caps the viewer's target so the host is not asked for frames it cannot
+  /// produce.
+  double host_fps() const { return host_fps_.load(); }
+  double host_build_ms() const { return host_build_ms_.load(); }
   /// Last socket close: code and reason text. The reason is what the host or
   /// the network said, and is written to the session log on reconnect.
   const std::wstring& close_detail() const { return close_detail_; }
@@ -433,6 +459,14 @@ class session_client {
   };
   void handle_text(const std::string& text);
   void handle_binary(const uint8_t* data, size_t size);
+  /// Forgets the decoded picture after a monitor switch: the size and the
+  /// pixel layout can both change, so no previous tile/bitmap may be reused.
+  /// The next frame is requested as a keyframe.
+  void reset_picture_state();
+  /// Applies a host `display` broadcast: updates the active index and, when
+  /// the monitor really changed, resets the decoder and asks for a fresh
+  /// picture.
+  void apply_display_change(int index);
   /// Records the capture timestamp a tile applied to every 128 px cell it
   /// covers, so the host's tile clock can name the cells this client missed.
   void note_applied_cells(int x, int y, int w, int h, uint64_t ts_us);
@@ -575,8 +609,12 @@ class session_client {
   /// Viewer health sample, once a second (web parity: the host's QoS uses it).
   std::atomic<uint64_t> stat_bytes_{0};
   uint64_t stat_frames_ = 0;
+  /// Frames that arrived between two paints (stale/overtaken). Counted by
+  /// `copy_frame` for the tile path; the surface path intentionally drops
+  /// surplus publishes and reports 0.
+  int dropped_window_ = 0;
   uint64_t stat_window_start_ = 0;
-  int last_rtt_ms_ = 0;
+  std::atomic<int> last_rtt_ms_{0};
   bool request_tiles_ = true;
   bool tiles_requested_ = false;
   bool stream_decoding_ = false;
@@ -596,24 +634,38 @@ class session_client {
   /// host in tile mode only pushes changed cells, so a static desktop would
   /// otherwise never bootstrap a fresh viewer.
   std::atomic<bool> has_image_{false};
-  uint64_t last_bootstrap_at_ = 0;
-  int bootstrap_requests_ = 0;
-  int screen_w_ = 0;
-  int screen_h_ = 0;
+  std::atomic<uint64_t> last_bootstrap_at_{0};
+  std::atomic<int> bootstrap_requests_{0};
+  std::atomic<int> screen_w_{0};
+  std::atomic<int> screen_h_{0};
   /// Tile mode: capture timestamp (us) applied to each 128 px cell, keyed by
-  /// (row << 32) | col. Reader-thread only.
+  /// (row << 32) | col. Reader-thread work plus a monitor switch from the UI
+  /// thread, so the map is guarded.
+  std::mutex cells_mutex_;
   std::unordered_map<uint64_t, uint64_t> applied_cells_;
   /// When the last tile-clock repair request went out (keep to one a second).
   uint64_t last_clock_request_ = 0;
   /// Last tile clock received from the host (reader thread -> UI tick).
   std::atomic<uint64_t> last_clock_seen_{0};
   /// Last full-screen refresh used as a fallback when clocks stop arriving.
-  uint64_t last_refresh_at_ = 0;
+  std::atomic<uint64_t> last_refresh_at_{0};
   std::atomic<int> cursor_x_{0};
   std::atomic<int> cursor_y_{0};
   std::atomic<bool> cursor_visible_{false};
   std::atomic<int> screen_width_{0};
   std::atomic<int> screen_height_{0};
+  /// Monitor list from `welcome.displays`; the reader thread writes it and
+  /// the UI timer copies it under `display_mutex_`.
+  mutable std::mutex display_mutex_;
+  std::vector<molink::display::info> displays_;
+  std::atomic<int> display_index_{0};
+  /// Once-a-second viewer sample for the automatic controller.
+  std::atomic<double> wire_fps_{0.0};
+  std::atomic<double> bandwidth_bps_{0.0};
+  std::atomic<int> dropped_frames_{0};
+  std::atomic<bool> has_rtt_{false};
+  std::atomic<double> host_fps_{0.0};
+  std::atomic<double> host_build_ms_{0.0};
   std::wstring last_error_;
   std::wstring last_error_code_;
   /// Incremented after `last_error_`/`last_error_code_` change.
