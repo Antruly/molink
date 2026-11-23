@@ -1991,7 +1991,7 @@ export function SessionView({
       normalizeKeyCode(
         event.code && event.code !== 'Unidentified'
           ? event.code
-          : keyToCode(event.key),
+          : keyToCode(event.key, event.location),
       )
     // Only the window that owns the pointer/keyboard may drive the host: a
     // hidden tab or an unfocused window keeps every key local. Local form

@@ -350,11 +350,14 @@ bool capture(std::vector<uint8_t>& out, int& width, int& height,
   return ok;
 }
 
-void send_key(WORD vk, bool down) {
+void send_key(WORD vk, bool down, bool extended) {
   INPUT input{};
   input.type = INPUT_KEYBOARD;
   input.ki.wVk = vk;
   if (!down) input.ki.dwFlags = KEYEVENTF_KEYUP;
+  // Numpad Enter/Divide and the navigation-block keys are E0-prefixed; without
+  // this the target sees the main Enter or the wrong editing key.
+  if (extended) input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
   if (SendInput(1, &input, sizeof(input)) != 1) {
     log_line("SendInput key " + std::to_string(vk) + " failed: " +
              std::to_string(GetLastError()));
@@ -472,8 +475,10 @@ std::string handle_line(const std::string& line, std::vector<uint8_t>& frame,
   if (line.rfind("key ", 0) == 0) {
     int vk = 0;
     int down = 1;
-    std::sscanf(line.c_str(), "key %d %d", &vk, &down);
-    send_key(static_cast<WORD>(vk), down != 0);
+    int extended = 0;
+    // An older core sends two fields; keep accepting that form.
+    std::sscanf(line.c_str(), "key %d %d %d", &vk, &down, &extended);
+    send_key(static_cast<WORD>(vk), down != 0, extended != 0);
     return R"({"ok":true})";
   }
   if (line.rfind("text ", 0) == 0) {
