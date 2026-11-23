@@ -339,6 +339,7 @@
   border: 2px solid var(--surface);
   border-radius: 9999px;
   background: var(--accent);
+}
 
 /* Feature-level failures fade in at the bottom of the picture, hold, and fade
    out just before the store's 6 s timer unmounts them. A refresh remounts the
