@@ -62,6 +62,8 @@ import {
   type KeyCombo,
 } from '../lib/key-combos'
 import { keyToCode, normalizeKeyCode } from '../lib/key-code'
+import { FADE_OPACITY_CLASS } from '../lib/proximity-fade'
+import { useProximityFade } from '../lib/use-proximity-fade'
 import { Codec, codecName } from '../lib/protocol'
 import { collectDropEntries, stageRemoteDrop } from '../lib/file-drop'
 import {
@@ -364,6 +366,7 @@ export function SessionView({
   const { t } = useTranslation()
   const localMode = useAppStore((state) => state.localMode)
   const qualityWatermark = useAppStore((state) => state.qualityWatermark)
+  const watermarkFade = useAppStore((state) => state.watermarkFade)
   const autoAudio = useAppStore((state) => state.autoAudio)
   const setQualityWatermark = useAppStore((state) => state.setQualityWatermark)
   const setTabPreset = useAppStore((state) => state.setTabPreset)
@@ -523,6 +526,20 @@ export function SessionView({
   } | null>(null)
   const [autoTier, setAutoTier] = useState<ResolvedQuality>('balanced')
   const sessionRootRef = useRef<HTMLDivElement>(null)
+  // The three overlays that step out of the way when the pointer comes close.
+  // Each keeps its own rectangle and verdict: reaching for the corner badges
+  // must not hide the stats bar at the opposite corner.
+  const watermarkBadgesRef = useRef<HTMLDivElement>(null)
+  const watermarkStatsRef = useRef<HTMLDivElement>(null)
+  const watermarkConnectingRef = useRef<HTMLDivElement>(null)
+  const watermarkProximity = useProximityFade(
+    {
+      badges: watermarkBadgesRef,
+      stats: watermarkStatsRef,
+      connecting: watermarkConnectingRef,
+    },
+    { enabled: watermarkFade },
+  )
   const panPointer = useRef<{ x: number; y: number } | null>(null)
   const statsRef = useRef(tab.stats)
   const hostRef = useRef({ fps: 0, buildMs: 0 })
@@ -1902,6 +1919,9 @@ export function SessionView({
   }
 
   const onPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    // One pointer event feeds both paths: the remote mouse and the local
+    // overlay proximity test (rAF-throttled, so no second hit-test per frame).
+    watermarkProximity.onPointerMove(event)
     if (!tab.controlEnabled || !inputAvailable) return
     if (virtualMouse) {
       onTouchpadMove(event)
@@ -2406,6 +2426,7 @@ export function SessionView({
           onPointerCancel={onTouchpadCancel}
           onPointerLeave={() => {
             panPointer.current = null
+            watermarkProximity.onPointerLeave()
           }}
           // Files are dropped on the transfer panel's own drop zone, not on
           // the picture: a stray drop over the remote desktop must not start a
@@ -2463,7 +2484,16 @@ export function SessionView({
                   mode={displayMode}
                 />
               ) : null}
-              <div className="pointer-events-none absolute left-3 top-3 flex flex-wrap gap-1.5">
+              <div
+                ref={watermarkBadgesRef}
+                data-watermark="badges"
+                className={
+                  'pointer-events-none absolute left-3 top-3 flex flex-wrap gap-1.5 transition-opacity duration-200 ' +
+                  (watermarkProximity.faded.badges
+                    ? FADE_OPACITY_CLASS
+                    : 'opacity-100')
+                }
+              >
                 {qualityWatermark && welcome ? (
                   <span className="rounded-md border border-white/15 bg-black/65 px-2 py-1 font-mono text-[10px] text-white/85 backdrop-blur">
                     {welcome.tiles.screen_w}×{welcome.tiles.screen_h}
@@ -2504,7 +2534,16 @@ export function SessionView({
               </div>
 
               {qualityWatermark ? (
-                <div className="pointer-events-none absolute bottom-3 right-3 flex items-center gap-2 rounded-md border border-white/15 bg-black/65 px-2.5 py-1 font-mono text-[10px] text-white/80 backdrop-blur">
+                <div
+                  ref={watermarkStatsRef}
+                  data-watermark="stats"
+                  className={
+                    'pointer-events-none absolute bottom-3 right-3 flex items-center gap-2 rounded-md border border-white/15 bg-black/65 px-2.5 py-1 font-mono text-[10px] text-white/80 backdrop-blur transition-opacity duration-200 ' +
+                    (watermarkProximity.faded.stats
+                      ? FADE_OPACITY_CLASS
+                      : 'opacity-100')
+                  }
+                >
                   <span className="text-accent">{tab.stats.fps} fps</span>
                   <span>{latency}</span>
                   <span>{formatBandwidth(tab.stats.bytesPerSec)}</span>
@@ -2516,31 +2555,45 @@ export function SessionView({
               ) : null}
             </div>
           ) : (
-            <div className="absolute inset-0 flex items-center justify-center gap-2 text-sm text-muted">
-              <Radio size={15} className="animate-pulse text-accent" />
-              {tab.phase === 'connecting'
-                ? tab.notice === 'waiting_approval'
-                  ? (
-                    <span className="flex flex-col items-center gap-2">
-                      <span className="flex items-center gap-2">
-                        <Radio size={15} className="animate-pulse text-accent" />
-                        {t('session.waitingApproval')}
-                        {approvalLeft !== null
-                          ? ` · ${approvalLeft}s`
-                          : ''}
+            <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+              <div
+                ref={watermarkConnectingRef}
+                data-watermark="connecting"
+                className={
+                  'flex items-center justify-center gap-2 text-sm text-muted transition-opacity duration-200 ' +
+                  (watermarkProximity.faded.connecting
+                    ? FADE_OPACITY_CLASS
+                    : 'opacity-100')
+                }
+              >
+                <Radio size={15} className="animate-pulse text-accent" />
+                {tab.phase === 'connecting'
+                  ? tab.notice === 'waiting_approval'
+                    ? (
+                      <span className="flex flex-col items-center gap-2">
+                        <span className="flex items-center gap-2">
+                          <Radio
+                            size={15}
+                            className="animate-pulse text-accent"
+                          />
+                          {t('session.waitingApproval')}
+                          {approvalLeft !== null
+                            ? ` · ${approvalLeft}s`
+                            : ''}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={cancelApproval}
+                          className="pointer-events-auto btn h-7 px-2 text-[11px]"
+                        >
+                          <X size={12} />
+                          {t('session.cancelRequest')}
+                        </button>
                       </span>
-                      <button
-                        type="button"
-                        onClick={cancelApproval}
-                        className="btn h-7 px-2 text-[11px]"
-                      >
-                        <X size={12} />
-                        {t('session.cancelRequest')}
-                      </button>
-                    </span>
-                  )
-                  : t('session.connecting')
-                : t('session.waiting')}
+                    )
+                    : t('session.connecting')
+                  : t('session.waiting')}
+              </div>
             </div>
           )}
 

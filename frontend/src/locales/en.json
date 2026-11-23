@@ -122,6 +122,8 @@
     "themeDark": "Dark",
     "watermark": "Quality overlay",
     "watermarkHint": "Show FPS, latency and bandwidth in the corner of a session.",
+    "watermarkFade": "Fade overlays near the pointer",
+    "watermarkFadeHint": "When the pointer comes within about 28px of the corner badges, the bottom stats bar or the connecting notice, that overlay fades to almost invisible and returns when the pointer leaves. Each overlay is judged independently. Touch input never fades.",
     "defaultQuality": "Default quality",
     "defaultPreset": "New-session default preset",
     "defaultPresetHint": "New connections start here; a device's last choice wins over it.",
