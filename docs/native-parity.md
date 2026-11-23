@@ -64,11 +64,11 @@
 | D5 | 输入 | 组合键转发菜单 | gap | 原生只有 Ctrl+Alt+Del，没有 Win+R/Alt+Tab 菜单 | `ui_kit_demo.cpp:2569` |
 | D6 | 输入 | 绝对鼠标/滚轮/按键 | ok | 坐标归一化、1..3 键、滚轮均已实现 | `ui_kit_demo.cpp:4028` |
 | D7 | 输入 | 相对/触控板鼠标 | gap | 原生没有虚拟鼠标模式 | — |
-| E1 | 诊断/错误 | 本地诊断环形缓冲、7 天、可关 | gap | 原生只有一个无轮转的文本文件 | `ui_kit_demo.cpp:1163` |
-| E2 | 诊断/错误 | 主机日志 tail/info/enable/disable | gap | 原生不处理 `logs` 消息 | `session_client.cpp:1301` |
-| E3 | 诊断/错误 | 一键复制两端日志/导出/清空/打开目录 | gap | 原生没有日志界面 | `ui_kit_demo.cpp:1163` |
-| E4 | 诊断/错误 | 错误分级：toast vs 会话横幅 | partial | 原生按“是否已认证”分，不按错误码分，toast 无等级 | `ui_kit_demo.cpp:5809` |
-| E5 | 诊断/错误 | 重连策略与断线横幅/倒计时/停止 | partial | 原生 1 s/1 s 后每 10 s 无限重试，无倒计时/停止 | `ui_kit_demo.cpp:8658` |
+| E1 | 诊断/错误 | 本地诊断环形缓冲、7 天、可关 | ok | `native_diag` 与核心同格式/保留/轮转/脱敏，设置页可关文件写入（ring 保留） | `shell/windows/native_diag.*` |
+| E2 | 诊断/错误 | 主机日志 tail/info/enable/disable | ok | `session_client` 处理 `logs`，暴露 tail/info/开关；面板展示主机版本/端口/目录 | `shell/windows/session_client.cpp` |
+| E3 | 诊断/错误 | 一键复制两端日志/导出/清空/打开目录 | ok | 诊断面板：本机/主机、all/warn/error、复制两端、导出、清空、打开目录 | `shell/windows/ui_kit_demo.cpp` |
+| E4 | 诊断/错误 | 错误分级：toast vs 会话横幅 | ok | `error_policy` 按错误码分流；toast 6 秒、三色、可关、同文刷新 | `shell/windows/error_policy.*` |
+| E5 | 诊断/错误 | 重连策略与断线横幅/倒计时/停止 | ok | 0/1 s/1 s/60 s 对齐 Web，断线遮罩带倒计时、立即重连与停止 | `shell/windows/reconnect_policy.*` |
 | E6 | 诊断/错误 | 主机错误的可执行动作 | partial | 有内联验证码重试；无忽略、无“请求访问” | `ui_kit_demo.cpp:5828` |
 | U1 | 界面 | 水印按区域接近淡化 | gap | 原生水印固定不透明 | `ui_kit_demo.cpp:3572` |
 | U2 | 界面 | 水印内容完整度 | partial | 缺 backend/版本/控制中/HTTP 版本；顶部编码是配置值 | `ui_kit_demo.cpp:3593` |

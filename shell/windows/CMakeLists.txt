@@ -63,6 +63,9 @@ add_executable(moLink-native WIN32
   clipboard_sync.cpp
   clipboard_files.cpp
   input_state.cpp
+  native_diag.cpp
+  error_policy.cpp
+  reconnect_policy.cpp
   puff.c
   ui_kit_demo.rc
 )

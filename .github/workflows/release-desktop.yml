@@ -480,7 +480,8 @@ jobs:
             'shell/windows/ws_client.cpp', 'shell/windows/session_client.cpp',
             'shell/windows/preset_message.cpp', 'shell/windows/file_panel_logic.cpp',
             'shell/windows/clipboard_sync.cpp', 'shell/windows/clipboard_files.cpp',
-            'shell/windows/input_state.cpp',
+            'shell/windows/input_state.cpp', 'shell/windows/native_diag.cpp',
+            'shell/windows/error_policy.cpp', 'shell/windows/reconnect_policy.cpp',
             'shell/windows/puff.c', "$env:RUNNER_TEMP\native-res.o",
             "-L$mingwLib"
           )

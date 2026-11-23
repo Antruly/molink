@@ -615,6 +615,8 @@ struct toast_state {
 void toast(ID2D1RenderTarget* t, const palette& theme,
            IDWriteTextFormat* small, const D2D1_SIZE_F& size,
            const toast_state& state, uint64_t now_ms);
+/// The toast's rectangle; the shell uses it to make the toast dismissible.
+D2D1_RECT_F toast_rect(const toast_state& state, const D2D1_SIZE_F& size);
 /// Dims the content behind a modal.
 void modal_scrim(ID2D1RenderTarget* t, const D2D1_SIZE_F& size);
 /// Draws a modal frame centred in `size`; returns the inner content rect and

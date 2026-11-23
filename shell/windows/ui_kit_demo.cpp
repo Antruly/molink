@@ -21,6 +21,7 @@
 #include <commdlg.h>
 #include <shellapi.h>
 #include <shobjidl.h>
+#include <shlobj.h>
 
 #include <algorithm>
 #include <cmath>
@@ -39,10 +40,13 @@
 
 #include "avatar_image.h"
 #include "clipboard_sync.h"
+#include "error_policy.h"
 #include "file_panel_logic.h"
 #include "file_panel_strings.h"
 #include "input_state.h"
+#include "native_diag.h"
 #include "preset_message.h"
+#include "reconnect_policy.h"
 #include "session_client.h"
 #include "ui_kit.h"
 
@@ -310,7 +314,43 @@ struct app_state {
   ULONGLONG toast_until = 0;
   /// 0 info, 1 warning, 2 error (matches `ui::toast_state::level`).
   int toast_level = 0;
+  /// Clicking the toast (or its ×) dismisses it.
+  D2D1_RECT_F hit_toast_close{};
   ULONGLONG click_flash_until = 0;
+
+  // ---- Diagnostics panel (E1-E3) -------------------------------------
+  bool diag_open = false;
+  float diag_anim = 0.0f;
+  /// 0 local ring, 1 host tail.
+  int diag_tab = 0;
+  /// 0 all, 1 warn and above, 2 error only.
+  int diag_filter = 0;
+  float diag_scroll = 0.0f;
+  float diag_content_h = 0.0f;
+  float diag_max_scroll = 0.0f;
+  /// Follow the newest line unless the user scrolled up.
+  bool diag_follow = true;
+  bool diag_recording = true;
+  ULONGLONG diag_refresh_at = 0;
+  ULONGLONG diag_host_at = 0;
+  std::wstring diag_local_text;
+  std::wstring diag_host_text;
+  /// A copy refreshed once a second, so painting the panel never copies the
+  /// host's 256 KiB tail on every frame.
+  molink::net::host_log_state diag_host_snapshot;
+  /// Visible lines for the current tab/filter; rebuilt only when the text or
+  /// the filter changes, not on every paint.
+  std::vector<std::wstring> diag_lines;
+  bool diag_lines_dirty = true;
+  D2D1_RECT_F hit_diag_panel{}, hit_diag_close{}, hit_diag_view{};
+  D2D1_RECT_F hit_diag_tab[2]{}, hit_diag_filter[3]{};
+  D2D1_RECT_F hit_diag_copy{}, hit_diag_export{}, hit_diag_clear{},
+      hit_diag_open_dir{}, hit_diag_refresh{}, hit_diag_host_toggle{};
+  D2D1_RECT_F hit_set_diag_open{}, hit_set_diag_toggle{};
+  /// 已停止重连: the disconnected overlay keeps the last picture and offers
+  /// a manual reconnect instead of scheduling another attempt.
+  bool reconnect_stopped = false;
+  D2D1_RECT_F hit_stop_retry{}, hit_retry_now{};
 
   // Settings modal (web SettingsPanel: centred 768 px dialog).
   bool settings_open = false;
@@ -499,7 +539,8 @@ struct app_state {
   bool tracking_leave = false;
   bool access_notice_shown = false;
   bool intent_applied = false;
-  std::wstring seen_session_error;
+  unsigned seen_error_seq = 0;
+  unsigned seen_feature_error_seq = 0;
   D2D1_RECT_F hit_self_avatar{}, hit_self_name{}, hit_copy_id{},
       hit_code_eye{}, hit_code_copy{}, hit_code_refresh{}, hit_code_single{},
       hit_code_multi{}, hit_more_settings{}, hit_connect_input_home{},
@@ -625,6 +666,10 @@ struct connect_result {
 void save_theme_mode();
 void show_toast(const std::wstring& text);
 void show_toast(const std::wstring& text, int level);
+void open_diagnostics();
+void draw_diag_panel(float w, float h);
+bool diag_panel_click(float x, float y);
+void refresh_diag_text();
 size_t caret_for_field(int field, float x);
 void clear_text_selection();
 void request_files_browse();
@@ -753,6 +798,12 @@ enum hover_slot {
   hv_set_quality0, hv_set_quality1, hv_set_quality2, hv_set_quality3,
   hv_set_quality4, hv_set_quality5, hv_set_quality6, hv_set_quality7,
   hv_chat_close, hv_chat_send, hv_files_close, hv_files_pick,
+  hv_diag_close, hv_diag_tab0, hv_diag_tab1,
+  hv_diag_filter0, hv_diag_filter1, hv_diag_filter2,
+  hv_diag_copy, hv_diag_export, hv_diag_clear, hv_diag_open_dir,
+  hv_diag_refresh, hv_diag_host_toggle,
+  hv_set_btn_diag, hv_set_diag_toggle, hv_toast_close, hv_stop_retry,
+  hv_retry_now,
   hv_count
 };
 
@@ -1661,36 +1712,13 @@ int local_core_port() {
 // Native session log + loopback settings API.
 // ---------------------------------------------------------------------------
 
-/// Log file for the one thing a screenshot cannot show: why a session ended.
-/// Written to %LOCALAPPDATA%\moLink\native-session.log as UTF-8 lines.
+/// Legacy shell log lines. They now go through the shared diagnostic logger
+/// (daily file, 7-day retention, 32 MiB roll, redaction) as `ui.shell`, so the
+/// new panel can show them next to the session's structured lines.
 void native_log(const std::wstring& text) {
-  wchar_t base[MAX_PATH] = {};
-  if (GetEnvironmentVariableW(L"LOCALAPPDATA", base, MAX_PATH) == 0) return;
-  const std::wstring dir = std::wstring(base) + L"\\moLink";
-  CreateDirectoryW(dir.c_str(), nullptr);
-  const std::wstring path = dir + L"\\native-session.log";
-  SYSTEMTIME now{};
-  GetLocalTime(&now);
-  wchar_t stamp[48] = {};
-  std::swprintf(stamp, 48, L"%04d-%02d-%02d %02d:%02d:%02d  ", now.wYear,
-                now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond);
-  const std::wstring line = std::wstring(stamp) + text + L"\r\n";
-  const int bytes = WideCharToMultiByte(CP_UTF8, 0, line.data(),
-                                        static_cast<int>(line.size()),
-                                        nullptr, 0, nullptr, nullptr);
-  if (bytes <= 0) return;
-  std::string utf8(static_cast<size_t>(bytes), '\0');
-  WideCharToMultiByte(CP_UTF8, 0, line.data(),
-                      static_cast<int>(line.size()), utf8.data(), bytes,
-                      nullptr, nullptr);
-  HANDLE file = CreateFileW(path.c_str(), FILE_APPEND_DATA,
-                            FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
-                            OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-  if (file == INVALID_HANDLE_VALUE) return;
-  DWORD written = 0;
-  WriteFile(file, utf8.data(), static_cast<DWORD>(utf8.size()), &written,
-            nullptr);
-  CloseHandle(file);
+  molink::native_diag::diag().log(molink::native_diag::level::info,
+                                  molink::native_diag::component::ui, "shell",
+                                  utf8_of(text));
 }
 
 // ---------------------------------------------------------------------------
@@ -2241,7 +2269,8 @@ void start_connect(const std::wstring& target, const std::wstring& code) {
   g.session_was_live = false;
   g.access_notice_shown = false;
   g.intent_applied = false;
-  g.seen_session_error.clear();
+  g.seen_error_seq = 0;
+  g.seen_feature_error_seq = 0;
   // A reconnect keeps the last decoded frame on screen (the web leaves the
   // final picture under its disconnected overlay); a fresh connect clears it.
   if (!g.reconnecting) {
@@ -2530,6 +2559,7 @@ void start_home_connect() {
   g.connect_error.clear();
   // A manual connect supersedes any automatic retry cycle.
   g.reconnecting = false;
+  g.reconnect_stopped = false;
   g.session_accepted = false;
   g.retry_attempt = 0;
   g.retry_at = 0;
@@ -2892,26 +2922,41 @@ bool recent_click(float x, float y) {
 /// user-facing Chinese text instead of showing "code: message" raw.
 std::wstring friendly_session_error(const std::wstring& code,
                                     const std::wstring& raw) {
-  if (code == L"invalid_code" || code == L"unauthorized") {
+  if (code == L"invalid_code" || code == L"unauthorized" ||
+      code == L"invalid_token") {
     return L"验证码错误或已失效";
   }
   if (code == L"locked") return L"主机已锁定，暂时无法连接";
   if (code == L"access_denied") return L"对方拒绝了本次连接请求";
   if (code == L"too_many_attempts") return L"尝试次数过多，请稍后再试";
   if (code == L"ip_banned") return L"当前 IP 已被禁止连接";
+  if (code == L"handshake_failed" || code == L"hello_timeout") {
+    return L"与主机握手失败，请稍后重试";
+  }
   if (code == L"display_mode_busy") return L"主机当前无法切换显示模式";
   if (code == L"display_mode_failed") return L"显示模式切换失败";
   return raw.empty() ? L"主机返回了错误" : raw;
 }
 
 bool auth_error_code(const std::wstring& code) {
-  return code == L"invalid_code" || code == L"unauthorized";
+  return code == L"invalid_code" || code == L"unauthorized" ||
+         code == L"invalid_token";
 }
 
 /// Banner actions: with a wrong code, retry with the inline field; otherwise
 /// reconnect with what we already had (the web's "重新连接").
 void retry_session_connect() {
-  if (g.session == nullptr) return;
+  if (g.session == nullptr) {
+    // The retry cycle was stopped (or the socket was already torn down):
+    // reconnect with the target/code the tab still holds.
+    if (g.connect_target.empty()) return;
+    g.address_text = g.connect_target;
+    g.code_text = g.connect_code;
+    clear_text_selection();
+    g.focus_field = 0;
+    start_home_connect();
+    return;
+  }
   const bool needs_code = auth_error_code(g.session->last_error_code());
   if (needs_code && g.retry_code.empty()) {
     g.focus_field = 11;
@@ -2931,12 +2976,54 @@ void retry_session_connect() {
   start_home_connect();
 }
 
+/// E5: "停止重连" keeps the last picture and the tab, but no timer runs.
+void stop_reconnect() {
+  if (!g.reconnecting) return;
+  g.reconnecting = false;
+  g.reconnect_stopped = true;
+  g.retry_at = 0;
+  g.session_was_live = false;
+  // The centered overlay now owns the state; drop the duplicate banner.
+  g.connect_error.clear();
+  // A worker may be mid-connect: invalidate its result so it cannot reopen
+  // the session after the user stopped the cycle.
+  ++g.connect_generation;
+  g.connecting = false;
+  if (g.session != nullptr) {
+    g.session->stop();
+    g.session.reset();
+  }
+  native_log(L"reconnect stopped by the user");
+  show_toast(L"已停止重连", 1);
+  if (g.window != nullptr) InvalidateRect(g.window, nullptr, FALSE);
+}
+
+/// E5: skip the remaining countdown and try right now.
+void reconnect_now() {
+  if (g.connect_target.empty() || g.connecting) return;
+  g.reconnect_stopped = false;
+  g.reconnecting = true;
+  g.session_was_live = false;
+  if (g.session != nullptr) {
+    g.session->stop();
+    g.session.reset();
+  }
+  g.retry_at = GetTickCount64();
+  show_toast(L"正在重新连接…", 0);
+  if (g.window != nullptr) InvalidateRect(g.window, nullptr, FALSE);
+}
+
 /// Click routing for the session error bar. Returns true when consumed.
 bool session_banner_click(float x, float y) {
-  if (g.session == nullptr || g.session->authenticated() ||
-      g.connect_error.empty()) {
-    return false;
+  if (inside(g.hit_stop_retry, x, y)) {
+    stop_reconnect();
+    return true;
   }
+  if (inside(g.hit_retry_now, x, y)) {
+    reconnect_now();
+    return true;
+  }
+  if (g.connect_error.empty()) return false;
   if (inside(g.hit_retry_input, x, y)) {
     g.focus_field = 11;
     g.retry_caret = caret_for_field(11, x);
@@ -3002,13 +3089,29 @@ void show_toast(const std::wstring& text) {
   show_toast(text, 0);
 }
 
-/// Warn/error toasts stay up a little longer than a confirmation, like the
-/// Web's 6 s failure notices. Level 0 is the ordinary info toast.
+/// The Web keeps every toast for six seconds; a repeat of the same text
+/// refreshes the existing toast instead of stacking another one.
 void show_toast(const std::wstring& text, int level) {
+  if (g.toast_text == text) {
+    g.toast_level = level;
+    g.toast_until = GetTickCount64() + 6000;
+    return;
+  }
   g.toast_text = text;
   g.toast_level = level;
-  const ULONGLONG hold = level == 2 ? 6000 : (level == 1 ? 4000 : 2500);
-  g.toast_until = GetTickCount64() + hold;
+  g.toast_until = GetTickCount64() + 6000;
+}
+
+int toast_level_of(molink::native::alerts::tone tone) {
+  switch (tone) {
+    case molink::native::alerts::tone::info:
+      return 0;
+    case molink::native::alerts::tone::warn:
+      return 1;
+    case molink::native::alerts::tone::error:
+    default:
+      return 2;
+  }
 }
 
 /// Keep the Win32 clipboard listener in step with the session switch. The
@@ -3533,6 +3636,30 @@ bool load_saved_avatar() {
 /// The web keeps the toolbar pin in localStorage; the native shell uses the
 /// same per-user preference in HKCU.
 constexpr wchar_t kUiKey[] = L"Software\\moLink\\Ui";
+
+/// Diagnostic recording defaults to on; only an explicit 0 switches it off.
+bool load_diag_recording() {
+  DWORD value = 1;
+  DWORD size = sizeof(value);
+  if (RegGetValueW(HKEY_CURRENT_USER, kUiKey, L"DiagLogEnabled",
+                   RRF_RT_REG_DWORD, nullptr, &value, &size) ==
+      ERROR_SUCCESS) {
+    return value != 0;
+  }
+  return true;
+}
+
+void save_diag_recording(bool enabled) {
+  HKEY key = nullptr;
+  if (RegCreateKeyExW(HKEY_CURRENT_USER, kUiKey, 0, nullptr, 0, KEY_SET_VALUE,
+                      nullptr, &key, nullptr) != ERROR_SUCCESS) {
+    return;
+  }
+  const DWORD value = enabled ? 1 : 0;
+  RegSetValueExW(key, L"DiagLogEnabled", 0, REG_DWORD,
+                 reinterpret_cast<const BYTE*>(&value), sizeof(value));
+  RegCloseKey(key);
+}
 
 bool load_pinned() {
   DWORD value = 0;
@@ -4703,7 +4830,7 @@ void draw_toolbar(const D2D1_RECT_F& stage) {
 bool remote_input_active() {
   return g.control_on && g.session != nullptr && g.session->live() &&
          g.session->authenticated() && g.tab == 1 && !g.settings_open &&
-         g.focus_field == 0;
+         !g.diag_open && g.focus_field == 0;
 }
 
 void send_remote_move(float x, float y) {
@@ -4749,6 +4876,7 @@ void close_session_tab() {
   ++g.connect_generation;
   g.connecting = false;
   g.reconnecting = false;
+  g.reconnect_stopped = false;
   g.session_accepted = false;
   g.retry_attempt = 0;
   g.retry_at = 0;
@@ -5145,8 +5273,10 @@ void draw_tooltip(const D2D1_SIZE_F& size) {
 }
 
 void draw_toast(const D2D1_SIZE_F& size) {
+  g.hit_toast_close = D2D1::RectF(0, 0, 0, 0);
   if (g.toast_text.empty() || GetTickCount64() >= g.toast_until) return;
   toast_state state{g.toast_text, g.toast_until, g.toast_level};
+  g.hit_toast_close = toast_rect(state, size);
   toast(g.target, *g.theme, g.small, size, state, GetTickCount64());
 }
 
@@ -6451,22 +6581,60 @@ void paint(HWND window) {
       arrow(fill, 1.4f);
     }
   }
-  // Keep the last frame visible and mark it, like the web's disconnected
-  // overlay, instead of leaving the stage blank during a retry cycle.
-  if (g.reconnecting) {
-    const std::wstring label = L"连接已断开，正在重连…";
-    const float cw = measure_text(g.tiny, label) + 24;
+  // E5: keep the last frame visible under a disconnect overlay with the
+  // countdown the Web shows, plus a way to retry immediately or stop.
+  g.hit_stop_retry = g.hit_retry_now = D2D1::RectF(0, 0, 0, 0);
+  if (g.reconnecting || g.reconnect_stopped) {
+    const ULONGLONG now = GetTickCount64();
+    const int seconds =
+        g.reconnecting
+            ? molink::native::reconnect::seconds_remaining(g.retry_at, now)
+            : 0;
+    std::wstring label;
+    if (g.reconnecting) {
+      label = seconds > 0
+                  ? L"连接已断开 · " + std::to_wstring(seconds) + L" 秒后重连"
+                  : L"连接已断开，正在重连…";
+    } else {
+      label = L"已停止重连";
+    }
+    const float cw = (std::max)(300.0f, measure_text(g.tiny, label) + 40);
+    const float ch = 82;
+    const float cx = (g.stage.left + g.stage.right) / 2;
     const float cy = (g.stage.top + g.stage.bottom) / 2;
-    const D2D1_RECT_F chip = D2D1::RectF(
-        (g.stage.left + g.stage.right) / 2 - cw / 2, cy - 12,
-        (g.stage.left + g.stage.right) / 2 + cw / 2, cy + 12);
-    fill_round(g.target, chip, 8, D2D1::ColorF(0, 0, 0, 0.66f));
-    stroke_round(g.target, chip, 8, D2D1::ColorF(0xf59e0b, 0.45f));
-    text(g.target, g.tiny, label, chip, D2D1::ColorF(0xf59e0b));
+    const D2D1_RECT_F panel = D2D1::RectF(cx - cw / 2, cy - ch / 2,
+                                          cx + cw / 2, cy + ch / 2);
+    fill_round(g.target, panel, 10, D2D1::ColorF(0, 0, 0, 0.72f));
+    stroke_round(g.target, panel, 10, D2D1::ColorF(0xf59e0b, 0.50f));
+    text(g.target, g.tiny, label,
+         D2D1::RectF(panel.left + 12, panel.top + 10, panel.right - 12,
+                     panel.top + 34),
+         D2D1::ColorF(0xf59e0b));
+    const float button_y = panel.bottom - 34;
+    if (g.reconnecting) {
+      g.hit_retry_now = D2D1::RectF(panel.left + 12, button_y,
+                                    panel.left + 132, button_y + 24);
+      g.hit_stop_retry = D2D1::RectF(panel.right - 108, button_y,
+                                     panel.right - 12, button_y + 24);
+      fill_round(g.target, g.hit_retry_now, 6,
+                 D2D1::ColorF(0xf59e0b, 0.20f));
+      fill_round(g.target, g.hit_stop_retry, 6,
+                 D2D1::ColorF(1, 1, 1, 0.10f));
+      text(g.target, g.label12, L"立即重连", g.hit_retry_now,
+           D2D1::ColorF(0xfbbf24));
+      text(g.target, g.label12, L"停止重连", g.hit_stop_retry,
+           g.theme->ink);
+    } else {
+      g.hit_retry_now = D2D1::RectF(cx - 60, button_y, cx + 60,
+                                    button_y + 24);
+      fill_round(g.target, g.hit_retry_now, 6,
+                 D2D1::ColorF(0xf59e0b, 0.20f));
+      text(g.target, g.label12, L"重新连接", g.hit_retry_now,
+           D2D1::ColorF(0xfbbf24));
+    }
   }
   g.hit_retry_input = g.hit_retry_btn = D2D1::RectF(0, 0, 0, 0);
-  if (g.session != nullptr && !g.session->authenticated() &&
-      !g.connect_error.empty()) {
+  if (!g.connect_error.empty()) {
     // Web SessionView error bar: the reason on the left, plus either an
     // inline access-code field (invalid code) or a reconnect button.
     const D2D1_COLOR_F danger =
@@ -6496,7 +6664,9 @@ void paint(HWND window) {
                D2D1::ColorF(danger.r, danger.g, danger.b, 0.14f));
     stroke_round(g.target, banner, 10,
                  D2D1::ColorF(danger.r, danger.g, danger.b, 0.45f));
-    const bool needs_code = auth_error_code(g.session->last_error_code());
+    const bool needs_code =
+        g.session != nullptr &&
+        auth_error_code(g.session->last_error_code());
     float text_right = banner.right - 14;
     if (needs_code) {
       g.hit_retry_btn = D2D1::RectF(banner.right - 12 - 60, banner.top + 8,
@@ -7630,6 +7800,7 @@ void draw_settings_modal(float w, float h) {
       g.hit_server_save = g.hit_server_default = D2D1::RectF(0, 0, 0, 0);
   g.hit_update_btn = g.hit_repo_btn = g.hit_site_btn = g.hit_star_btn =
       D2D1::RectF(0, 0, 0, 0);
+  g.hit_set_diag_open = g.hit_set_diag_toggle = D2D1::RectF(0, 0, 0, 0);
 
   g.target->PushAxisAlignedClip(g.settings_view,
                                 D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
@@ -8039,6 +8210,27 @@ void draw_settings_modal(float w, float h) {
             L"剪贴板和文件内容在设备之间加密传输（直连或经中继），不会保存"
             L"到目录服务器。验证码，聊天记录和本机设置只保存在本机的配置目录中。") +
         4;
+
+    // E1/E3: the low-contrast "运行日志" entry the Web keeps at the bottom of
+    // its settings dialog. The switch only stops disk writes; the ring keeps
+    // recording so "复制最近日志" still works.
+    y += 14;
+    text(g.target, g.heading, L"运行日志",
+         D2D1::RectF(x, y, x + cw, y + 20), g.theme->ink);
+    y += 24;
+    y = settings_hint(
+            x, y, cw,
+            L"本机诊断写入 %LOCALAPPDATA%\\moLink\\logs，按天滚动并保留 7 天；"
+            L"验证码、会话令牌、剪贴板和文件内容不会写入。") +
+        4;
+    y = settings_toggle_row(x, y, cw, L"记录到文件",
+                            L"关闭后仍保留内存环形缓冲，供诊断面板查看和复制。",
+                            g.diag_recording, hv_set_diag_toggle,
+                            &g.hit_set_diag_toggle);
+    g.hit_set_diag_open = D2D1::RectF(x, y, x + 150, y + 32);
+    settings_button(g.hit_set_diag_open, L"打开运行日志", false,
+                    hv_set_btn_diag);
+    y += 46;
   }
 
   g.target->PopAxisAlignedClip();
@@ -8309,6 +8501,19 @@ void settings_click(float x, float y) {
       }
       if (inside(g.hit_star_btn, x, y)) {
         open_url(kRepoUrl);
+        return;
+      }
+      if (inside(g.hit_set_diag_toggle, x, y)) {
+        g.diag_recording = !g.diag_recording;
+        save_diag_recording(g.diag_recording);
+        molink::native_diag::diag().set_enabled(g.diag_recording);
+        if (g.diag_recording) molink::native_diag::diag().cleanup_old_files();
+        show_toast(g.diag_recording ? L"已开启日志记录"
+                                    : L"已关闭日志文件写入");
+        return;
+      }
+      if (inside(g.hit_set_diag_open, x, y)) {
+        open_diagnostics();
         return;
       }
       break;
@@ -9519,6 +9724,518 @@ bool close_prompt_click(float x, float y) {
   return true;
 }
 
+// ---------------------------------------------------------------------------
+// Diagnostics panel (E1-E3): local ring + host tail in one modal, with the
+// Web's "copy both sides" / export / clear / open-directory actions.
+// ---------------------------------------------------------------------------
+
+namespace ndiag = molink::native_diag;
+
+std::wstring log_level_token(const std::wstring& line) {
+  const std::size_t first = line.find(L' ');
+  if (first == std::wstring::npos) return std::wstring();
+  const std::size_t second = line.find(L' ', first + 1);
+  if (second == std::wstring::npos) return std::wstring();
+  return line.substr(first + 1, second - first - 1);
+}
+
+bool log_line_visible(const std::wstring& line, int filter) {
+  if (filter == 0) return true;
+  const std::wstring token = log_level_token(line);
+  if (token == L"ERROR") return true;
+  if (filter == 2) return false;
+  return token == L"WARN";
+}
+
+std::vector<std::wstring> split_log_lines(const std::wstring& text) {
+  std::vector<std::wstring> lines;
+  std::size_t start = 0;
+  while (start < text.size()) {
+    const std::size_t end = text.find(L'\n', start);
+    if (end == std::wstring::npos) {
+      if (start < text.size()) lines.push_back(text.substr(start));
+      break;
+    }
+    if (end > start) lines.push_back(text.substr(start, end - start));
+    start = end + 1;
+  }
+  return lines;
+}
+
+std::wstring filtered_log_text(const std::wstring& text, int filter) {
+  if (filter == 0) return text;
+  const std::vector<std::wstring> lines = split_log_lines(text);
+  std::wstring out;
+  for (const std::wstring& line : lines) {
+    if (!log_line_visible(line, filter)) continue;
+    if (!out.empty()) out.push_back(L'\n');
+    out += line;
+  }
+  return out;
+}
+
+std::wstring diag_directory_text() {
+  return wide_of(ndiag::diag().directory());
+}
+
+void refresh_diag_text() {
+  g.diag_local_text = wide_of(ndiag::diag().tail(500));
+  if (g.session != nullptr && g.session->authenticated()) {
+    g.diag_host_snapshot = g.session->host_logs();
+    g.diag_host_text = g.diag_host_snapshot.has_tail
+                           ? wide_of(g.diag_host_snapshot.tail)
+                           : std::wstring();
+  } else {
+    g.diag_host_snapshot = molink::net::host_log_state{};
+    g.diag_host_text.clear();
+  }
+  g.diag_lines_dirty = true;
+}
+
+void request_host_diagnostics() {
+  if (g.session == nullptr || !g.session->authenticated()) return;
+  g.session->request_log_info();
+  g.session->request_log_tail(500);
+  g.diag_host_at = GetTickCount64();
+}
+
+void open_diagnostics() {
+  g.diag_open = true;
+  g.settings_open = false;
+  g.focus_field = 0;
+  g.diag_scroll = 0;
+  g.diag_follow = true;
+  g.diag_filter = 0;
+  g.diag_refresh_at = 0;
+  refresh_diag_text();
+  request_host_diagnostics();
+  if (g.window != nullptr) InvalidateRect(g.window, nullptr, FALSE);
+}
+
+std::wstring build_copy_log_text() {
+  std::wstring out = L"moLink 诊断日志\n";
+  out += L"本机版本: ";
+  out += kNativeVersion;
+  SYSTEMTIME now{};
+  GetLocalTime(&now);
+  wchar_t stamp[64] = {};
+  std::swprintf(stamp, 64, L"%04d-%02d-%02d %02d:%02d:%02d", now.wYear,
+                now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond);
+  out += L"\n生成时间: ";
+  out += stamp;
+  out += L"\n本机日志目录: ";
+  out += diag_directory_text();
+  if (g.session != nullptr) {
+    const molink::net::host_log_state host = g.session->host_logs();
+    out += L"\n远端: ";
+    out += g.connect_target.empty() ? g.session_label : g.connect_target;
+    if (!host.version.empty()) {
+      out += L"  v";
+      out += wide_of(host.version);
+    }
+    if (host.port > 0) {
+      out += L"  port ";
+      out += std::to_wstring(host.port);
+    }
+    if (host.has_info) {
+      out += L"\n主机日志目录: ";
+      out += wide_of(host.directory);
+      if (!host.file.empty()) {
+        out += L"\n主机当前文件: ";
+        out += wide_of(host.file);
+      }
+      out += L"\n主机记录: ";
+      out += host.enabled ? L"开" : L"关";
+      out += L"（保留 ";
+      out += std::to_wstring(host.retention_days);
+      out += L" 天，";
+      out += std::to_wstring(host.current_bytes);
+      out += L" 字节）";
+    }
+  }
+  out += L"\n\n=== 本机日志（info 及以上）===\n";
+  {
+    const std::wstring local =
+        wide_of(ndiag::diag().tail(500, ndiag::level::info));
+    out += local.empty() ? L"（空）" : local;
+  }
+  out += L"\n\n=== 主机日志（最近 500 行）===\n";
+  if (g.session != nullptr) {
+    const molink::net::host_log_state host = g.session->host_logs();
+    if (host.has_tail) {
+      out += host.tail.empty() ? L"（空）" : wide_of(host.tail);
+    } else {
+      out += L"（尚未获取主机日志）";
+    }
+  } else {
+    out += L"（未连接）";
+  }
+  out += L"\n";
+  return out;
+}
+
+void copy_recent_diagnostics() {
+  const std::wstring text = build_copy_log_text();
+  // Record the value before the clipboard write so the automatic clipboard
+  // sync treats it as an echo and does not send the logs to the host.
+  g.clipboard_sync.on_remote_text(u16_of(text), GetTickCount64());
+  set_clipboard_text(text);
+  show_toast(L"已复制最近日志");
+}
+
+void export_diagnostics() {
+  const std::wstring text = build_copy_log_text();
+  SYSTEMTIME now{};
+  GetLocalTime(&now);
+  wchar_t path[MAX_PATH] = {};
+  std::swprintf(path, MAX_PATH, L"molink-logs-%04d%02d%02d-%02d%02d%02d.txt",
+                now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute,
+                now.wSecond);
+  OPENFILENAMEW ofn{};
+  ofn.lStructSize = sizeof(ofn);
+  ofn.hwndOwner = g.window;
+  ofn.lpstrFilter = L"文本文件 (*.txt)\0*.txt\0所有文件 (*.*)\0*.*\0";
+  ofn.lpstrFile = path;
+  ofn.nMaxFile = MAX_PATH;
+  ofn.lpstrDefExt = L"txt";
+  ofn.lpstrTitle = L"导出运行日志";
+  ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
+  if (!GetSaveFileNameW(&ofn)) return;
+  std::ofstream out(path, std::ios::binary | std::ios::trunc);
+  if (!out) {
+    show_toast(L"无法写入导出文件", 2);
+    return;
+  }
+  const std::string utf8 = utf8_of(text);
+  out.write(utf8.data(), static_cast<std::streamsize>(utf8.size()));
+  out.flush();
+  if (!out) {
+    show_toast(L"无法写入导出文件", 2);
+    return;
+  }
+  show_toast(L"日志已导出");
+}
+
+void clear_local_diagnostics() {
+  const std::size_t removed = ndiag::diag().clear();
+  refresh_diag_text();
+  g.diag_scroll = 0;
+  g.diag_follow = true;
+  show_toast(removed > 0 ? L"已清空本机运行日志" : L"本机日志已是空的");
+}
+
+void open_diagnostics_directory() {
+  ndiag::diag().ensure_directory();
+  const std::wstring dir = diag_directory_text();
+  if (dir.empty()) {
+    show_toast(L"无法确定日志目录", 2);
+    return;
+  }
+  ShellExecuteW(nullptr, L"open", dir.c_str(), nullptr, nullptr,
+                SW_SHOWNORMAL);
+}
+
+D2D1_COLOR_F log_line_color(const std::wstring& line) {
+  const std::wstring token = log_level_token(line);
+  if (token == L"ERROR") {
+    return g.theme == &kLight ? D2D1::ColorF(0xc0392b)
+                              : D2D1::ColorF(0xff8f87);
+  }
+  if (token == L"WARN") {
+    return g.theme == &kLight ? D2D1::ColorF(0xb45309)
+                              : D2D1::ColorF(0xfbbf24);
+  }
+  if (token == L"DEBUG" || token == L"TRACE") return g.theme->muted;
+  return g.theme->ink;
+}
+
+void draw_diag_panel(float w, float h) {
+  if (!g.diag_open && g.diag_anim <= 0.01f) return;
+  const float e = ease_out(clampf(g.diag_anim, 0.0f, 1.0f));
+  fill_round(g.target, D2D1::RectF(0, 0, w, h), 0,
+             D2D1::ColorF(0, 0, 0, 0.35f * e));
+  const float width = (std::min)(880.0f, w - 32);
+  const float height = (std::min)(620.0f, h - 32);
+  const D2D1_RECT_F panel =
+      D2D1::RectF((w - width) / 2, (h - height) / 2,
+                  (w + width) / 2, (h + height) / 2);
+  g.hit_diag_panel = panel;
+  shadow(g.target, *g.theme, panel, 16);
+  fill_round(g.target, panel, 16, g.theme->surface);
+  stroke_round(g.target, panel, 16, g.theme->line);
+
+  draw_icon(g.target, icon::activity, panel.left + 22, panel.top + 24,
+            g.theme->accent);
+  text(g.target, g.name16, L"运行日志",
+       D2D1::RectF(panel.left + 36, panel.top + 6, panel.right - 60,
+                   panel.top + 42),
+       g.theme->ink);
+  g.hit_diag_close =
+      D2D1::RectF(panel.right - 44, panel.top + 8, panel.right - 12,
+                  panel.top + 40);
+  quiet_icon_button(g.target, *g.theme, g.hit_diag_close, hv_diag_close,
+                    icon::close, false,
+                    inside(g.hit_diag_close, g.hover_x, g.hover_y));
+  line(g.target, panel.left, panel.top + 48, panel.right, panel.top + 48,
+       g.theme->line_soft, 1.0f);
+
+  // Tabs.
+  const wchar_t* tabs[2] = {L"本机日志", L"主机日志"};
+  for (int i = 0; i < 2; ++i) {
+    const D2D1_RECT_F r =
+        D2D1::RectF(panel.left + 16 + i * 96, panel.top + 58,
+                    panel.left + 16 + i * 96 + 88, panel.top + 84);
+    const bool active = g.diag_tab == i;
+    const float hover = hover_lerp(hv_diag_tab0 + i,
+                                   inside(r, g.hover_x, g.hover_y));
+    fill_round(g.target, r, 13,
+               active ? g.theme->accent_soft
+                      : D2D1::ColorF(g.theme->panel.r, g.theme->panel.g,
+                                     g.theme->panel.b, hover));
+    text(g.target, g.label12, tabs[i], r,
+         active ? g.theme->accent
+                : mix_color(g.theme->muted, g.theme->ink, hover));
+    g.hit_diag_tab[i] = r;
+  }
+
+  // Severity filter.
+  const wchar_t* filters[3] = {L"全部", L"警告", L"错误"};
+  for (int i = 0; i < 3; ++i) {
+    const D2D1_RECT_F r =
+        D2D1::RectF(panel.right - 16 - (3 - i) * 60, panel.top + 58,
+                    panel.right - 16 - (2 - i) * 60, panel.top + 82);
+    const bool active = g.diag_filter == i;
+    const float hover = hover_lerp(hv_diag_filter0 + i,
+                                   inside(r, g.hover_x, g.hover_y));
+    fill_round(g.target, r, 12,
+               active ? g.theme->panel_strong
+                      : D2D1::ColorF(g.theme->panel.r, g.theme->panel.g,
+                                     g.theme->panel.b, hover));
+    text(g.target, g.label12, filters[i], r,
+         active ? g.theme->ink
+                : mix_color(g.theme->muted, g.theme->ink, hover));
+    g.hit_diag_filter[i] = r;
+  }
+
+  const molink::net::host_log_state& host = g.diag_host_snapshot;
+  float content_top = panel.top + 96;
+  if (g.diag_tab == 1) {
+    std::wstring info;
+    if (g.session == nullptr || !g.session->authenticated()) {
+      info = L"连接会话后可读取主机日志。";
+    } else if (!host.has_info && !host.has_tail) {
+      info = L"正在读取主机日志…";
+    } else {
+      if (!host.version.empty()) {
+        info = L"v" + wide_of(host.version);
+      }
+      if (host.port > 0) {
+        if (!info.empty()) info += L" · ";
+        info += L"端口 " + std::to_wstring(host.port);
+      }
+      if (host.has_info) {
+        if (!info.empty()) info += L" · ";
+        info += host.enabled ? L"记录开" : L"记录关";
+        info += L" · 保留 " + std::to_wstring(host.retention_days) + L" 天";
+        if (!host.file.empty()) {
+          info += L"\n" + wide_of(host.file);
+        }
+      } else if (host.has_tail) {
+        if (!info.empty()) info += L" · ";
+        info += L"最近 " + std::to_wstring(host.tail_lines) + L" 行";
+      }
+    }
+    text(g.target, g.small_left, info,
+         D2D1::RectF(panel.left + 16, content_top - 2, panel.right - 250,
+                     content_top + 34),
+         g.theme->muted);
+    g.hit_diag_refresh =
+        D2D1::RectF(panel.right - 238, content_top - 6,
+                    panel.right - 158, content_top + 22);
+    g.hit_diag_host_toggle =
+        D2D1::RectF(panel.right - 150, content_top - 6, panel.right - 16,
+                    content_top + 22);
+    const bool host_ready =
+        g.session != nullptr && g.session->authenticated();
+    settings_button(g.hit_diag_refresh, L"刷新", false, hv_diag_refresh,
+                    !host_ready);
+    if (host.has_info) {
+      settings_button(g.hit_diag_host_toggle,
+                      host.enabled ? L"关闭主机记录" : L"开启主机记录", false,
+                      hv_diag_host_toggle, !host_ready);
+    } else {
+      settings_button(g.hit_diag_host_toggle, L"读取主机信息", false,
+                      hv_diag_host_toggle, !host_ready);
+    }
+    content_top += 34;
+  } else {
+    g.hit_diag_refresh = g.hit_diag_host_toggle = D2D1::RectF(0, 0, 0, 0);
+  }
+
+  const float bottom_y = panel.bottom - 48;
+  const D2D1_RECT_F view =
+      D2D1::RectF(panel.left + 16, content_top, panel.right - 16, bottom_y - 8);
+  g.hit_diag_view = view;
+  fill_round(g.target, view, 8,
+             g.theme == &kLight ? D2D1::ColorF(0xf6f7f9)
+                                : D2D1::ColorF(0x05070a, 0.88f));
+  stroke_round(g.target, view, 8, g.theme->line_soft);
+
+  const std::wstring& raw = g.diag_tab == 0 ? g.diag_local_text
+                                            : g.diag_host_text;
+  if (g.diag_lines_dirty) {
+    g.diag_lines_dirty = false;
+    g.diag_lines =
+        split_log_lines(filtered_log_text(raw, g.diag_filter));
+  }
+  const std::vector<std::wstring>& lines = g.diag_lines;
+  const float line_h = 16.0f;
+  g.diag_content_h = static_cast<float>(lines.size()) * line_h + 12.0f;
+  const float view_h = view.bottom - view.top;
+  g.diag_max_scroll = (std::max)(0.0f, g.diag_content_h - view_h + 8);
+  if (g.diag_follow) g.diag_scroll = g.diag_max_scroll;
+  g.diag_scroll = clampf(g.diag_scroll, 0.0f, g.diag_max_scroll);
+
+  g.target->PushAxisAlignedClip(view, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+  if (lines.empty()) {
+    text(g.target, g.small_left,
+         g.diag_tab == 0 ? L"本机暂无日志。" : L"主机日志尚未获取。",
+         D2D1::RectF(view.left + 12, view.top + 12, view.right - 12,
+                     view.top + 36),
+         g.theme->muted);
+  } else {
+    const int first = static_cast<int>(g.diag_scroll / line_h);
+    const int visible =
+        static_cast<int>(view_h / line_h) + 1;
+    const float max_width = view.right - view.left - 20;
+    for (int i = first; i < static_cast<int>(lines.size()) &&
+                        i < first + visible;
+         ++i) {
+      std::wstring line = lines[static_cast<std::size_t>(i)];
+      // One row per log line; a long path must not wrap into the next row.
+      while (line.size() > 3 && measure_text(g.tiny, line) > max_width) {
+        line.pop_back();
+      }
+      if (line.size() != lines[static_cast<std::size_t>(i)].size()) {
+        line += L"…";
+      }
+      const float y = view.top + 6 +
+                      static_cast<float>(i) * line_h - g.diag_scroll;
+      text(g.target, g.tiny, line,
+           D2D1::RectF(view.left + 8, y, view.right - 8, y + line_h),
+           log_line_color(lines[static_cast<std::size_t>(i)]));
+    }
+  }
+  g.target->PopAxisAlignedClip();
+
+  if (g.diag_max_scroll > 0.5f) {
+    const float track_top = view.top + 8;
+    const float track_h = view_h - 16;
+    const D2D1_RECT_F track =
+        D2D1::RectF(view.right - 7, track_top, view.right - 3,
+                    track_top + track_h);
+    fill_round(g.target, track, 2, g.theme->line_soft);
+    const float thumb_h =
+        (std::max)(20.0f, track_h * view_h / g.diag_content_h);
+    const float thumb_y =
+        track_top + (track_h - thumb_h) * (g.diag_scroll / g.diag_max_scroll);
+    fill_round(g.target,
+               D2D1::RectF(track.left, thumb_y, track.right,
+                           thumb_y + thumb_h),
+               2, g.theme->line);
+  }
+
+  // Bottom actions.
+  const float button_w = 128;
+  const float gap = 8;
+  const float y = panel.bottom - 40;
+  g.hit_diag_copy =
+      D2D1::RectF(panel.left + 16, y, panel.left + 16 + button_w, y + 28);
+  g.hit_diag_export = D2D1::RectF(g.hit_diag_copy.right + gap, y,
+                                  g.hit_diag_copy.right + gap + button_w,
+                                  y + 28);
+  g.hit_diag_clear = D2D1::RectF(g.hit_diag_export.right + gap, y,
+                                 g.hit_diag_export.right + gap + button_w,
+                                 y + 28);
+  g.hit_diag_open_dir = D2D1::RectF(g.hit_diag_clear.right + gap, y,
+                                    g.hit_diag_clear.right + gap + button_w,
+                                    y + 28);
+  settings_button(g.hit_diag_copy, L"复制最近日志", true, hv_diag_copy);
+  settings_button(g.hit_diag_export, L"导出", false, hv_diag_export);
+  settings_button(g.hit_diag_clear, L"清空本机", false, hv_diag_clear);
+  settings_button(g.hit_diag_open_dir, L"打开目录", false, hv_diag_open_dir);
+  text(g.target, g.tiny,
+       g.diag_recording ? L"文件记录：开" : L"文件记录：关（仅内存）",
+       D2D1::RectF(g.hit_diag_open_dir.right + 12, y + 6,
+                   panel.right - 16, y + 26),
+       g.theme->muted);
+}
+
+bool diag_panel_click(float x, float y) {
+  if (!g.diag_open) return false;
+  if (!inside(g.hit_diag_panel, x, y)) {
+    g.diag_open = false;
+    g.diag_anim = 0.0f;
+    if (g.window != nullptr) InvalidateRect(g.window, nullptr, FALSE);
+    return true;
+  }
+  if (inside(g.hit_diag_close, x, y)) {
+    g.diag_open = false;
+    g.diag_anim = 0.0f;
+    if (g.window != nullptr) InvalidateRect(g.window, nullptr, FALSE);
+    return true;
+  }
+  for (int i = 0; i < 2; ++i) {
+    if (inside(g.hit_diag_tab[i], x, y)) {
+      g.diag_tab = i;
+      g.diag_scroll = 0;
+      g.diag_follow = true;
+      g.diag_lines_dirty = true;
+      if (i == 1) request_host_diagnostics();
+      refresh_diag_text();
+      return true;
+    }
+  }
+  for (int i = 0; i < 3; ++i) {
+    if (inside(g.hit_diag_filter[i], x, y)) {
+      g.diag_filter = i;
+      g.diag_scroll = 0;
+      g.diag_follow = true;
+      g.diag_lines_dirty = true;
+      return true;
+    }
+  }
+  if (inside(g.hit_diag_copy, x, y)) {
+    copy_recent_diagnostics();
+    return true;
+  }
+  if (inside(g.hit_diag_export, x, y)) {
+    export_diagnostics();
+    return true;
+  }
+  if (inside(g.hit_diag_clear, x, y)) {
+    clear_local_diagnostics();
+    return true;
+  }
+  if (inside(g.hit_diag_open_dir, x, y)) {
+    open_diagnostics_directory();
+    return true;
+  }
+  if (inside(g.hit_diag_refresh, x, y)) {
+    request_host_diagnostics();
+    refresh_diag_text();
+    return true;
+  }
+  if (inside(g.hit_diag_host_toggle, x, y) && g.session != nullptr &&
+      g.session->authenticated()) {
+    const molink::net::host_log_state host = g.session->host_logs();
+    g.session->set_host_logging(!host.enabled);
+    g.diag_host_at = GetTickCount64();
+    return true;
+  }
+  return true;
+}
+
 void draw_overlays(float w, float h) {
   if (g.tab == 1 || g.immersive) {
     draw_chat_drawer(w, h);
@@ -9526,6 +10243,7 @@ void draw_overlays(float w, float h) {
   }
   draw_settings_modal(w, h);
   draw_rename_modal(w, h);
+  draw_diag_panel(w, h);
 }
 
 std::wstring* focus_text(int field) {
@@ -10037,7 +10755,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
       const bool bottom = client.y >= rc.bottom - border;
       // A modal covers the window: nothing behind it may become a caption
       // drag, otherwise its own header buttons (y < 40) are dead.
-      if (g.settings_open || g.close_prompt) return HTCLIENT;
+      if (g.settings_open || g.close_prompt || g.diag_open) return HTCLIENT;
       if (left && top) return HTTOPLEFT;
       if (right && top) return HTTOPRIGHT;
       if (left && bottom) return HTBOTTOMLEFT;
@@ -10200,6 +10918,14 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
           return 0;
         }
       }
+      if (g.diag_open) {
+        const int delta = GET_WHEEL_DELTA_WPARAM(wparam);
+        g.diag_follow = false;
+        g.diag_scroll = clampf(g.diag_scroll - (delta / 120.0f) * 48.0f,
+                               0.0f, g.diag_max_scroll);
+        InvalidateRect(window, nullptr, FALSE);
+        return 0;
+      }
       if (g.settings_open) {
         const int delta = GET_WHEEL_DELTA_WPARAM(wparam);
         g.settings_scroll =
@@ -10272,21 +10998,45 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
           show_toast(L"已发送连接请求，等待对方确认");
           InvalidateRect(window, nullptr, FALSE);
         }
-        const std::wstring& host_error = g.session->last_error();
-        if (!host_error.empty() && host_error != g.seen_session_error) {
-          g.seen_session_error = host_error;
+        const std::wstring host_error = g.session->last_error();
+        const unsigned error_seq = g.session->error_seq();
+        if (!host_error.empty() && error_seq != g.seen_error_seq) {
+          g.seen_error_seq = error_seq;
+          const std::wstring code = g.session->last_error_code();
           // A rejected resume token must not be presented forever: drop it
           // so the next retry can fall back to a code or an access request,
           // matching the web client's invalid_code handling.
-          if (auth_error_code(g.session->last_error_code())) {
+          if (auth_error_code(code)) {
             g.resume_token.clear();
             g.resume_target.clear();
             g.resume_code.clear();
           }
-          const std::wstring text = friendly_session_error(
-              g.session->last_error_code(), host_error);
-          g.connect_error = text;
-          show_toast(text);
+          // E4: only a closed transport, the credential failures and a failed
+          // handshake reach the session banner. Input/clipboard/file failures
+          // are toasts, even before the first welcome.
+          const auto route = molink::native::alerts::classify(
+              utf8_of(code), utf8_of(host_error));
+          const std::wstring text = friendly_session_error(code, host_error);
+          if (route.where ==
+              molink::native::alerts::surface::banner) {
+            g.connect_error = text;
+          }
+          show_toast(text, toast_level_of(route.level));
+          InvalidateRect(window, nullptr, FALSE);
+        }
+        // Feature failures (input/clipboard/file) use their own channel and
+        // only ever become a toast.
+        const std::wstring feature_error = g.session->last_feature_error();
+        const unsigned feature_seq = g.session->feature_error_seq();
+        if (!feature_error.empty() &&
+            feature_seq != g.seen_feature_error_seq) {
+          g.seen_feature_error_seq = feature_seq;
+          const std::wstring code = g.session->last_feature_error_code();
+          const auto route = molink::native::alerts::classify(
+              utf8_of(code), utf8_of(feature_error));
+          const std::wstring text =
+              friendly_session_error(code, feature_error);
+          show_toast(text, toast_level_of(route.level));
           InvalidateRect(window, nullptr, FALSE);
         }
         if (g.session->authenticated()) {
@@ -10339,6 +11089,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
             // The replacement socket made it through hello: the retry cycle
             // is over.
             g.reconnecting = false;
+            g.reconnect_stopped = false;
             g.retry_attempt = 0;
             g.retry_at = 0;
             native_log(L"reconnected: target=" + g.connect_target);
@@ -10478,12 +11229,39 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
                      L" error=" + g.session->last_error() +
                      (retryable ? L" -> reconnecting" : L" -> stopped"));
           if (retryable) {
+            // A fresh drop starts the schedule at attempt 1 (immediate); a
+            // retry attempt that died before `welcome` keeps counting.
+            if (!g.reconnecting) g.retry_attempt = 0;
             g.reconnecting = true;
-            g.retry_attempt = 0;
-            g.retry_at = GetTickCount64();
-            show_toast(L"连接已断开，正在重连…");
+            g.reconnect_stopped = false;
+            ++g.retry_attempt;
+            g.retry_at =
+                GetTickCount64() +
+                molink::native::reconnect::delay_for_attempt(g.retry_attempt);
+            g.connect_error = L"连接已断开";
+            if (!g.session->close_detail().empty()) {
+              g.connect_error += L"：" + g.session->close_detail();
+            }
+            show_toast(L"连接已断开，正在重连…", 1);
           } else {
-            show_toast(L"会话已断开");
+            // A close with no policy answer is a transport failure, which the
+            // task routes to the banner even when the session was never
+            // accepted. A policy answer (access denied, locked) keeps the
+            // classification `error_policy` gave it above.
+            const std::wstring reason = g.session->last_error();
+            const std::wstring code = g.session->last_error_code();
+            const auto route = molink::native::alerts::classify(
+                reason.empty() ? std::string("transport_closed")
+                               : utf8_of(code),
+                utf8_of(reason));
+            if (route.where == molink::native::alerts::surface::banner &&
+                g.connect_error.empty()) {
+              g.connect_error = L"连接已断开";
+              if (!g.session->close_detail().empty()) {
+                g.connect_error += L"：" + g.session->close_detail();
+              }
+            }
+            show_toast(L"会话已断开", toast_level_of(route.level));
           }
           InvalidateRect(window, nullptr, FALSE);
         }
@@ -10521,7 +11299,17 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
         InvalidateRect(window, nullptr, FALSE);
       };
       const bool on_session = g.tab == 1 || g.immersive;
+      if (g.diag_open && now - g.diag_refresh_at >= 1000) {
+        g.diag_refresh_at = now;
+        refresh_diag_text();
+        if (g.diag_tab == 1 && now - g.diag_host_at >= 3000) {
+          request_host_diagnostics();
+        }
+        InvalidateRect(window, nullptr, FALSE);
+      }
+      if (g.reconnecting) InvalidateRect(window, nullptr, FALSE);
       step_anim(g.settings_anim, g.settings_open);
+      step_anim(g.diag_anim, g.diag_open);
       step_anim(g.chat_anim, g.chat_open && on_session);
       step_anim(g.files_anim, g.files_open && on_session);
       if (g.connecting) InvalidateRect(window, nullptr, FALSE);
@@ -10724,6 +11512,20 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
       const float y = static_cast<float>(HIWORD(lparam)) * 96.0f / g_dpi;
       SetFocus(window);
       g.click_flash_until = GetTickCount64() + 130;
+      // E4: a toast can be dismissed by clicking it.
+      if (!g.toast_text.empty() && GetTickCount64() < g.toast_until &&
+          inside(g.hit_toast_close, x, y)) {
+        g.toast_text.clear();
+        g.toast_until = 0;
+        InvalidateRect(window, nullptr, FALSE);
+        return 0;
+      }
+      // The diagnostics panel is modal and sits above the settings dialog.
+      if (g.diag_open) {
+        diag_panel_click(x, y);
+        InvalidateRect(window, nullptr, FALSE);
+        return 0;
+      }
       if (g.ctx_field != 0) {
         const bool on_panel = inside(g.ctx_panel, x, y);
         int picked = -1;
@@ -11031,6 +11833,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
       }
       break;
     case WM_CHAR: {
+      if (g.diag_open) return 0;
       if (remote_input_active()) return 0;
       const wchar_t ch = static_cast<wchar_t>(wparam);
       if (g.focus_field == 3) {
@@ -11070,6 +11873,15 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
       break;
     }
     case WM_KEYDOWN: {
+      // The diagnostics panel is modal: typing must not reach the remote.
+      if (g.diag_open) {
+        if (wparam == VK_ESCAPE) {
+          g.diag_open = false;
+          g.diag_anim = 0.0f;
+          InvalidateRect(window, nullptr, FALSE);
+        }
+        return 0;
+      }
       if (g.rename_open) {
         if (wparam == VK_RETURN) {
           apply_rename();
@@ -11131,7 +11943,10 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
       // Esc unwinds one layer at a time, like the web: menu, then toolbar,
       // then immersive mode. F11 toggles immersive directly.
       if (wparam == VK_ESCAPE) {
-        if (g.settings_open) {
+        if (g.diag_open) {
+          g.diag_open = false;
+          g.diag_anim = 0.0f;
+        } else if (g.settings_open) {
           g.settings_open = false;
           g.focus_field = 0;
         } else if (g.open_menu >= 0) {
@@ -11428,8 +12243,10 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
         const bool was_reconnecting = g.reconnecting;
         g.session.reset(result->client);
         configure_session(g.session.get());
-        g.session_was_live = false;
-        g.retry_attempt = 0;
+        // A reconnect attempt that dies before `welcome` must still schedule
+        // another one; marking it as a live session makes the close path run.
+        g.session_was_live = was_reconnecting;
+        if (!was_reconnecting) g.retry_attempt = 0;
         g.retry_at = 0;
         g.tab = 1;
         g.session_open = true;
@@ -11445,11 +12262,13 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
         g.reconnecting = false;
         show_toast(L"已连接 " + g.session_label);
       } else if (g.reconnecting) {
-        // A transient failure while reconnecting: stay quiet and try again.
+        // A transient failure while reconnecting: stay quiet and try again,
+        // using the Web's 0 / 1 s / 1 s / 60 s schedule.
         delete result->client;
         ++g.retry_attempt;
-        const ULONGLONG delay = g.retry_attempt <= 2 ? 1000 : 10000;
-        g.retry_at = GetTickCount64() + delay;
+        g.retry_at =
+            GetTickCount64() +
+            molink::native::reconnect::delay_for_attempt(g.retry_attempt);
       } else {
         delete result->client;
         g.connect_error =
@@ -11536,6 +12355,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   SetCurrentProcessExplicitAppUserModelID(L"com.molink.desktop");
   enable_dpi_awareness();
   CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+  // E1: diagnostics are on by default; the switch (settings → 关于) stops
+  // disk writes but keeps the in-memory ring. Cleanup runs at startup and
+  // once per day from inside the logger.
+  g.diag_recording = load_diag_recording();
+  molink::native_diag::diag().set_enabled(g.diag_recording);
+  molink::native_diag::diag().cleanup_old_files();
   // Same startup as the web: a pinned toolbar opens expanded, otherwise the
   // session starts with the floating ball.
   g.pinned = load_pinned();
