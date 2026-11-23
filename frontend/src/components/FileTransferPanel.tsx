@@ -3737,7 +3737,7 @@ export function FileTransferPanel({
                     void loadLocalDirectory(event.target.value)
                   }
                 }}
-                className="field h-6 max-w-[130px] shrink-0 truncate text-[9px]"
+                className="field h-6 max-w-[136px] shrink-0 truncate !py-0 text-[11px] leading-6"
                 aria-label={t('files.roots')}
                 title={t('files.roots')}
               >
@@ -4029,7 +4029,7 @@ export function FileTransferPanel({
                   const value = event.target.value
                   browseRemote(value === '__roots__' ? '' : value)
                 }}
-                className="field h-6 max-w-[130px] shrink-0 truncate text-[9px]"
+                className="field h-6 max-w-[136px] shrink-0 truncate !py-0 text-[11px] leading-6"
                 aria-label={t('files.roots')}
                 title={t('files.roots')}
               >
