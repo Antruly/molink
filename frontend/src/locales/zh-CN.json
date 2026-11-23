@@ -895,6 +895,18 @@
     "clearConfirm": "确认清空？",
     "empty": "暂无日志。连接或解码出现问题时，记录会显示在这里。",
     "noMatch": "没有匹配的记录。",
-    "privacy": "日志只写入本机存储，不包含验证码、聊天或剪贴板内容。"
+    "recording": "记录诊断日志",
+    "recordingHint": "默认开启，日志只保存在本机 7 天，不会上传；关闭后仅保留内存缓冲。",
+    "hostDir": "被控端：{{dir}} · {{size}} · 保留 {{days}} 天",
+    "localDir": "本机：浏览器存储 · {{size}} · 保留 7 天",
+    "localOnlyLocation": "本机存储",
+    "copyRecent": "复制最近日志",
+    "openDir": "打开日志目录",
+    "copiedForSupport": "已复制，可直接发给维护者",
+    "copyFailed": "复制失败",
+    "openDirUnsupported": "仅桌面壳支持打开日志目录",
+    "recordingOn": "已开启记录",
+    "recordingOff": "已关闭记录",
+    "privacy": "日志只保存在本机，不会上传。不包含验证码、聊天或剪贴板内容。"
   }
 }

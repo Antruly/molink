@@ -245,6 +245,7 @@ AV1 不可用、观看端没有解码能力或单帧编码失败时，服务端�
 | `quality` | `mode`, `format`, `fps` | 画质/帧率切换的确认 |
 | `capture-stats` | `fps`, `target_fps`, `build_ms` | 每秒一次：主机实际发布帧率、目标帧率、单帧构建+编码耗时（EMA，毫秒）。客户端据此区分“屏幕没变化”和“主机编码不过来” |
 | `codec` | `av1`, `wire`, `decoded`, `full`（可选） | 本地核心代理每秒最多一次的解码统计；`full=true` 表示线路只传 AV1 全帧 |
+| `logs` | `action`, `tail`, `size`, `lines`, `enabled`, `directory`, `retention_days`, `current_bytes`, `file` | 诊断日志回复：`action=tail` 带最近日志文本（上限 256 KiB，截断时首行注明）与字节数；`action=info` 带目录、保留天数、当前文件大小和开关；`action=state` 回应 enable/disable |
 | `error` | `code`, `message` | 错误 |
 
 `welcome` 示例（真实屏幕）：
@@ -310,6 +311,7 @@ QUIC 会话（`transport=quic`）在一条双向 QUIC 流上复用完全相同�
 | `display` | `index` | 切换被控端显示器（全局）；服务端回 `display` 并发送新关键帧 |
 | `display-mode` | `width`, `height` | 请求主机切换显示模式；仅当 `welcome.tiles.can_set_display_mode` 不为 `false` 时可用（目前仅 DXGI 采集）。成功回 `display-mode` 并发送关键帧；后端不支持回 `display_mode_unsupported`，驱动拒绝回 `display_mode_failed`，两秒内重复请求回 `display_mode_busy` |
 | `input` | `events[]` | 指针/键盘事件；需要已鉴权，见 §4.3 |
+| `logs` | `action`（`tail`/`info`/`enable`/`disable`），`lines`（可选，1..5000，默认 500） | 读取或开关被控端诊断日志；需要已鉴权。日志只写在本机，永不上传，且不含验证码、会话令牌、密码或剪贴板内容 |
 | `bye` | — | 正常关闭 |
 
 ### 4.2.1 显示器选择

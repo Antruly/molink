@@ -12,6 +12,7 @@
 
 #include <webapp/uvcpp_web_json.h>
 
+#include "diag_log.h"
 #include "directory_listing.h"
 #include "util.h"
 
@@ -263,6 +264,8 @@ void file_transfer::notify_upload(const upload& item, upload_event event,
 
 void file_transfer::fail(const std::string& action, uint32_t id,
                          const std::string& why) {
+  diag().log(diag_level::warn, "file.fail", why,
+             {{"action", action}, {"id", std::to_string(id)}});
   uvcpp_json j;
   j["type"] = "file";
   j["action"] = action;
@@ -341,6 +344,11 @@ void file_transfer::offer(const std::string& name, uint64_t size,
   j["chunk"] = kChunkBytes;
   j["dir"] = dir;
   send_json_(dump_json(j));
+  diag().log(diag_level::info, "file.accept", std::string(),
+             {{"id", std::to_string(id)},
+              {"name", base},
+              {"bytes", std::to_string(size)},
+              {"dir", dir}});
   notify_upload(uploads_.at(id), upload_event::accepted);
 }
 
@@ -427,6 +435,10 @@ void file_transfer::complete(uint32_t id, clock::time_point now) {
     drop_upload(id, true);
     return;
   }
+  diag().log(diag_level::info, "file.done", std::string(),
+             {{"id", std::to_string(id)},
+              {"bytes", std::to_string(item.size)},
+              {"path", final_path}});
   notify_upload(item, upload_event::done, final_path);
   uploads_.erase(it);
   uvcpp_json j;
@@ -587,6 +599,10 @@ void file_transfer::request(const std::string& path,
     return;
   }
   const uint32_t id = item.id;
+  diag().log(diag_level::info, "file.send", std::string(),
+             {{"id", std::to_string(id)},
+              {"bytes", std::to_string(size)},
+              {"name", resolved->filename().string()}});
   downloads_.emplace(id, std::move(item));
   uvcpp_json j;
   j["type"] = "file";
