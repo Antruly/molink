@@ -37,6 +37,7 @@
 #include <vector>
 
 #include "avatar_image.h"
+#include "clipboard_sync.h"
 #include "preset_message.h"
 #include "session_client.h"
 #include "ui_kit.h"
@@ -104,6 +105,10 @@ struct app_state {
   bool watermark = false;
   bool audio_on = true;
   bool clipboard_on = true;
+  /// Dedup and echo suppression for the automatic text clipboard sync. The
+  /// Win32 listener/reads/writes stay in this file; the rules are shared with
+  /// the Linux unit tests (clipboard_sync.cpp).
+  molink::clipboard::text_sync clipboard_sync;
   // The web defaults to control mode (its home mode switch starts on
   // `control` unless the user picked `view`); the toolbar button still turns
   // it off for a view-only session.
@@ -984,6 +989,13 @@ std::string utf8_of(const std::wstring& text) {
   return out;
 }
 
+/// The shared clipboard state machine works on UTF-16 code units, which is
+/// what the Windows clipboard and the Web's `charCodeAt` hash use. On Windows
+/// wchar_t is 16 bits, so this is a plain copy.
+std::u16string u16_of(const std::wstring& text) {
+  return std::u16string(text.begin(), text.end());
+}
+
 std::string json_escape(const std::wstring& text) {
   const std::string utf8 = utf8_of(text);
   std::string out;
@@ -1001,8 +1013,8 @@ std::string json_escape(const std::wstring& text) {
   return out;
 }
 
-void session_send(const std::string& json) {
-  if (g.session != nullptr) g.session->send_json(json);
+bool session_send(const std::string& json) {
+  return g.session != nullptr && g.session->send_json(json);
 }
 
 bool looks_like_device_id(const std::wstring& target) {
@@ -2809,6 +2821,77 @@ void show_toast(const std::wstring& text) {
   g.toast_until = GetTickCount64() + 2500;
 }
 
+/// Keep the Win32 clipboard listener in step with the session switch. The
+/// switch used to gate only the inbound write; it now stops both directions of
+/// the automatic text sync, like the Web's clipboard toggle.
+void clipboard_apply_enabled() {
+  g.clipboard_sync.set_enabled(g.clipboard_on);
+  if (g.window == nullptr) return;
+  if (g.clipboard_on) {
+    AddClipboardFormatListener(g.window);
+  } else {
+    RemoveClipboardFormatListener(g.window);
+  }
+}
+
+void clipboard_toggle() {
+  g.clipboard_on = !g.clipboard_on;
+  clipboard_apply_enabled();
+  native_log(g.clipboard_on ? L"clipboard.sync switch=on"
+                            : L"clipboard.sync switch=off");
+}
+
+/// Read the new local clipboard and decide whether it goes to the host.
+/// Called from WM_CLIPBOARDUPDATE: the listener fires only when the content
+/// changes, so no polling is involved.
+void clipboard_local_changed() {
+  if (!g.clipboard_on) return;
+  // The host accepts clipboard-sync only after authentication. Before that
+  // there is nothing to send, and remembering the value here would swallow
+  // the first real copy after the connection comes up.
+  if (g.session == nullptr || !g.session->live() ||
+      !g.session->authenticated()) {
+    return;
+  }
+  const std::wstring wide = local_clipboard_text();
+  const std::u16string text = u16_of(wide);
+  const molink::clipboard::decision result =
+      g.clipboard_sync.on_local_text(text, GetTickCount64());
+  if (!result.send) {
+    switch (result.reason) {
+      case molink::clipboard::skip_reason::duplicate:
+      case molink::clipboard::skip_reason::echo:
+        native_log(L"clipboard.sync direction=out bytes=" +
+                   std::to_wstring(result.bytes) +
+                   (result.reason == molink::clipboard::skip_reason::echo
+                        ? L" result=echo"
+                        : L" result=duplicate"));
+        break;
+      case molink::clipboard::skip_reason::too_large:
+        native_log(L"clipboard.sync direction=out bytes=" +
+                   std::to_wstring(result.bytes) + L" result=too_large");
+        show_toast(L"剪贴板文本超过 192 KiB，未同步");
+        break;
+      case molink::clipboard::skip_reason::disabled:
+      case molink::clipboard::skip_reason::empty:
+      case molink::clipboard::skip_reason::none:
+        break;
+    }
+    return;
+  }
+  if (session_send(molink::clipboard::clipboard_sync_json(text))) {
+    native_log(L"clipboard.sync direction=out bytes=" +
+               std::to_wstring(result.bytes));
+  } else {
+    // A closed socket must not make this text permanently unsendable: the
+    // next copy of the same value is a fresh attempt.
+    g.clipboard_sync.reset_last_sent();
+    native_log(L"clipboard.sync direction=out bytes=" +
+               std::to_wstring(result.bytes) + L" result=send_failed");
+    show_toast(L"剪贴板同步发送失败");
+  }
+}
+
 void send_quality() {
   if (g.session == nullptr) return;
   // Fixed tiers are rebuilt from the plan on every send; custom values go
@@ -2862,7 +2945,7 @@ void menu_apply(int which, int index) {
   }
   if (which == 4) {
     if (index == 0) {
-      g.clipboard_on = !g.clipboard_on;
+      clipboard_toggle();
     } else if (index == 1) {
       clipboard_get();
     } else {
@@ -4641,7 +4724,7 @@ bool session_click(float x, float y) {
     return true;
   }
   if (inside(g.hit_clip_toggle, x, y)) {
-    g.clipboard_on = !g.clipboard_on;
+    clipboard_toggle();
     return true;
   }
   if (inside(g.hit_clip_get, x, y)) {
@@ -8925,7 +9008,12 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
         }
         for (const std::string& clip : g.session->take_clipboard()) {
           if (g.clipboard_on) {
-            set_clipboard_text(wide_of(clip));
+            const std::wstring local = wide_of(clip);
+            // Record the value before writing it: the write raises
+            // WM_CLIPBOARDUPDATE, and without this the echo would be read as a
+            // fresh local copy and sent straight back to the host.
+            g.clipboard_sync.on_remote_text(u16_of(local), GetTickCount64());
+            set_clipboard_text(local);
             show_toast(L"已接收远端剪贴板");
             InvalidateRect(window, nullptr, FALSE);
           }

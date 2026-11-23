@@ -37,3 +37,6 @@ cer/
 
 # 本机测试机记录（含凭据，不要提交）
 docs/testing.local.md
+
+# clangd's index cache: build output, not source.
+backend/.cache/

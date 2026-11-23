@@ -976,6 +976,19 @@ set_target_properties(molink-core-preset-message-test PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 add_test(NAME preset_message COMMAND molink-core-preset-message-test)
 
+# Clipboard text sync without Win32: the empty/duplicate/192 KiB rules and the
+# echo table (two-minute window, 64 entries) are shared with the native shell
+# and tested here on Linux. The Windows calls themselves stay in ui_kit_demo.
+add_executable(molink-core-clipboard-sync-test
+  tests/clipboard_sync_test.cpp
+  "${CMAKE_CURRENT_SOURCE_DIR}/../shell/windows/clipboard_sync.cpp"
+)
+target_include_directories(molink-core-clipboard-sync-test PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../shell/windows")
+set_target_properties(molink-core-clipboard-sync-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME clipboard_sync COMMAND molink-core-clipboard-sync-test)
+
 # Service registration: the path staleness rule is pure and shared with the
 # status endpoint (Win32/systemd orchestration stays in the core).
 add_executable(molink-core-service-control-test
