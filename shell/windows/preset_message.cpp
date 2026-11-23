@@ -71,7 +71,8 @@ void append_json_string(std::string& out, std::string_view value) {
       default:
         if (c < 0x20) {
           char buffer[8];
-          std::snprintf(buffer, sizeof(buffer), "\\u%04x", c);
+          std::snprintf(buffer, sizeof(buffer), "\\u%04x",
+                        static_cast<unsigned int>(c));
           out += buffer;
         } else {
           out.push_back(raw);
