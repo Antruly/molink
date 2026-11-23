@@ -1345,6 +1345,13 @@ void session_client::handle_text(const std::string& text) {
     if (find_string(text, "avatar", &avatar) && !avatar.empty()) {
       avatar_ = wide_of(avatar);
     }
+    // The viewer-owned preset goes out before the first frame, like the Web
+    // (SessionView sends it as soon as the session is live). Sending it once
+    // per connection also covers the reconnect credential path.
+    if (!startup_preset_sent_ && ws_.is_open()) {
+      startup_preset_sent_ = true;
+      ws_.send_text(startup_preset_json_);
+    }
     if (stream_decoding_ && !request_tiles_) {
       // Follow the host's global stream preference (VP9/AV1/tiles): the core
       // handles all of them, and the toolbar changes the codec deliberately.
@@ -1360,8 +1367,9 @@ void session_client::handle_text(const std::string& text) {
       // the web client with "平铺" as the only codec in its menu.
       (void)has_preference;
       (void)preference;
-      ws_.send_text(
-          "{\"type\":\"quality\",\"mode\":\"balanced\",\"format\":\"bgra\"}");
+      // The selected tier went out above; do not force BGRA with the retired
+      // host-global `quality` message. `session-preset` is viewer-owned and
+      // carries chroma, so truecolor/BGRA and turbo/gray are both expressible.
       // The host's push clock only sends on change; a fresh viewer on a
       // static screen would sit on "waiting for the first frame" forever.
       // The web asks for a keyframe and one frame as soon as it is live.
@@ -1509,11 +1517,23 @@ void session_client::handle_text(const std::string& text) {
     if (find_string(text, "value", &value) && !value.empty()) {
       video_mode_ = wide_of(value);
     }
+  } else if (type == "session-preset") {
+    // The host's reply is an observation, never a command: record what it
+    // actually applied and leave the viewer's selector alone (Web
+    // `onSessionPresetApplied` does exactly this).
+    preset::applied_reply reply;
+    if (preset::parse_session_preset_reply(text, &reply) && reply.applied) {
+      std::lock_guard<std::mutex> lock(applied_mutex_);
+      applied_ = std::move(reply);
+    }
   } else if (type == "quality") {
-    std::string mode;
-    if (find_string(text, "mode", &mode) && !mode.empty()) {
-      // The toolbar shows the preset name; map it to the chip text.
-      stats_->codec = stats_->codec;  // placeholder, preset is a UI field
+    // Retired host-global acknowledgement. Older cores still answer a
+    // viewer-owned preset request this way; use it as a fallback so the
+    // actual-values line is not stuck on "waiting".
+    preset::applied_reply reply;
+    if (preset::parse_quality_reply(text, &reply)) {
+      std::lock_guard<std::mutex> lock(applied_mutex_);
+      applied_ = std::move(reply);
     }
   }
 }
@@ -1606,18 +1626,19 @@ void session_client::tick(uint64_t now_ms) {
   }
 }
 
-void session_client::send_quality(const std::string& mode, int fps, int qp,
-                                  int bitrate_kbps, const std::string& rate_mode,
-                                  const std::string& format) {
-  if (!ws_.is_open()) return;
-  std::string text = "{\"type\":\"quality\",\"mode\":\"" + mode + "\"";
-  if (fps > 0) text += ",\"fps\":" + std::to_string(fps);
-  if (qp >= 0) text += ",\"qp\":" + std::to_string(qp);
-  if (bitrate_kbps >= 0) text += ",\"bitrate_kbps\":" + std::to_string(bitrate_kbps);
-  if (!rate_mode.empty()) text += ",\"rate_mode\":\"" + rate_mode + "\"";
-  if (!format.empty()) text += ",\"format\":\"" + format + "\"";
-  text += "}";
-  ws_.send_text(text);
+bool session_client::send_session_preset(const std::string& json) {
+  if (!ws_.is_open()) return false;
+  if (!ws_.send_text(json)) return false;
+  // The Web requests a keyframe after a tier change (SessionView's
+  // requestKeyframe); the host also forces one when it rebuilds the encoder,
+  // but an explicit request covers a pure fps/knob change and a lost reply.
+  if (authenticated_) ws_.send_text("{\"type\":\"request-keyframe\"}");
+  return true;
+}
+
+preset::applied_reply session_client::applied_preset() const {
+  std::lock_guard<std::mutex> lock(applied_mutex_);
+  return applied_;
 }
 
 bool session_client::send_json(const std::string& text) {

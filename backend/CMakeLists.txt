@@ -959,6 +959,19 @@ set_target_properties(molink-core-session-preset-test PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 add_test(NAME session_preset COMMAND molink-core-session-preset-test)
 
+# The native shell's session-preset payload is built by a Windows-independent
+# source, so the exact bytes the viewer puts on the wire are tested here on
+# Linux (and in the Windows protocol job) without a display or Win32.
+add_executable(molink-core-preset-message-test
+  tests/preset_message_test.cpp
+  "${CMAKE_CURRENT_SOURCE_DIR}/../shell/windows/preset_message.cpp"
+)
+target_include_directories(molink-core-preset-message-test PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../shell/windows")
+set_target_properties(molink-core-preset-message-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME preset_message COMMAND molink-core-preset-message-test)
+
 # Service registration: the path staleness rule is pure and shared with the
 # status endpoint (Win32/systemd orchestration stays in the core).
 add_executable(molink-core-service-control-test

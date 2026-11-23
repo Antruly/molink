@@ -103,7 +103,10 @@ void text(ID2D1RenderTarget* t, IDWriteTextFormat* format,
           const D2D1_COLOR_F& color) {
   ID2D1SolidColorBrush* b = g_brushes.get(t, color);
   if (b == nullptr) return;
-  t->DrawTextW(s.c_str(), static_cast<UINT32>(s.size()), format, r, b,
+  // `DrawText` rather than `DrawTextW`: the D2D method is named DrawText, and
+  // when windows.h is in scope its DrawText->DrawTextW macro renames both the
+  // interface and this call. The W spelling does not exist in MinGW's header.
+  t->DrawText(s.c_str(), static_cast<UINT32>(s.size()), format, r, b,
                D2D1_DRAW_TEXT_OPTIONS_CLIP);
 }
 
