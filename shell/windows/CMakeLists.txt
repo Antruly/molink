@@ -66,7 +66,11 @@ target_include_directories(moLink-native PRIVATE
   # ui_kit_demo.rc names the icon as shell/assets/icons/icon.ico.
   "${CMAKE_CURRENT_SOURCE_DIR}/../.."
 )
-target_compile_definitions(moLink-native PRIVATE _WIN32_WINNT=0x0601)
+# NOMINMAX: windows.h defines min/max as macros, which turns every
+# std::min/std::max in the shared UI headers into a syntax error under MSVC
+# (C2589). The native shell had only ever been built with MinGW, so the first
+# MSVC build stopped here.
+target_compile_definitions(moLink-native PRIVATE _WIN32_WINNT=0x0601 NOMINMAX)
 if(MSVC)
   # preset_message.h carries the zh-CN labels as UTF-8 source text.
   target_compile_options(moLink-native PRIVATE /utf-8)
