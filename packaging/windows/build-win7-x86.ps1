@@ -30,7 +30,7 @@ param(
   # Win7 x86).
   [switch]$NativeOnly = $false,
   [string]$Repo = "",
-  [string]$Version = "0.12.6",
+  [string]$Version = "0.12.12",
   [string]$Out = ""
 )
 
@@ -307,7 +307,7 @@ if (Test-Path $sharpYuvLib) { $webpLibs += $sharpYuvLib }
 $nativeRes = Join-Path $env:RUNNER_TEMP 'native-res.o'
 & $rc -O coff -I $Repo (Join-Path $Repo 'shell\windows\ui_kit_demo.rc') -o $nativeRes
 if ($LASTEXITCODE -ne 0) { throw 'native resources failed' }
-& $cxx -std=c++20 -D_WIN32_WINNT=0x0601 -DWINVER=0x0601 -DMOLINK_HAVE_WEBP `
+& $cxx -std=c++20 -finput-charset=UTF-8 -fexec-charset=UTF-8 -D_WIN32_WINNT=0x0601 -DWINVER=0x0601 -DMOLINK_HAVE_WEBP `
   -O2 -mwindows -municode -static `
   -I (Join-Path $Repo 'shell\windows') -I (Join-Path $webpSrc 'src') `
   -o (Join-Path $pkg 'moLink-native.exe') `
@@ -315,6 +315,7 @@ if ($LASTEXITCODE -ne 0) { throw 'native resources failed' }
   (Join-Path $Repo 'shell\windows\ui_kit.cpp') `
   (Join-Path $Repo 'shell\windows\ws_client.cpp') `
   (Join-Path $Repo 'shell\windows\session_client.cpp') `
+  (Join-Path $Repo 'shell\windows\preset_message.cpp') `
   (Join-Path $Repo 'shell\windows\puff.c') `
   $nativeRes $webpLibs `
   -ld2d1 -ldwrite -lole32 -luser32 -lgdi32 -ladvapi32 -lwindowscodecs `

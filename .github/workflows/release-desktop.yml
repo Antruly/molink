@@ -23,7 +23,7 @@ permissions:
 # artifacts, using the version in backend/src/version.h. Without this, manual
 # runs produced packages named after the branch ("main").
 env:
-  PKG_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '0.12.6' }}
+  PKG_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '0.12.12' }}
 
 # Linux and Windows download the prebuilt libuvcpp archive (UVCPP_VERSION,
 # default 1.8.7); macOS has no prebuilt asset yet and builds it from the
@@ -473,10 +473,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'native resources failed' }
           $common = @(
             '-std=c++20', '-D_WIN32_WINNT=0x0601', '-O2', '-mwindows', '-municode', '-static',
+            '-finput-charset=UTF-8', '-fexec-charset=UTF-8',
             '-I', 'shell/windows', "-I$mingwInc",
             '-o', 'build\windows\pkg\moLink-native.exe',
             'shell/windows/ui_kit_demo.cpp', 'shell/windows/ui_kit.cpp',
             'shell/windows/ws_client.cpp', 'shell/windows/session_client.cpp',
+            'shell/windows/preset_message.cpp',
             'shell/windows/puff.c', "$env:RUNNER_TEMP\native-res.o",
             "-L$mingwLib"
           )
@@ -692,7 +694,7 @@ jobs:
           python3 -m pip install --user meson ninja
           export PATH="$HOME/.local/bin:$PATH"
           # code.videolan.org is not reliably reachable from the runners (the
-          # 0.12.6 run failed to connect after 220 ms while libvpx downloaded
+          # 0.12.12 run failed to connect after 220 ms while libvpx downloaded
           # from github.com in the same job). Try it first, then the GitHub
           # mirror; only give up when both fail. The two tarballs extract to
           # the same dav1d-1.4.3/ directory.
