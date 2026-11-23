@@ -42,6 +42,7 @@ import {
   type ComboForwardChoice,
 } from '../lib/combo-forward'
 import { logDiag } from '../lib/diag-log'
+import type { ClipboardOfferPrompt } from '../lib/remote-clipboard'
 import type { Frame } from '../lib/protocol'
 import { forgetSessionScreenBuffer } from '../lib/screen-buffer'
 import {
@@ -101,6 +102,9 @@ export interface SessionTab {
   error: string | null
   /// Machine-readable error code from the host (e.g. unauthorized).
   errorCode?: string | null
+  /// A remote clipboard selection waiting behind the explicit "取出" button,
+  /// or its download progress.
+  clipboardOffer?: ClipboardOfferPrompt | null
   /// "relay" or "p2p" for a device-ID session (legacy live mode).
   transport?: string
   /// Data path reported live by the local core: direct | p2p | relay.
@@ -189,6 +193,10 @@ interface AppState {
   /// Remote Explorer file clipboard -> this machine's clipboard. Off by
   /// default: enabling it transfers the whole file selection over the session.
   remoteClipboardFiles: boolean
+  /// Mount remote clipboard files with FUSE (Linux) and pull ranges only when
+  /// this machine pastes. On by default; when the core cannot mount, the
+  /// selection falls back to the capped download path.
+  clipboardVirtualFiles: boolean
   /// Keep the host's reconnect credential across restarts, so a single-use
   /// verification code is not needed again. On by default.
   rememberDevice: boolean
@@ -249,6 +257,13 @@ interface AppState {
   setWatermarkFade: (enabled: boolean) => void
   setAutoAudio: (enabled: boolean) => void
   setRemoteClipboardFiles: (enabled: boolean) => void
+  setClipboardVirtualFiles: (enabled: boolean) => void
+  /// Banner state for a remote clipboard selection that needs an explicit
+  /// "取出" (or is downloading it).
+  setClipboardOffer: (
+    id: string,
+    prompt: ClipboardOfferPrompt | null,
+  ) => void
   setRememberDevice: (enabled: boolean) => void
   setKeyboardGrab: (enabled: boolean) => void
   /// Stores the remembered first-use answer (`null` clears it).
@@ -343,6 +358,7 @@ const QUALITY_KEY = 'molink.quality'
 const WATERMARK_FADE_KEY = 'molink.watermarkFade'
 const AUTO_AUDIO_KEY = 'molink.autoAudio'
 const REMOTE_CLIPBOARD_FILES_KEY = 'molink.remoteClipboardFiles'
+const CLIPBOARD_VIRTUAL_FILES_KEY = 'molink.clipboardVirtualFiles'
 const CLOSE_BEHAVIOR_KEY = 'molink.closeBehavior'
 const QUALITY_MODE_KEY = 'molink.qualityMode'
 const DEFAULT_PRESET_KEY = 'molink.defaultPreset'
@@ -705,6 +721,10 @@ export const useAppStore = create<AppState>((set, get) => {
     // On by default: pasting a file copied on the remote is the feature, and
     // the settings switch still lets a user opt out.
     remoteClipboardFiles: readStorage(REMOTE_CLIPBOARD_FILES_KEY) !== '0',
+    // On by default: virtual paste is the reason copying a remote file no
+    // longer downloads it. The switch opts back into eager downloading.
+    clipboardVirtualFiles:
+      readStorage(CLIPBOARD_VIRTUAL_FILES_KEY) !== '0',
     rememberDevice: readStorage(REMEMBER_DEVICE_KEY) !== '0',
     // The shell's origin changes with its ephemeral port, so the cookie copy
     // is what actually survives a restart.
@@ -779,6 +799,20 @@ export const useAppStore = create<AppState>((set, get) => {
       for (const connection of runtimes.values()) {
         connection.setRemoteClipboardEnabled(enabled)
       }
+    },
+
+    setClipboardVirtualFiles: (enabled) => {
+      writeStorage(CLIPBOARD_VIRTUAL_FILES_KEY, enabled ? '1' : '0')
+      set({ clipboardVirtualFiles: enabled })
+      // Each announcement re-reads the setting; turning it off also releases
+      // a mount that is already on this machine's clipboard.
+      for (const connection of runtimes.values()) {
+        connection.setClipboardVirtualEnabled(enabled)
+      }
+    },
+
+    setClipboardOffer: (id, prompt) => {
+      patchTab(id, { clipboardOffer: prompt })
     },
 
     setRememberDevice: (enabled) => {
@@ -1497,11 +1531,24 @@ export const useAppStore = create<AppState>((set, get) => {
         // Local files go to every remote; the local core's clipboard API is
         // only reachable when this UI is the local shell/browser.
         connection.enableClipboardFileSync(() => get().token)
-        // And the reverse: files copied on the remote can be staged into this
-        // machine's clipboard. The setting is off by default.
+        // And the reverse: files copied on the remote can be put on this
+        // machine's clipboard (mounted virtually when possible).
         connection.enableRemoteClipboardSync(
           () => get().token,
           get().remoteClipboardFiles,
+          {
+            // Mount with FUSE when this core can and the user allows it.
+            useVirtual: () =>
+              get().clipboardVirtualFiles &&
+              get().device?.capabilities.clipboard_virtual === true,
+            // On Linux the setting is on but the core has no libfuse: say so
+            // instead of silently falling back to a full download.
+            noteVirtualFallback: () =>
+              get().clipboardVirtualFiles &&
+              get().device?.platform === 'linux' &&
+              get().device?.capabilities.clipboard_virtual !== true,
+            onPrompt: (prompt) => patchTab(id, { clipboardOffer: prompt }),
+          },
         )
       }
 

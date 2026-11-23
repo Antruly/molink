@@ -39,6 +39,8 @@
 #endif
 
 #include "clipboard_stage.h"
+#include "clipboard_virtual.h"
+#include "clipboard/virtual_mount.h"
 #include "config.h"
 #include "directory_listing.h"
 #include "discovery.h"
@@ -144,6 +146,28 @@ std::string clipboard_cache_directory() {
 #endif
 }
 
+/// Where the viewer mounts remote clipboard files for on-demand reads:
+/// `~/.cache/molink/clip/<generation>/` on Linux. Only the FUSE path uses it;
+/// other platforms fall back to the staging directories above.
+std::string clipboard_virtual_directory() {
+#if defined(_WIN32)
+  const char* local = std::getenv("LOCALAPPDATA");
+  const std::string base =
+      local != nullptr && *local != '\0'
+          ? std::string(local) + "\\moLink\\cache"
+          : local_home_directory() + "\\AppData\\Local\\moLink\\cache";
+  return base + "\\clip";
+#elif defined(__APPLE__)
+  return local_home_directory() + "/Library/Caches/moLink/clip";
+#else
+  const char* xdg = std::getenv("XDG_CACHE_HOME");
+  const std::string base =
+      xdg != nullptr && *xdg != '\0' ? std::string(xdg)
+                                     : local_home_directory() + "/.cache";
+  return base + "/molink/clip";
+#endif
+}
+
 void remember_clipboard_echoes(const std::vector<std::string>& paths) {
   const auto marks = clipboard_echoes();
   const uint64_t now = now_ms();
@@ -168,6 +192,16 @@ void remember_clipboard_echoes(const std::vector<std::string>& paths) {
 }
 
 bool clipboard_echo_path(const std::string& path) {
+  // A virtual clipboard mount outlives the two-minute echo window (a user may
+  // paste much later), so every path under it is permanently ours. Without
+  // this the local->remote poll would upload the mount back to the host.
+  const std::string virtual_root = clipboard_virtual_directory();
+  if (!virtual_root.empty()) {
+    const std::string prefix = virtual_root + "/";
+    if (path.size() > prefix.size() && path.compare(0, prefix.size(), prefix) == 0) {
+      return true;
+    }
+  }
   const auto marks = clipboard_echoes();
   const uint64_t now = now_ms();
   std::lock_guard<std::mutex> lock(marks->mutex);
@@ -428,6 +462,36 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
         return true;
       });
 
+  // Virtual clipboard files: the viewer's OS clipboard names a read-only FUSE
+  // mount instead of a downloaded copy. The page's loopback bridge relays each
+  // range read to the host over its existing session. Without libfuse (or when
+  // the mount fails) the page falls back to the download path.
+  std::string virtual_directory = clipboard_virtual_directory();
+  if (virtual_directory.empty()) {
+    virtual_directory = stage_directory.empty()
+                            ? std::string()
+                            : (std::filesystem::path(stage_directory) / "mount")
+                                  .string();
+  }
+  const auto virtual_clipboard_service = std::make_shared<virtual_clipboard>(
+      virtual_directory,
+      deps.clipboard != nullptr && deps.clipboard->available()
+          ? platform_virtual_mount_factory()
+          : virtual_mount_factory(),
+      [clipboard = deps.clipboard](const std::vector<std::string>& paths) {
+        if (!clipboard || !clipboard->available() ||
+            !clipboard->set_files(paths)) {
+          return false;
+        }
+        // The mount paths must not travel back to the remote as a fresh copy.
+        remember_clipboard_echoes(paths);
+        return true;
+      },
+      [clipboard = deps.clipboard] {
+        if (clipboard && clipboard->available()) clipboard->set_text({});
+      },
+      [&app](std::function<void()> fn) { app.post(std::move(fn)); });
+
   // ---- Remote access gate ---------------------------------------------
   // The listener is always on 0.0.0.0 for hot toggling; a connection accepted
   // before the switch was turned off is still rejected on every request.
@@ -547,7 +611,7 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
       resp.set_header("Access-Control-Allow-Origin", origin);
       resp.set_header("Vary", "Origin");
       resp.set_header("Access-Control-Allow-Methods",
-                      "GET, POST, OPTIONS");
+                      "GET, POST, PUT, DELETE, OPTIONS");
       resp.set_header("Access-Control-Allow-Headers",
                       "Authorization, Content-Type, X-MoLink-Token, "
                       "X-MoLink-Client");
@@ -1682,6 +1746,29 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
              resp.end();
            });
 
+  // The viewer cancelled a download (clipboard changed, user pressed cancel):
+  // delete its temp file now instead of waiting for the 30-minute sweep.
+  app.del("/api/clipboard-stage/:id",
+          [staging](uvcpp_web_request& req, uvcpp_web_response& resp,
+                    uvcpp_web_next) {
+            if (!is_loopback_peer(req.peer_ip())) {
+              resp.status(403).json_str(R"({"code":"loopback_only"})");
+              resp.end();
+              return;
+            }
+            const std::string* id = req.param("id");
+            if (id == nullptr || id->empty()) {
+              resp.status(400).json_str(R"({"code":"bad_stage_request"})");
+              resp.end();
+              return;
+            }
+            staging->abort(*id);
+            uvcpp_json out;
+            out["ok"] = true;
+            resp.set_header("Cache-Control", "no-store").json(out);
+            resp.end();
+          });
+
   app.post("/api/clipboard-apply",
            [staging, clipboard = deps.clipboard](
                uvcpp_web_request& req, uvcpp_web_response& resp,
@@ -1742,6 +1829,192 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
              resp.set_header("Cache-Control", "no-store").json(out);
              resp.end();
            });
+
+  // ---- Virtual clipboard (FUSE) ---------------------------------------
+  // The page forwards a `clipboard-sync.files` announcement here. The core
+  // mounts the files read-only and puts the mount paths on the OS clipboard;
+  // no file bytes move until the local user pastes.
+  app.post("/api/clipboard-virtual-offer",
+           [virtual_clipboard_service](uvcpp_web_request& req,
+                                       uvcpp_web_response& resp,
+                                       uvcpp_web_next) {
+             if (!is_loopback_peer(req.peer_ip())) {
+               resp.status(403).json_str(R"({"code":"loopback_only"})");
+               resp.end();
+               return;
+             }
+             if (!virtual_clipboard_service ||
+                 !virtual_clipboard_service->available()) {
+               resp.status(503).json_str(
+                   R"({"code":"clipboard_virtual_unavailable"})");
+               resp.end();
+               return;
+             }
+             uvcpp_json body;
+             try {
+               body = uvcpp_json::parse(req.body_str());
+             } catch (...) {
+               resp.status(400).json_str(
+                   R"({"code":"bad_virtual_offer"})");
+               resp.end();
+               return;
+             }
+             if (!body.is_object() || !body.contains("files") ||
+                 !body["files"].is_array()) {
+               resp.status(400).json_str(
+                   R"({"code":"bad_virtual_offer"})");
+               resp.end();
+               return;
+             }
+             std::vector<virtual_offer_request_file> files;
+             for (const auto& item : body["files"]) {
+               if (!item.is_object() || !item.contains("id") ||
+                   !item["id"].is_number_integer() ||
+                   !item.contains("name") || !item["name"].is_string() ||
+                   !item.contains("size") ||
+                   !item["size"].is_number_integer()) {
+                 resp.status(400).json_str(
+                     R"({"code":"bad_virtual_offer"})");
+                 resp.end();
+                 return;
+               }
+               virtual_offer_request_file file;
+               try {
+                 const int64_t id = item["id"].get<int64_t>();
+                 const int64_t size = item["size"].get<int64_t>();
+                 if (id <= 0 || id > 0x7fffffff || size < 0) {
+                   resp.status(400).json_str(
+                       R"({"code":"bad_virtual_offer"})");
+                   resp.end();
+                   return;
+                 }
+                 file.id = static_cast<uint32_t>(id);
+                 file.size = static_cast<uint64_t>(size);
+               } catch (...) {
+                 resp.status(400).json_str(
+                     R"({"code":"bad_virtual_offer"})");
+                 resp.end();
+                 return;
+               }
+               file.name = item["name"].get<std::string>();
+               files.push_back(std::move(file));
+               if (files.size() > 64) break;
+             }
+             std::string session;
+             if (body.contains("session") && body["session"].is_string()) {
+               session = body["session"].get<std::string>();
+             }
+             std::size_t omitted = 0;
+             std::string mount;
+             std::vector<std::string> paths;
+             std::string error;
+             const virtual_offer_error result =
+                 virtual_clipboard_service->offer(session, files, omitted,
+                                                  mount, paths, error);
+             if (result != virtual_offer_error::none) {
+               uvcpp_json out;
+               out["ok"] = false;
+               out["code"] =
+                   result == virtual_offer_error::unavailable
+                       ? "clipboard_virtual_unavailable"
+                       : result == virtual_offer_error::clipboard_unavailable
+                             ? "clipboard_unavailable"
+                             : result == virtual_offer_error::mount_failed
+                                   ? "clipboard_virtual_mount_failed"
+                                   : "bad_virtual_offer";
+               out["message"] = error;
+               const int status =
+                   result == virtual_offer_error::bad_file
+                       ? 400
+                       : result == virtual_offer_error::mount_failed
+                             ? 500
+                             : 503;
+               resp.status(status).json(out);
+               resp.end();
+               return;
+             }
+             uvcpp_json out;
+             out["ok"] = true;
+             out["mount"] = mount;
+             out["omitted"] = omitted;
+             out["paths"] = uvcpp_json::array();
+             for (const std::string& path : paths) out["paths"].push_back(path);
+             resp.set_header("Cache-Control", "no-store").json(out);
+             resp.end();
+           });
+
+  app.post("/api/clipboard-virtual-clear",
+           [virtual_clipboard_service](uvcpp_web_request& req,
+                                       uvcpp_web_response& resp,
+                                       uvcpp_web_next) {
+             if (!is_loopback_peer(req.peer_ip())) {
+               resp.status(403).json_str(R"({"code":"loopback_only"})");
+               resp.end();
+               return;
+             }
+             bool cleared = false;
+             if (virtual_clipboard_service) {
+               std::string mount;
+               try {
+                 const uvcpp_json body = uvcpp_json::parse(req.body_str());
+                 if (body.is_object() && body.contains("mount") &&
+                     body["mount"].is_string()) {
+                   mount = body["mount"].get<std::string>();
+                 }
+               } catch (...) {
+                 // An empty body clears unconditionally.
+               }
+               if (mount.empty()) {
+                 virtual_clipboard_service->clear("page");
+                 cleared = true;
+               } else {
+                 cleared = virtual_clipboard_service->clear_if(mount);
+               }
+             }
+             uvcpp_json out;
+             out["ok"] = true;
+             out["cleared"] = cleared;
+             resp.set_header("Cache-Control", "no-store").json(out);
+             resp.end();
+           });
+
+  // The page's relay for virtual-file reads. Text frames carry the core's
+  // pull request, binary frames carry the host's 0x18 reply back.
+  app.websocket(
+      "/ws/clipboard-virtual",
+      [virtual_clipboard_service](uvcpp::uvcpp_web_ws_request& ws) {
+        uvcpp::uvcpp_ws_connection* conn = ws.connection();
+        if (conn == nullptr) return;
+        if (!is_loopback_peer(ws.request().peer_ip())) {
+          conn->close(uvcpp::ws_close_code::POLICY_VIOLATION,
+                      "loopback only");
+          return;
+        }
+        const std::string* mount = ws.query("mount");
+        uint64_t bridge_id = 0;
+        if (virtual_clipboard_service == nullptr || mount == nullptr ||
+            mount->empty() ||
+            !virtual_clipboard_service->bridge_attach(
+                *mount,
+                [conn](const std::string& message) {
+                  conn->send_text(message.data(), message.size());
+                },
+                &bridge_id)) {
+          conn->close(uvcpp::ws_close_code::POLICY_VIOLATION,
+                      "unknown mount");
+          return;
+        }
+        const std::string generation = *mount;
+        conn->on_binary([virtual_clipboard_service](const uint8_t* data,
+                                                    size_t length) {
+          virtual_clipboard_service->bridge_binary(data, length);
+        });
+        conn->on_close([virtual_clipboard_service, generation,
+                        bridge_id](uvcpp::ws_close_code,
+                                   const std::string&) {
+          virtual_clipboard_service->bridge_detach(generation, bridge_id);
+        });
+      });
 
   // Voice call control for the person at this machine (the host UI polls).
   app.get("/api/call",
@@ -1902,8 +2175,9 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
            });
 
   app.get("/api/device",
-          [deps](uvcpp_web_request& req, uvcpp_web_response& resp,
-                 uvcpp_web_next) {
+          [deps, virtual_clipboard_service](uvcpp_web_request& req,
+                                            uvcpp_web_response& resp,
+                                            uvcpp_web_next) {
             // Loopback-only, and the local UI is exempt from the idle lock.
             const std::string peer = req.peer_ip();
             const bool loopback = is_loopback_peer(peer);
@@ -1951,6 +2225,11 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
                 deps.input != nullptr && deps.input->available();
             j["capabilities"]["clipboard"] =
                 deps.clipboard != nullptr && deps.clipboard->available();
+            // The viewer can mount remote clipboard files and pull ranges on
+            // paste instead of downloading the whole selection on copy.
+            j["capabilities"]["clipboard_virtual"] =
+                virtual_clipboard_service != nullptr &&
+                virtual_clipboard_service->available();
             resp.set_header("Cache-Control", "no-store").json(j);
             resp.end();
           });
@@ -2761,8 +3040,9 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
            });
 
   app.get("/api/info",
-          [deps](uvcpp_web_request&, uvcpp_web_response& resp,
-                 uvcpp_web_next) {
+          [deps, virtual_clipboard_service](uvcpp_web_request&,
+                                            uvcpp_web_response& resp,
+                                            uvcpp_web_next) {
             uvcpp_json j;
             j["service"] = MOLINK_CORE_SERVICE;
             j["product"] = MOLINK_PRODUCT_NAME;
@@ -2790,6 +3070,9 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
             }
             j["capabilities"]["clipboard"] =
                 deps.clipboard != nullptr && deps.clipboard->available();
+            j["capabilities"]["clipboard_virtual"] =
+                virtual_clipboard_service != nullptr &&
+                virtual_clipboard_service->available();
             if (deps.clipboard) {
               j["clipboard"]["backend"] = deps.clipboard->backend();
               j["clipboard"]["available"] = deps.clipboard->available();

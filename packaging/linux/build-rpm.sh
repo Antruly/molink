@@ -76,7 +76,7 @@ Release: 1
 Summary: Web-first remote desktop
 License: MIT
 BuildArch: x86_64
-Requires: gtk3, webkit2gtk4.1, libX11, libXtst, libXfixes, libXdamage, zlib, libuv, sqlite-libs, openssl-libs
+Requires: gtk3, webkit2gtk4.1, libX11, libXtst, libXfixes, libXdamage, zlib, libuv, sqlite-libs, openssl-libs, fuse3-libs, fuse3
 
 %description
 moLink captures the screen, streams tiled frames over a local WebSocket and

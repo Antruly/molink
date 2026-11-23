@@ -323,6 +323,15 @@ stage_error clipboard_stage::apply(const std::vector<std::string>& ids,
   return stage_error::none;
 }
 
+void clipboard_stage::abort(const std::string& id) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  const auto it = entries_.find(id);
+  if (it == entries_.end()) return;
+  std::error_code ec;
+  fs::remove(it->second.temp_path, ec);
+  entries_.erase(it);
+}
+
 void clipboard_stage::sweep() {
   std::lock_guard<std::mutex> lock(mutex_);
   sweep_locked(now_ms());

@@ -15,6 +15,52 @@ export const PULL_CHUNK_BYTES = 256 * 1024
 /// reliable channel that also carries the screen.
 export const PULL_CONCURRENCY = 2
 
+/// Automatic fallback (no FUSE): downloading without asking is only allowed
+/// for a selection small enough to not swamp the session. Anything larger is
+/// offered behind an explicit button instead.
+export const AUTO_PULL_MAX_FILES = 8
+export const AUTO_PULL_MAX_FILE_BYTES = 64 * 1024 * 1024
+export const AUTO_PULL_MAX_TOTAL_BYTES = 256 * 1024 * 1024
+/// Sanity bound for the virtual (FUSE) path. The bytes never pass through the
+/// page; this only keeps absurd metadata out of the mount.
+export const VIRTUAL_MAX_FILE_BYTES = 1024 * 1024 * 1024 * 1024
+export const VIRTUAL_MAX_TOTAL_BYTES = 4 * 1024 * 1024 * 1024 * 1024
+
+export interface PullLimits {
+  maxFiles: number
+  maxFileBytes: number
+  maxTotalBytes: number
+}
+
+export const PULL_LIMITS_DEFAULT: PullLimits = {
+  maxFiles: PULL_MAX_FILES,
+  maxFileBytes: PULL_MAX_FILE_BYTES,
+  maxTotalBytes: PULL_MAX_TOTAL_BYTES,
+}
+
+export const PULL_LIMITS_AUTO: PullLimits = {
+  maxFiles: AUTO_PULL_MAX_FILES,
+  maxFileBytes: AUTO_PULL_MAX_FILE_BYTES,
+  maxTotalBytes: AUTO_PULL_MAX_TOTAL_BYTES,
+}
+
+export const PULL_LIMITS_VIRTUAL: PullLimits = {
+  maxFiles: PULL_MAX_FILES,
+  maxFileBytes: VIRTUAL_MAX_FILE_BYTES,
+  maxTotalBytes: VIRTUAL_MAX_TOTAL_BYTES,
+}
+
+/// The explicit "取出" button may exceed the automatic caps: the user asked
+/// for it, and the download streams to disk with progress and cancellation.
+export const EXPLICIT_PULL_MAX_FILE_BYTES = 4 * 1024 * 1024 * 1024
+export const EXPLICIT_PULL_MAX_TOTAL_BYTES = 8 * 1024 * 1024 * 1024
+
+export const PULL_LIMITS_EXPLICIT: PullLimits = {
+  maxFiles: PULL_MAX_FILES,
+  maxFileBytes: EXPLICIT_PULL_MAX_FILE_BYTES,
+  maxTotalBytes: EXPLICIT_PULL_MAX_TOTAL_BYTES,
+}
+
 export interface PullFile {
   id: number
   name: string
@@ -64,7 +110,10 @@ function validFile(value: unknown): PullFile | null {
 /// Keep the first files that fit the count and byte budgets. Unlike the old
 /// "all or nothing" cap, a selection with one huge file still copies the
 /// small files before it; the caller reports the truncation.
-export function planPullFiles(raw: unknown): PullPlan {
+export function planPullFilesWithLimits(
+  raw: unknown,
+  limits: PullLimits,
+): PullPlan {
   if (!Array.isArray(raw)) return { files: [], omitted: 0 }
   const parsed: PullFile[] = []
   for (const item of raw) {
@@ -74,13 +123,53 @@ export function planPullFiles(raw: unknown): PullPlan {
   const files: PullFile[] = []
   let total = 0
   for (const file of parsed) {
-    if (files.length >= PULL_MAX_FILES) break
-    if (file.size > PULL_MAX_FILE_BYTES) break
-    if (total + file.size > PULL_MAX_TOTAL_BYTES) break
+    if (files.length >= limits.maxFiles) break
+    if (file.size > limits.maxFileBytes) break
+    if (total + file.size > limits.maxTotalBytes) break
     files.push(file)
     total += file.size
   }
   return { files, omitted: parsed.length - files.length }
+}
+
+/// The explicit "取出" path and the files panel: the historical caps.
+export function planPullFiles(raw: unknown): PullPlan {
+  return planPullFilesWithLimits(raw, PULL_LIMITS_DEFAULT)
+}
+
+/// The banner's explicit button: larger than the automatic caps because the
+/// user asked for this selection.
+export function planExplicitPullFiles(raw: unknown): PullPlan {
+  return planPullFilesWithLimits(raw, PULL_LIMITS_EXPLICIT)
+}
+
+/// The automatic fallback when FUSE is unavailable: small selections only.
+export function planAutoPullFiles(raw: unknown): PullPlan {
+  return planPullFilesWithLimits(raw, PULL_LIMITS_AUTO)
+}
+
+/// The virtual clipboard accepts large files; the limits are sanity bounds
+/// only, so a 500 MB selection is mounted rather than downloaded.
+export function planVirtualFiles(raw: unknown): PullPlan {
+  return planPullFilesWithLimits(raw, PULL_LIMITS_VIRTUAL)
+}
+
+/// Total count and bytes of every valid entry, for the "N files (xx MB)"
+/// prompt. Invalid entries are ignored exactly as in the plans above.
+export function summarizePullFiles(raw: unknown): {
+  count: number
+  bytes: number
+} {
+  if (!Array.isArray(raw)) return { count: 0, bytes: 0 }
+  let count = 0
+  let bytes = 0
+  for (const item of raw) {
+    const file = validFile(item)
+    if (file === null) continue
+    count += 1
+    bytes += file.size
+  }
+  return { count, bytes }
 }
 
 /// Bytes to ask for at @p offset. Zero means the file is complete.

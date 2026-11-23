@@ -77,12 +77,13 @@ constexpr std::size_t kClipboardFileEchoMax = 64;
 /// One clipboard-pull range is at most this many bytes. The viewer uses the
 /// same size, so a normal download is one packet per request.
 constexpr uint64_t kClipboardPullChunkBytes = 256ull * 1024;
-// The same advisory caps the viewer applies. The host advertises at most this
-// prefix so a folder-sized CF_HDROP cannot turn into a huge JSON message; the
-// rest is still available through the files panel.
+// The id list is capped by count only: each entry is metadata, so a large
+// file costs a few bytes here. The client decides whether it can stream it
+// (virtual clipboard) or download it (its own, smaller, download caps).
 constexpr std::size_t kClipboardPullMaxFiles = 8;
-constexpr uint64_t kClipboardPullMaxFileBytes = 256ull * 1024 * 1024;
-constexpr uint64_t kClipboardPullMaxTotalBytes = 2ull * 1024 * 1024 * 1024;
+constexpr uint64_t kClipboardPullMaxFileBytes = 1ull * 1024 * 1024 * 1024 * 1024;
+constexpr uint64_t kClipboardPullMaxTotalBytes =
+    4ull * 1024 * 1024 * 1024 * 1024;
 
 std::string clipboard_files_signature(
     const std::vector<clipboard_file>& files) {

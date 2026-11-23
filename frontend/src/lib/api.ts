@@ -5,6 +5,9 @@ export interface DeviceCapabilities {
   screen_capture: boolean
   input_injection: boolean
   clipboard: boolean
+  /// The local core can mount remote clipboard files with FUSE and relay
+  /// range reads, so copying on the host transfers no bytes.
+  clipboard_virtual?: boolean
 }
 
 export interface AuthCode {
@@ -768,6 +771,18 @@ export function appendClipboardStage(
   )
 }
 
+/// Delete an unfinished staging entry (clipboard changed mid-download).
+export function abortClipboardStage(
+  token: string,
+  id: string,
+): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>(
+    `/api/clipboard-stage/${encodeURIComponent(id)}`,
+    { method: 'DELETE' },
+    token,
+  )
+}
+
 /// After every file is complete, hand the ordered ids to the local clipboard.
 export function applyClipboardStage(
   token: string,
@@ -782,6 +797,65 @@ export function applyClipboardStage(
     },
     token,
   )
+}
+
+export interface VirtualClipboardOfferFile {
+  id: number
+  name: string
+  size: number
+}
+
+export interface VirtualClipboardOffer {
+  ok: boolean
+  mount: string
+  omitted: number
+  paths: string[]
+}
+
+/// Mount remote clipboard files read-only in the local core and put the mount
+/// paths on this machine's clipboard. Loopback only. The reply's `mount` id is
+/// used to open the relay WebSocket; a failed offer throws ApiError
+/// (`clipboard_virtual_unavailable`, `clipboard_virtual_mount_failed`, …) so
+/// the caller can fall back to downloading.
+export function offerVirtualClipboard(
+  token: string,
+  files: VirtualClipboardOfferFile[],
+  session: string,
+): Promise<VirtualClipboardOffer> {
+  return request<VirtualClipboardOffer>(
+    '/api/clipboard-virtual-offer',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ files, session }),
+    },
+    token,
+  )
+}
+
+/// Unmount a generation. Without `mount` the core clears whatever it owns;
+/// with it, a stale tab cannot unmount a newer copy.
+export function clearVirtualClipboard(
+  token: string,
+  mount?: string,
+): Promise<{ ok: boolean; cleared: boolean }> {
+  return request<{ ok: boolean; cleared: boolean }>(
+    '/api/clipboard-virtual-clear',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(mount ? { mount } : {}),
+    },
+    token,
+  )
+}
+
+/// Loopback WebSocket that relays virtual-file pulls. It lives outside
+/// `/api/`, so the browser's (header-less) upgrade is not sent through the
+/// bearer-token guard; the core checks the peer is loopback instead.
+export function virtualClipboardBridgeUrl(mount: string): string {
+  const base = coreBaseUrl().replace(/^http/, 'ws')
+  return `${base}/ws/clipboard-virtual?mount=${encodeURIComponent(mount)}`
 }
 
 export interface CallState {

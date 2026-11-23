@@ -224,9 +224,11 @@ set(MOLINK_CORE_SOURCES
   src/clipboard/x11_clipboard.cpp
   src/clipboard/windows_clipboard.cpp
   src/clipboard/windows_data_object.cpp
+  src/clipboard/x11_clipboard_fuse.cpp
   src/clipboard_stage.cpp
   src/clipboard_lazy.cpp
   src/clipboard_pull.cpp
+  src/clipboard_virtual.cpp
   src/access_requests.cpp
   src/auth_state.cpp
   src/compression.cpp
@@ -551,6 +553,20 @@ if(MOLINK_BUILD_CORE)
     endif()
   endif()
 
+  # Virtual clipboard files (viewer side): remote clipboard entries become a
+  # read-only FUSE mount, so copying transfers nothing and pasting pulls ranges
+  # on demand. Optional: without libfuse3 the core falls back to downloading.
+  set(MOLINK_HAVE_FUSE 0)
+  if(UNIX AND NOT APPLE)
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+      pkg_check_modules(FUSE3 QUIET fuse3)
+      if(FUSE3_FOUND)
+        set(MOLINK_HAVE_FUSE 1)
+      endif()
+    endif()
+  endif()
+
   if(WIN32)
     # crypt32: a static libcrypto's CAPI engine calls the Windows certificate
     # store APIs directly (MinGW builds against a static OpenSSL need it).
@@ -580,6 +596,17 @@ if(MOLINK_BUILD_CORE)
   else()
     target_compile_definitions(molink-core PRIVATE MOLINK_HAVE_X11=0)
     message(STATUS "molink: X11 screen capture unavailable; synthetic frames only")
+  endif()
+
+  if(MOLINK_HAVE_FUSE)
+    target_compile_definitions(molink-core PRIVATE MOLINK_HAVE_FUSE=1)
+    target_include_directories(molink-core PRIVATE ${FUSE3_INCLUDE_DIRS})
+    target_link_directories(molink-core PRIVATE ${FUSE3_LIBRARY_DIRS})
+    target_link_libraries(molink-core PRIVATE ${FUSE3_LIBRARIES})
+    message(STATUS "molink: FUSE virtual clipboard enabled")
+  else()
+    target_compile_definitions(molink-core PRIVATE MOLINK_HAVE_FUSE=0)
+    message(STATUS "molink: libfuse3 not found; virtual clipboard unavailable")
   endif()
 
   # The manifest names the executable, and uvp resolves it as build/<name>.
@@ -755,6 +782,19 @@ target_include_directories(molink-core-clipboard-pull-test PRIVATE src)
 set_target_properties(molink-core-clipboard-pull-test PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 add_test(NAME clipboard_pull COMMAND molink-core-clipboard-pull-test)
+
+# Virtual clipboard lifecycle: offer caps and naming, mount/unmount on a new
+# announcement, bridge relay and the read-failure path. The FUSE layer itself
+# is not linked; the test supplies a fake mount factory.
+add_executable(molink-core-clipboard-virtual-test
+  tests/clipboard_virtual_test.cpp
+  src/clipboard_virtual.cpp
+  src/clipboard_stage.cpp
+)
+target_include_directories(molink-core-clipboard-virtual-test PRIVATE src)
+set_target_properties(molink-core-clipboard-virtual-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME clipboard_virtual COMMAND molink-core-clipboard-virtual-test)
 
 # Delayed clipboard rendering state machine: offer limits, per-session clear,
 # and the 15 s / 10 s render budget. Platform-neutral, so Windows-only delayed

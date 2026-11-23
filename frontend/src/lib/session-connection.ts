@@ -14,7 +14,10 @@ import { PcmPlayer } from './audio'
 import { ClipboardEcho } from './clipboard-echo'
 import { lazyCapability, type LazyCapability } from './clipboard-lazy'
 import { ClipboardFileSync } from './clipboard-sync'
-import { RemoteClipboardSync } from './remote-clipboard'
+import {
+  RemoteClipboardSync,
+  type ClipboardOfferPrompt,
+} from './remote-clipboard'
 import {
   applyFrameToSession,
   applyStreamFrameToSession,
@@ -82,6 +85,8 @@ export interface TabPatch {
   retryAt?: number | null
   controlEnabled?: boolean
   clipboardEnabled?: boolean
+  /// Remote clipboard selection behind the "取出" banner, or its progress.
+  clipboardOffer?: ClipboardOfferPrompt | null
   label?: string
   displayIndex?: number
 }
@@ -513,6 +518,10 @@ export class SessionConnection {
           hostBuildMs: info.buildMs,
         }),
       onClipboard: (text) => {
+        // The remote clipboard now holds text, so a virtual file mount (and
+        // any over-limit file offer) describes something that is no longer
+        // there. Do this even when text sync is switched off for this tab.
+        this.remoteClipboard?.handleRemoteText()
         if (!this.clipboardEnabled) return
         // Only the remote the user is actively working in may write the local
         // clipboard; otherwise several tabs fight over it. Local -> remote
@@ -618,13 +627,21 @@ export class SessionConnection {
     )
   }
 
-  /// Remote files copied on the host, downloaded into the local core's
-  /// staging area and applied to this machine's clipboard. Only called when
-  /// the page and the core are on the same machine (localMode), and only takes
-  /// effect when the user enabled the setting.
+  /// Remote files copied on the host, put on this machine's clipboard. Only
+  /// called when the page and the core are on the same machine (localMode),
+  /// and only takes effect when the user enabled the setting.
+  ///
+  /// `options.useVirtual` reports whether the local core can mount the files
+  /// (FUSE) so copying transfers nothing; `useVirtual` is consulted per
+  /// announcement, so toggling the setting works without reconnecting.
   enableRemoteClipboardSync(
     token: () => string,
     enabled: boolean,
+    options: {
+      useVirtual?: () => boolean
+      noteVirtualFallback?: () => boolean
+      onPrompt?: (prompt: ClipboardOfferPrompt | null) => void
+    } = {},
   ): void {
     if (this.remoteClipboard !== null) {
       this.remoteClipboard.setEnabled(enabled)
@@ -645,13 +662,36 @@ export class SessionConnection {
         })
       },
       this.clipboardEcho,
-      { usePull: () => this.clipboardPull },
+      {
+        usePull: () => this.clipboardPull,
+        useVirtual: options.useVirtual,
+        noteVirtualFallback: options.noteVirtualFallback,
+        onPrompt: options.onPrompt,
+      },
     )
     this.remoteClipboard.setEnabled(enabled)
   }
 
   setRemoteClipboardEnabled(enabled: boolean): void {
     this.remoteClipboard?.setEnabled(enabled)
+  }
+
+  /// The virtual-paste setting changed; release a mount that is already up.
+  setClipboardVirtualEnabled(enabled: boolean): void {
+    if (!enabled) this.remoteClipboard?.disableVirtual()
+  }
+
+  /// Banner actions for an over-limit remote clipboard selection.
+  downloadClipboardOffer(): void {
+    this.remoteClipboard?.downloadOffer()
+  }
+
+  cancelClipboardOffer(): void {
+    this.remoteClipboard?.cancelOffer()
+  }
+
+  dismissClipboardOffer(): void {
+    this.remoteClipboard?.dismissOffer()
   }
 
   /// The files panel uploads through the same ids, and its downloads use the
