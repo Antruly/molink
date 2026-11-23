@@ -24,6 +24,7 @@ import {
 } from '../lib/api'
 import {
   SESSION_PRESETS,
+  isExplicitStreamCodec,
   presetPlan,
   type SessionPresetId,
 } from '../lib/session-presets'
@@ -292,6 +293,14 @@ function Av1Controls({ token }: { token: string }) {
 
   if (!data) return null
 
+  const codecExplicit = isExplicitStreamCodec(codecPreference)
+  const codecHostAvailable = !codecExplicit || !data.encoders ||
+    data.encoders.some(
+      (encoder) =>
+        encoder.available &&
+        encoder[codecPreference as 'av1' | 'h264' | 'vp9' | 'vp8'] === true,
+    )
+
   const keyframeOptions = [0, 1, 2, 3, 5, 10, 15, 30, 60]
   if (!keyframeOptions.includes(keyframeInterval)) {
     keyframeOptions.push(keyframeInterval)
@@ -319,6 +328,16 @@ function Av1Controls({ token }: { token: string }) {
           <option value="vp9">VP9</option>
           <option value="vp8">VP8</option>
         </select>
+        {codecExplicit ? (
+          <p className="text-[10px] leading-relaxed text-muted">
+            {t('settings.codecForces420')}
+          </p>
+        ) : null}
+        {codecExplicit && !codecHostAvailable ? (
+          <p className="text-[10px] leading-relaxed text-danger">
+            {t('settings.codecUnavailable')}
+          </p>
+        ) : null}
       </div>
 
       <div className="space-y-2">
@@ -567,6 +586,7 @@ export function PreferencesControls({
   const setRememberDevice = useAppStore((state) => state.setRememberDevice)
   const keyboardGrab = useAppStore((state) => state.keyboardGrab)
   const setKeyboardGrab = useAppStore((state) => state.setKeyboardGrab)
+  const comboForwardAsked = useAppStore((state) => state.comboForwardAsked)
   const grabApplicable = keyboardGrabApplicable()
   const [grabAvailable, setGrabAvailable] = useState(() =>
     keyboardGrabAvailable(),
@@ -681,6 +701,15 @@ export function PreferencesControls({
                     ? t('settings.keyboardGrabHint')
                     : t('settings.keyboardGrabUnsupported')}
                 </div>
+                {comboForwardAsked ? (
+                  <div className="mt-1 text-[10px] leading-relaxed text-muted">
+                    {t(
+                      comboForwardAsked === 'enabled'
+                        ? 'settings.comboForwardRememberedOn'
+                        : 'settings.comboForwardRememberedOff',
+                    )}
+                  </div>
+                ) : null}
               </div>
               <Toggle
                 checked={keyboardGrab && grabAvailable}
