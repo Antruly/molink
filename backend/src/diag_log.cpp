@@ -425,10 +425,13 @@ std::string diag_log::format_line(int64_t epoch_ms, diag_level level,
   line += level_name(level);
   line.push_back(' ');
   line += normalize_key(truncate_utf8(event, 60));
+  // `code` is normally a verification code, but app.exit's numeric process
+  // code is the whole point of the line and cannot identify a session.
+  const bool exit_event = event == "app.exit";
   for (const diag_field& field : fields) {
     const std::string key = normalize_key(field.key);
     std::string value;
-    if (is_secret_key(field.key)) {
+    if (is_secret_key(field.key) && !(exit_event && key == "code")) {
       value = "***";
     } else {
       const bool path_like =
