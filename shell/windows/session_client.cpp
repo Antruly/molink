@@ -192,6 +192,28 @@ bool json_string_field(const std::string& json, const char* key, size_t start,
   return false;
 }
 
+/// String field inside a nested object, e.g. `"tiles": {"backend": "dxgi"}`.
+/// The search starts at the object's opening brace. Welcome has exactly one
+/// `tiles` object, so the first match is the one the Web reads.
+bool json_object_string_field(const std::string& json, const char* object,
+                              const char* key, std::string* out) {
+  const std::string needle = std::string("\"") + object + "\"";
+  size_t at = 0;
+  while ((at = json.find(needle, at)) != std::string::npos) {
+    size_t pos = at + needle.size();
+    skip_ws(json, &pos);
+    if (pos < json.size() && json[pos] == ':') {
+      ++pos;
+      skip_ws(json, &pos);
+      if (pos < json.size() && json[pos] == '{') {
+        return json_string_field(json, key, pos + 1, out);
+      }
+    }
+    at += needle.size();
+  }
+  return false;
+}
+
 bool json_u64_field(const std::string& json, const char* key, size_t start,
                     uint64_t* out) {
   const std::string needle = std::string("\"") + key + "\"";
@@ -514,12 +536,15 @@ bool session_client::start(const std::string& core_host, int core_port,
     std::lock_guard<std::mutex> lock(log_mutex_);
     host_logs_ = host_log_state{};
     host_logs_.port = endpoint.port;
+    tiles_backend_.clear();
+    host_version_.clear();
   }
   video_mode_.clear();
   avatar_.clear();
   close_detail_.clear();
   device_name_.clear();
   security_.clear();
+  input_available_.store(false);
   path_label_.clear();
   protocol_label_.clear();
   // A new socket starts with a clean file-transfer state; partial downloads
@@ -2714,6 +2739,10 @@ void session_client::handle_text(const std::string& text) {
     if (find_string(text, "security", &security) && !security.empty()) {
       security_ = wide_of(security);
     }
+    bool input_available = false;
+    if (json_bool_field(text, "input", 0, &input_available)) {
+      input_available_.store(input_available);
+    }
     // Clipboard-file capabilities. `clipboard_stream` is the host confirming
     // it will fetch ranges from our lazy offer; `clipboard_pull` is the
     // reverse direction (`clipboard-sync.files` + 0x18). `nested_rdp` is only
@@ -2733,6 +2762,13 @@ void session_client::handle_text(const std::string& text) {
         !version.empty()) {
       std::lock_guard<std::mutex> lock(log_mutex_);
       host_logs_.version = version;
+      host_version_ = wide_of(version);
+    }
+    std::string tiles_backend;
+    if (json_object_string_field(text, "tiles", "backend", &tiles_backend) &&
+        !tiles_backend.empty()) {
+      std::lock_guard<std::mutex> lock(log_mutex_);
+      tiles_backend_ = wide_of(tiles_backend);
     }
     molink::native_diag::diag().log(
         molink::native_diag::level::info,
@@ -3093,6 +3129,16 @@ bool session_client::set_host_logging(bool enabled) {
 host_log_state session_client::host_logs() const {
   std::lock_guard<std::mutex> lock(log_mutex_);
   return host_logs_;
+}
+
+std::wstring session_client::tiles_backend() const {
+  std::lock_guard<std::mutex> lock(log_mutex_);
+  return tiles_backend_;
+}
+
+std::wstring session_client::host_version() const {
+  std::lock_guard<std::mutex> lock(log_mutex_);
+  return host_version_;
 }
 
 bool session_client::send_json(const std::string& text) {

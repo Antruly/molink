@@ -66,6 +66,8 @@ add_executable(moLink-native WIN32
   native_diag.cpp
   error_policy.cpp
   reconnect_policy.cpp
+  ui_strings.cpp
+  watermark_fade.cpp
   puff.c
   ui_kit_demo.rc
 )
