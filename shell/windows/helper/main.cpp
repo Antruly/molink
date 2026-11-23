@@ -2,9 +2,10 @@
 //
 // The LocalSystem service launches this binary in the active console session.
 // It switches its thread onto the current input desktop (Winlogon for lock /
-// UAC), captures BGRA frames and injects input there. The core is not wired
-// to this pipe yet; treat it as experimental until validated on a real
-// Windows machine.
+// UAC), captures BGRA frames and injects input there. It also supervises
+// molink-core.exe (see core_supervisor.cpp): a running core is adopted, and a
+// crashed core is restarted with backoff. The secure-desktop pipe itself is
+// still experimental until validated on a real Windows machine.
 #ifndef UNICODE
 #define UNICODE
 #endif
@@ -22,6 +23,8 @@
 #include <cstring>
 #include <string>
 #include <vector>
+
+#include "core_supervisor.h"
 
 namespace {
 
@@ -610,6 +613,22 @@ void input_pipe_loop(std::atomic<bool>& running) {
   }
 }
 
+// Wake a pipe server blocked in ConnectNamedPipe so its loop can observe
+// running=false. Same trick molink-service uses for its session pipe.
+void poke_pipe(const wchar_t* name) {
+  for (int attempt = 0; attempt < 40; ++attempt) {
+    HANDLE pipe = CreateFileW(name, GENERIC_READ | GENERIC_WRITE, 0, nullptr,
+                              OPEN_EXISTING, 0, nullptr);
+    if (pipe != INVALID_HANDLE_VALUE) {
+      DWORD written = 0;
+      WriteFile(pipe, "quit", 4, &written, nullptr);
+      CloseHandle(pipe);
+      return;
+    }
+    Sleep(50);
+  }
+}
+
 }  // namespace
 
 int wmain() {
@@ -622,8 +641,33 @@ int wmain() {
   }
   log_line("helper started, desktop=" + desktop_json());
   std::atomic<bool> running{true};
+
+  // The helper hosts molink-core: wait for an existing core (the desktop shell
+  // starts one), then restart it with backoff if it dies. Supervision ending
+  // because the core exited normally does not stop the helper -- the secure
+  // desktop pipes must keep working -- but a stop request or a console session
+  // change does.
+  molink::supervisor::restart_policy policy;
+  auto core_backend = molink::supervisor::make_core_supervisor(running, policy);
+  std::thread supervisor_thread([&] {
+    molink::supervisor::run(*core_backend, policy);
+    // Supervision can end on its own (a normal core exit, or the restart
+    // budget ran out). The helper still serves the secure desktop, so keep
+    // watching for a service/session stop; that is what makes the helper exit
+    // promptly instead of being terminated by the service's timeout.
+    while (!core_backend->stopping()) Sleep(250);
+    running.store(false);
+    poke_pipe(kPipeName);
+    poke_pipe(kInputPipeName);
+  });
+
   std::thread input_thread(input_pipe_loop, std::ref(running));
   pipe_loop(running);
+  // A "quit" on the secure pipe only ends that server; wake the input pipe and
+  // let the supervisor stop the core before this process goes away.
+  running.store(false);
+  poke_pipe(kInputPipeName);
+  supervisor_thread.join();
   input_thread.join();
   if (g_desktop != nullptr) CloseDesktop(g_desktop);
   return 0;

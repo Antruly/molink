@@ -15,6 +15,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <sddl.h>
+#include <tlhelp32.h>
 #include <wtsapi32.h>
 
 #include <atomic>
@@ -24,6 +25,7 @@
 #include <cwchar>
 #include <cstdio>
 #include <iterator>
+#include <mutex>
 #include <sstream>
 #include <fstream>
 #include <string>
@@ -34,12 +36,26 @@ namespace {
 SERVICE_STATUS_HANDLE g_status = nullptr;
 SERVICE_STATUS g_service_status{};
 HANDLE g_stop_event = nullptr;
+/// Signals molink-helper.exe to stop its supervised core and exit, so a
+/// session switch never leaves the old core behind. Global: the service runs
+/// in session 0 and the helper in the console session.
+HANDLE g_helper_stop_event = nullptr;
+/// "Exit but leave the core running": used when the service itself is being
+/// stopped (the app's Stop button), as opposed to a console session switch.
+HANDLE g_helper_detach_event = nullptr;
 PROCESS_INFORMATION g_helper{};
+/// Serialises helper start/stop: the pipe thread's secure-start/secure-stop
+/// can race the main loop's session switch.
+std::mutex g_helper_mutex;
+/// SERVICE_CONTROL_STOP is disabled while a session switch is in progress.
+bool g_controls_switching = false;
 /// Console session the helper was started in; the console moves when the user
 /// picks "switch user" or logs back in.
 DWORD g_helper_session = 0xFFFFFFFF;
 std::atomic<bool> g_running{true};
 constexpr wchar_t kServiceName[] = L"moLinkSession";
+constexpr wchar_t kHelperStopEventName[] = L"Global\\moLinkHelperStop";
+constexpr wchar_t kHelperDetachEventName[] = L"Global\\moLinkHelperDetach";
 constexpr wchar_t kLogPath[] = L"C:\\ProgramData\\moLink\\service\\service.log";
 
 void log_line(const std::string& message) {
@@ -144,12 +160,17 @@ bool client_is_elevated(HANDLE pipe) {
 }
 
 bool launch_helper(std::string& err) {
+  std::lock_guard<std::mutex> lock(g_helper_mutex);
   if (g_helper.hProcess != nullptr) return true;
   DWORD session = WTSGetActiveConsoleSessionId();
   if (session == 0xFFFFFFFF) {
     err = "no active console session";
     return false;
   }
+  // A relaunch must not inherit a stop request left over from the previous
+  // helper (or from service shutdown).
+  if (g_helper_stop_event != nullptr) ResetEvent(g_helper_stop_event);
+  if (g_helper_detach_event != nullptr) ResetEvent(g_helper_detach_event);
   // Use the service's own SYSTEM token. WTSQueryUserToken fails at the login
   // screen because no user is logged on yet.
   HANDLE process_token = nullptr;
@@ -216,15 +237,150 @@ bool launch_helper(std::string& err) {
   return true;
 }
 
-/// Stops the helper so it can be started in another session.
-void stop_helper() {
+/// Stops the helper. `stop_core` is true for a console session switch, where
+/// the old core must leave before the new session's helper starts; false for a
+/// service stop, where only the secure-desktop helper goes away and the core
+/// (which asked for the stop through the app) keeps running.
+void stop_helper(bool stop_core) {
+  std::lock_guard<std::mutex> lock(g_helper_mutex);
   if (g_helper.hProcess == nullptr) return;
-  TerminateProcess(g_helper.hProcess, 0);
-  WaitForSingleObject(g_helper.hProcess, 3000);
+  HANDLE event = stop_core ? g_helper_stop_event : g_helper_detach_event;
+  if (event != nullptr) SetEvent(event);
+  const DWORD wait = WaitForSingleObject(g_helper.hProcess, 8000);
+  if (wait != WAIT_OBJECT_0) {
+    log_line("helper did not stop in time, terminating pid=" +
+             std::to_string(g_helper.dwProcessId));
+    TerminateProcess(g_helper.hProcess, 0);
+    WaitForSingleObject(g_helper.hProcess, 3000);
+  }
+  if (g_helper_stop_event != nullptr) ResetEvent(g_helper_stop_event);
+  if (g_helper_detach_event != nullptr) ResetEvent(g_helper_detach_event);
   CloseHandle(g_helper.hThread);
   CloseHandle(g_helper.hProcess);
   g_helper = PROCESS_INFORMATION{};
-  g_helper_session = 0xFFFFFFFF;
+  // Keep g_helper_session: it is the last session the helper ran in, so the
+  // loop can still tell a session move from a same-session helper crash.
+}
+
+struct helper_state {
+  bool running = false;
+  DWORD session = 0xFFFFFFFF;
+  DWORD pid = 0;
+};
+
+helper_state query_helper() {
+  std::lock_guard<std::mutex> lock(g_helper_mutex);
+  helper_state state;
+  // The last session the helper ran in is meaningful even after it exited:
+  // it tells the loop whether the console actually moved.
+  state.session = g_helper_session;
+  if (g_helper.hProcess == nullptr) return state;
+  state.pid = g_helper.dwProcessId;
+  state.running = WaitForSingleObject(g_helper.hProcess, 0) != WAIT_OBJECT_0;
+  return state;
+}
+
+DWORD helper_pid() {
+  std::lock_guard<std::mutex> lock(g_helper_mutex);
+  return g_helper.dwProcessId;
+}
+
+std::wstring core_pid_path() {
+  std::wstring path(kLogPath);
+  const std::size_t slash = path.find_last_of(L"\\/");
+  if (slash == std::wstring::npos) return L"core.pid";
+  return path.substr(0, slash + 1) + L"core.pid";
+}
+
+unsigned long long process_creation_ticks(HANDLE process) {
+  FILETIME creation{};
+  FILETIME exit_time{};
+  FILETIME kernel{};
+  FILETIME user{};
+  if (!GetProcessTimes(process, &creation, &exit_time, &kernel, &user)) {
+    return 0;
+  }
+  return (static_cast<unsigned long long>(creation.dwHighDateTime) << 32) |
+         creation.dwLowDateTime;
+}
+
+bool pid_exists(DWORD pid) {
+  HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (snapshot == INVALID_HANDLE_VALUE) {
+    // Cannot tell; keep the record for the next attempt.
+    return true;
+  }
+  PROCESSENTRY32W entry{};
+  entry.dwSize = sizeof(entry);
+  bool found = false;
+  if (Process32FirstW(snapshot, &entry)) {
+    do {
+      if (entry.th32ProcessID == pid) {
+        found = true;
+        break;
+      }
+    } while (Process32NextW(snapshot, &entry));
+  }
+  CloseHandle(snapshot);
+  return found;
+}
+
+bool image_is_molink_core(HANDLE process) {
+  wchar_t path[32768] = {};
+  DWORD size = static_cast<DWORD>(std::size(path));
+  if (!QueryFullProcessImageNameW(process, 0, path, &size)) return false;
+  std::wstring name(path, size);
+  const std::size_t slash = name.find_last_of(L"\\/");
+  if (slash != std::wstring::npos) name = name.substr(slash + 1);
+  return _wcsicmp(name.c_str(), L"molink-core.exe") == 0;
+}
+
+/// A helper that was terminated before it could stop its core leaves
+/// core.pid behind. Kill that core so the new session does not inherit a
+/// listener bound to the old console's desktop. The recorded creation time
+/// guards against Windows having reused the pid for an unrelated process.
+void terminate_stale_core() {
+  const std::wstring path = core_pid_path();
+  std::ifstream in(path.c_str());
+  DWORD pid = 0;
+  unsigned long long recorded_creation = 0;
+  if (!(in >> pid) || pid == 0) return;
+  in >> recorded_creation;  // optional; older files contain only the pid
+  in.close();
+  HANDLE process =
+      OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION |
+                      SYNCHRONIZE,
+                  FALSE, pid);
+  if (process == nullptr) {
+    if (!pid_exists(pid)) DeleteFileW(path.c_str());
+    return;
+  }
+  if (!image_is_molink_core(process)) {
+    // The pid was reused by an unrelated process; the core it named is gone.
+    CloseHandle(process);
+    DeleteFileW(path.c_str());
+    return;
+  }
+  const unsigned long long actual_creation = process_creation_ticks(process);
+  if (recorded_creation != 0 && actual_creation != 0 &&
+      recorded_creation != actual_creation) {
+    CloseHandle(process);
+    DeleteFileW(path.c_str());
+    return;
+  }
+  if (WaitForSingleObject(process, 0) != WAIT_OBJECT_0) {
+    if (TerminateProcess(process, 1)) {
+      WaitForSingleObject(process, 3000);
+      log_line("terminated stale core pid=" + std::to_string(pid));
+    } else {
+      log_line("could not terminate stale core pid=" + std::to_string(pid) +
+               " error=" + std::to_string(GetLastError()));
+    }
+  }
+  const bool exited = WaitForSingleObject(process, 0) == WAIT_OBJECT_0;
+  CloseHandle(process);
+  // Keep the record when the core refused to die so the next switch retries.
+  if (exited) DeleteFileW(path.c_str());
 }
 
 std::string handle_command(HANDLE pipe, const std::string& line) {
@@ -274,11 +430,12 @@ std::string handle_command(HANDLE pipe, const std::string& line) {
     }
     char reply[96] = {};
     std::snprintf(reply, sizeof(reply), R"({"ok":true,"pid":%lu})",
-                  static_cast<unsigned long>(g_helper.dwProcessId));
+                  static_cast<unsigned long>(helper_pid()));
     return reply;
   }
   if (command == "secure-stop") {
-    stop_helper();
+    // Stopping the secure-desktop helper must not take the app's core down.
+    stop_helper(false);
     return R"({"ok":true})";
   }
   if (command == "switch") {
@@ -311,6 +468,7 @@ std::string handle_command(HANDLE pipe, const std::string& line) {
   return R"({"ok":false,"error":"unknown command"})";
 }
 
+
 DWORD WINAPI control_handler(DWORD control, DWORD, void*, void*) {
   if (control == SERVICE_CONTROL_STOP ||
       control == SERVICE_CONTROL_SHUTDOWN) {
@@ -325,6 +483,24 @@ DWORD WINAPI control_handler(DWORD control, DWORD, void*, void*) {
 void report_running() {
   g_service_status.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
   g_service_status.dwCurrentState = SERVICE_RUNNING;
+  g_service_status.dwControlsAccepted = SERVICE_ACCEPT_STOP |
+                                        SERVICE_ACCEPT_SHUTDOWN;
+  SetServiceStatus(g_status, &g_service_status);
+}
+
+/// While the helper is being moved to another console session, the old core
+/// runs its normal shutdown path, which ends with stop_session_service().
+/// Rejecting SERVICE_CONTROL_STOP for that short window keeps a session switch
+/// from stopping the service that is about to launch the new helper. System
+/// shutdown is still accepted.
+void report_switching_helper() {
+  g_controls_switching = true;
+  g_service_status.dwControlsAccepted = SERVICE_ACCEPT_SHUTDOWN;
+  SetServiceStatus(g_status, &g_service_status);
+}
+
+void report_helper_switched() {
+  g_controls_switching = false;
   g_service_status.dwControlsAccepted = SERVICE_ACCEPT_STOP |
                                         SERVICE_ACCEPT_SHUTDOWN;
   SetServiceStatus(g_status, &g_service_status);
@@ -398,6 +574,18 @@ void WINAPI service_main(DWORD, wchar_t**) {
   enable_privilege(L"SeTcbPrivilege");
   enable_privilege(L"SeAssignPrimaryTokenPrivilege");
   enable_privilege(L"SeIncreaseQuotaPrivilege");
+  enable_privilege(L"SeDebugPrivilege");
+  // The helper lives in the console session and opens this event by name, so
+  // it must be in the global namespace.
+  enable_privilege(L"SeCreateGlobalPrivilege");
+  g_helper_stop_event =
+      CreateEventW(nullptr, TRUE, FALSE, kHelperStopEventName);
+  g_helper_detach_event =
+      CreateEventW(nullptr, TRUE, FALSE, kHelperDetachEventName);
+  if (g_helper_stop_event == nullptr || g_helper_detach_event == nullptr) {
+    log_line("could not create helper stop events: " +
+             std::to_string(GetLastError()));
+  }
   std::string helper_error;
   if (!launch_helper(helper_error)) {
     log_line("helper launch failed: " + helper_error);
@@ -412,41 +600,61 @@ void WINAPI service_main(DWORD, wchar_t**) {
     if (WaitForSingleObject(g_stop_event, 1000) == WAIT_OBJECT_0) break;
     if (!g_running.load()) break;
     const DWORD active = WTSGetActiveConsoleSessionId();
-    if (active == 0xFFFFFFFF) continue;
-    const bool helper_gone =
-        g_helper.hProcess != nullptr &&
-        WaitForSingleObject(g_helper.hProcess, 0) == WAIT_OBJECT_0;
-    if (g_helper.hProcess != nullptr && !helper_gone &&
-        active == g_helper_session) {
+    if (active == 0xFFFFFFFF) {
+      // No console to follow. Do not leave SERVICE_CONTROL_STOP disabled.
+      if (g_controls_switching) report_helper_switched();
       continue;
     }
+    const helper_state helper = query_helper();
+    if (helper.running && active == helper.session) {
+      // A secure-start request may have launched the helper while the
+      // session-switch window was open; restore normal service controls.
+      if (g_controls_switching) report_helper_switched();
+      continue;
+    }
+
+    // The console moved if the helper was launched in a different session.
+    // A helper that merely crashed in the current session keeps its core: the
+    // relaunched helper adopts it instead of killing it.
+    const bool session_moved =
+        helper.session != 0xFFFFFFFF && helper.session != active;
     const uint64_t now = GetTickCount64();
+    if (session_moved) next_launch_attempt = 0;
     if (now < next_launch_attempt) continue;
     next_launch_attempt = now + 5000;
-    if (g_helper.hProcess != nullptr) {
-      log_line("helper session " + std::to_string(g_helper_session) +
-               " -> " + std::to_string(active) + ", restarting");
-      stop_helper();
+
+    // The old core's graceful shutdown asks the SCM to stop this service.
+    // That request belongs to the session switch, not to a user stop, so do
+    // not accept it while the helper is being replaced.
+    report_switching_helper();
+    if (helper.running) {
+      log_line("helper session " + std::to_string(helper.session) + " -> " +
+               std::to_string(active) + ", restarting");
     }
+    // On a session switch a dead helper may have left its core behind; stop
+    // that core before the new session's helper starts. In the same session
+    // the surviving core is adopted rather than killed.
+    stop_helper(true);
+    if (session_moved) terminate_stale_core();
     std::string relaunch_error;
     if (launch_helper(relaunch_error)) {
       log_line("helper running in session " + std::to_string(active));
     } else {
       log_line("helper relaunch failed: " + relaunch_error);
     }
+    report_helper_switched();
   }
   g_running.store(false);
-  // ConnectNamedPipe blocks indefinitely; poke both servers so their loops
-  // can observe running=false and the service can leave StopPending.
+  // A service stop is not a console switch: let the core that asked for the
+  // stop keep running, and take only the secure-desktop helper down. Signal
+  // the helper first; its supervisor pokes its own pipe servers and exits.
+  stop_helper(false);
+  // ConnectNamedPipe blocks indefinitely; poke this service's pipe server so
+  // it can observe running=false and the service can leave StopPending.
   poke_pipe(kPipeName);
-  poke_pipe(L"\\\\.\\pipe\\molink-secure-input");
   pipe_thread.join();
-  if (g_helper.hProcess != nullptr) {
-    TerminateProcess(g_helper.hProcess, 0);
-    CloseHandle(g_helper.hThread);
-    CloseHandle(g_helper.hProcess);
-    g_helper = PROCESS_INFORMATION{};
-  }
+  if (g_helper_detach_event != nullptr) CloseHandle(g_helper_detach_event);
+  if (g_helper_stop_event != nullptr) CloseHandle(g_helper_stop_event);
   if (g_stop_event != nullptr) CloseHandle(g_stop_event);
   log_line("service stopped");
   g_service_status.dwCurrentState = SERVICE_STOPPED;
@@ -465,6 +673,12 @@ std::wstring module_path() {
   wchar_t path[MAX_PATH * 4] = {};
   GetModuleFileNameW(nullptr, path, static_cast<DWORD>(std::size(path)));
   return path;
+}
+
+bool file_exists(const std::wstring& path) {
+  const DWORD attributes = GetFileAttributesW(path.c_str());
+  return attributes != INVALID_FILE_ATTRIBUTES &&
+         (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
 }
 
 void stop_service_handle(SC_HANDLE service) {
@@ -541,6 +755,18 @@ bool install_service() {
                                       L"molink-helper.exe";
       const std::wstring helper_dst = install_dir + L"\\molink-helper.exe";
       CopyFileW(helper_src.c_str(), helper_dst.c_str(), FALSE);
+    }
+  }
+  // The helper runs from %ProgramData%\moLink\service but the core normally
+  // stays next to the packaged app. Record that location so the supervisor
+  // does not have to guess (and so a package outside Program Files works).
+  if (slash != std::wstring::npos) {
+    const std::wstring core_src =
+        source.substr(0, slash + 1) + L"molink-core.exe";
+    if (file_exists(core_src)) {
+      std::ofstream hint((install_dir + L"\\core.path").c_str(),
+                         std::ios::trunc);
+      if (hint) hint << wide_to_utf8(core_src.c_str()) << "\n";
     }
   }
   SC_HANDLE manager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CREATE_SERVICE);
