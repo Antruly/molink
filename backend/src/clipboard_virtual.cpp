@@ -357,6 +357,11 @@ int virtual_clipboard::pull_block(
   {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!mount_) return -5;  // EIO
+    // A read can only be served by a live session bridge. Without one the pull
+    // would wait out the whole deadline and then report EIO, which shows up as
+    // a file manager frozen for a minute mid-paste; fail while the paste has
+    // not started instead.
+    if (!bridge_) return -5;
     const auto it = files_.find(file_id);
     if (it == files_.end()) return -5;
     if (offset >= it->second.size) return 0;
