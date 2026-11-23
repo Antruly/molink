@@ -193,6 +193,13 @@ void test_redaction() {
   const std::string input = log.tail(20);
   expect(contains(input, "unknown key code: MetaLeft"),
          "a rejected key keeps the key name that makes it actionable");
+  // app.exit's numeric process code is not a verification code: the exit
+  // trace is useless if it is redacted to code=***.
+  log.log(molink::diag_level::info, "app.exit", std::string(),
+          {{"reason", "signal"}, {"code", "15"}});
+  const std::string exit = log.tail(20);
+  expect(contains(exit, "app.exit reason=signal code=15"),
+         "app.exit keeps its numeric code");
   std::error_code ec;
   fs::remove_all(dir, ec);
 }

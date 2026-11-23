@@ -425,16 +425,18 @@ export class RemoteClipboardSync {
     this.pullPaths = []
     this.pullReceived = 0
     this.pullTotal = fresh.reduce((sum, file) => sum + file.size, 0)
-    if (this.prompt !== null || note !== undefined) {
-      this.setPrompt({
-        count: fresh.length,
-        bytes: this.pullTotal,
-        omitted: hostOmitted,
-        phase: 'downloading',
-        received: 0,
-        note,
-      })
-    }
+    // Every download, including the automatic fallback when FUSE is not
+    // available, shows progress and a cancel action. Writing into the staging
+    // folder silently and only surfacing a failure at paste time is what made
+    // the file manager show its own "skip/cancel" dialog over a half copy.
+    this.setPrompt({
+      count: fresh.length,
+      bytes: this.pullTotal,
+      omitted: hostOmitted,
+      phase: 'downloading',
+      received: 0,
+      note,
+    })
     const nonce = `${Date.now().toString(36)}` +
       `${Math.random().toString(36).slice(2)}`
     void clipboardBatchId(fresh, nonce).then((batch) => {
@@ -655,7 +657,13 @@ export class RemoteClipboardSync {
         item.file.size,
         this.pullBatch,
       )
-      if (this.pullCancelled) return
+      if (this.pullCancelled) {
+        // The batch was cancelled while the staging entry was being created.
+        // failPull() had already swept the ids it knew about; delete this late
+        // one so a temp file never outlives the failed paste.
+        void abortClipboardStage(this.token(), staged.id).catch(() => undefined)
+        return
+      }
       active.stageId = staged.id
       active.path = staged.path
     } catch (error) {

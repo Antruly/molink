@@ -100,9 +100,21 @@ bool read_lazy_blob(lazy_blob_source& source, std::size_t index,
             .count());
     std::vector<uint8_t> chunk;
     std::string range_error;
-    if (!source.read_range(index, position, static_cast<uint32_t>(want), chunk,
-                           range_error,
-                           std::min(chunk_timeout_ms, left_ms), left_ms)) {
+    bool ranged = false;
+    try {
+      ranged = source.read_range(index, position, static_cast<uint32_t>(want),
+                                 chunk, range_error,
+                                 std::min(chunk_timeout_ms, left_ms), left_ms);
+    } catch (const std::exception& exception) {
+      // IStream::Read is called by Explorer's paste thread. An exception here
+      // must become STG_E_READFAULT, never std::terminate.
+      range_error = exception.what();
+      ranged = false;
+    } catch (...) {
+      range_error = "clipboard file read threw";
+      ranged = false;
+    }
+    if (!ranged) {
       error = range_error.empty() ? "clipboard file read failed" : range_error;
       return false;
     }
@@ -200,7 +212,22 @@ bool lazy_file_source::wait_files(const std::vector<std::size_t>& indices,
       for (const std::size_t index : to_request) states_[index].failed = true;
       return false;
     }
-    for (const std::size_t index : to_request) request(index);
+    for (const std::size_t index : to_request) {
+      try {
+        request(index);
+      } catch (const std::exception& exception) {
+        // The request posts to the session's event loop. A throwing post must
+        // fail this file, not escape into the clipboard render thread.
+        (void)exception;
+        std::lock_guard<std::mutex> lock(mutex_);
+        states_[index].failed = true;
+        cv_.notify_all();
+      } catch (...) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        states_[index].failed = true;
+        cv_.notify_all();
+      }
+    }
   }
 
   std::unique_lock<std::mutex> lock(mutex_);
@@ -320,6 +347,7 @@ bool remote_file_source::read_range(std::size_t index, uint64_t offset,
 
   auto wait = std::make_shared<pending>();
   wait->offset = offset;
+  wait->length = want;
   uint32_t id = 0;
   {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -334,7 +362,16 @@ bool remote_file_source::read_range(std::size_t index, uint64_t offset,
   // Never call the transport while holding mutex_: the request posts to the
   // session's event loop, and a very fast peer's reply re-enters note_range()
   // from that loop.
-  const bool posted = request_ && request_(index, id, offset, want);
+  bool posted = false;
+  try {
+    posted = request_ && request_(index, id, offset, want);
+  } catch (const std::exception& exception) {
+    error = exception.what();
+    posted = false;
+  } catch (...) {
+    error = "clipboard range request threw";
+    posted = false;
+  }
   if (!posted) {
     std::lock_guard<std::mutex> lock(mutex_);
     pending_.erase(id);
@@ -398,8 +435,16 @@ void remote_file_source::note_range(uint32_t id, uint32_t error,
   if (error == 0) {
     if (data == nullptr && length != 0) {
       wait->error = 1;
+    } else if (length > wait->length) {
+      // A buggy peer must not make the host allocate more than it asked for.
+      wait->error = 1;
     } else if (length != 0) {
-      wait->data.assign(data, data + length);
+      try {
+        wait->data.assign(data, data + length);
+      } catch (...) {
+        wait->data.clear();
+        wait->error = 1;
+      }
     }
   }
   wait->done = true;
@@ -409,6 +454,11 @@ void remote_file_source::note_range(uint32_t id, uint32_t error,
 bool remote_file_source::has_pending(uint32_t id) const {
   std::lock_guard<std::mutex> lock(mutex_);
   return !closed_ && pending_.find(id) != pending_.end();
+}
+
+std::size_t remote_file_source::pending_count() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return pending_.size();
 }
 
 void remote_file_source::fail_all(const std::string&) {

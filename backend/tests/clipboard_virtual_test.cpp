@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -337,6 +338,141 @@ void read_paths() {
   fs::remove_all(root, ec);
 }
 
+/// Every failure of a FUSE range read must be -EIO, and a page-side send that
+/// throws must not escape into the FUSE worker (which would terminate the
+/// core). The production timeouts are 15 s/60 s; the test injects short ones.
+void read_failure_paths() {
+  const fs::path root =
+      fs::temp_directory_path() / "molink-clipboard-virtual-read-fail";
+  std::error_code ec;
+  fs::remove_all(root, ec);
+  fs::create_directories(root, ec);
+
+  auto factory = [](const std::string& mountpoint,
+                    const std::vector<virtual_mount_file>&,
+                    molink::virtual_file_reader*,
+                    std::string&) -> std::shared_ptr<virtual_mount> {
+    auto state = std::make_shared<mount_state>();
+    state->path = mountpoint;
+    return std::make_shared<fake_mount>(state);
+  };
+  auto clipboard = std::make_shared<virtual_clipboard>(
+      root.string(), factory,
+      [](const std::vector<std::string>&) { return true; }, [] {}, nullptr,
+      150, 150);
+
+  std::vector<virtual_offer_request_file> files;
+  virtual_offer_request_file file;
+  file.id = 7;
+  file.name = "seven.bin";
+  file.size = 1000;
+  files.push_back(file);
+  std::size_t omitted = 0;
+  std::string mount;
+  std::vector<std::string> paths;
+  std::string error;
+  expect(clipboard->offer("s", files, omitted, mount, paths, error) ==
+             virtual_offer_error::none,
+         "failure fixture mounts");
+
+  std::vector<char> buffer(1000, 0);
+  int read = 0;
+
+  // No bridge at all: fail while the paste has not started.
+  read = clipboard->read_file_range(7, 0, buffer.size(), buffer.data(),
+                                    buffer.size());
+  expect(read < 0, "a read without a bridge is EIO");
+
+  // A bridge whose send throws. The exception is raised synchronously from
+  // pull_block; read_file_range must translate it to EIO.
+  {
+    auto started = std::chrono::steady_clock::now();
+    expect(clipboard->bridge_attach(
+               mount, [](const std::string&) {
+                 throw std::runtime_error("bridge send threw");
+               }),
+           "the throwing bridge attaches");
+    read = clipboard->read_file_range(7, 0, 400, buffer.data(), buffer.size());
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    expect(read < 0, "a throwing bridge send is EIO");
+    expect(elapsed < std::chrono::seconds(1),
+           "a throwing send fails at once, not at the timeout");
+  }
+
+  // A reply for another offset is rejected; the read wakes immediately.
+  fake_bridge bridge;
+  expect(clipboard->bridge_attach(mount,
+                                  [&bridge](const std::string& message) {
+                                    bridge.send(message);
+                                  }),
+         "the recording bridge attaches");
+  {
+    std::thread reader([&] {
+      read = clipboard->read_file_range(7, 0, 300, buffer.data(),
+                                        buffer.size());
+    });
+    const std::string message = bridge.wait_message();
+    expect(!message.empty(), "the read reached the bridge");
+    const uint32_t seq = parse_seq(message);
+    std::vector<uint8_t> payload(300, 0x11);
+    const std::vector<uint8_t> wrong =
+        make_chunk(seq, 0, 1, payload);
+    clipboard->bridge_binary(wrong.data(), wrong.size());
+    reader.join();
+    expect(read < 0, "a reply at the wrong offset is EIO");
+  }
+
+  // A short reply must not be treated as end of file: the descriptor said
+  // 1000 bytes, and a partial answer would create a truncated paste.
+  {
+    std::thread reader([&] {
+      read = clipboard->read_file_range(7, 300, 200, buffer.data(),
+                                        buffer.size());
+    });
+    const std::string message = bridge.wait_message();
+    const uint32_t seq = parse_seq(message);
+    std::vector<uint8_t> short_payload(199, 0x22);
+    const std::vector<uint8_t> short_reply =
+        make_chunk(seq, 0, 300, short_payload);
+    clipboard->bridge_binary(short_reply.data(), short_reply.size());
+    reader.join();
+    expect(read < 0, "a short reply is EIO, not a short file");
+  }
+
+  // Nobody answers: the injected 150 ms block budget fails the read.
+  {
+    fake_bridge silent;
+    expect(clipboard->bridge_attach(mount,
+                                    [&silent](const std::string& message) {
+                                      silent.send(message);
+                                    }),
+           "the silent bridge attaches");
+    std::thread reader([&] {
+      read = clipboard->read_file_range(7, 500, 100, buffer.data(),
+                                        buffer.size());
+    });
+    const auto started = std::chrono::steady_clock::now();
+    reader.join();
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    expect(read < 0, "a stalled bridge times out as EIO");
+    expect(elapsed < std::chrono::seconds(2),
+           "the injected read timeout is honoured");
+  }
+
+  // A failed read must not leave a waiter behind, so clearing the generation
+  // returns without the 500 ms drain window.
+  {
+    const auto started = std::chrono::steady_clock::now();
+    clipboard->clear("test");
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    expect(!clipboard->active(), "clear drops the generation");
+    expect(elapsed < std::chrono::milliseconds(400),
+           "a failed read decrements the waiting-reader count");
+  }
+
+  fs::remove_all(root, ec);
+}
+
 }  // namespace
 
 // The test links no platform mount layer: the fake mount always detaches, so
@@ -349,6 +485,7 @@ int main() {
   plan_caps_and_names();
   mount_lifecycle();
   read_paths();
+  read_failure_paths();
   std::printf("%d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;
 }

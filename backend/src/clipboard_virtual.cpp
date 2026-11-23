@@ -84,12 +84,17 @@ virtual_offer_error plan_virtual_offer(
 virtual_clipboard::virtual_clipboard(std::string cache_root,
                                      virtual_mount_factory factory,
                                      apply_fn apply, clear_fn clear,
-                                     post_fn post)
+                                     post_fn post, uint64_t pull_timeout_ms,
+                                     uint64_t read_timeout_ms)
     : cache_root_(std::move(cache_root)),
       factory_(std::move(factory)),
       apply_(std::move(apply)),
       clear_cb_(std::move(clear)),
-      post_(std::move(post)) {}
+      post_(std::move(post)),
+      pull_timeout_ms_(pull_timeout_ms == 0 ? kVirtualPullTimeoutMs
+                                            : pull_timeout_ms),
+      read_timeout_ms_(read_timeout_ms == 0 ? kVirtualReadTimeoutMs
+                                            : read_timeout_ms) {}
 
 virtual_clipboard::~virtual_clipboard() { clear("shutdown"); }
 
@@ -337,7 +342,12 @@ void virtual_clipboard::bridge_binary(const uint8_t* data,
         bytes != pending->length) {
       pending->failed = true;
     } else {
-      pending->data.assign(data + 16, data + length);
+      try {
+        pending->data.assign(data + 16, data + length);
+      } catch (...) {
+        pending->data.clear();
+        pending->failed = true;
+      }
     }
     pending->done = true;
   }
@@ -406,34 +416,59 @@ int virtual_clipboard::pull_block(
     ++readers_waiting_;
   }
 
+  bool delivered = true;
   if (deliver) {
-    if (post) {
-      std::weak_ptr<virtual_clipboard> weak = weak_from_this();
-      post([weak, seq, message] {
-        auto self = weak.lock();
-        if (!self) return;
-        send_text_fn target;
-        {
-          std::lock_guard<std::mutex> lock(self->mutex_);
-          if (!self->bridge_ || !self->send_) return;
-          const auto it = self->pending_.find(seq);
-          if (it == self->pending_.end() || it->second->done ||
-              it->second->failed) {
-            return;
+    try {
+      if (post) {
+        std::weak_ptr<virtual_clipboard> weak = weak_from_this();
+        post([weak, seq, message] {
+          auto self = weak.lock();
+          if (!self) return;
+          send_text_fn target;
+          {
+            std::lock_guard<std::mutex> lock(self->mutex_);
+            if (!self->bridge_ || !self->send_) return;
+            const auto it = self->pending_.find(seq);
+            if (it == self->pending_.end() || it->second->done ||
+                it->second->failed) {
+              return;
+            }
+            target = self->send_;
           }
-          target = self->send_;
-        }
-        if (target) target(message);
-      });
-    } else {
-      send(message);
+          try {
+            if (target) target(message);
+          } catch (...) {
+            // The page's bridge is the only transport for these bytes. A
+            // throwing send must fail the pending read, not escape the loop
+            // (or the FUSE reader thread) and terminate the process.
+            std::lock_guard<std::mutex> lock(self->mutex_);
+            const auto it = self->pending_.find(seq);
+            if (it != self->pending_.end()) it->second->failed = true;
+            self->cv_.notify_all();
+          }
+        });
+      } else if (send) {
+        send(message);
+      }
+    } catch (...) {
+      delivered = false;
     }
+  }
+  if (!delivered) {
+    // The request never left this process; undo the bookkeeping the waiter
+    // below would otherwise do and fail the read immediately.
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto it = pending_.find(seq);
+    if (it != pending_.end()) pending_.erase(it);
+    if (readers_waiting_ > 0) --readers_waiting_;
+    drain_cv_.notify_all();
+    return -5;
   }
 
   const auto chunk_deadline = std::min(
       total_deadline,
       std::chrono::steady_clock::now() +
-          std::chrono::milliseconds(kVirtualPullTimeoutMs));
+          std::chrono::milliseconds(pull_timeout_ms_));
   std::unique_lock<std::mutex> lock(mutex_);
   const bool ready = cv_.wait_until(lock, chunk_deadline, [&pending] {
     return pending->done || pending->failed;
@@ -469,17 +504,25 @@ int virtual_clipboard::read_file_range(uint32_t file_id, uint64_t offset,
   if (buffer == nullptr) return -5;
   if (capacity < length) length = capacity;
   const auto deadline = std::chrono::steady_clock::now() +
-                        std::chrono::milliseconds(kVirtualReadTimeoutMs);
-  uint64_t done = 0;
-  while (done < length) {
-    const uint64_t want = std::min<uint64_t>(length - done, kVirtualPullBytes);
-    const int got = pull_block(file_id, offset + done, want, buffer + done,
-                               capacity - done, deadline);
-    if (got < 0) return -5;
-    done += static_cast<uint64_t>(got);
-    if (static_cast<uint64_t>(got) < want) break;  // end of file
+                        std::chrono::milliseconds(read_timeout_ms_);
+  // FUSE calls this on its worker thread. Any exception (a broken bridge, a
+  // bad allocation, a page-side send throwing) must become -EIO so the file
+  // manager shows a failed copy instead of the whole core disappearing.
+  try {
+    uint64_t done = 0;
+    while (done < length) {
+      const uint64_t want =
+          std::min<uint64_t>(length - done, kVirtualPullBytes);
+      const int got = pull_block(file_id, offset + done, want, buffer + done,
+                                 capacity - done, deadline);
+      if (got < 0) return -5;
+      done += static_cast<uint64_t>(got);
+      if (static_cast<uint64_t>(got) < want) break;  // end of file
+    }
+    return static_cast<int>(done);
+  } catch (...) {
+    return -5;
   }
-  return static_cast<int>(done);
 }
 
 }  // namespace molink

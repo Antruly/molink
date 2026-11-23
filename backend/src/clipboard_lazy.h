@@ -234,12 +234,16 @@ class remote_file_source final : public lazy_blob_source {
   /// drops it instead of asking the client for bytes nobody will consume.
   bool has_pending(uint32_t id) const;
 
+  /// Number of range requests still waiting for an answer (tests/diagnostics).
+  std::size_t pending_count() const;
+
   void fail_all(const std::string& reason) override;
   bool closed() const override;
 
  private:
   struct pending {
     uint64_t offset = 0;
+    uint32_t length = 0;
     uint32_t error = 0;
     uint64_t reply_offset = 0;
     std::vector<uint8_t> data;

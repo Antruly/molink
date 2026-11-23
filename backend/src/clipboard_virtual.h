@@ -76,8 +76,12 @@ class virtual_clipboard final
   using post_fn = std::function<void(std::function<void()>)>;
   using send_text_fn = std::function<void(const std::string&)>;
 
+  /// `pull_timeout_ms` / `read_timeout_ms` default to the production budgets;
+  /// tests shrink them so a stalled bridge is exercised without a 15 s wait.
   virtual_clipboard(std::string cache_root, virtual_mount_factory factory,
-                    apply_fn apply, clear_fn clear, post_fn post = {});
+                    apply_fn apply, clear_fn clear, post_fn post = {},
+                    uint64_t pull_timeout_ms = kVirtualPullTimeoutMs,
+                    uint64_t read_timeout_ms = kVirtualReadTimeoutMs);
   ~virtual_clipboard() override;
 
   virtual_clipboard(const virtual_clipboard&) = delete;
@@ -188,6 +192,8 @@ class virtual_clipboard final
   bool bridge_ = false;
   uint64_t next_bridge_id_ = 1;
   uint64_t bridge_id_ = 0;
+  uint64_t pull_timeout_ms_ = kVirtualPullTimeoutMs;
+  uint64_t read_timeout_ms_ = kVirtualReadTimeoutMs;
 };
 
 }  // namespace molink
