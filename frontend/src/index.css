@@ -339,4 +339,23 @@
   border: 2px solid var(--surface);
   border-radius: 9999px;
   background: var(--accent);
+
+/* Feature-level failures fade in at the bottom of the picture, hold, and fade
+   out just before the store's 6 s timer unmounts them. A refresh remounts the
+   element (keyed by id+at), so the animation restarts. */
+@keyframes molink-toast-lifetime {
+  0% {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  2.5% {
+    opacity: 1;
+    transform: none;
+  }
+  97.5% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
 }
