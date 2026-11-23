@@ -968,6 +968,10 @@ add_executable(molink-core-preset-message-test
 )
 target_include_directories(molink-core-preset-message-test PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/../shell/windows")
+if(MSVC)
+  # The tier labels and the expected JSON are UTF-8 source text.
+  target_compile_options(molink-core-preset-message-test PRIVATE /utf-8)
+endif()
 set_target_properties(molink-core-preset-message-test PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 add_test(NAME preset_message COMMAND molink-core-preset-message-test)
