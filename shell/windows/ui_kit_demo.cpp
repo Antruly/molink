@@ -49,6 +49,8 @@
 #include "reconnect_policy.h"
 #include "session_client.h"
 #include "ui_kit.h"
+#include "ui_strings.h"
+#include "watermark_fade.h"
 
 using namespace molink::ui;
 using namespace molink::net;
@@ -360,7 +362,7 @@ struct app_state {
   float settings_content_h = 0.0f;
   float settings_max_scroll = 0.0f;
   D2D1_RECT_F settings_view{}, settings_scrollbar{}, settings_thumb{};
-  D2D1_RECT_F hit_seg_theme[2]{}, hit_seg_lang[2]{};
+  D2D1_RECT_F hit_seg_theme[2]{}, hit_seg_lang[2]{}, hit_seg_close[3]{};
   D2D1_RECT_F hit_lock_field{}, hit_fps_field{};
   D2D1_RECT_F hit_sec_toggle[6]{}, hit_disp_toggle[3]{};
   D2D1_RECT_F hit_dev_name{}, hit_dev_apply{}, hit_long_term{},
@@ -371,7 +373,10 @@ struct app_state {
   D2D1_RECT_F hit_service_btn[5]{};
   D2D1_RECT_F hit_update_btn{}, hit_repo_btn{}, hit_site_btn{}, hit_star_btn{};
   int settings_lock = 0;
-  int settings_lang = 1;
+  /// UI language, persisted to %APPDATA%\moLink\ui-native.json (the Web page
+  /// keeps its own localStorage and mirrors it to the core's ui.json).
+  molink::ui_strings::language lang =
+      molink::ui_strings::language::zh_cn;
   bool sec_allow_remote = true;
   bool sec_allow_web = true;
   bool sec_discovery = true;
@@ -513,9 +518,16 @@ struct app_state {
   D2D1_RECT_F hit_recent_card[4]{};
   bool close_prompt = false;
   bool close_remember = false;
-  int close_behavior = 0;  // 0 ask, 1 minimize, 2 close session tab
+  /// 1 hide to tray (default), 2 close the session tab, 3 quit. 0 (the old
+  /// "ask" value) is migrated to 1 when loaded.
+  int close_behavior = 1;
   D2D1_RECT_F hit_close_panel{}, hit_close_cancel{}, hit_close_tab{},
       hit_close_tray{}, hit_close_remember{};
+  /// Watermark proximity fade (U1): the badges and stats bar fade
+  /// independently. The rectangles are the last painted bounds.
+  molink::ui::fade_target fade_badges, fade_stats;
+  D2D1_RECT_F watermark_badges_rect{}, watermark_stats_rect{};
+  ULONGLONG watermark_fade_at = 0;
   D2D1_RECT_F hit_recent_action[4][3]{};
   D2D1_RECT_F hit_recent_forget[4]{};
   D2D1_RECT_F hit_recent_star[4]{};
@@ -635,6 +647,26 @@ struct app_state {
 
 app_state g;
 
+/// The table owns the literals, so the pointer stays valid for the whole
+/// process. Missing keys paint as an empty label; the unit test keeps the
+/// table complete.
+const wchar_t* trc(const char* key) {
+  return molink::ui_strings::text(g.lang, key);
+}
+
+std::wstring tr(const char* key) { return std::wstring(trc(key)); }
+
+/// Replaces the Web's `{{seconds}}` placeholder in a count string.
+std::wstring tr_seconds(const char* key, int seconds) {
+  std::wstring value = tr(key);
+  const std::wstring needle = L"{{seconds}}";
+  const size_t at = value.find(needle);
+  if (at != std::wstring::npos) {
+    value.replace(at, needle.size(), std::to_wstring(seconds));
+  }
+  return value;
+}
+
 /// A local core with a published surface decodes the stream codecs itself.
 bool surface_stream_mode() {
   // Either we started the core ourselves (surface_mode) or a launcher handed
@@ -656,6 +688,10 @@ constexpr UINT WM_APP_TRAY = WM_APP + 9;
 constexpr UINT WM_APP_UPDATE_RESULT = WM_APP + 10;
 constexpr UINT WM_APP_START_CONNECT = WM_APP + 11;
 constexpr UINT kTrayId = 1;
+constexpr UINT kTrayShow = 1;
+constexpr UINT kTrayExit = 2;
+/// Recent-session commands occupy kTrayRecentBase + index.
+constexpr UINT kTrayRecentBase = 1000;
 
 struct connect_result {
   molink::net::session_client* client = nullptr;
@@ -677,12 +713,19 @@ void local_browse(const std::wstring& path);
 std::wstring home_directory();
 size_t* focus_caret(int field);
 
-/// Web `SESSION_PRESETS` order, with the same zh-CN labels. The wire ids live
-/// in `molink::preset` so the JSON and the table have one source.
-const wchar_t* kPresets[] = {L"极速", L"流畅", L"标准",
-                             L"高清", L"真彩色", L"自动"};
+/// Web `SESSION_PRESETS` order. The wire ids live in `molink::preset` so the
+/// JSON and the table have one source; the labels come from the string table.
+const char* kPresetKeys[] = {
+    "session.presetTurbo",  "session.presetSmooth", "session.presetBalanced",
+    "session.presetHd",     "session.presetTruecolor", "session.presetAuto",
+};
 constexpr int kPresetCount =
     static_cast<int>(molink::preset::plan_count);
+
+std::wstring preset_label(int index) {
+  if (index < 0 || index >= kPresetCount) index = 0;
+  return tr(kPresetKeys[index]);
+}
 const wchar_t* kFpsChoices[] = {L"自动", L"15 fps", L"30 fps", L"60 fps"};
 // The native client decodes tiles only; the stream entries stay visible but
 // disabled so the menu matches the web's list without offering codecs that
@@ -785,6 +828,7 @@ enum hover_slot {
   hv_set_toggle16, hv_set_toggle17,
   hv_about_check, hv_about_link,
   hv_set_seg_theme0, hv_set_seg_theme1, hv_set_seg_lang0, hv_set_seg_lang1,
+  hv_set_seg_close0, hv_set_seg_close1, hv_set_seg_close2,
   hv_set_video0, hv_set_video1, hv_set_video2,
   hv_set_field_lock, hv_set_field_fps, hv_set_field_dev, hv_set_field_long,
   hv_set_field_tcp, hv_set_field_udp, hv_set_btn_dev, hv_set_btn_long,
@@ -1052,10 +1096,13 @@ const wchar_t* menu_label(int which, int index) {
     return items[index];
   }
   if (which == 5) {
-    if (index == 0) return L"聊天";
-    if (index == 1) return L"文件";
-    if (index == 2) return g.control_on ? L"停止控制" : L"开始控制";
-    return index == 3 ? L"Ctrl+Alt+Del" : L"组合键";
+    if (index == 0) return trc("session.chat");
+    if (index == 1) return trc("session.files");
+    if (index == 2) {
+      return g.control_on ? trc("session.stopControl")
+                          : trc("session.startControl");
+    }
+    return index == 3 ? trc("session.ctrlAltDel") : trc("session.comboKeys");
   }
   if (which == 7) {
     const std::vector<std::wstring>& labels = combo_labels();
@@ -1064,7 +1111,7 @@ const wchar_t* menu_label(int which, int index) {
     }
     return L"";
   }
-  return index == 0 ? L"切换主题" : L"设置";
+  return index == 0 ? trc("settings.theme") : trc("settings.title");
 }
 
 int menu_current(int which) {
@@ -2548,7 +2595,7 @@ void start_connect(const std::wstring& target, const std::wstring& code) {
 /// Shared by the ConnectCard button and the Enter key.
 void start_home_connect() {
   if (g.connecting) {
-    show_toast(L"正在连接中…");
+    show_toast(tr("toast.connecting"));
     return;
   }
   if (g.address_text.empty()) {
@@ -2852,7 +2899,7 @@ bool recent_click(float x, float y) {
     if (inside(g.hit_recent_forget[i], x, y)) {
       g.recents.erase(g.recents.begin() + idx);
       save_recents();
-      show_toast(L"已从最近连接中移除");
+      show_toast(tr("toast.recentRemoved"));
       InvalidateRect(g.window, nullptr, FALSE);
       return true;
     }
@@ -2865,7 +2912,7 @@ bool recent_click(float x, float y) {
       return true;
     }
     if (inside(g.hit_recent_edit[i], x, y)) {
-      show_toast(L"正在打开重命名…");
+      show_toast(tr("session.renameOpening"));
       open_rename_dialog(idx);
       return true;
     }
@@ -2909,7 +2956,7 @@ bool recent_click(float x, float y) {
         // machine to approve, which is what a saved access-request row means.
         start_home_connect();
       } else {
-        show_toast(L"已填入连接框，双击直接连接");
+        show_toast(tr("tray.prefilled"));
       }
       InvalidateRect(g.window, nullptr, FALSE);
       return true;
@@ -2924,18 +2971,17 @@ std::wstring friendly_session_error(const std::wstring& code,
                                     const std::wstring& raw) {
   if (code == L"invalid_code" || code == L"unauthorized" ||
       code == L"invalid_token") {
-    return L"验证码错误或已失效";
+    return tr("error.invalid_code");
   }
-  if (code == L"locked") return L"主机已锁定，暂时无法连接";
-  if (code == L"access_denied") return L"对方拒绝了本次连接请求";
-  if (code == L"too_many_attempts") return L"尝试次数过多，请稍后再试";
-  if (code == L"ip_banned") return L"当前 IP 已被禁止连接";
-  if (code == L"handshake_failed" || code == L"hello_timeout") {
-    return L"与主机握手失败，请稍后重试";
-  }
-  if (code == L"display_mode_busy") return L"主机当前无法切换显示模式";
-  if (code == L"display_mode_failed") return L"显示模式切换失败";
-  return raw.empty() ? L"主机返回了错误" : raw;
+  if (code == L"locked") return tr("error.locked");
+  if (code == L"access_denied") return tr("error.access_denied");
+  if (code == L"too_many_attempts") return tr("error.too_many_attempts");
+  if (code == L"ip_banned") return tr("error.ip_banned");
+  if (code == L"handshake_failed") return tr("error.handshake_failed");
+  if (code == L"hello_timeout") return tr("error.hello_timeout");
+  if (code == L"display_mode_busy") return tr("error.display_mode_busy");
+  if (code == L"display_mode_failed") return tr("error.display_mode_failed");
+  return raw.empty() ? tr("error.host") : raw;
 }
 
 bool auth_error_code(const std::wstring& code) {
@@ -2960,7 +3006,7 @@ void retry_session_connect() {
   const bool needs_code = auth_error_code(g.session->last_error_code());
   if (needs_code && g.retry_code.empty()) {
     g.focus_field = 11;
-    show_toast(L"请输入验证码后重试");
+    show_toast(tr("toast.codeRequired"));
     InvalidateRect(g.window, nullptr, FALSE);
     return;
   }
@@ -2994,7 +3040,7 @@ void stop_reconnect() {
     g.session.reset();
   }
   native_log(L"reconnect stopped by the user");
-  show_toast(L"已停止重连", 1);
+  show_toast(tr("toast.retryStopped"), 1);
   if (g.window != nullptr) InvalidateRect(g.window, nullptr, FALSE);
 }
 
@@ -3009,7 +3055,7 @@ void reconnect_now() {
     g.session.reset();
   }
   g.retry_at = GetTickCount64();
-  show_toast(L"正在重新连接…", 0);
+  show_toast(tr("toast.reconnecting"), 0);
   if (g.window != nullptr) InvalidateRect(g.window, nullptr, FALSE);
 }
 
@@ -3071,18 +3117,18 @@ void show_toast(const std::wstring& text, int level);
 
 void clipboard_get() {
   session_send("{\"type\":\"clipboard\",\"action\":\"get\"}");
-  show_toast(L"已请求远端剪贴板");
+  show_toast(tr("toast.clipboardRequested"));
 }
 
 void clipboard_set() {
   const std::wstring text = local_clipboard_text();
   if (text.empty()) {
-    show_toast(L"本地剪贴板为空");
+    show_toast(tr("toast.clipboardEmpty"));
     return;
   }
   session_send("{\"type\":\"clipboard\",\"action\":\"set\",\"text\":\"" +
                json_escape(text) + "\"}");
-  show_toast(L"已发送到远端剪贴板");
+  show_toast(tr("toast.clipboardSent"));
 }
 
 void show_toast(const std::wstring& text) {
@@ -3201,7 +3247,7 @@ void clipboard_local_changed() {
       case molink::clipboard::skip_reason::too_large:
         native_log(L"clipboard.sync direction=out bytes=" +
                    std::to_wstring(result.bytes) + L" result=too_large");
-        show_toast(L"剪贴板文本超过 192 KiB，未同步");
+        show_toast(tr("toast.clipboardTooLarge"));
         break;
       case molink::clipboard::skip_reason::disabled:
       case molink::clipboard::skip_reason::empty:
@@ -3219,7 +3265,7 @@ void clipboard_local_changed() {
     g.clipboard_sync.reset_last_sent();
     native_log(L"clipboard.sync direction=out bytes=" +
                std::to_wstring(result.bytes) + L" result=send_failed");
-    show_toast(L"剪贴板同步发送失败");
+    show_toast(tr("toast.clipboardFailed"));
   }
 }
 
@@ -3310,7 +3356,7 @@ int menu_apply(int which, int index) {
       g.control_on = !g.control_on;
     } else if (index == 3) {
       session_send("{\"type\":\"input\",\"k\":\"sas\"}");
-      show_toast(L"已发送 Ctrl+Alt+Del");
+      show_toast(tr("toast.ctrlAltDelSent"));
     } else {
       // Open the shortcut list in the same popover position.
       return 7;
@@ -3337,7 +3383,7 @@ int menu_apply(int which, int index) {
 }
 
 std::wstring quality_label() {
-  return quality_custom() ? L"自定义" : kPresets[g.preset];
+  return quality_custom() ? tr("session.qualityCustom") : preset_label(g.preset);
 }
 
 std::wstring fps_label() {
@@ -3615,6 +3661,24 @@ void save_avatar_path(const std::wstring& path) {
   std::fclose(file);
 }
 
+/// The native client's own UI preferences. It is separate from the core's
+/// `ui.json` (the Web page owns that one), so neither side can clobber the
+/// other when both clients run on the same machine.
+std::wstring ui_language_path() {
+  wchar_t buffer[MAX_PATH] = {};
+  if (GetEnvironmentVariableW(L"APPDATA", buffer, MAX_PATH) == 0) {
+    return std::wstring();
+  }
+  std::wstring dir = std::wstring(buffer) + L"\\moLink";
+  CreateDirectoryW(dir.c_str(), nullptr);
+  return dir + L"\\ui-native.json";
+}
+
+void save_ui_language() {
+  const std::wstring path = ui_language_path();
+  if (!path.empty()) molink::ui_strings::save_file(path, g.lang);
+}
+
 bool load_saved_avatar() {
   const std::wstring store = avatar_store_path();
   if (store.empty()) return false;
@@ -3694,15 +3758,17 @@ void save_theme_mode() {
 }
 
 int load_close_behavior() {
-  DWORD value = 0;
+  DWORD value = 1;
   DWORD size = sizeof(value);
   if (RegGetValueW(HKEY_CURRENT_USER, kUiKey, L"WindowCloseBehavior",
                    RRF_RT_REG_DWORD, nullptr, &value, &size) ==
           ERROR_SUCCESS &&
-      value <= 2) {
+      value >= 1 && value <= 3) {
     return static_cast<int>(value);
   }
-  return 0;
+  // The old default was "ask" (0). The native client now mirrors the WebView2
+  // shell: closing the window hides it to the tray and keeps the core alive.
+  return 1;
 }
 
 void save_close_behavior(int behavior) {
@@ -3776,11 +3842,49 @@ void minimize_to_tray() {
   }
 }
 
+/// Menu labels treat `&` as an accelerator prefix; double it for literal text
+/// and keep the row readable when a device name is long.
+std::wstring tray_menu_text(const std::wstring& text) {
+  std::wstring out;
+  for (wchar_t c : text) {
+    if (c == L'&') out.push_back(L'&');
+    else if (c == L'\t' || c == L'\r' || c == L'\n') out.push_back(L' ');
+    else out.push_back(c);
+    if (out.size() >= 64) {
+      out += L"…";
+      break;
+    }
+  }
+  return out;
+}
+
 void show_tray_menu() {
   HMENU menu = CreatePopupMenu();
   if (menu == nullptr) return;
-  AppendMenuW(menu, MF_STRING, 1, L"显示 moLink");
-  AppendMenuW(menu, MF_STRING, 2, L"退出");
+  AppendMenuW(menu, MF_STRING, kTrayShow, trc("tray.show"));
+
+  HMENU recent = CreatePopupMenu();
+  if (recent != nullptr) {
+    int added = 0;
+    for (int i = 0; i < static_cast<int>(g.recents.size()) && added < 4; ++i) {
+      const app_state::recent_entry& entry = g.recents[i];
+      std::wstring label = entry.note.empty() ? entry.label : entry.note;
+      if (label.empty()) label = entry.target;
+      if (label.empty()) continue;
+      const UINT command = kTrayRecentBase + static_cast<UINT>(i);
+      AppendMenuW(recent, MF_STRING, command, tray_menu_text(label).c_str());
+      ++added;
+    }
+    if (added == 0) {
+      AppendMenuW(recent, MF_STRING | MF_GRAYED, 0, trc("tray.recentEmpty"));
+    }
+    AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(recent),
+                trc("tray.recent"));
+  }
+  AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+  AppendMenuW(menu, MF_STRING, kTrayExit, trc("tray.exit"));
+  SetMenuDefaultItem(menu, kTrayShow, FALSE);
+
   POINT point{};
   GetCursorPos(&point);
   SetForegroundWindow(g.window);
@@ -4114,7 +4218,7 @@ void draw_quality_panel(float window_w, float window_h) {
                D2D1::ColorF(g.theme->panel.r, g.theme->panel.g,
                             g.theme->panel.b, h));
     stroke_round(g.target, r, 9.6f, g.theme->line);
-    text(g.target, g.tiny, kPresets[i], r,
+    text(g.target, g.tiny, preset_label(i), r,
          active ? g.theme->accent
                 : mix_color(g.theme->ink, g.theme->ink, h));
     g.qp_preset[i] = r;
@@ -4296,10 +4400,11 @@ void draw_picture(const D2D1_RECT_F& stage) {
     std::wstring label = L"远程画面（共享内存直绘）";
     D2D1_COLOR_F color = g.theme->muted;
     if (g.reconnecting || (g.connecting && g.tab == 1)) {
-      label = g.reconnecting ? L"连接已断开，正在重连…" : L"正在连接…";
+      label = g.reconnecting ? tr("toast.connectionLost")
+                             : tr("session.connecting");
       color = D2D1::ColorF(0xf59e0b);
     } else if (pending) {
-      label = L"已发送连接请求，等待主机确认…";
+      label = tr("session.waitingApproval");
       color = D2D1::ColorF(0xf59e0b);
     } else if (authenticated) {
       label = L"已连接 " + g.session_label + L" · 等待画面";
@@ -4363,13 +4468,16 @@ void draw_picture(const D2D1_RECT_F& stage) {
 }
 
 void dark_chip(ID2D1RenderTarget* t, const palette& th,
-               const D2D1_RECT_F& r, const std::wstring& label, bool accent) {
-  fill_round(t, r, 6, D2D1::ColorF(0, 0, 0, 0.65f));
+               const D2D1_RECT_F& r, const std::wstring& label, bool accent,
+               float alpha = 1.0f) {
+  fill_round(t, r, 6, D2D1::ColorF(0, 0, 0, 0.65f * alpha));
   stroke_round(t, r, 6,
-               accent ? D2D1::ColorF(th.accent.r, th.accent.g, th.accent.b, 0.4f)
-                      : D2D1::ColorF(1, 1, 1, 0.15f));
+               accent ? D2D1::ColorF(th.accent.r, th.accent.g, th.accent.b,
+                                     0.4f * alpha)
+                      : D2D1::ColorF(1, 1, 1, 0.15f * alpha));
   text(t, g.tiny, label, r,
-       accent ? th.accent : D2D1::ColorF(1, 1, 1, 0.85f));
+       accent ? D2D1::ColorF(th.accent.r, th.accent.g, th.accent.b, alpha)
+              : D2D1::ColorF(1, 1, 1, 0.85f * alpha));
 }
 
 /// The web's diagnostics overlay: chips along the picture's top-left and a
@@ -4377,39 +4485,145 @@ void dark_chip(ID2D1RenderTarget* t, const palette& th,
 std::wstring session_path_label();
 std::wstring session_protocol_label();
 
+std::wstring uppercase_ascii(std::wstring value) {
+  for (wchar_t& c : value) {
+    if (c >= L'a' && c <= L'z') c = static_cast<wchar_t>(c - L'a' + L'A');
+  }
+  return value;
+}
+
+/// The host's `session-preset` reply names the encoder that is actually
+/// running. Until it arrives (or with an older core that does not reply) the
+/// last frame's codec is the next best answer, then the local preference.
+std::wstring session_actual_codec_label() {
+  if (g.session != nullptr) {
+    const molink::preset::applied_reply reply = g.session->applied_preset();
+    if (reply.applied && !reply.actual.codec.empty()) {
+      const std::string& codec = reply.actual.codec;
+      if (codec == "tiles") return tr("session.watermarkTiles");
+      if (codec == "h264") return L"H.264";
+      if (codec == "av1") return L"AV1";
+      if (codec == "vp9") return L"VP9";
+      if (codec == "vp8") return L"VP8";
+      if (codec == "auto") return tr("session.presetAuto");
+      return uppercase_ascii(std::wstring(codec.begin(), codec.end()));
+    }
+    const std::wstring live = g.session->live_codec_name();
+    if (!live.empty()) return live;
+  }
+  // Do not fall back to the local toolbar selection: this chip is the
+  // encoder that is actually running (the Web reads the frame codec too).
+  return L"—";
+}
+
+/// The HTTP leg of the transport. The native chips used to fold this into the
+/// protocol name; the Web shows it as its own label.
+std::wstring session_http_version_label() {
+  if (g.session == nullptr) return L"—";
+  const std::wstring& protocol = g.session->protocol_label();
+  if (protocol == L"http2") return L"HTTP/2";
+  if (protocol == L"http3") return L"HTTP/3";
+  if (protocol == L"websocket") return L"HTTP/1.1";
+  return L"—";
+}
+
+/// `welcome.tiles.backend` + the host core version, e.g. `dxgi · v0.9.67`.
+std::wstring session_backend_label() {
+  if (g.session == nullptr) return std::wstring();
+  std::wstring backend = g.session->tiles_backend();
+  if (backend.empty()) return backend;
+  const std::wstring version = g.session->host_version();
+  if (!version.empty()) backend += L" · v" + version;
+  return backend;
+}
+
+void reset_watermark_fade() {
+  g.fade_badges = molink::ui::fade_target{};
+  g.fade_stats = molink::ui::fade_target{};
+  g.watermark_badges_rect = D2D1::RectF(0, 0, 0, 0);
+  g.watermark_stats_rect = D2D1::RectF(0, 0, 0, 0);
+  g.watermark_fade_at = 0;
+}
+
+/// Advances the two independent fade targets from the current pointer and
+/// the last painted bounds. Called from pointer moves and the 16 ms timer.
+void update_watermark_fade() {
+  const ULONGLONG now = GetTickCount64();
+  const ULONGLONG last = g.watermark_fade_at;
+  g.watermark_fade_at = now;
+  const uint64_t elapsed = last == 0 ? 16 : now - last;
+  const bool active =
+      g.watermark && g.session != nullptr && (g.tab == 1 || g.immersive);
+  if (!active) {
+    reset_watermark_fade();
+    return;
+  }
+  const auto to_fade_rect = [](const D2D1_RECT_F& rect) {
+    return molink::ui::fade_rect{rect.left, rect.top, rect.right, rect.bottom};
+  };
+  const bool near_badges = molink::ui::is_near_rect(
+      g.hover_x, g.hover_y, to_fade_rect(g.watermark_badges_rect));
+  const bool near_stats = molink::ui::is_near_rect(
+      g.hover_x, g.hover_y, to_fade_rect(g.watermark_stats_rect));
+  bool changed = molink::ui::advance_fade(&g.fade_badges, near_badges, now,
+                                          elapsed);
+  changed = molink::ui::advance_fade(&g.fade_stats, near_stats, now, elapsed) ||
+            changed;
+  if (changed && g.window != nullptr) {
+    InvalidateRect(g.window, nullptr, FALSE);
+  }
+}
+
 void draw_watermark(const D2D1_RECT_F& stage) {
   if (!g.watermark) return;
   // The floating toolbar shares the picture's top edge; drop the chips below
   // it so the transport/resolution chips stay readable.
-  const float top = stage.top + (g.bar_open ? 48.0f : 12.0f);
+  float top = stage.top + (g.bar_open ? 48.0f : 12.0f);
   float x = stage.left + 12;
+  const float left = x;
+  const float chips_top = top;
   struct chip_spec {
     std::wstring label;
     bool accent;
   };
-  const std::wstring codec = codec_label();
-  std::wstring codec_upper = codec;
-  for (wchar_t& c : codec_upper) {
-    if (c >= L'a' && c <= L'z') c = static_cast<wchar_t>(c - L'a' + L'A');
+  std::vector<chip_spec> specs;
+  // Follow the encoder the host reports as applied, not the local selector.
+  specs.push_back({g.stats.resolution, false});
+  specs.push_back({uppercase_ascii(session_actual_codec_label()), false});
+  specs.push_back({preset_label(g.preset), true});
+
+  // Actual transport the session settled on, including the HTTP leg
+  // (HTTP/2 or HTTP/3 on the RFC 8441/9220 WebSocket paths).
+  std::wstring transport = tr("session.watermarkLink");
+  const std::wstring path = session_path_label();
+  if (!path.empty()) transport += L" " + path;
+  const std::wstring protocol = session_protocol_label();
+  if (!protocol.empty()) transport += L" · " + protocol;
+  transport += L" · " + session_http_version_label();
+  specs.push_back({transport, false});
+
+  const std::wstring backend = session_backend_label();
+  if (!backend.empty()) specs.push_back({backend, false});
+  if (g.session != nullptr && g.session->authenticated() && g.control_on &&
+      g.session->input_available()) {
+    specs.push_back({tr("session.controlOn"), true});
   }
-  // Actual transport the session settled on (the old chip was a fixed
-  // "LAN · UDP · H2" placeholder). H2 there meant an HTTP/2 WebSocket
-  // (RFC 8441), not a UDP path.
-  std::wstring transport = session_path_label();
-  const std::wstring transport_protocol = session_protocol_label();
-  if (!transport_protocol.empty()) transport += L" · " + transport_protocol;
-  const chip_spec specs[4] = {
-      {g.stats.resolution, false},
-      {codec_upper, false},
-      {kPresets[g.preset], true},
-      {transport, false},
-  };
+
+  const float badges_alpha = g.fade_badges.alpha;
   for (const chip_spec& spec : specs) {
     const float w = text_width(spec.label, 10.0f) + 16;
+    // The Web's badge row wraps; keep the added backend/control chips from
+    // running off a narrow picture.
+    if (x > left && x + w > stage.right - 12) {
+      x = left;
+      top += 27;
+    }
     dark_chip(g.target, *g.theme, D2D1::RectF(x, top, x + w, top + 21),
-              spec.label, spec.accent);
+              spec.label, spec.accent, badges_alpha);
     x += w + 6;
   }
+  g.watermark_badges_rect = D2D1::RectF(
+      left, chips_top, (std::max)(left + 1.0f, x - 6), top + 21);
 
   // Bottom-right stats bar: fps, latency, bandwidth, encoding, transport.
   // The web watermark shows what the viewer actually painted, not the target
@@ -4428,12 +4642,9 @@ void draw_watermark(const D2D1_RECT_F& stage) {
   }
   const std::wstring rate = rate_buffer;
   const std::wstring link = session_path_label() + L"/" +
-                            session_protocol_label();
-  // The top-left chip is the *configured* codec (AUTO / a pinned choice);
-  // this bar shows what the host is really sending right now (TILES / VP9 /
-  // VP8 / AV1 / H.264).
-  const std::wstring live_codec =
-      g.session != nullptr ? g.session->live_codec_name() : std::wstring();
+                            session_protocol_label() + L"/" +
+                            session_http_version_label();
+  const std::wstring live_codec = session_actual_codec_label();
   std::vector<std::wstring> labels = {fps, latency, rate, quality_label()};
   std::vector<bool> accents = {true, false, false, true};
   std::vector<bool> faded = {false, false, false, false};
@@ -4456,17 +4667,21 @@ void draw_watermark(const D2D1_RECT_F& stage) {
   const D2D1_RECT_F bar = D2D1::RectF(stage.right - 12 - total,
                                      stage.bottom - 12 - bar_h,
                                      stage.right - 12, stage.bottom - 12);
-  fill_round(g.target, bar, 6, D2D1::ColorF(0, 0, 0, 0.65f));
-  stroke_round(g.target, bar, 6, D2D1::ColorF(1, 1, 1, 0.15f));
+  g.watermark_stats_rect = bar;
+  const float stats_alpha = g.fade_stats.alpha;
+  fill_round(g.target, bar, 6, D2D1::ColorF(0, 0, 0, 0.65f * stats_alpha));
+  stroke_round(g.target, bar, 6,
+               D2D1::ColorF(1, 1, 1, 0.15f * stats_alpha));
   float bx = bar.left + 6;
   for (int i = 0; i < count; ++i) {
-    D2D1_COLOR_F color = accents[i]
-                             ? g.theme->accent
-                             : (faded[i]
-                                    ? D2D1::ColorF(g.theme->muted.r,
-                                                   g.theme->muted.g,
-                                                   g.theme->muted.b, 0.6f)
-                                    : D2D1::ColorF(1, 1, 1, 0.8f));
+    D2D1_COLOR_F color =
+        accents[i]
+            ? D2D1::ColorF(g.theme->accent.r, g.theme->accent.g,
+                           g.theme->accent.b, stats_alpha)
+            : (faded[i]
+                   ? D2D1::ColorF(g.theme->muted.r, g.theme->muted.g,
+                                  g.theme->muted.b, 0.6f * stats_alpha)
+                   : D2D1::ColorF(1, 1, 1, 0.8f * stats_alpha));
     text(g.target, g.tiny, labels[i],
          D2D1::RectF(bx, bar.top, bx + widths[i] + 2, bar.bottom), color);
     bx += widths[i] + 8;
@@ -4584,34 +4799,45 @@ void draw_bar(const D2D1_RECT_F& stage) {
     const bool hovered = inside(r, g.hover_x, g.hover_y);
     const wchar_t* tip = nullptr;
     switch (slot.kind) {
-      case bk_pin: tip = g.pinned ? L"取消固定" : L"固定"; break;
-      case bk_collapse: tip = L"收起"; break;
-      case bk_fullscreen: tip = g.immersive ? L"退出全屏" : L"全屏"; break;
-      case bk_display_fit: tip = L"适应"; break;
-      case bk_display_actual: tip = L"1:1"; break;
-      case bk_display_fill: tip = L"拉伸"; break;
-      case bk_fps: tip = L"帧率"; break;
-      case bk_quality: tip = L"画质"; break;
-      case bk_codec: tip = L"编码"; break;
-      case bk_watermark: tip = L"诊断水印"; break;
-      case bk_resolution: tip = L"分辨率"; break;
-      case bk_clip_toggle:
-        tip = g.clipboard_on ? L"关闭剪贴板" : L"开启剪贴板";
+      case bk_pin:
+        tip = g.pinned ? trc("session.unpinToolbar") : trc("session.pinToolbar");
         break;
-      case bk_clip_get: tip = L"获取远端剪贴板"; break;
-      case bk_clip_set: tip = L"发送到远端剪贴板"; break;
-      case bk_audio: tip = L"声音"; break;
-      case bk_volume: tip = L"音量"; break;
-      case bk_chat: tip = L"聊天"; break;
-      case bk_files: tip = L"文件"; break;
-      case bk_control: tip = g.control_on ? L"停止控制" : L"开始控制"; break;
-      case bk_sas: tip = L"Ctrl+Alt+Del"; break;
-      case bk_theme: tip = L"切换主题"; break;
-      case bk_settings: tip = L"设置"; break;
-      case bk_clip_menu: tip = L"剪贴板"; break;
-      case bk_tools_menu: tip = L"工具"; break;
-      case bk_appearance_menu: tip = L"外观"; break;
-      case bk_disconnect: tip = L"断开连接"; break;
+      case bk_collapse: tip = trc("session.collapse"); break;
+      case bk_fullscreen:
+        tip = g.immersive ? trc("session.exitFullscreen")
+                          : trc("session.fullscreen");
+        break;
+      case bk_display_fit: tip = trc("session.fit"); break;
+      case bk_display_actual: tip = trc("session.actual"); break;
+      case bk_display_fill: tip = trc("session.fill"); break;
+      case bk_fps: tip = trc("session.frameRate"); break;
+      case bk_quality: tip = trc("session.quality"); break;
+      case bk_codec: tip = trc("session.codec"); break;
+      case bk_watermark: tip = trc("settings.watermark"); break;
+      case bk_resolution: tip = trc("session.resolution"); break;
+      case bk_clip_toggle:
+        tip = g.clipboard_on ? trc("session.clipboardOff")
+                             : trc("session.clipboardOn");
+        break;
+      case bk_clip_get: tip = trc("session.clipboardGet"); break;
+      case bk_clip_set: tip = trc("session.clipboardSet"); break;
+      case bk_audio:
+        tip = g.audio_on ? trc("session.audioOff") : trc("session.audioOn");
+        break;
+      case bk_volume: tip = trc("session.audioVolume"); break;
+      case bk_chat: tip = trc("session.chat"); break;
+      case bk_files: tip = trc("session.files"); break;
+      case bk_control:
+        tip = g.control_on ? trc("session.stopControl")
+                           : trc("session.startControl");
+        break;
+      case bk_sas: tip = trc("session.ctrlAltDel"); break;
+      case bk_theme: tip = trc("settings.theme"); break;
+      case bk_settings: tip = trc("settings.title"); break;
+      case bk_clip_menu: tip = trc("session.clipboard"); break;
+      case bk_tools_menu: tip = trc("session.tools"); break;
+      case bk_appearance_menu: tip = trc("session.appearance"); break;
+      case bk_disconnect: tip = trc("session.disconnect"); break;
       default: break;
     }
     if (tip != nullptr) note_tip(slot.kind, tip, r, hovered);
@@ -4765,11 +4991,12 @@ void draw_bar(const D2D1_RECT_F& stage) {
         g.hit_latency = r;
         break;
       case bk_path:
-        toolbar_chip(g.target, *g.theme, g.tiny, r, L"LAN");
+        toolbar_chip(g.target, *g.theme, g.tiny, r, session_path_label());
         g.hit_path = r;
         break;
       case bk_protocol:
-        toolbar_chip(g.target, *g.theme, g.tiny, r, L"UDP");
+        toolbar_chip(g.target, *g.theme, g.tiny, r,
+                     session_protocol_label());
         g.hit_protocol = r;
         break;
       case bk_clip_menu:
@@ -5057,6 +5284,7 @@ bool session_click(float x, float y) {
   }
   if (inside(g.hit_watermark, x, y)) {
     g.watermark = !g.watermark;
+    if (!g.watermark) reset_watermark_fade();
     return true;
   }
   if (inside(g.hit_audio, x, y)) {
@@ -5087,7 +5315,7 @@ bool session_click(float x, float y) {
   }
   if (inside(g.hit_sas, x, y)) {
     session_send("{\"type\":\"input\",\"k\":\"sas\"}");
-    show_toast(L"已发送 Ctrl+Alt+Del");
+    show_toast(tr("toast.ctrlAltDelSent"));
     return true;
   }
   if (inside(g.hit_transport, x, y) || inside(g.hit_kbps, x, y) ||
@@ -5410,7 +5638,9 @@ void paint(HWND window) {
         D2D1::RectF(bx + 36, 6, bx + 68, 34),
         D2D1::RectF(bx + 72, 6, bx + 104, 34),
     };
-    const wchar_t* window_tips[3] = {L"最小化", L"全屏", L"关闭"};
+    const wchar_t* window_tips[3] = {trc("window.minimize"),
+                                     trc("window.fullscreen"),
+                                     trc("window.close")};
     for (int i = 0; i < 3; ++i) {
       note_tip(1000 + i, window_tips[i], buttons[i],
                inside(buttons[i], g.hover_x, g.hover_y));
@@ -5431,13 +5661,14 @@ void paint(HWND window) {
          D2D1::RectF(36, header_y, 110, header_y + 30), g.theme->ink);
 
     const D2D1_RECT_F home_tab = D2D1::RectF(127, header_y, 195, header_y + 30);
-    note_tip(1003, L"首页", home_tab, inside(home_tab, g.hover_x, g.hover_y));
-    nav_tab(g.target, *g.theme, g.label12, home_tab, L"首页", g.tab == 0,
-            hv_home_tab, inside(home_tab, g.hover_x, g.hover_y));
+    note_tip(1003, trc("tabs.home"), home_tab,
+             inside(home_tab, g.hover_x, g.hover_y));
+    nav_tab(g.target, *g.theme, g.label12, home_tab, trc("tabs.home"),
+            g.tab == 0, hv_home_tab, inside(home_tab, g.hover_x, g.hover_y));
     g.hit_tab[0] = home_tab;
 
     const D2D1_RECT_F plus = D2D1::RectF(201, header_y, 229, header_y + 30);
-    note_tip(1004, L"新建会话", plus, inside(plus, g.hover_x, g.hover_y));
+    note_tip(1004, trc("tabs.new"), plus, inside(plus, g.hover_x, g.hover_y));
     {
       const float h = hover_lerp(hv_plus, inside(plus, g.hover_x, g.hover_y));
       fill_round(g.target, plus, 8,
@@ -5558,9 +5789,9 @@ void paint(HWND window) {
     const D2D1_RECT_F settings_sq = D2D1::RectF(w - 40, header_y, w - 8,
                                                 header_y + 32);
     // Show the theme the button switches to, like the web (sun on dark).
-    note_tip(1007, L"切换主题", theme_sq,
+    note_tip(1007, trc("settings.theme"), theme_sq,
              inside(theme_sq, g.hover_x, g.hover_y));
-    note_tip(1008, L"设置", settings_sq,
+    note_tip(1008, trc("settings.title"), settings_sq,
              inside(settings_sq, g.hover_x, g.hover_y));
     header_square(g.target, *g.theme, theme_sq, hv_header_theme,
                   g.theme == &kLight ? icon::moon : icon::sun,
@@ -5805,7 +6036,7 @@ void paint(HWND window) {
     card(conn);
     const float cx = conn.left;
     const float conny = conn.top;
-    text(g.target, g.subtitle, L"连接设备",
+    text(g.target, g.subtitle, trc("home.title"),
          D2D1::RectF(cx + 12, conny + 8, cx + 220, conny + 28), g.theme->ink);
     text(g.target, g.tiny, L"输入设备 ID 或地址，端口默认 28418",
          D2D1::RectF(cx + 12, conny + 30, cx + 320, conny + 44),
@@ -5998,8 +6229,9 @@ void paint(HWND window) {
                    : g.theme->accent);
     fill_round(g.target, g.hit_connect_btn, 10, connect_bg);
     const std::wstring connect_label =
-        g.connecting ? L"正在连接…"
-                     : (needs_code ? L"发送连接请求" : L"连接");
+        g.connecting ? tr("session.connecting")
+                     : (needs_code ? tr("home.requestAccess")
+                                   : tr("home.connect"));
     const float cw_text = measure_text(g.small_bold, connect_label);
     draw_icon(g.target, icon::send,
               (g.hit_connect_btn.left + g.hit_connect_btn.right) / 2 -
@@ -6593,10 +6825,11 @@ void paint(HWND window) {
     std::wstring label;
     if (g.reconnecting) {
       label = seconds > 0
-                  ? L"连接已断开 · " + std::to_wstring(seconds) + L" 秒后重连"
-                  : L"连接已断开，正在重连…";
+                  ? tr("session.disconnected") + L" · " +
+                        tr_seconds("session.retryIn", seconds)
+                  : tr("toast.connectionLost");
     } else {
-      label = L"已停止重连";
+      label = tr("toast.retryStopped");
     }
     const float cw = (std::max)(300.0f, measure_text(g.tiny, label) + 40);
     const float ch = 82;
@@ -6719,11 +6952,11 @@ void paint(HWND window) {
                  enabled ? g.theme->accent_soft
                          : D2D1::ColorF(g.theme->panel.r, g.theme->panel.g,
                                         g.theme->panel.b, 0.6f));
-      text(g.target, g.label12, L"连接", g.hit_retry_btn,
+      text(g.target, g.label12, trc("home.connect"), g.hit_retry_btn,
            enabled ? g.theme->accent : g.theme->muted);
     } else {
       fill_round(g.target, g.hit_retry_btn, 7, g.theme->accent_soft);
-      text(g.target, g.label12, L"重新连接", g.hit_retry_btn,
+      text(g.target, g.label12, trc("session.reconnect"), g.hit_retry_btn,
            g.theme->accent);
     }
   }
@@ -7253,7 +7486,7 @@ void send_upload_roots(const std::vector<molink::files::walk_root>& roots,
 void send_local_selection() {
   using namespace molink::files::text;
   if (!can_send_files()) {
-    show_toast(L"请先连接会话后再发送文件");
+    show_toast(tr("toast.fileNeedsSession"));
     return;
   }
   if (g.local_selection.empty()) return;
@@ -7339,7 +7572,7 @@ void add_transfer(const std::wstring& path) {
 void add_transfer_batch(const std::vector<std::wstring>& paths) {
   if (paths.empty()) return;
   if (g.session == nullptr || !g.session->live()) {
-    show_toast(L"请先连接会话后再发送文件");
+    show_toast(tr("toast.fileNeedsSession"));
     return;
   }
   std::vector<molink::files::walk_root> roots;
@@ -7406,7 +7639,7 @@ void handle_file_events() {
                        : event.message,
                    1);
       } else if (!event.stream) {
-        show_toast(L"远端只支持整文件上传，剪贴板文件未发送", 1);
+        show_toast(tr("toast.fileUnsupported"), 1);
       }
       InvalidateRect(g.window, nullptr, FALSE);
       continue;
@@ -7452,13 +7685,13 @@ void handle_file_events() {
       g.files_open = true;
       g.chat_open = false;
       g.files_tab = 1;
-      show_toast(L"开始接收 " + event.name);
+      show_toast(tr("toast.receiving") + L" " + event.name);
       InvalidateRect(g.window, nullptr, FALSE);
     } else if (event.action == L"downloaded") {
-      show_toast(L"已保存到 " + event.path);
+      show_toast(tr("toast.savedTo") + L" " + event.path);
       InvalidateRect(g.window, nullptr, FALSE);
     } else if (event.action == L"done") {
-      show_toast(L"已发送 " + event.name);
+      show_toast(tr("toast.sent") + L" " + event.name);
       InvalidateRect(g.window, nullptr, FALSE);
     } else if (event.action == L"reject" || event.action == L"error" ||
                event.action == L"cancel" || event.action == L"cancelled") {
@@ -7722,7 +7955,7 @@ void draw_settings_modal(float w, float h) {
   // Header: settings icon + title + close.
   draw_icon(g.target, icon::settings, panel.left + 22, panel.top + 24,
             g.theme->accent);
-  text(g.target, g.name16, L"设置",
+  text(g.target, g.name16, trc("settings.title"),
        D2D1::RectF(panel.left + 36, panel.top + 6, panel.right - 60,
                    panel.top + 42),
        g.theme->ink);
@@ -7787,6 +8020,7 @@ void draw_settings_modal(float w, float h) {
     g.hit_seg_lang[i] = D2D1::RectF(0, 0, 0, 0);
     g.hit_sec_toggle[i] = D2D1::RectF(0, 0, 0, 0);
   }
+  for (int i = 0; i < 3; ++i) g.hit_seg_close[i] = D2D1::RectF(0, 0, 0, 0);
   for (int i = 0; i < 3; ++i) g.hit_disp_toggle[i] = D2D1::RectF(0, 0, 0, 0);
   for (int i = 0; i < 6; ++i) g.hit_sec_toggle[i] = D2D1::RectF(0, 0, 0, 0);
   for (int i = 0; i < 2; ++i) g.hit_seg_video[i] = D2D1::RectF(0, 0, 0, 0);
@@ -7807,21 +8041,21 @@ void draw_settings_modal(float w, float h) {
   const int section_now = g.settings_section;
 
   if (section_now == 0) {
-    // General: theme, auto-lock, language (web PreferencesControls).
-    settings_head(icon::sun, L"主题", x, y);
+    // General: theme, auto-lock, language, close behaviour (web
+    // PreferencesControls plus the shell's tray behaviour).
+    settings_head(icon::sun, trc("settings.theme"), x, y);
     y += 24;
-    const wchar_t* theme_labels[2] = {L"亮色", L"暗色"};
+    const wchar_t* theme_labels[2] = {trc("settings.themeLight"),
+                                      trc("settings.themeDark")};
     const icon theme_icons[2] = {icon::sun, icon::moon};
     settings_segment(x, y, cw, theme_labels, theme_icons, 2,
                      g.theme == &kLight ? 0 : 1, g.hit_seg_theme,
                      hv_set_seg_theme0);
     y += 36 + 20;
 
-    settings_head(icon::rotate, L"自动锁定", x, y);
+    settings_head(icon::rotate, trc("settings.autoLock"), x, y);
     y += 22;
-    y = settings_hint(x, y, cw,
-                      L"在没有任何远程会话且长时间无操作后锁定界面。") +
-        6;
+    y = settings_hint(x, y, cw, trc("settings.autoLockHint")) + 6;
     static const wchar_t* locks[6] = {L"30 秒", L"1 分钟", L"2 分钟",
                                       L"5 分钟", L"15 分钟", L"从不"};
     g.hit_lock_field = settings_select(
@@ -7829,11 +8063,26 @@ void draw_settings_modal(float w, float h) {
         hv_set_field_lock);
     y += 36 + 20;
 
-    settings_head(icon::globe, L"语言", x, y);
+    settings_head(icon::globe, trc("settings.language"), x, y);
     y += 24;
     const wchar_t* lang_labels[2] = {L"English", L"中文"};
-    settings_segment(x, y, cw, lang_labels, nullptr, 2, g.settings_lang,
-                     g.hit_seg_lang, hv_set_seg_lang0);
+    settings_segment(x, y, cw, lang_labels, nullptr, 2,
+                     static_cast<int>(g.lang), g.hit_seg_lang,
+                     hv_set_seg_lang0);
+    y += 36 + 20;
+
+    settings_head(icon::close, trc("window.closeBehavior"), x, y);
+    y += 22;
+    y = settings_hint(x, y, cw, trc("window.closeBehaviorHint")) + 6;
+    // Persisted values are 1 hide, 2 close tab, 3 quit; the legacy 0 ("ask")
+    // is shown as the current default.
+    const int close_index =
+        g.close_behavior == 2 ? 1 : (g.close_behavior == 3 ? 2 : 0);
+    const wchar_t* close_labels[3] = {trc("window.hideToTray"),
+                                      trc("window.closeTab"),
+                                      trc("window.quit")};
+    settings_segment(x, y, cw, close_labels, nullptr, 3, close_index,
+                     g.hit_seg_close, hv_set_seg_close0);
     y += 36;
   } else if (section_now == 1) {
     // Security: toggles card, device name and long-term code.
@@ -8000,8 +8249,8 @@ void draw_settings_modal(float w, float h) {
   } else if (section_now == 3) {
     // Display: watermark, auto audio, default frame rate and quality.
     y = settings_toggle_row(
-        x, y, cw, L"连接质量水印",
-        L"在会话角落显示帧率，延迟和带宽，默认关闭。", g.watermark,
+        x, y, cw, trc("settings.watermark"),
+        trc("settings.watermarkHint"), g.watermark,
         hv_set_toggle4, &g.hit_disp_toggle[0]);
     y = settings_toggle_row(
         x, y, cw, L"连接后自动播放声音",
@@ -8315,8 +8564,19 @@ void settings_click(float x, float y) {
           return;
         }
         if (inside(g.hit_seg_lang[i], x, y)) {
-          g.settings_lang = i;
-          show_toast(L"语言设置已保存（重启后生效）");
+          g.lang = i == 0 ? molink::ui_strings::language::en
+                          : molink::ui_strings::language::zh_cn;
+          save_ui_language();
+          show_toast(tr("settings.saved"));
+          InvalidateRect(g.window, nullptr, FALSE);
+          return;
+        }
+      }
+      for (int i = 0; i < 3; ++i) {
+        if (inside(g.hit_seg_close[i], x, y)) {
+          g.close_behavior = i == 0 ? 1 : (i == 1 ? 2 : 3);
+          save_close_behavior(g.close_behavior);
+          show_toast(tr("settings.saved"));
           return;
         }
       }
@@ -8331,13 +8591,13 @@ void settings_click(float x, float y) {
         if (inside(g.hit_seg_video[i], x, y)) {
           static const char* modes[] = {"stream", "tiles"};
           if (g.session == nullptr || !g.session->live()) {
-            show_toast(L"请先连接会话再切换视频模式");
+            show_toast(tr("toast.videoModeNeedsSession"));
           } else if (g.session->send_video_mode(modes[i])) {
             g.video_mode = i;
-            show_toast(i == 1 ? L"已切换到瓦片（静态）模式"
-                              : L"已切换到视频流模式");
+            show_toast(i == 1 ? tr("toast.videoTiles")
+                              : tr("toast.videoStream"));
           } else {
-            show_toast(L"视频模式切换失败");
+            show_toast(tr("toast.videoModeFailed"));
           }
           return;
         }
@@ -8425,7 +8685,7 @@ void settings_click(float x, float y) {
         return;
       }
       if (inside(g.hit_server_save, x, y)) {
-        show_toast(L"已保存。");
+        show_toast(tr("settings.saved"));
         return;
       }
       if (inside(g.hit_server_default, x, y)) {
@@ -8437,7 +8697,10 @@ void settings_click(float x, float y) {
     case 3:
       for (int i = 0; i < 3; ++i) {
         if (inside(g.hit_disp_toggle[i], x, y)) {
-          if (i == 0) g.watermark = !g.watermark;
+          if (i == 0) {
+            g.watermark = !g.watermark;
+            if (!g.watermark) reset_watermark_fade();
+          }
           if (i == 1) g.disp_auto_audio = !g.disp_auto_audio;
           if (i == 2) g.disp_remote_cursor = !g.disp_remote_cursor;
           return;
@@ -8542,7 +8805,7 @@ void draw_chat_drawer(float w, float h) {
        g.theme->line_soft, 1.0f);
   draw_icon(g.target, icon::chat, panel.left + 18, panel.top + 22,
             g.theme->accent);
-  text(g.target, g.body_medium, L"聊天",
+  text(g.target, g.body_medium, trc("session.chat"),
        D2D1::RectF(panel.left + 34, panel.top + 6, panel.left + 80,
                    panel.top + 38),
        g.theme->ink);
@@ -8771,7 +9034,7 @@ void draw_files_drawer(float w, float h) {
        g.theme->line_soft, 1.0f);
   draw_icon(g.target, icon::folder, panel.left + 18, panel.top + 22,
             g.theme->accent);
-  text(g.target, g.body_medium, L"文件",
+  text(g.target, g.body_medium, trc("session.files"),
        D2D1::RectF(panel.left + 34, panel.top + 6, panel.left + 90,
                    panel.top + 38),
        g.theme->ink);
@@ -9643,13 +9906,11 @@ void draw_close_prompt(float w, float h) {
   shadow(g.target, *g.theme, panel, 12);
   fill_round(g.target, panel, 12, g.theme->surface);
   stroke_round(g.target, panel, 12, g.theme->line_soft);
-  text(g.target, g.body_medium, L"关闭窗口",
+  text(g.target, g.body_medium, trc("window.closePromptTitle"),
        D2D1::RectF(panel.left + 16, panel.top + 12, panel.right - 16,
                    panel.top + 36),
        g.theme->ink);
-  text(g.target, g.tiny_wrap,
-       L"当前有 1 个远程画面标签页。要关闭会话标签页，还是把窗口最小化到"
-       L"托盘（会话继续）？",
+  text(g.target, g.tiny_wrap, trc("window.closePromptBody"),
        D2D1::RectF(panel.left + 16, panel.top + 40, panel.right - 16,
                    panel.top + 92),
        g.theme->muted);
@@ -9665,7 +9926,7 @@ void draw_close_prompt(float w, float h) {
     draw_icon(g.target, icon::check, panel.left + 23, panel.top + 105,
               g.theme->on_accent);
   }
-  text(g.target, g.small_left, L"记住我的选择，下次不再提示",
+  text(g.target, g.small_left, trc("window.rememberChoice"),
        D2D1::RectF(panel.left + 36, panel.top + 96, panel.right - 16,
                    panel.top + 116),
        g.theme->muted);
@@ -9690,9 +9951,9 @@ void draw_close_prompt(float w, float h) {
            hovered ? g.theme->ink : g.theme->muted);
     }
   };
-  prompt_button(g.hit_close_cancel, L"取消", false);
-  prompt_button(g.hit_close_tab, L"关闭标签页", false);
-  prompt_button(g.hit_close_tray, L"最小化到托盘", true);
+  prompt_button(g.hit_close_cancel, trc("window.cancel"), false);
+  prompt_button(g.hit_close_tab, trc("window.closeTab"), false);
+  prompt_button(g.hit_close_tray, trc("window.minimizeToTray"), true);
 }
 
 bool close_prompt_click(float x, float y) {
@@ -10720,11 +10981,25 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
       if (LOWORD(wparam) == WA_INACTIVE) release_remote_keys();
       break;
     case WM_CLOSE:
-      if (g.quitting || !g.session_open) {
+      // Default: hide to the notification area and keep the core (and any
+      // session) alive, like the WebView2 shell. 设置 → 常规 can switch the
+      // close button to "close the session tab" or to a real quit.
+      if (g.quitting) {
+        DestroyWindow(window);
+        return 0;
+      }
+      if (g.close_behavior == 3) {
+        g.quitting = true;
         DestroyWindow(window);
         return 0;
       }
       if (g.close_behavior == 1) {
+        minimize_to_tray();
+        return 0;
+      }
+      if (!g.session_open) {
+        // "Close the session tab" with no tab: keep the app in the tray; the
+        // tray menu still offers a real exit.
         minimize_to_tray();
         return 0;
       }
@@ -10733,6 +11008,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
         InvalidateRect(window, nullptr, FALSE);
         return 0;
       }
+      // Legacy "ask" value (0) from a pre-batch-9 store.
       close_ctx_menu();
       g.close_prompt = true;
       g.close_remember = false;
@@ -10995,7 +11271,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
         }
         if (g.session->access_pending() && !g.access_notice_shown) {
           g.access_notice_shown = true;
-          show_toast(L"已发送连接请求，等待对方确认");
+          show_toast(tr("toast.accessRequested"));
           InvalidateRect(window, nullptr, FALSE);
         }
         const std::wstring host_error = g.session->last_error();
@@ -11093,7 +11369,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
             g.retry_attempt = 0;
             g.retry_at = 0;
             native_log(L"reconnected: target=" + g.connect_target);
-            show_toast(L"已重新连接 " + g.session_label);
+            show_toast(tr("toast.reconnected") + L" " + g.session_label);
             InvalidateRect(window, nullptr, FALSE);
           }
           if (!g.connect_error.empty()) {
@@ -11142,7 +11418,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
             // fresh local copy and sent straight back to the host.
             g.clipboard_sync.on_remote_text(u16_of(local), GetTickCount64());
             set_clipboard_text(local);
-            show_toast(L"已接收远端剪贴板");
+            show_toast(tr("toast.clipboardReceived"));
             InvalidateRect(window, nullptr, FALSE);
           }
         }
@@ -11219,7 +11495,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
             g.reconnecting = true;
             g.retry_attempt = 0;
             g.retry_at = GetTickCount64() + 500;
-            show_toast(L"通过本机 core 连接失败，改用直连（平铺）");
+            show_toast(tr("toast.coreFallback"));
             InvalidateRect(window, nullptr, FALSE);
             return 0;
           }
@@ -11238,11 +11514,11 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
             g.retry_at =
                 GetTickCount64() +
                 molink::native::reconnect::delay_for_attempt(g.retry_attempt);
-            g.connect_error = L"连接已断开";
+            g.connect_error = tr("session.disconnected");
             if (!g.session->close_detail().empty()) {
               g.connect_error += L"：" + g.session->close_detail();
             }
-            show_toast(L"连接已断开，正在重连…", 1);
+            show_toast(tr("toast.connectionLost"), 1);
           } else {
             // A close with no policy answer is a transport failure, which the
             // task routes to the banner even when the session was never
@@ -11256,12 +11532,12 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
                 utf8_of(reason));
             if (route.where == molink::native::alerts::surface::banner &&
                 g.connect_error.empty()) {
-              g.connect_error = L"连接已断开";
+              g.connect_error = tr("session.disconnected");
               if (!g.session->close_detail().empty()) {
                 g.connect_error += L"：" + g.session->close_detail();
               }
             }
-            show_toast(L"会话已断开", toast_level_of(route.level));
+            show_toast(tr("toast.disconnected"), toast_level_of(route.level));
           }
           InvalidateRect(window, nullptr, FALSE);
         }
@@ -11284,6 +11560,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
         if (g.focus_field != 0) InvalidateRect(window, nullptr, FALSE);
       }
       if (advance_hover()) InvalidateRect(window, nullptr, FALSE);
+      update_watermark_fade();
       if (g.tip_id >= 0 && !g.tip_shown && now - g.tip_since >= 600) {
         g.tip_shown = true;
         InvalidateRect(window, nullptr, FALSE);
@@ -11445,12 +11722,14 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
       }
       g.hover_x = x;
       g.hover_y = y;
+      update_watermark_fade();
       InvalidateRect(window, nullptr, FALSE);
       return 0;
     }
     case WM_MOUSELEAVE:
       g.tracking_leave = false;
       g.hover_x = g.hover_y = -1;
+      update_watermark_fade();
       // A tooltip must not outlive the pointer leaving the window.
       g.tip_candidate = -1;
       g.tip_id = -1;
@@ -11681,10 +11960,10 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
         }
         if (inside(g.hit_copy_id, x, y)) {
           if (g.device_id.empty()) {
-            show_toast(L"ID 尚未就绪：本机核心没有响应");
+            show_toast(tr("toast.idNotReady"));
           } else {
             set_clipboard_text(g.device_id);
-            show_toast(L"已复制 ID");
+            show_toast(tr("toast.idCopied"));
           }
           InvalidateRect(window, nullptr, FALSE);
           return 0;
@@ -11696,10 +11975,10 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
         }
         if (inside(g.hit_code_copy, x, y)) {
           if (g.device_code.empty()) {
-            show_toast(L"验证码尚未就绪：本机核心没有响应");
+            show_toast(tr("toast.codeNotReady"));
           } else {
             set_clipboard_text(g.device_code);
-            show_toast(L"已复制验证码");
+            show_toast(tr("toast.codeCopied"));
           }
           InvalidateRect(window, nullptr, FALSE);
           return 0;
@@ -11709,9 +11988,9 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
           // a random number that no client could ever authenticate with.
           std::wstring error;
           if (refresh_device_code(&error)) {
-            show_toast(L"验证码已更换");
+            show_toast(tr("toast.codeChanged"));
           } else {
-            show_toast(error.empty() ? L"验证码更换失败" : error);
+            show_toast(error.empty() ? tr("toast.codeChangeFailed") : error);
           }
           InvalidateRect(window, nullptr, FALSE);
           return 0;
@@ -12204,14 +12483,14 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
       if (result->state == 3) {
         g.update_state = 3;
         g.update_latest = result->latest;
-        show_toast(L"发现新版本 " + result->latest);
+        show_toast(tr("toast.updateFound") + L" " + result->latest);
       } else if (result->state == 2) {
         g.update_state = 2;
         g.update_latest = result->latest;
-        show_toast(L"已是最新版本");
+        show_toast(tr("toast.updateLatest"));
       } else {
         g.update_state = 0;
-        show_toast(L"检查更新失败，请检查网络后重试");
+        show_toast(tr("toast.updateFailed"));
       }
       delete result;
       InvalidateRect(window, nullptr, FALSE);
@@ -12221,7 +12500,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
       auto* path = reinterpret_cast<std::wstring*>(lparam);
       if (path != nullptr) {
         if (g.surface_base == nullptr && surface_open(*path)) {
-          show_toast(L"本机核心画面已连接");
+          show_toast(tr("toast.coreSurfaceConnected"));
         }
         g.surface_path = *path;
         delete path;
@@ -12260,7 +12539,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
           return 0;
         }
         g.reconnecting = false;
-        show_toast(L"已连接 " + g.session_label);
+        show_toast(tr("toast.connected") + L" " + g.session_label);
       } else if (g.reconnecting) {
         // A transient failure while reconnecting: stay quiet and try again,
         // using the Web's 0 / 1 s / 1 s / 60 s schedule.
@@ -12301,13 +12580,34 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
       return 0;
     }
     case WM_COMMAND:
-      if (LOWORD(wparam) == 1) {
+      if (LOWORD(wparam) == kTrayShow) {
         show_main_window();
         return 0;
       }
-      if (LOWORD(wparam) == 2) {
+      if (LOWORD(wparam) == kTrayExit) {
         g.quitting = true;
         DestroyWindow(window);
+        return 0;
+      }
+      if (LOWORD(wparam) >= kTrayRecentBase) {
+        const int index =
+            static_cast<int>(LOWORD(wparam) - kTrayRecentBase);
+        if (index >= 0 && index < static_cast<int>(g.recents.size())) {
+          const app_state::recent_entry& entry = g.recents[index];
+          show_main_window();
+          g.tab = 0;
+          g.device_tab = 0;
+          g.settings_open = false;
+          g.address_text = entry.target;
+          g.code_text = entry.token;
+          g.address_caret = g.address_text.size();
+          g.code_caret = g.code_text.size();
+          g.focus_field = 2;
+          g.connect_error.clear();
+          clear_text_selection();
+          show_toast(tr("tray.prefilled"));
+          InvalidateRect(window, nullptr, FALSE);
+        }
         return 0;
       }
       break;
@@ -12367,6 +12667,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   g.bar_open = g.pinned;
   g.mode = static_cast<app_state::theme_mode>(load_theme_mode());
   g.close_behavior = load_close_behavior();
+  {
+    const std::wstring language_path = ui_language_path();
+    if (!language_path.empty()) {
+      molink::ui_strings::load_file(language_path, &g.lang);
+    }
+  }
   // The security/video settings are the host's, not the shell's: read them
   // from the local core instead of showing hard-coded defaults. A launcher
   // that talks to an already-running core passes its ready-line token here.

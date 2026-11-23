@@ -1018,6 +1018,35 @@ set_target_properties(molink-core-preset-message-test PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 add_test(NAME preset_message COMMAND molink-core-preset-message-test)
 
+# The native shell's string table: every key must carry both languages, and
+# the language preference document the shell reads at startup round-trips.
+# No Win32: the same source is compiled into the Windows client.
+add_executable(molink-core-ui-strings-test
+  tests/ui_strings_test.cpp
+  "${CMAKE_CURRENT_SOURCE_DIR}/../shell/windows/ui_strings.cpp"
+)
+target_include_directories(molink-core-ui-strings-test PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../shell/windows")
+if(MSVC)
+  # The table carries UTF-8 Chinese source text.
+  target_compile_options(molink-core-ui-strings-test PRIVATE /utf-8)
+endif()
+set_target_properties(molink-core-ui-strings-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME ui_strings COMMAND molink-core-ui-strings-test)
+
+# Watermark proximity geometry and the 28 px / 80 ms fade rules, shared with
+# the Windows painter so they can be checked without a display.
+add_executable(molink-core-watermark-fade-test
+  tests/watermark_fade_test.cpp
+  "${CMAKE_CURRENT_SOURCE_DIR}/../shell/windows/watermark_fade.cpp"
+)
+target_include_directories(molink-core-watermark-fade-test PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../shell/windows")
+set_target_properties(molink-core-watermark-fade-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME watermark_fade COMMAND molink-core-watermark-fade-test)
+
 # Clipboard text sync without Win32: the empty/duplicate/192 KiB rules and the
 # echo table (two-minute window, 64 entries) are shared with the native shell
 # and tested here on Linux. The Windows calls themselves stay in ui_kit_demo.
