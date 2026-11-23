@@ -149,6 +149,9 @@ class session_client {
   const std::wstring& device_name() const { return device_name_; }
   /// `welcome.security`: e2e, relay or none (empty until welcome).
   const std::wstring& security() const { return security_; }
+  /// `welcome.input`: the host can inject keyboard/pointer input. The
+  /// watermark's "control on" chip requires this, like the Web.
+  bool input_available() const { return input_available_.load(); }
   /// True once the host sent `welcome` (the code was accepted or access was
   /// approved).
   bool authenticated() const { return authenticated_; }
@@ -209,6 +212,11 @@ class session_client {
   /// Last `transport` announcement: path (direct/lan/relay) and protocol.
   const std::wstring& path_label() const { return path_label_; }
   const std::wstring& protocol_label() const { return protocol_label_; }
+  /// `welcome.tiles.backend`: the host's capture backend (`dxgi`, `x11`, ...),
+  /// shown in the watermark next to the core version. Empty until welcome.
+  std::wstring tiles_backend() const;
+  /// `welcome.version`: the host core's version. Empty until welcome.
+  std::wstring host_version() const;
   /// Copies the newest decoded tile frame (BGRA) when `since` is older than
   /// the stored sequence. Returns false when nothing new arrived.
   bool copy_frame(std::vector<uint8_t>& out, int* width, int* height,
@@ -618,10 +626,15 @@ class session_client {
   /// runs on the reader thread while the UI polls it.
   mutable std::mutex log_mutex_;
   host_log_state host_logs_;
+  /// `welcome.tiles.backend` and `welcome.version`; copied under the same
+  /// mutex because the reader thread writes them and the UI paints them.
+  std::wstring tiles_backend_;
+  std::wstring host_version_;
   std::wstring video_mode_;
   std::string resume_token_;
   std::wstring avatar_;
   std::atomic<uint8_t> live_codec_{0};
+  std::atomic<bool> input_available_{false};
   std::wstring close_detail_;
   std::wstring path_label_;
   std::wstring protocol_label_;
