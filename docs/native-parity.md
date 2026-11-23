@@ -37,8 +37,8 @@
 | A5 | 会话与画质 | 切档重建编码器/关键帧 | partial | 靠宿主旧 `quality` 路径顺带请求关键帧，原生不主动请求 | `session_client.cpp:1609` |
 | A6 | 会话与画质 | 首帧前应用预设 + 按 host 记忆 | gap | 原生 welcome 时不发预设，也不按 host:port 保存 | `session_client.cpp:1323` |
 | A7 | 会话与画质 | 变更防抖/去重 | partial | 滑块松手才发，但无 120/300 ms 合并、无 last-sent 去重 | `ui_kit_demo.cpp:3402` |
-| A8 | 会话与画质 | auto 档位阶梯 + 帧率负载控制 | gap | 原生没有观看端自适应控制器 | `ui_kit_demo.cpp:2499` |
-| A9 | 会话与画质 | 多显示器选择 | gap | 原生没有 `display` 消息，也不解析 welcome.displays | `session_client.cpp:1323` |
+| A8 | 会话与画质 | auto 档位阶梯 + 帧率负载控制 | ok | 观看端阶梯/帧率控制器（`adaptive_quality.cpp`）：3 次降档、5 次升档，6 s/10 s dwell；帧率 2 次降、4 次升，1.5 s/3 s dwell；宿主 `capture-stats.build_ms` 封顶 | `shell/windows/adaptive_quality.*`、`ui_kit_demo.cpp` |
+| A9 | 会话与画质 | 多显示器选择 | ok | 解析 `welcome.displays`/`display_index`，工具栏选择器发 `{"type":"display","index":N}`，切换后清解码状态并请求关键帧 | `session_client.cpp`、`display_selector.cpp`、`ui_kit_demo.cpp` |
 | A10 | 会话与画质 | truecolor/4:4:4 的 BGRA 语义 | gap | 原生格式表有 BGRA，但无法请求 4:4:4/no_subsampling | `ui_kit_demo.cpp:479` |
 | B1 | 剪贴板 | 文本入站实时同步 | ok | 宿主推送文本时原生会写入本机剪贴板 | `session_client.cpp:1489` |
 | B2 | 剪贴板 | 文本出站实时同步 + 192 KiB | gap | 原生只有手动“发送到远端”，没有本地轮询 | `ui_kit_demo.cpp:2476` |
@@ -63,7 +63,7 @@
 | D4 | 输入 | 失焦释放按键 | gap | 只释放鼠标按键，没有按键集合与焦点丢失处理 | `ui_kit_demo.cpp:4051` |
 | D5 | 输入 | 组合键转发菜单 | gap | 原生只有 Ctrl+Alt+Del，没有 Win+R/Alt+Tab 菜单 | `ui_kit_demo.cpp:2569` |
 | D6 | 输入 | 绝对鼠标/滚轮/按键 | ok | 坐标归一化、1..3 键、滚轮均已实现 | `ui_kit_demo.cpp:4028` |
-| D7 | 输入 | 相对/触控板鼠标 | gap | 原生没有虚拟鼠标模式 | — |
+| D7 | 输入 | 相对/触控板鼠标 | ok | 设置里可开相对鼠标与灵敏度；本地虚拟光标累计增量后仍发 Web 同款 `k=move` 归一化坐标，Ctrl+Alt+M 回到绝对 | `shell/windows/trackpad_mouse.*`、`ui_kit_demo.cpp` |
 | E1 | 诊断/错误 | 本地诊断环形缓冲、7 天、可关 | ok | `native_diag` 与核心同格式/保留/轮转/脱敏，设置页可关文件写入（ring 保留） | `shell/windows/native_diag.*` |
 | E2 | 诊断/错误 | 主机日志 tail/info/enable/disable | ok | `session_client` 处理 `logs`，暴露 tail/info/开关；面板展示主机版本/端口/目录 | `shell/windows/session_client.cpp` |
 | E3 | 诊断/错误 | 一键复制两端日志/导出/清空/打开目录 | ok | 诊断面板：本机/主机、all/warn/error、复制两端、导出、清空、打开目录 | `shell/windows/ui_kit_demo.cpp` |
@@ -406,19 +406,24 @@
   `frontend/src/lib/session-connection.ts:519-521`。
 - 每次调整都通过 `session-preset` 的 `fps` 字段下发（`SessionView.tsx:1275-1279`）。
 
-**Native 现状**
+**Native 现状（批次 10 已实现）**
 
-- `auto` 只是旧 mode 表里的一项（`ui_kit_demo.cpp:469`），没有任何观看端调整逻辑。
-- 原生的统计只有接收码率和显示 fps（`session_client.cpp:1577-1601`），不解析
-  `capture-stats`，没有 `hostFps/buildMs`。
-- 没有 `capture-fps` 发送路径（Web 虽然定义了 `setCaptureFps`，主路径仍走
-  `session-preset.fps`）。
+- `shell/windows/adaptive_quality.*` 是与 Win32 无关的两个控制器：档位阶梯和帧率
+  负载控制；阈值、样本数、dwell 与 Web 相同（降档 3 次 / 升档 5 次，6 s / 10 s；
+  帧率降 2 次 / 升 4 次，1.5 s / 3 s），并由 Linux 单测固定。
+- 只在 preset 为 `auto` 且会话已鉴权时运行。观看端把当前档位解析成具体 preset
+  （带目标 fps）下发，切档后 `send_session_preset` 请求关键帧；用户选择器仍显示
+  “自动 · 档位”。
+- `session_client` 解析 `capture-stats`，暴露 `host_fps()`、`host_build_ms()`、
+  `wire_fps()`、`bandwidth_bps()`、`dropped_frames()`、`has_rtt()/rtt_ms()`。
+- 阶梯按本项要求为 turbo → smooth → balanced → hd → truecolor。Web 当前
+  `autoTier` 只走 smooth/balanced/quality，且刻意排除 turbo（黑白突兀）和
+  truecolor（BGRA 平铺）；本批只借用它的阈值与滞回参数。
 
 **差异**
 
-- 选“自适应”时，Web 会随链路和编码能力改变画面档位与帧率；原生只是把 `auto` 交给
-  宿主，之后什么都不做。
-- 原生无法看到宿主编码耗时，无法避免“编码器跟不上但仍要求 30fps”。
+- 自动档位现在由观看端管理，而不是把 `auto` 交给宿主后不再过问。
+- 宿主 encode 时间参与帧率封顶，避免“编码器跟不上但仍要求 30fps”。
 
 **实现建议**
 
@@ -439,18 +444,19 @@
   `frontend/src/lib/client.ts:1638-1642`。
 - 宿主处理并回报 `display`：`backend/src/session_controller.cpp:2932-2960`。
 
-**Native 现状**
+**Native 现状（批次 10 已实现）**
 
-- 只有分辨率切换 `{"type":"display-mode","width":..,"height":..}`：
-  `ui_kit_demo.cpp:2525-2534`。
-- welcome 解析不包含 `displays`：`session_client.cpp:1323-1416` 只读
-  `codec_preference/video_mode/session_token/avatar/screen_w/screen_h/device_name/security`。
-- UI 没有显示器下拉。
+- `session_client` 解析 `welcome.displays`（index/name/x/y/width/height/primary）
+  与 `display_index`；`display_selector.cpp` 负责 JSON 解析和“同屏不重置”的规则。
+- 工具栏在超过一个显示器时显示选择器，选择后发
+  `{"type":"display","index":n}`（字段名与 Web/后端一致，是 `index` 不是 `id`）。
+- 宿主的 `display` 广播会更新当前索引；真实切换会清空解码帧、tile 时钟与
+  applied cell，并立即请求关键帧、帧和全屏 tile。
 
 **差异**
 
-- 多显示器主机上，原生只能看当前采集屏，无法切到另一块屏；Web 可以。
-- Web 还会收到宿主主动的 `display` 广播（`client.ts:1879-1883`），原生忽略。
+- 多显示器主机上原生可以切到任意采集屏，并跟随其他观看端的切换。
+- 显示器名称保留宿主返回的 UTF-8；无名时回退为“显示器 N”。
 
 **实现建议**
 
@@ -1353,21 +1359,22 @@
   locale 说明在 `frontend/src/locales/zh-CN.json:319-321`。
 - 触摸输入以相对增量驱动光标，而不是绝对定位。
 
-**Native 现状**
+**Native 现状（批次 10 已实现）**
 
-- 没有虚拟鼠标/相对模式；只有绝对归一化坐标。
-- Windows 原生客户端主要面向桌面，触摸板由系统处理，通常不需要这个模式。
+- 设置 → 显示新增“相对鼠标（触控板/远程游戏）”开关，默认关闭；开启后鼠标增量
+  累计到本地虚拟光标（Web 的 `1.7` 灵敏度为默认，另有 0.8/1.2/2.5/3.5 倍）。
+- 指针到画面边缘时自动回中，支持持续转视角；`Ctrl+Alt+M` 回到绝对模式。
+- 协议与 Web 完全一致：仍然发送 `{"type":"input","k":"move","x":..,"y":..}`
+  归一化坐标，宿主 input 解码不需要新增字段。`trackpad_mouse.cpp` 的增量/钳制/
+  灵敏度换算是纯函数，由 Linux 单测覆盖。
+- 未实现 Web 触摸端的“点按左键/长按右键/双指滚动”手势；原生鼠标按键仍走
+  `k=button`，滚轮仍走 `k=wheel`。
 
 **差异**
 
-- 在二合一/触摸 Windows 设备上，Web 的触控板模式不可用；原生同样没有。
-- 对普通鼠标用户没有影响。
-
-**实现建议**
-
-- 低优先级。若要对齐，增加一个“触控板模式”开关：捕获触摸拖动的增量，维护一个
-  本地虚拟光标坐标，按画面尺寸归一化后发 `k=move`；点按/长按映射 1/3 键。
-- 桌面场景可以明确记为“本轮不做”。
+- 相对模式显式开启，绝对指针路径不变；普通桌面用户不受影响。
+- 因为宿主只接受归一化绝对坐标，需要原始相对输入的 FPS 游戏仍受宿主注入方式
+  限制；客户端已做到持续相对累计与回中。
 
 ---
 

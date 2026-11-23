@@ -60,6 +60,9 @@ add_executable(moLink-native WIN32
   session_client.cpp
   file_panel_logic.cpp
   preset_message.cpp
+  adaptive_quality.cpp
+  display_selector.cpp
+  trackpad_mouse.cpp
   clipboard_sync.cpp
   clipboard_files.cpp
   input_state.cpp

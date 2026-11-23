@@ -1100,6 +1100,46 @@ set_target_properties(molink-core-input-state-test PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 add_test(NAME input_state COMMAND molink-core-input-state-test)
 
+# Automatic quality: the tier ladder, hysteresis/dwell and the load-aware
+# frame rate are pure and shared with the native shell, so the thresholds the
+# Web uses can be pinned on Linux.
+add_executable(molink-core-adaptive-quality-test
+  tests/adaptive_quality_test.cpp
+  "${CMAKE_CURRENT_SOURCE_DIR}/../shell/windows/adaptive_quality.cpp"
+)
+target_include_directories(molink-core-adaptive-quality-test PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../shell/windows")
+set_target_properties(molink-core-adaptive-quality-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME adaptive_quality COMMAND molink-core-adaptive-quality-test)
+
+# Multi-monitor selection: welcome.displays parsing and the "a real switch
+# resets the decoder" rule are shared with the native shell.
+add_executable(molink-core-display-selector-test
+  tests/display_selector_test.cpp
+  "${CMAKE_CURRENT_SOURCE_DIR}/../shell/windows/display_selector.cpp"
+)
+target_include_directories(molink-core-display-selector-test PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../shell/windows")
+if(MSVC)
+  # The parsed UTF-8 monitor name is source text in the test.
+  target_compile_options(molink-core-display-selector-test PRIVATE /utf-8)
+endif()
+set_target_properties(molink-core-display-selector-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME display_selector COMMAND molink-core-display-selector-test)
+
+# Relative (trackpad / virtual mouse) movement and sensitivity conversion.
+add_executable(molink-core-trackpad-mouse-test
+  tests/trackpad_mouse_test.cpp
+  "${CMAKE_CURRENT_SOURCE_DIR}/../shell/windows/trackpad_mouse.cpp"
+)
+target_include_directories(molink-core-trackpad-mouse-test PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../shell/windows")
+set_target_properties(molink-core-trackpad-mouse-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME trackpad_mouse COMMAND molink-core-trackpad-mouse-test)
+
 # Service registration: the path staleness rule is pure and shared with the
 # status endpoint (Win32/systemd orchestration stays in the core).
 add_executable(molink-core-service-control-test

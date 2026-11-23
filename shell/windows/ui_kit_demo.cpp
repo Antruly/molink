@@ -39,7 +39,9 @@
 #include <vector>
 
 #include "avatar_image.h"
+#include "adaptive_quality.h"
 #include "clipboard_sync.h"
+#include "display_selector.h"
 #include "error_policy.h"
 #include "file_panel_logic.h"
 #include "file_panel_strings.h"
@@ -48,6 +50,7 @@
 #include "preset_message.h"
 #include "reconnect_policy.h"
 #include "session_client.h"
+#include "trackpad_mouse.h"
 #include "ui_kit.h"
 #include "ui_strings.h"
 #include "watermark_fade.h"
@@ -301,6 +304,39 @@ struct app_state {
   bool caret_on = true;
   ULONGLONG caret_tick = 0;
   int preset = 1;  // smooth, the Web's DEFAULT_SESSION_PRESET
+  // ---- A8 automatic quality ----------------------------------------
+  // The viewer owns an explicit "auto" selection; these two controllers walk
+  // the five fixed tiers and adapt the frame rate inside the tier's window.
+  // They only run while that selection is auto and the session is live.
+  molink::adaptive::tier_state auto_tiers;
+  molink::adaptive::fps_state auto_fps;
+  /// The concrete preset index the automatic session currently asks the host
+  /// for (starts on balanced, the Web's autoTier default).
+  int auto_preset = 2;
+  uint64_t auto_sample_at = 0;
+  bool auto_running = false;
+
+  // ---- A9 multi-monitor --------------------------------------------
+  std::vector<molink::display::info> displays;
+  /// UTF-8 host names converted once for DirectWrite.
+  std::vector<std::wstring> display_labels;
+  int display_index = 0;
+  D2D1_RECT_F hit_monitor{};
+  uint64_t displays_refresh_at = 0;
+
+  // ---- D7 relative / trackpad mouse --------------------------------
+  /// Off by default: the absolute pointer path is unchanged unless the user
+  /// asks for relative input.
+  bool trackpad_mouse = false;
+  int trackpad_sens_index = 2;  // 1.7x, the Web's virtual-mouse constant
+  molink::mouse::cursor virtual_cursor;
+  /// Last absolute client point, used to derive deltas when raw input is not
+  /// available (and to place the virtual cursor when the mode is enabled).
+  bool trackpad_have_point = false;
+  float trackpad_last_x = 0.0f;
+  float trackpad_last_y = 0.0f;
+  D2D1_RECT_F hit_trackpad_sens{};
+
   float hover_x = -1, hover_y = -1;
 
   D2D1_RECT_F hit_theme[3]{}, hit_tab[3]{}, hit_settings{}, hit_modal_close{},
@@ -364,7 +400,7 @@ struct app_state {
   D2D1_RECT_F settings_view{}, settings_scrollbar{}, settings_thumb{};
   D2D1_RECT_F hit_seg_theme[2]{}, hit_seg_lang[2]{}, hit_seg_close[3]{};
   D2D1_RECT_F hit_lock_field{}, hit_fps_field{};
-  D2D1_RECT_F hit_sec_toggle[6]{}, hit_disp_toggle[3]{};
+  D2D1_RECT_F hit_sec_toggle[6]{}, hit_disp_toggle[6]{};
   D2D1_RECT_F hit_dev_name{}, hit_dev_apply{}, hit_long_term{},
       hit_long_apply{}, hit_stun{}, hit_tcp{}, hit_udp{}, hit_ports_save{},
       hit_server_toggle{}, hit_server_url{}, hit_server_invite{},
@@ -832,6 +868,7 @@ enum hover_slot {
   hv_set_video0, hv_set_video1, hv_set_video2,
   hv_set_field_lock, hv_set_field_fps, hv_set_field_dev, hv_set_field_long,
   hv_set_field_tcp, hv_set_field_udp, hv_set_btn_dev, hv_set_btn_long,
+  hv_set_field_trackpad_sens,
   hv_set_btn_ports, hv_set_btn_service0, hv_set_btn_service1,
   hv_set_btn_service2, hv_set_btn_service3, hv_set_btn_service4,
   hv_set_btn_update, hv_set_btn_repo, hv_set_btn_site, hv_set_btn_star,
@@ -959,7 +996,8 @@ float text_width(const std::wstring& s, float size = 11.0f) {
 enum bar_kind {
   bk_pin, bk_collapse, bk_fullscreen, bk_separator, bk_display_fit,
   bk_display_actual, bk_display_fill, bk_fps, bk_quality, bk_codec,
-  bk_watermark, bk_resolution, bk_clip_toggle, bk_clip_get, bk_clip_set,
+  bk_watermark, bk_resolution, bk_monitor, bk_clip_toggle, bk_clip_get,
+  bk_clip_set,
   bk_audio, bk_volume, bk_chat, bk_files, bk_control, bk_sas, bk_theme,
   bk_settings, bk_transport, bk_path, bk_protocol, bk_clip_menu, bk_tools_menu,
   bk_appearance_menu, bk_kbps, bk_latency, bk_session_chip, bk_disconnect
@@ -992,6 +1030,9 @@ std::vector<bar_slot> bar_layout(int tier, bool with_chip) {
     add(bk_watermark, 28);
   }
   add(bk_resolution, 104);
+  // Multi-monitor selector: only when the host advertises more than one
+  // display, so a single-monitor host keeps the original toolbar width.
+  if (g.displays.size() > 1) add(bk_monitor, 112);
   add(bk_separator, 9);
   if (tier >= 2) {
     // Wide window: every web control stands on its own.
@@ -1055,8 +1096,10 @@ int menu_count(int which) {
   if (which == 5) return 5;
   if (which == 6) return 2;
   if (which == 7) return static_cast<int>(molink::input::combo_count());
+  if (which == 8) return static_cast<int>(g.displays.size());
   if (which == 10) return 6;
   if (which == 11) return 4;
+  if (which == 12) return molink::mouse::sensitivity_choice_count;
   return 2;
 }
 
@@ -1089,6 +1132,11 @@ const wchar_t* menu_label(int which, int index) {
                                    L"30 帧", L"60 帧"};
     return fps[index];
   }
+  if (which == 12) {
+    static const wchar_t* sensitivity[] = {
+        L"0.8 倍", L"1.2 倍", L"1.7 倍（触控板）", L"2.5 倍", L"3.5 倍"};
+    return sensitivity[index];
+  }
   if (which == 4) {
     if (index == 0) return g.clipboard_on ? L"关闭剪贴板" : L"开启剪贴板";
     static const wchar_t* items[] = {nullptr, L"获取远端剪贴板",
@@ -1111,6 +1159,12 @@ const wchar_t* menu_label(int which, int index) {
     }
     return L"";
   }
+  if (which == 8) {
+    if (index >= 0 && index < static_cast<int>(g.display_labels.size())) {
+      return g.display_labels[index].c_str();
+    }
+    return L"";
+  }
   return index == 0 ? trc("settings.theme") : trc("settings.title");
 }
 
@@ -1119,8 +1173,15 @@ int menu_current(int which) {
   if (which == 1) return g.codec_index;
   if (which == 2) return g.res_index;
   if (which == 3) return g.format_index;
+  if (which == 8) {
+    for (int i = 0; i < static_cast<int>(g.displays.size()); ++i) {
+      if (g.displays[i].index == g.display_index) return i;
+    }
+    return -1;
+  }
   if (which == 10) return g.settings_lock;
   if (which == 11) return g.fps_index >= 0 ? g.fps_index : 0;
+  if (which == 12) return g.trackpad_sens_index;
   return -1;
 }
 
@@ -1220,6 +1281,21 @@ void load_preset_plan(int index) {
   g.chroma = plan.chroma;
   g.fps_value = plan.fps;
   g.fps_index = -1;
+  if (plan.id == molink::preset::preset_id::auto_) {
+    // A fresh automatic session starts like the Web: balanced, 15 fps. The
+    // ladder and load controller have their own state; the user's selector
+    // stays on 自动 while the wire carries a concrete tier.
+    molink::adaptive::reset_auto(&g.auto_tiers, &g.auto_fps,
+                                 GetTickCount64());
+    g.auto_preset = 2;
+    g.fps_value = molink::adaptive::plan_for(
+                      molink::adaptive::tier::balanced)
+                      .start;
+    g.auto_sample_at = 0;
+    g.auto_running = false;
+  } else {
+    g.auto_running = false;
+  }
 }
 
 molink::preset::advanced_params advanced_params_now() {
@@ -1240,8 +1316,15 @@ std::string current_preset_json() {
   if (g.custom_active) {
     return molink::preset::advanced_preset_message_json(advanced_params_now());
   }
-  return molink::preset::preset_message_json(preset_id_at(g.preset),
-                                             g.fps_value);
+  const molink::preset::preset_id selected = preset_id_at(g.preset);
+  // Automatic is viewer-owned: the controller resolves it to a concrete tier
+  // before the host sees it, so a switch always rebuilds the encoder and the
+  // reply names the tier actually applied.
+  if (selected == molink::preset::preset_id::auto_) {
+    return molink::preset::preset_message_json(preset_id_at(g.auto_preset),
+                                               g.fps_value);
+  }
+  return molink::preset::preset_message_json(selected, g.fps_value);
 }
 
 std::wstring wide_of(const std::string& text) {
@@ -1266,6 +1349,39 @@ std::string utf8_of(const std::wstring& text) {
                       static_cast<int>(text.size()), out.data(), size, nullptr,
                       nullptr);
   return out;
+}
+
+/// Copies the host's monitor list out of the session once a second. The host
+/// broadcasts a switch made by another viewer on the same machine; the
+/// toolbar and the input rectangle must follow it without a reconnect.
+void refresh_session_displays() {
+  if (g.session == nullptr) return;
+  std::vector<molink::display::info> next = g.session->displays();
+  const int index = g.session->display_index();
+  bool changed = index != g.display_index ||
+                 next.size() != g.displays.size();
+  if (!changed) {
+    for (std::size_t i = 0; i < next.size(); ++i) {
+      if (next[i].index != g.displays[i].index ||
+          next[i].name != g.displays[i].name ||
+          next[i].width != g.displays[i].width ||
+          next[i].height != g.displays[i].height) {
+        changed = true;
+        break;
+      }
+    }
+  }
+  if (!changed) return;
+  g.displays = std::move(next);
+  g.display_labels.clear();
+  g.display_labels.reserve(g.displays.size());
+  for (const molink::display::info& item : g.displays) {
+    g.display_labels.push_back(
+        item.name.empty() ? L"显示器 " + std::to_wstring(item.index + 1)
+                          : wide_of(item.name));
+  }
+  g.display_index = index;
+  InvalidateRect(g.window, nullptr, FALSE);
 }
 
 /// The shared clipboard state machine works on UTF-16 code units, which is
@@ -3272,23 +3388,110 @@ void clipboard_local_changed() {
 void send_quality() {
   if (g.session == nullptr) return;
   // Fixed tiers are rebuilt from the plan on every send; custom values go
-  // through the advanced rules. Both are the Web's exact payloads.
+  // through the advanced rules. Both are the Web's exact payloads. A selected
+  // 自动 tier is resolved by `current_preset_json()`.
   g.session->send_session_preset(current_preset_json());
+}
+
+bool automatic_quality_selected() {
+  return !g.custom_active &&
+         preset_id_at(g.preset) == molink::preset::preset_id::auto_;
+}
+
+/// One second of the Web's two automatic controllers. Only the explicit
+/// 自动 preset may adapt: the host is sent a concrete tier, so a step always
+/// rebuilds the encoder and `send_session_preset` follows it with a keyframe.
+void auto_quality_tick(uint64_t now_ms) {
+  if (!automatic_quality_selected() || g.session == nullptr ||
+      !g.session->live() || !g.session->authenticated()) {
+    g.auto_running = false;
+    return;
+  }
+  if (!g.auto_running) {
+    // The user (or a reconnect) just entered automatic mode: start from the
+    // Web's balanced 15 fps. The preset was already sent as this concrete
+    // tier by `current_preset_json()` (startup, settings card or reset), so
+    // no extra keyframe is requested here.
+    molink::adaptive::reset_auto(&g.auto_tiers, &g.auto_fps, now_ms);
+    g.auto_preset = 2;
+    g.fps_index = -1;
+    g.fps_value = g.auto_fps.target;
+    g.auto_sample_at = 0;
+    g.auto_running = true;
+  }
+  if (now_ms - g.auto_sample_at < 1000) return;
+  g.auto_sample_at = now_ms;
+
+  molink::adaptive::sample value;
+  value.latency_known = g.session->has_rtt();
+  value.latency_ms = g.session->rtt_ms();
+  value.wire_fps = g.session->wire_fps();
+  value.dropped = g.session->dropped_frames();
+  value.bandwidth_bps = g.session->bandwidth_bps();
+  value.target_fps = g.auto_fps.target;
+  value.host_build_ms = g.session->host_build_ms();
+
+  bool changed = false;
+  const molink::adaptive::fps_plan plan =
+      molink::adaptive::plan_for(g.auto_tiers.current);
+  const molink::adaptive::fps_step fps =
+      molink::adaptive::step_fps(&g.auto_fps, value, plan, now_ms);
+  if (fps.changed) {
+    g.fps_value = fps.target;
+    changed = true;
+  }
+  value.target_fps = g.auto_fps.target;
+  const molink::adaptive::tier_step tier =
+      molink::adaptive::step_tier(&g.auto_tiers, value, now_ms);
+  if (tier.changed) {
+    g.auto_preset = molink::adaptive::index_of(tier.value);
+    const molink::adaptive::fps_plan next =
+        molink::adaptive::plan_for(tier.value);
+    // A new tier owns a new window: clamp the current target instead of
+    // jumping to its resting rate, exactly like the Web's preset effect.
+    g.auto_fps.target =
+        std::max(next.min, std::min(next.max, g.auto_fps.target));
+    g.auto_fps.good = 0;
+    g.auto_fps.bad = 0;
+    g.fps_value = g.auto_fps.target;
+    changed = true;
+  }
+  if (changed) {
+    // The controller owns the rate now: show the adapted value instead of the
+    // fixed-rate label a previous manual choice left behind.
+    g.fps_index = -1;
+    send_quality();
+    InvalidateRect(g.window, nullptr, FALSE);
+  }
 }
 
 /// Implemented with the other remote-input helpers; declared here so the
 /// toolbar menu can inject a shortcut.
 void send_key_combo(const molink::input::key_combo& combo);
 
+/// Toolbar/settings frame-rate choice. In automatic quality the chosen rate
+/// becomes the controller's starting point instead of being overwritten a
+/// second later.
+void apply_fps_choice(int index) {
+  g.fps_index = index;
+  if (index > 0) {
+    g.fps_value = (index == 1 ? 15 : (index == 2 ? 30 : 60));
+    if (automatic_quality_selected()) {
+      g.auto_fps.target = g.fps_value;
+      g.auto_fps.good = 0;
+      g.auto_fps.bad = 0;
+      g.auto_fps.last_change_ms = GetTickCount64();
+    }
+  }
+  send_quality();
+}
+
 /// Applies a menu choice and returns the menu that should stay open (-1
 /// closes it). The tools menu uses a positive result to open the shortcut
 /// submenu in place.
 int menu_apply(int which, int index) {
   if (which == 0) {
-    g.fps_index = index;
-    // 自动 keeps the value the host reports; the others set it directly.
-    if (index > 0) g.fps_value = (index == 1 ? 15 : (index == 2 ? 30 : 60));
-    send_quality();
+    apply_fps_choice(index);
     return -1;
   }
   if (which == 1) {
@@ -3303,10 +3506,20 @@ int menu_apply(int which, int index) {
     g.settings_lock = index;
     return -1;
   }
+  if (which == 8) {
+    if (index >= 0 && index < static_cast<int>(g.displays.size()) &&
+        g.session != nullptr) {
+      const int id = g.displays[index].index;
+      if (g.session->send_display(id)) g.display_index = id;
+    }
+    return -1;
+  }
   if (which == 11) {
-    g.fps_index = index;
-    if (index > 0) g.fps_value = (index == 1 ? 15 : (index == 2 ? 30 : 60));
-    send_quality();
+    apply_fps_choice(index);
+    return -1;
+  }
+  if (which == 12) {
+    g.trackpad_sens_index = index;
     return -1;
   }
   if (which == 2) {
@@ -3383,12 +3596,33 @@ int menu_apply(int which, int index) {
 }
 
 std::wstring quality_label() {
-  return quality_custom() ? tr("session.qualityCustom") : preset_label(g.preset);
+  if (quality_custom()) return tr("session.qualityCustom");
+  if (preset_id_at(g.preset) == molink::preset::preset_id::auto_) {
+    // The selector stays on 自动; the suffix names the concrete tier the
+    // controller currently asks the host for.
+    return preset_label(g.preset) + L" · " + preset_label(g.auto_preset);
+  }
+  return preset_label(g.preset);
 }
 
 std::wstring fps_label() {
   return g.fps_index >= 0 ? kFpsChoices[g.fps_index]
                           : std::to_wstring(g.fps_value) + L" fps";
+}
+
+/// Toolbar label for the active monitor. Host names can be very long
+/// ("\\\\.\\DISPLAY1"), so the chip shows them but the layout clips; an
+/// unnamed display falls back to a numbered label.
+std::wstring display_label() {
+  for (int i = 0; i < static_cast<int>(g.displays.size()); ++i) {
+    if (g.displays[i].index != g.display_index) continue;
+    if (i < static_cast<int>(g.display_labels.size()) &&
+        !g.display_labels[i].empty()) {
+      return g.display_labels[i];
+    }
+    return L"显示器 " + std::to_wstring(g.display_index + 1);
+  }
+  return L"显示器";
 }
 
 std::wstring codec_label() {
@@ -4815,6 +5049,7 @@ void draw_bar(const D2D1_RECT_F& stage) {
       case bk_codec: tip = trc("session.codec"); break;
       case bk_watermark: tip = trc("settings.watermark"); break;
       case bk_resolution: tip = trc("session.resolution"); break;
+      case bk_monitor: tip = L"切换显示器"; break;
       case bk_clip_toggle:
         tip = g.clipboard_on ? trc("session.clipboardOff")
                              : trc("session.clipboardOn");
@@ -4907,6 +5142,11 @@ void draw_bar(const D2D1_RECT_F& stage) {
                     kResolutionChoices[g.res_index], hovered, g.open_menu == 2,
                     6);
         g.hit_resolution = r;
+        break;
+      case bk_monitor:
+        select_chip(g.target, *g.theme, g.small_left, r, icon::monitor,
+                    display_label(), hovered, g.open_menu == 8, 6);
+        g.hit_monitor = r;
         break;
       case bk_clip_toggle:
         quiet_icon_button(g.target, *g.theme, r, hv_clip_toggle,
@@ -5036,6 +5276,7 @@ void clear_toolbar_hits() {
   g.hit_display[0] = g.hit_display[1] = g.hit_display[2] = none;
   g.hit_fps = g.hit_quality = g.hit_codec = g.hit_watermark = none;
   g.hit_resolution = g.hit_clip_toggle = g.hit_clip_get = none;
+  g.hit_monitor = none;
   g.hit_clip_set = g.hit_audio = g.hit_volume = g.hit_chat = none;
   g.hit_files = g.hit_control = g.hit_sas = g.hit_tool_theme = none;
   g.hit_tool_settings = g.hit_path = g.hit_protocol = none;
@@ -5060,18 +5301,80 @@ bool remote_input_active() {
          !g.diag_open && g.focus_field == 0;
 }
 
-void send_remote_move(float x, float y) {
+void send_remote_move_norm(double nx, double ny) {
   if (!g.session || !g.session->live()) return;
-  const D2D1_RECT_F r = g.picture_rect;
-  if (r.right <= r.left || r.bottom <= r.top) return;
-  const float nx = (x - r.left) / (r.right - r.left);
-  const float ny = (y - r.top) / (r.bottom - r.top);
-  if (nx < 0.0f || nx > 1.0f || ny < 0.0f || ny > 1.0f) return;
+  if (nx < 0.0 || nx > 1.0 || ny < 0.0 || ny > 1.0) return;
   char buffer[192];
   std::snprintf(buffer, sizeof(buffer),
                 "{\"type\":\"input\",\"k\":\"move\",\"x\":%.5f,\"y\":%.5f}",
                 nx, ny);
   g.session->send_json(buffer);
+}
+
+void send_remote_move(float x, float y) {
+  const D2D1_RECT_F r = g.picture_rect;
+  if (r.right <= r.left || r.bottom <= r.top) return;
+  const double nx = (x - r.left) / (r.right - r.left);
+  const double ny = (y - r.top) / (r.bottom - r.top);
+  send_remote_move_norm(nx, ny);
+}
+
+/// The Web's virtual mouse starts at the pointer's current position when the
+/// mode is enabled, so the host cursor does not jump. Outside the picture it
+/// starts at the centre.
+void set_trackpad_mouse(bool on) {
+  if (g.trackpad_mouse == on) return;
+  g.trackpad_mouse = on;
+  if (on) {
+    const D2D1_RECT_F r = g.picture_rect;
+    if (g.trackpad_have_point && r.right > r.left && r.bottom > r.top &&
+        g.trackpad_last_x >= r.left && g.trackpad_last_x <= r.right &&
+        g.trackpad_last_y >= r.top && g.trackpad_last_y <= r.bottom) {
+      g.virtual_cursor.x =
+          (g.trackpad_last_x - r.left) / (r.right - r.left);
+      g.virtual_cursor.y = (g.trackpad_last_y - r.top) / (r.bottom - r.top);
+    } else {
+      g.virtual_cursor.x = 0.5;
+      g.virtual_cursor.y = 0.5;
+    }
+    send_remote_move_norm(g.virtual_cursor.x, g.virtual_cursor.y);
+    show_toast(L"相对鼠标已开启（Ctrl+Alt+M 回到绝对）");
+  } else {
+    g.trackpad_have_point = false;
+    // Leave the host cursor where the user last pointed, not at the virtual
+    // position the relative mode had reached.
+    if (remote_input_active() && g.hover_x >= g.picture_rect.left &&
+        g.hover_x <= g.picture_rect.right && g.hover_y >= g.picture_rect.top &&
+        g.hover_y <= g.picture_rect.bottom) {
+      send_remote_move(g.hover_x, g.hover_y);
+    }
+    show_toast(L"已回到绝对鼠标");
+  }
+  InvalidateRect(g.window, nullptr, FALSE);
+}
+
+/// Continuous relative movement: when the local pointer reaches the picture's
+/// edge, warp it back to the centre. The next move is measured from the new
+/// position, so a game can keep turning without the cursor hitting a screen
+/// edge. Returns true when the pointer was warped (the caller must not then
+/// overwrite the new reference point with the old edge position).
+bool recenter_trackpad_cursor(float x, float y) {
+  const D2D1_RECT_F r = g.picture_rect;
+  const float margin = 12.0f;
+  if (x > r.left + margin && x < r.right - margin && y > r.top + margin &&
+      y < r.bottom - margin) {
+    return false;
+  }
+  if (g.window == nullptr) return false;
+  const float cx = (r.left + r.right) / 2.0f;
+  const float cy = (r.top + r.bottom) / 2.0f;
+  POINT screen{static_cast<LONG>(std::lround(cx * g_dpi / 96.0f)),
+               static_cast<LONG>(std::lround(cy * g_dpi / 96.0f))};
+  if (!ClientToScreen(g.window, &screen)) return false;
+  SetCursorPos(screen.x, screen.y);
+  g.trackpad_last_x = cx;
+  g.trackpad_last_y = cy;
+  return true;
 }
 
 void send_remote_button(int button, bool down) {
@@ -5115,6 +5418,11 @@ void close_session_tab() {
   release_remote_buttons();
   // The host must not keep a modifier down after the socket goes away.
   release_remote_keys();
+  g.displays.clear();
+  g.display_labels.clear();
+  g.display_index = 0;
+  g.displays_refresh_at = 0;
+  g.auto_running = false;
   mark_recent_offline(g.connect_target);
   if (g.session != nullptr) {
     g.session->stop();
@@ -5201,7 +5509,9 @@ bool session_click(float x, float y) {
   }
   if (remote_input_active() && inside(g.picture_rect, x, y) &&
       !inside(g.hit_bar, x, y) && !inside(g.hit_ball, x, y)) {
-    send_remote_move(x, y);
+    // Relative mode has already placed the host cursor; an absolute move here
+    // would yank it back to the local pointer.
+    if (!g.trackpad_mouse) send_remote_move(x, y);
     send_remote_button(1, true);
     g.remote_buttons |= 1 << 1;
     g.remote_mouse_down = true;
@@ -5252,6 +5562,7 @@ bool session_click(float x, float y) {
   };
   const select_hit selects[] = {
       {&g.hit_fps, 0}, {&g.hit_codec, 1}, {&g.hit_resolution, 2},
+      {&g.hit_monitor, 8},
   };
   for (const select_hit& select : selects) {
     if (inside(*select.rect, x, y)) {
@@ -8021,7 +8332,8 @@ void draw_settings_modal(float w, float h) {
     g.hit_sec_toggle[i] = D2D1::RectF(0, 0, 0, 0);
   }
   for (int i = 0; i < 3; ++i) g.hit_seg_close[i] = D2D1::RectF(0, 0, 0, 0);
-  for (int i = 0; i < 3; ++i) g.hit_disp_toggle[i] = D2D1::RectF(0, 0, 0, 0);
+  for (int i = 0; i < 6; ++i) g.hit_disp_toggle[i] = D2D1::RectF(0, 0, 0, 0);
+  g.hit_trackpad_sens = D2D1::RectF(0, 0, 0, 0);
   for (int i = 0; i < 6; ++i) g.hit_sec_toggle[i] = D2D1::RectF(0, 0, 0, 0);
   for (int i = 0; i < 2; ++i) g.hit_seg_video[i] = D2D1::RectF(0, 0, 0, 0);
   for (int i = 0; i < 8; ++i) g.hit_quality_card[i] = D2D1::RectF(0, 0, 0, 0);
@@ -8261,6 +8573,28 @@ void draw_settings_modal(float w, float h) {
         L"在被控端画面上绘制主机自己的鼠标指针（虚拟绘制）。默认关闭，"
         L"只显示本机光标。", g.disp_remote_cursor, hv_set_toggle9,
         &g.hit_disp_toggle[2]);
+    y = settings_toggle_row(
+        x, y, cw, L"相对鼠标（触控板/远程游戏）",
+        L"把鼠标移动当作相对位移：光标从画面中间开始累计，适合触控板和"
+        L"需要持续转视角的远程游戏。默认关闭，绝对指针行为不变；"
+        L"快捷键 Ctrl+Alt+M 随时回到绝对模式。", g.trackpad_mouse,
+        hv_set_toggle10, &g.hit_disp_toggle[3]);
+    if (g.trackpad_mouse) {
+      static const wchar_t* sensitivity_labels[] = {
+          L"0.8 倍", L"1.2 倍", L"1.7 倍（触控板）", L"2.5 倍", L"3.5 倍"};
+      const int sens = g.trackpad_sens_index >= 0 &&
+                               g.trackpad_sens_index <
+                                   molink::mouse::sensitivity_choice_count
+                           ? g.trackpad_sens_index
+                           : 2;
+      text(g.target, g.small_left, L"相对灵敏度",
+           D2D1::RectF(x, y, x + cw, y + 20), g.theme->muted);
+      y += 24;
+      g.hit_trackpad_sens =
+          settings_select(x, y, cw, sensitivity_labels[sens],
+                          g.open_menu == 12, hv_set_field_trackpad_sens);
+      y += 36 + 10;
+    }
 
     settings_head(icon::activity, L"平均帧率", x, y);
     y += 22;
@@ -8695,7 +9029,7 @@ void settings_click(float x, float y) {
       }
       break;
     case 3:
-      for (int i = 0; i < 3; ++i) {
+      for (int i = 0; i < 4; ++i) {
         if (inside(g.hit_disp_toggle[i], x, y)) {
           if (i == 0) {
             g.watermark = !g.watermark;
@@ -8703,8 +9037,14 @@ void settings_click(float x, float y) {
           }
           if (i == 1) g.disp_auto_audio = !g.disp_auto_audio;
           if (i == 2) g.disp_remote_cursor = !g.disp_remote_cursor;
+          if (i == 3) set_trackpad_mouse(!g.trackpad_mouse);
           return;
         }
+      }
+      if (inside(g.hit_trackpad_sens, x, y)) {
+        g.open_menu = g.open_menu == 12 ? -1 : 12;
+        g.menu_field = g.hit_trackpad_sens;
+        return;
       }
       if (inside(g.hit_fps_field, x, y)) {
         g.open_menu = g.open_menu == 11 ? -1 : 11;
@@ -10863,10 +11203,10 @@ LPCWSTR cursor_at(float x, float y) {
         }
         break;
       case 3:
-        for (int i = 0; i < 3; ++i) {
+        for (int i = 0; i < 4; ++i) {
           if (in(g.hit_disp_toggle[i])) return IDC_HAND;
         }
-        if (in(g.hit_fps_field)) return IDC_HAND;
+        if (in(g.hit_fps_field) || in(g.hit_trackpad_sens)) return IDC_HAND;
         for (int i = 0; i < 8; ++i) {
           if (in(g.hit_quality_card[i])) return IDC_HAND;
         }
@@ -11121,7 +11461,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
       }
       if (remote_input_active() && inside(g.picture_rect, x, y) &&
           !inside(g.hit_bar, x, y) && !inside(g.hit_ball, x, y)) {
-        send_remote_move(x, y);
+        if (!g.trackpad_mouse) send_remote_move(x, y);
         const int button = message == WM_RBUTTONDOWN ? 3 : 2;
         send_remote_button(button, true);
         g.remote_buttons |= 1 << button;
@@ -11264,6 +11604,11 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
       surface_poll();
       if (g.session != nullptr) {
         g.session->tick(GetTickCount64());
+        if (GetTickCount64() >= g.displays_refresh_at) {
+          g.displays_refresh_at = GetTickCount64() + 1000;
+          refresh_session_displays();
+        }
+        auto_quality_tick(GetTickCount64());
         const std::wstring& host_name = g.session->device_name();
         if (!host_name.empty() && host_name != g.session_label) {
           g.session_label = host_name;
@@ -11718,7 +12063,39 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
           !inside(g.hit_bar, x, y) &&
           !(g.chat_open && inside(g.hit_chat_panel, x, y)) &&
           !(g.files_open && inside(g.hit_files_panel, x, y))) {
-        send_remote_move(x, y);
+        if (g.trackpad_mouse) {
+          // Relative mode accumulates pointer deltas into a local cursor and
+          // sends that position; the wire message is the Web's ordinary
+          // normalized `move`, so an unmodified host needs no new field.
+          if (g.trackpad_have_point) {
+            const double sensitivity = molink::mouse::sensitivity_at(
+                g.trackpad_sens_index);
+            const molink::mouse::move_result moved = molink::mouse::advance(
+                &g.virtual_cursor, x - g.trackpad_last_x,
+                y - g.trackpad_last_y,
+                g.picture_rect.right - g.picture_rect.left,
+                g.picture_rect.bottom - g.picture_rect.top, sensitivity);
+            if (moved.changed) send_remote_move_norm(moved.x, moved.y);
+          }
+          const bool warped = recenter_trackpad_cursor(x, y);
+          if (!warped) {
+            g.trackpad_last_x = x;
+            g.trackpad_last_y = y;
+          }
+          g.trackpad_have_point = true;
+        } else {
+          send_remote_move(x, y);
+          g.trackpad_last_x = x;
+          g.trackpad_last_y = y;
+          g.trackpad_have_point = true;
+        }
+      } else {
+        // Leaving the picture (or a toolbar) ends the relative run: the next
+        // entry starts from the new point instead of applying the whole
+        // excursion as one delta.
+        g.trackpad_last_x = x;
+        g.trackpad_last_y = y;
+        g.trackpad_have_point = false;
       }
       g.hover_x = x;
       g.hover_y = y;
@@ -11776,7 +12153,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
           !inside(g.hit_ball, x, y) &&
           !(g.chat_open && inside(g.hit_chat_panel, x, y)) &&
           !(g.files_open && inside(g.hit_files_panel, x, y))) {
-        send_remote_move(x, y);
+        if (!g.trackpad_mouse) send_remote_move(x, y);
         send_remote_button(1, true);
         g.remote_buttons |= 1 << 1;
         g.remote_mouse_down = true;
@@ -12213,6 +12590,15 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
       if (g.focus_field == 31 && wparam == VK_RETURN) {
         local_open_input();
         InvalidateRect(window, nullptr, FALSE);
+        return 0;
+      }
+      // Local escape from the relative mouse: while it is on, Ctrl+Alt+M
+      // returns to the absolute pointer instead of being forwarded to the
+      // host. With the mode off the shortcut belongs to the host again.
+      if (g.trackpad_mouse && (wparam == 'M' || wparam == 'm') &&
+          (GetKeyState(VK_CONTROL) & 0x8000) != 0 &&
+          (GetKeyState(VK_MENU) & 0x8000) != 0) {
+        set_trackpad_mouse(false);
         return 0;
       }
       if (remote_input_active() && wparam != VK_F11) {

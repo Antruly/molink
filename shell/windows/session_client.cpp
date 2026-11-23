@@ -451,6 +451,22 @@ std::string quality_path(const session_endpoint& endpoint) {
   return path;
 }
 
+/// Reads a decimal number (`fps:29.7`). The integer helper would truncate a
+/// capture-stats encode time, which is exactly the value the frame-rate
+/// controller compares against the frame budget.
+bool find_double_value(const std::string& json, const char* key, double* out) {
+  const std::string needle = std::string("\"") + key + "\":";
+  const size_t at = json.find(needle);
+  if (at == std::string::npos) return false;
+  size_t i = at + needle.size();
+  while (i < json.size() && (json[i] == ' ' || json[i] == '\t')) ++i;
+  char* end = nullptr;
+  const double value = std::strtod(json.c_str() + i, &end);
+  if (end == json.c_str() + i) return false;
+  *out = value;
+  return true;
+}
+
 }  // namespace
 
 bool session_client::find_number(const std::string& json, const char* key,
@@ -515,8 +531,20 @@ bool session_client::start(const std::string& core_host, int core_port,
   last_bootstrap_at_ = 0;
   stat_bytes_.store(0);
   stat_frames_ = 0;
+  dropped_window_ = 0;
   stat_window_start_ = GetTickCount64();
-  last_rtt_ms_ = 0;
+  last_rtt_ms_.store(0);
+  has_rtt_.store(false);
+  wire_fps_.store(0.0);
+  bandwidth_bps_.store(0.0);
+  dropped_frames_.store(0);
+  host_fps_.store(0.0);
+  host_build_ms_.store(0.0);
+  {
+    std::lock_guard<std::mutex> lock(display_mutex_);
+    displays_.clear();
+  }
+  display_index_.store(0);
   cursor_visible_.store(false);
   cursor_x_.store(0);
   cursor_y_.store(0);
@@ -860,13 +888,13 @@ void session_client::handle_tile_clock(const uint8_t* payload, uint32_t len) {
     // static desktop and had no pixels to hand out. The bootstrap loop gives
     // up after 40 tries, so keep asking for a full-screen refresh (which
     // reads the live desktop) instead of sitting on a blank stage forever.
-    if (request_tiles_ && screen_w_ > 0 && screen_h_ > 0 &&
+    if (request_tiles_ && screen_w_.load() > 0 && screen_h_.load() > 0 &&
         now - last_refresh_at_ >= 2000) {
       last_refresh_at_ = now;
       ws_.send_text(
           "{\"type\":\"request-tiles\",\"tiles\":[{\"x\":0,\"y\":0,"
-          "\"w\":" + std::to_string(screen_w_) + ",\"h\":" +
-          std::to_string(screen_h_) + "}]}");
+          "\"w\":" + std::to_string(screen_w_.load()) + ",\"h\":" +
+          std::to_string(screen_h_.load()) + "}]}");
     }
     return;
   }
@@ -2602,6 +2630,13 @@ bool session_client::copy_frame(std::vector<uint8_t>& out, int* width,
       frame_width_ <= 0 || frame_height_ <= 0) {
     return false;
   }
+  // A sequence jump means newer frames overtook the one this caller last
+  // painted. That is the viewer-side "dropped" count the auto controller
+  // reads (the Web counts stale/overtaken frames the same way).
+  if (since != 0 && frame_sequence_ > since + 1) {
+    const uint64_t skipped = frame_sequence_ - since - 1;
+    dropped_window_ += static_cast<int>(std::min<uint64_t>(skipped, 1000));
+  }
   out = frame_pixels_;
   if (width != nullptr) *width = frame_width_;
   if (height != nullptr) *height = frame_height_;
@@ -2730,6 +2765,29 @@ void session_client::handle_text(const std::string& text) {
       screen_h_ = height;
       screen_width_.store(width);
       screen_height_.store(height);
+    }
+    // Multi-monitor: the toolbar selector and the input rectangle both follow
+    // the host's active monitor. Older cores omit the list entirely; then the
+    // selector stays hidden and nothing changes.
+    const molink::display::welcome monitor =
+        molink::display::parse_welcome(text);
+    {
+      std::lock_guard<std::mutex> lock(display_mutex_);
+      displays_ = monitor.list;
+    }
+    display_index_.store(monitor.current);
+    if (!monitor.list.empty()) {
+      const molink::display::info* active =
+          molink::display::find(monitor, monitor.current);
+      if (active == nullptr) active = &monitor.list.front();
+      if (active->width > 0 && active->height > 0) {
+        screen_w_ = active->width;
+        screen_h_ = active->height;
+        screen_width_.store(active->width);
+        screen_height_.store(active->height);
+        stats_->resolution = std::to_wstring(active->width) + L"x" +
+                             std::to_wstring(active->height);
+      }
     }
     std::string name;
     if (find_string(text, "device_name", &name) && !name.empty()) {
@@ -2909,6 +2967,7 @@ void session_client::handle_text(const std::string& text) {
     }
     if (found && sent > 0 && now >= sent) {
       last_rtt_ms_ = static_cast<int>((now - sent + 500) / 1000);
+      has_rtt_.store(true);
       stats_->note_latency(last_rtt_ms_);
     }
     ping_sent_at_.store(0);
@@ -2983,6 +3042,23 @@ void session_client::handle_text(const std::string& text) {
     if (find_string(text, "value", &value) && !value.empty()) {
       video_mode_ = wide_of(value);
     }
+  } else if (type == "capture-stats") {
+    // The host reports how fast it is actually encoding. The auto frame-rate
+    // controller uses build_ms as a ceiling; a host that needs 100 ms per
+    // frame must not be asked for 30 fps.
+    double fps = 0.0;
+    double build_ms = 0.0;
+    if (find_double_value(text, "fps", &fps) && fps >= 0.0) {
+      host_fps_.store(fps);
+    }
+    if (find_double_value(text, "build_ms", &build_ms) && build_ms >= 0.0) {
+      host_build_ms_.store(build_ms);
+    }
+  } else if (type == "display") {
+    // Host-wide monitor broadcast. The sender already reset capture; drop the
+    // decoder state and ask for the first picture of the new monitor.
+    int index = 0;
+    if (find_number(text, "index", &index)) apply_display_change(index);
   } else if (type == "session-preset") {
     // The host's reply is an observation, never a command: record what it
     // actually applied and leave the viewer's selector alone (Web
@@ -3027,14 +3103,14 @@ void session_client::tick(uint64_t now_ms) {
   // every static desktop (megabytes each time, and enough backpressure to
   // drop the session on a WAN link).
   if (!stream_decoding_ && authenticated_ && has_image_.load() &&
-      request_tiles_ && screen_w_ > 0 && screen_h_ > 0 &&
+      request_tiles_ && screen_w_.load() > 0 && screen_h_.load() > 0 &&
       now_ms - last_clock_seen_ >= 5000 &&
       now_ms - last_refresh_at_ >= 5000) {
     last_refresh_at_ = now_ms;
     ws_.send_text(
         "{\"type\":\"request-tiles\",\"tiles\":[{\"x\":0,\"y\":0,"
-        "\"w\":" + std::to_string(screen_w_) + ",\"h\":" +
-        std::to_string(screen_h_) + "}]}");
+        "\"w\":" + std::to_string(screen_w_.load()) + ",\"h\":" +
+        std::to_string(screen_h_.load()) + "}]}");
   }
   // A session without a picture keeps asking. The surface path is included:
   // the core decodes the stream or paints tiles and publishes the surface, so
@@ -3044,15 +3120,15 @@ void session_client::tick(uint64_t now_ms) {
       now_ms - last_bootstrap_at_ >= 500) {
     ++bootstrap_requests_;
     last_bootstrap_at_ = now_ms;
-    if (screen_w_ > 0 && screen_h_ > 0 &&
+    if (screen_w_.load() > 0 && screen_h_.load() > 0 &&
         (request_tiles_ || stream_decoding_) && (bootstrap_requests_ % 4) == 0) {
       // Even a surface viewer benefits from a full-screen tile refresh: the
       // core composites it directly, and it is not gated on the host's
       // stream/keyframe state.
       ws_.send_text(
           "{\"type\":\"request-tiles\",\"tiles\":[{\"x\":0,\"y\":0,"
-          "\"w\":" + std::to_string(screen_w_) + ",\"h\":" +
-          std::to_string(screen_h_) + "}]}");
+          "\"w\":" + std::to_string(screen_w_.load()) + ",\"h\":" +
+          std::to_string(screen_h_.load()) + "}]}");
     } else {
       ws_.send_text("{\"type\":\"request-frame\"}");
     }
@@ -3073,6 +3149,10 @@ void session_client::tick(uint64_t now_ms) {
     const uint64_t bytes = stat_bytes_.exchange(0);
     const uint64_t rx = bytes * 1000 / (elapsed > 0 ? elapsed : 1000);
     stat_window_start_ = now_ms;
+    wire_fps_.store(fps);
+    bandwidth_bps_.store(static_cast<double>(rx));
+    dropped_frames_.store(dropped_window_);
+    dropped_window_ = 0;
     if (stats_ != nullptr) {
       stats_->note_bitrate(static_cast<double>(rx) * 8.0 / 1000.0);
     }
@@ -3081,7 +3161,8 @@ void session_client::tick(uint64_t now_ms) {
       std::snprintf(buffer, sizeof(buffer),
                     "{\"type\":\"viewer\",\"fps\":%.1f,\"dropped\":0,"
                     "\"rx\":%llu,\"rtt\":%d}",
-                    fps, static_cast<unsigned long long>(rx), last_rtt_ms_);
+                    fps, static_cast<unsigned long long>(rx),
+                    last_rtt_ms_.load());
       ws_.send_text(buffer);
     }
   }
@@ -3164,6 +3245,94 @@ bool session_client::send_video_mode(const std::string& mode) {
   if (mode != "stream" && mode != "tiles" && mode != "mixed") return false;
   video_mode_ = wide_of(value);
   return ws_.send_text("{\"type\":\"video-mode\",\"value\":\"" + value + "\"}");
+}
+
+std::vector<molink::display::info> session_client::displays() const {
+  std::lock_guard<std::mutex> lock(display_mutex_);
+  return displays_;
+}
+
+bool session_client::send_display(int index) {
+  if (!ws_.is_open() || !authenticated_) return false;
+  {
+    std::lock_guard<std::mutex> lock(display_mutex_);
+    if (!displays_.empty()) {
+      bool found = false;
+      for (const molink::display::info& item : displays_) {
+        if (item.index == index) {
+          found = true;
+          break;
+        }
+      }
+      if (!found) return false;
+    }
+  }
+  if (!ws_.send_text("{\"type\":\"display\",\"index\":" +
+                     std::to_string(index) + "}")) {
+    return false;
+  }
+  // The host answers with a `display` broadcast as well; setting the index
+  // now makes the selector respond immediately, and the later echo is then a
+  // no-op rather than a second decoder reset.
+  apply_display_change(index);
+  return true;
+}
+
+void session_client::reset_picture_state() {
+  {
+    std::lock_guard<std::mutex> lock(frame_mutex_);
+    frame_pixels_.clear();
+    frame_width_ = 0;
+    frame_height_ = 0;
+    frame_sequence_ = 0;
+  }
+  applied_cells_.clear();
+  has_image_.store(false);
+  bootstrap_requests_ = 0;
+  last_bootstrap_at_ = 0;
+  last_refresh_at_ = 0;
+  last_clock_seen_.store(0);
+  if (!ws_.is_open()) return;
+  // A monitor switch changes the picture's size and the tile grid. Ask for a
+  // keyframe and one frame immediately; the bootstrap loop takes over if the
+  // first request is lost. A full-screen tile refresh is independent of the
+  // host's stream/keyframe state and is the reliable first picture in tile
+  // mode.
+  ws_.send_text("{\"type\":\"request-keyframe\"}");
+  ws_.send_text("{\"type\":\"request-frame\"}");
+  const int width = screen_w_;
+  const int height = screen_h_;
+  if (width > 0 && height > 0) {
+    ws_.send_text(
+        "{\"type\":\"request-tiles\",\"tiles\":[{\"x\":0,\"y\":0,\"w\":" +
+        std::to_string(width) + ",\"h\":" + std::to_string(height) + "}]}");
+  }
+}
+
+void session_client::apply_display_change(int index) {
+  if (display_index_.exchange(index) == index) return;
+  int width = 0;
+  int height = 0;
+  {
+    std::lock_guard<std::mutex> lock(display_mutex_);
+    for (const molink::display::info& item : displays_) {
+      if (item.index != index) continue;
+      width = item.width;
+      height = item.height;
+      break;
+    }
+  }
+  if (width > 0 && height > 0) {
+    screen_w_ = width;
+    screen_h_ = height;
+    screen_width_.store(width);
+    screen_height_.store(height);
+    if (stats_ != nullptr) {
+      stats_->resolution = std::to_wstring(width) + L"x" +
+                           std::to_wstring(height);
+    }
+  }
+  reset_picture_state();
 }
 
 void session_client::stop() { ws_.close(); }
