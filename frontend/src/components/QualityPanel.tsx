@@ -5,6 +5,7 @@ import { Gauge, X } from 'lucide-react'
 import {
   SESSION_PRESETS,
   chromaLabel,
+  isExplicitStreamCodec,
   presetPlan,
   type PresetApplied,
   type SessionPresetId,
@@ -17,10 +18,14 @@ import {
 export function QualityPanel({
   preset,
   applied,
+  codecPreference,
   onPreset,
 }: {
   preset: SessionPresetId
   applied?: PresetApplied
+  /// The host's global encoder preference. An explicit one is 4:2:0, so a
+  /// truecolour tier is really running at reduced chroma.
+  codecPreference?: string
   onPreset: (preset: SessionPresetId) => void
 }) {
   const { t } = useTranslation()
@@ -148,6 +153,17 @@ export function QualityPanel({
               <div className="rounded-md border border-line bg-panel/60 px-2 py-1.5 text-[10px] leading-relaxed text-muted">
                 {actualLine}
               </div>
+              {preset === 'truecolor' && isExplicitStreamCodec(codecPreference)
+                ? (
+                    <p className="rounded-md border border-accent/30 bg-accent-soft px-2 py-1.5 text-[10px] leading-relaxed text-accent">
+                      {t('session.truecolorWithCodec', {
+                        codec: codecPreference === 'h264'
+                          ? 'H.264'
+                          : codecPreference?.toUpperCase(),
+                      })}
+                    </p>
+                  )
+                : null}
               <p className="text-[10px] leading-relaxed text-muted">
                 {t('session.presetHint')}
               </p>

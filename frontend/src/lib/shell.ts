@@ -157,6 +157,39 @@ export interface ShellDragOutPayload {
   names: string[]
 }
 
+/// The Linux GTK shell can open a native folder chooser. WebKitGTK does not
+/// implement the File System Access API and treats `webkitdirectory` as a
+/// plain file picker, so this bridge is the only correct folder picker there.
+export function shellDirectoryPickerCapable(): boolean {
+  const target = window as unknown as WebKitWindow
+  return shellInfo.enabled && shellInfo.platform === 'linux' &&
+    Boolean(target.webkit?.messageHandlers?.molink)
+}
+
+/// Asks the shell to open `gtk_file_chooser_dialog_new(... SELECT_FOLDER ...)`.
+/// The chosen absolute path arrives later as a `molink-directory` DOM event;
+/// cancelling dispatches nothing.
+export function requestShellDirectoryPick(): boolean {
+  if (!shellDirectoryPickerCapable()) return false
+  postShellCommand('pick-directory')
+  return true
+}
+
+/// Listens for the absolute folder path the native picker chose.
+export function onShellDirectoryPicked(
+  listener: (path: string) => void,
+): () => void {
+  const handler = (event: Event) => {
+    const detail = (event as CustomEvent<unknown>).detail
+    if (typeof detail !== 'string' || detail === '') return
+    listener(detail)
+  }
+  window.addEventListener('molink-directory', handler as EventListener)
+  return () => {
+    window.removeEventListener('molink-directory', handler as EventListener)
+  }
+}
+
 /// Only the Linux GTK shell can start a system drag from a WebView: the
 /// browser page has no API for it, and WebView2/Windows is a separate shell
 /// that does not implement the bridge command yet.

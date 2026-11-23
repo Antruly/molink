@@ -145,6 +145,10 @@ export interface UiPreferences {
   connectDraft?: { input: string; code: string }
   /// Whether reconnect credentials are persisted at all.
   rememberDevice?: boolean
+  /// The remembered first-use answer to the combo-forwarding dialog. Kept in
+  /// ui.json so the native shell (whose origin changes every launch) does not
+  /// ask again.
+  comboForwardAsked?: 'enabled' | 'declined'
   /// Default picture preset for a new session (viewer-side only).
   defaultPreset?: string
   /// Viewer-owned presets keyed by `molink.preset.<host>:<port>`. Written by
@@ -319,6 +323,17 @@ export interface Av1Effective {
   hardware?: boolean
 }
 
+export interface Av1Encoder {
+  id: string
+  name: string
+  hardware: boolean
+  available: boolean
+  av1: boolean
+  h264: boolean
+  vp9: boolean
+  vp8: boolean
+}
+
 export interface Av1Settings {
   available: boolean
   enabled: boolean
@@ -338,6 +353,9 @@ export interface Av1Settings {
   /// Video path: stream / tiles (no adaptive mixing).
   video_mode?: string
   devices: Av1Device[]
+  /// What this host can actually encode right now. Used by the codec picker
+  /// to name an encoder this build/machine does not have.
+  encoders?: Av1Encoder[]
   active_quality?: string
   effective?: Av1Effective
 }

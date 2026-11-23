@@ -37,6 +37,10 @@ import type {
   Welcome,
 } from '../lib/client'
 import { cleanDeviceNote, deviceNoteKey } from '../lib/device-note'
+import {
+  normalizeComboForwardAsked,
+  type ComboForwardChoice,
+} from '../lib/combo-forward'
 import { logDiag } from '../lib/diag-log'
 import type { Frame } from '../lib/protocol'
 import { forgetSessionScreenBuffer } from '../lib/screen-buffer'
@@ -111,6 +115,10 @@ export interface SessionTab {
   /// decode), and the host's current global preference.
   codecOptions?: string[]
   codecPreference?: string
+  /// False when the host's pinned encoder cannot run for this session; the
+  /// toolbar names `codecError` instead of silently substituting a codec.
+  codecAvailable?: boolean
+  codecError?: string
   /// The stream is AV1-only (no tile image underneath).
   av1Full?: boolean
   av1WireBytes?: number
@@ -185,6 +193,13 @@ interface AppState {
   /// desktop's Super/Alt shortcuts reach the remote. Off by default because it
   /// also takes Alt+Tab and friends away from the local desktop.
   keyboardGrab: boolean
+  /// The remembered answer to the first-use "enable combo forwarding?"
+  /// dialog. null = never answered with "remember"; the dialog asks again on
+  /// a later launch.
+  comboForwardAsked: ComboForwardChoice | null
+  /// In-memory only: the dialog was answered this page session. An
+  /// unremembered answer silences it until the next launch.
+  comboForwardAnswered: boolean
   /// What the window's close button does while a session tab is open:
   /// ask once, hide to the tray, or close the session tab.
   windowCloseBehavior: 'ask' | 'tray' | 'tab'
@@ -232,6 +247,10 @@ interface AppState {
   setRemoteClipboardFiles: (enabled: boolean) => void
   setRememberDevice: (enabled: boolean) => void
   setKeyboardGrab: (enabled: boolean) => void
+  /// Stores the remembered first-use answer (`null` clears it).
+  setComboForwardAsked: (choice: ComboForwardChoice | null) => void
+  /// Marks the dialog answered for this page session; never persisted.
+  markComboForwardAnswered: () => void
   setWindowCloseBehavior: (behavior: 'ask' | 'tray' | 'tab') => void
   /// Sets the default preset for future sessions (viewer-side only).
   setDefaultPreset: (preset: SessionPresetId) => void
@@ -333,6 +352,7 @@ const CONNECT_DRAFT_KEY = 'molink.connectDraft'
 /// never disagree about the default.
 const REMEMBER_DEVICE_KEY = kRememberDeviceKey
 const KEYBOARD_GRAB_KEY = 'molink.keyboardGrab'
+const COMBO_FORWARD_KEY = 'molink.comboForwardAsked'
 const EMPTY_STATS: Stats = {
   fps: 0,
   wireFps: 0,
@@ -588,6 +608,7 @@ export const useAppStore = create<AppState>((set, get) => {
     deviceNotes: get().deviceNotes,
     connectDraft: get().connectDraft,
     rememberDevice: get().rememberDevice,
+    comboForwardAsked: get().comboForwardAsked ?? undefined,
     defaultPreset: get().defaultPreset,
     presets: get().presets,
     sessions: sessionStore.persistedRecords(),
@@ -682,6 +703,10 @@ export const useAppStore = create<AppState>((set, get) => {
     keyboardGrab:
       readStorage(KEYBOARD_GRAB_KEY) === '1' ||
       readCookie('molink_keyboardGrab') === '1',
+    comboForwardAsked: normalizeComboForwardAsked(
+      readStorage(COMBO_FORWARD_KEY),
+    ),
+    comboForwardAnswered: false,
     windowCloseBehavior: (() => {
       const saved = readStorage(CLOSE_BEHAVIOR_KEY)
       return saved === 'tray' || saved === 'tab' ? saved : 'ask'
@@ -756,6 +781,26 @@ export const useAppStore = create<AppState>((set, get) => {
       writeStorage(KEYBOARD_GRAB_KEY, enabled ? '1' : '0')
       writeCookie('molink_keyboardGrab', enabled ? '1' : '0')
       set({ keyboardGrab: enabled })
+    },
+
+    setComboForwardAsked: (choice) => {
+      if (choice === null) {
+        try {
+          window.localStorage.removeItem(COMBO_FORWARD_KEY)
+        } catch {
+          // Storage can be disabled; the in-memory choice still applies.
+        }
+      } else {
+        writeStorage(COMBO_FORWARD_KEY, choice)
+      }
+      set({ comboForwardAsked: choice })
+      // The native shell's origin changes on every launch; ui.json is the
+      // copy that survives it.
+      schedulePersist()
+    },
+
+    markComboForwardAnswered: () => {
+      set({ comboForwardAnswered: true })
     },
 
     setWindowCloseBehavior: (behavior) => {
@@ -911,6 +956,14 @@ export const useAppStore = create<AppState>((set, get) => {
         if (typeof prefs.defaultPreset === 'string') {
           next.defaultPreset = normalizePresetId(prefs.defaultPreset)
           writeStorage(DEFAULT_PRESET_KEY, next.defaultPreset)
+        }
+        // A remembered combo-forwarding answer survives the shell's changing
+        // origin through ui.json. An absent value leaves the local copy alone
+        // (first run, or an older ui.json).
+        const comboAsked = normalizeComboForwardAsked(prefs.comboForwardAsked)
+        if (comboAsked !== null) {
+          next.comboForwardAsked = comboAsked
+          writeStorage(COMBO_FORWARD_KEY, comboAsked)
         }
         // The core is the source of truth for remember_device and the session
         // tokens in ui.json. Apply both together so turning the switch off on

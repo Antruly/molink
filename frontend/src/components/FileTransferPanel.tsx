@@ -40,6 +40,7 @@ import {
   type FsRoot,
 } from '../lib/api'
 import { clipboardFilesMode } from '../lib/clipboard-local'
+import { directoryPickMode } from '../lib/directory-pick'
 import {
   collectDropEntries,
   onDroppedFiles,
@@ -54,7 +55,13 @@ import {
   REMOTE_DRAG_MIME,
   type RemoteDragItem,
 } from '../lib/remote-drag'
-import { shellDragOutCapable, startShellDragOut } from '../lib/shell'
+import {
+  onShellDirectoryPicked,
+  requestShellDirectoryPick,
+  shellDirectoryPickerCapable,
+  shellDragOutCapable,
+  startShellDragOut,
+} from '../lib/shell'
 import type {
   ClipboardFileEntry,
   FileEntry,
@@ -1738,8 +1745,12 @@ export function FileTransferPanel({
   /// List a folder on this machine through the local core. Only usable when
   /// the page itself is served by the local core (desktop client): a remote
   /// browser must not enumerate the host it is controlling.
+  ///
+  /// `remember` is false for the default home the panel opens on by itself:
+  /// writing that into LOCAL_PATH_KEY would look like a path the user picked
+  /// and could overwrite a real choice on the next launch.
   const loadLocalDirectory = useCallback(
-    async (path: string) => {
+    async (path: string, remember = true) => {
       if (!localMode || token === '') {
         setError(t('files.localPathNeedsClient'))
         return
@@ -1767,7 +1778,7 @@ export function FileTransferPanel({
         setSnapshotPath('')
         setLocalSelection(new Set())
         setLocalInput(result.path)
-        storePath(LOCAL_PATH_KEY, result.path)
+        if (remember) storePath(LOCAL_PATH_KEY, result.path)
         setLocalNote(t('files.fsListHint'))
         setError(null)
       } catch {
@@ -1781,9 +1792,12 @@ export function FileTransferPanel({
     [localMode, token, t],
   )
 
-  // In the desktop shell the local pane can start on the folder last used
-  // without asking for a directory picker. A browser-only page cannot, so it
-  // keeps the drop/pick hint until the user chooses something.
+  // In the desktop shell the local pane starts on the folder last used, or on
+  // this machine's home (`/api/fs/list` resolves an empty path to $HOME) when
+  // nothing was remembered. The default home is deliberately not written into
+  // LOCAL_PATH_KEY: only a path the user actually opened should be
+  // remembered. A browser-only page cannot read an arbitrary local path, so
+  // it explains how to pick a folder instead.
   useEffect(() => {
     if (!open) {
       localInitial.current = null
@@ -1791,23 +1805,43 @@ export function FileTransferPanel({
     }
     if (!localMode || token === '') return
     const stored = readStored(LOCAL_PATH_KEY)
+    const remembered = stored.trim() !== ''
     const key = `${token}:${stored}`
     if (localInitial.current === key) return
     localInitial.current = key
-    void loadLocalDirectory(stored)
+    void loadLocalDirectory(remembered ? stored : '', remembered)
   }, [loadLocalDirectory, localMode, open, token])
 
   const chooseLocalDirectory = useCallback(() => {
     setError(null)
-    if (!canPickDirectory(window)) {
-      const input = directoryInputRef.current
-      // `webkitdirectory` is an attribute, not a JS-only flag. If the browser
-      // ignored it the control silently becomes a file picker, which loses
-      // the folder shape -- say so instead of pretending a folder was chosen.
-      if (!supportsDirectoryInput(document)) {
-        setLocalNote(t('files.dirPickerUnsupported'))
+    const mode = directoryPickMode({
+      secureContext: window.isSecureContext === true,
+      showDirectoryPicker: window.showDirectoryPicker,
+      shellBridge: shellDirectoryPickerCapable(),
+      supportsDirectoryInput: supportsDirectoryInput(document),
+    })
+    if (mode === 'shell') {
+      // The GTK shell opens a native SELECT_FOLDER dialog and sends the
+      // absolute path back as `molink-directory` (handled below). Cancelling
+      // dispatches nothing, so there is no stale/empty path to apply.
+      if (requestShellDirectoryPick()) {
+        setLocalNote(t('files.dirPickerShell'))
       }
+      return
+    }
+    if (mode === 'directory-input') {
+      const input = directoryInputRef.current
+      // Chromium on an insecure origin cannot use showDirectoryPicker but
+      // still implements `webkitdirectory`; that is a real folder chooser.
+      setLocalNote(t('files.dirPickerInputFallback'))
       input?.click()
+      return
+    }
+    if (mode === 'unsupported') {
+      // Never click the hidden file input here: a browser that ignores
+      // `webkitdirectory` turns it into a plain file dialog, which is the
+      // exact "选择目录变成选文件" bug. Say what to do instead.
+      setLocalNote(t('files.dirPickerUnsupported'))
       return
     }
     void (async () => {
@@ -1827,6 +1861,14 @@ export function FileTransferPanel({
       }
     })()
   }, [loadHandleDirectory, t])
+
+  // The shell's native folder chooser reports the absolute path here.
+  useEffect(() => {
+    if (!open) return
+    return onShellDirectoryPicked((path) => {
+      void loadLocalDirectory(path)
+    })
+  }, [loadLocalDirectory, open])
 
   const applySnapshot = useCallback(
     (
@@ -3604,6 +3646,12 @@ export function FileTransferPanel({
   if (!open) return null
 
   const directionMode: DownloadMode = downloadModeFor(window)
+  /// A browser-only page cannot read this machine's home folder through
+  /// /api/fs/list, so it starts with the picker explanation instead of a
+  /// silent empty pane. A user action's note always wins.
+  const displayedLocalNote =
+    localNote ??
+    (!localMode && source === null ? t('files.defaultHomeBrowser') : null)
   /// The local core can read and write the open folder in the desktop shell,
   /// even though the browser's File System Access API is unavailable there.
   const fsLocalTarget = source?.kind === 'fs' && localMode && token !== ''
@@ -3719,7 +3767,7 @@ export function FileTransferPanel({
               disabled={!source}
               className="grid h-6 w-6 shrink-0 place-items-center rounded text-muted transition hover:bg-panel hover:text-ink disabled:opacity-40"
               aria-label={t('files.home')}
-              title={t('files.home')}
+              title={t('files.homeLocalTooltip')}
             >
               <Home size={12} />
             </button>
@@ -3760,7 +3808,7 @@ export function FileTransferPanel({
               onClick={chooseLocalDirectory}
               className="flex h-7 shrink-0 items-center gap-1 rounded-md px-1.5 text-[9px] text-muted transition hover:bg-panel hover:text-accent"
               aria-label={t('files.selectDir')}
-              title={t('files.selectDir')}
+              title={t('files.selectDirTooltip')}
             >
               <FolderOpen size={12} />
               {t('files.selectDirShort')}
@@ -3770,7 +3818,7 @@ export function FileTransferPanel({
               onClick={() => fileInputRef.current?.click()}
               className="flex h-7 shrink-0 items-center gap-1 rounded-md px-1.5 text-[9px] text-muted transition hover:bg-panel hover:text-accent"
               aria-label={t('files.selectFiles')}
-              title={t('files.selectFiles')}
+              title={t('files.selectFilesTooltip')}
             >
               <FileIcon size={12} />
               {t('files.selectFilesShort')}
@@ -3857,12 +3905,12 @@ export function FileTransferPanel({
                 {t('files.selectedCount', { count: localSelection.size })}
               </span>
             ) : null}
-            {localNote ? (
+            {displayedLocalNote ? (
               <span
                 className="ml-auto min-w-0 truncate text-[9px] text-muted"
-                title={localNote}
+                title={displayedLocalNote}
               >
-                {localNote}
+                {displayedLocalNote}
               </span>
             ) : null}
           </div>
@@ -4009,7 +4057,7 @@ export function FileTransferPanel({
               disabled={!listing}
               className="grid h-6 w-6 shrink-0 place-items-center rounded text-muted transition hover:bg-panel hover:text-ink disabled:opacity-40"
               aria-label={t('files.home')}
-              title={t('files.home')}
+              title={t('files.homeRemoteTooltip')}
             >
               <Home size={12} />
             </button>

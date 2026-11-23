@@ -1288,6 +1288,26 @@ void send_welcome(session_transport* transport, const session_info& session,
          advertised_stream_codecs(video_mode, host_caps, viewer_caps)) {
       j["stream_codecs"].push_back(codec);
     }
+    // An explicit encoder that this host cannot run (or this viewer cannot
+    // decode) is reported up front. The page shows the named encoder as
+    // unavailable instead of letting the picture sit on tiles with no reason.
+    const std::string preference =
+        opt.auth ? opt.auth->settings().stream_codec : std::string("auto");
+    bool codec_available = true;
+    if (preference == "av1") {
+      codec_available = host_caps.av1 && viewer_caps.av1;
+    } else if (preference == "h264") {
+      codec_available = host_caps.h264 && viewer_caps.h264;
+    } else if (preference == "vp9") {
+      codec_available = host_caps.vp9 && viewer_caps.vp9;
+    } else if (preference == "vp8") {
+      codec_available = host_caps.vp8 && viewer_caps.vp8;
+    } else if (preference == "tiles" || preference == "auto") {
+      codec_available = true;
+    } else {
+      codec_available = false;
+    }
+    j["codec_available"] = codec_available;
   }
   j["codec_preference"] =
       opt.auth ? opt.auth->settings().stream_codec : std::string("auto");
@@ -2475,6 +2495,17 @@ void session_controller::on_text(const std::string& text) {
       send_error(transport.get(), "bad_preset", error);
       return;
     }
+    // An explicitly pinned encoder is 4:2:0. The truecolour tier asks for
+    // 4:4:4 and the tile path, but the user asked for VP9 (or another
+    // encoder) by name: keep the stream and reduce the colour depth. The
+    // viewer's UI states this instead of the stream silently staying off.
+    const std::string preference =
+        options_.auth ? options_.auth->settings().stream_codec : "auto";
+    const bool explicit_codec = is_explicit_stream_codec(preference);
+    if (explicit_codec) {
+      resolved.chroma = "420";
+      resolved.no_subsampling = false;
+    }
     // The first preset of a session always starts from a keyframe, and a
     // preset/format/rate change rebuilds the encoder at the next frame
     // boundary (the capture thread owns it, so no half-encoded frame is
@@ -2494,10 +2525,8 @@ void session_controller::on_text(const std::string& text) {
     // "tiles 4:4:4" until something moved.
     const std::string video_mode =
         options_.auth ? options_.auth->settings().video_mode : "tiles";
-    const std::string preference =
-        options_.auth ? options_.auth->settings().stream_codec : "auto";
     const bool stream_permitted =
-        video_mode != "tiles" && preference != "tiles";
+        explicit_codec || (video_mode != "tiles" && preference != "tiles");
     if (!resolved.no_subsampling && stream_permitted) {
       // Ten seconds, the same window a joining viewer gets.
       constexpr uint64_t kPresetStreamMs = 10000;
@@ -2919,6 +2948,7 @@ void session_controller::on_text(const std::string& text) {
       // rest on its next tick.
       const std::string preference = options_.auth->settings().stream_codec;
       options_.capture->set_stream_always(stream_always_for(mode, preference));
+      options_.capture->set_stream_locked(stream_locked_for(preference));
     }
     uvcpp_json shared;
     shared["type"] = "video-mode";
@@ -2964,6 +2994,10 @@ void session_controller::on_text(const std::string& text) {
     if (options_.capture) {
       const std::string mode = options_.auth->settings().video_mode;
       options_.capture->set_stream_always(stream_always_for(mode, value));
+      // The explicit encoder locks the stream path immediately. The
+      // supervisor re-checks every viewer's decoder and clears the lock if
+      // one of them cannot take it.
+      options_.capture->set_stream_locked(stream_locked_for(value));
       if (value != "auto") {
         options_.capture->set_av1_stream_allowed(value == "av1");
         options_.capture->set_h264_stream_allowed(value == "h264");
@@ -3899,11 +3933,22 @@ void session_supervisor::run() {
       // runs when every watching client can decode it.
       const bool enabled =
           !options_.auth || options_.auth->settings().av1_enabled;
+      // The host's global codec preference is read before the admission
+      // tests: an explicitly pinned encoder changes them (no tile fallback,
+      // and 4:2:0 wins over a truecolour request).
+      const std::string preference =
+          options_.auth ? options_.auth->settings().stream_codec : "auto";
+      const bool explicit_codec = is_explicit_stream_codec(preference);
+      // Every stream encoder is 4:2:0. A user who pinned VP9 gets the stream
+      // at 4:2:0 even if the viewer's active tier asked for 4:4:4; the UI
+      // says so instead of silently leaving the stream off.
+      const bool no_subsampling_effective =
+          effective_no_subsampling(no_subsampling, preference);
       // Single-frame AV1 is retired, so the hello's `av1` flag is gone and the
       // permission now follows the low-delay stream capability. Without this
       // the pinned/laddered AV1 was always refused and silently fell back to
       // H.264.
-      const bool allow = enabled && live && all_stream && !no_subsampling;
+      const bool allow = enabled && live && all_stream && !no_subsampling_effective;
       // What this host can actually encode. The viewer set only says what is
       // decodable; a Windows build without libvpx still has NVENC H.264, and
       // choosing VP9 merely because every viewer can decode it made the
@@ -3922,15 +3967,34 @@ void session_supervisor::run() {
         host_vp8 = host_vp8 || backend.vp8_stream;
         if (backend.hardware && backend.av1_stream) av1_hardware = true;
       }
+      // A pinned codec wins when every viewer can decode it; the automatic
+      // hardware-first order applies otherwise. An explicit pin is never
+      // replaced by another rung: if it is unavailable the picture stays on
+      // tiles and the viewer is told which encoder is missing.
+      stream_choice pinned = stream_choice::none;
+      if (preference == "av1" && allow && all_stream && host_av1) {
+        pinned = stream_choice::av1;
+      } else if (preference == "h264" && all_h264_stream && host_h264) {
+        pinned = stream_choice::h264;
+      } else if (preference == "vp9" && all_vp9_stream && host_vp9) {
+        pinned = stream_choice::vp9;
+      } else if (preference == "vp8" && all_vp8_stream && host_vp8) {
+        pinned = stream_choice::vp8;
+      }
+      const bool codec_available =
+          !explicit_codec || pinned != stream_choice::none;
       // A stream round is only worth starting when at least one viewer can
       // actually decode it. With a tiles-only viewer (or a host build without
       // the encoders) the join window below used to hold the stream path for
       // kJoinStreamMs and the first picture waited for it; tiles can start at
-      // once instead.
+      // once instead. An explicit codec uses the pinned result: a missing
+      // encoder is reported, not replaced by a different one.
       const bool can_stream =
-          !no_subsampling &&
-          ((allow && host_av1) || (all_h264_stream && host_h264) ||
-           (all_vp9_stream && host_vp9) || (all_vp8_stream && host_vp8));
+          explicit_codec
+              ? (pinned != stream_choice::none)
+              : (!no_subsampling_effective &&
+                 ((allow && host_av1) || (all_h264_stream && host_h264) ||
+                  (all_vp9_stream && host_vp9) || (all_vp8_stream && host_vp8)));
       if (std::getenv("MOLINK_AV1_LOG") != nullptr && allow != av1_allowed_) {
         std::fprintf(stderr, "host: av1 allowed=%d\n", allow ? 1 : 0);
         av1_allowed_ = allow;
@@ -3945,21 +4009,6 @@ void session_supervisor::run() {
       // single session without one keeps the host on tiles and patches.
       // AV1 is preferred; when it is not decodable by everyone but H.264 is,
       // the stream switches codec instead of dropping back to tiles.
-      // A pinned codec wins when every viewer can decode it; the automatic
-      // hardware-first order applies otherwise. The capture falls back to
-      // tiles when this host cannot actually encode the pinned one.
-      const std::string preference =
-          options_.auth ? options_.auth->settings().stream_codec : "auto";
-      stream_choice pinned = stream_choice::none;
-      if (preference == "av1" && allow && all_stream && host_av1) {
-        pinned = stream_choice::av1;
-      } else if (preference == "h264" && all_h264_stream && host_h264) {
-        pinned = stream_choice::h264;
-      } else if (preference == "vp9" && all_vp9_stream && host_vp9) {
-        pinned = stream_choice::vp9;
-      } else if (preference == "vp8" && all_vp8_stream && host_vp8) {
-        pinned = stream_choice::vp8;
-      }
       const std::string video_mode =
           options_.auth ? options_.auth->settings().video_mode : "tiles";
       // The secure desktop cannot use tiles: it is captured through the
@@ -3974,11 +4023,16 @@ void session_supervisor::run() {
         // choice takes effect without reconnecting.
         const int enter_percent =
             options_.auth ? options_.auth->settings().stream_enter_percent : 15;
+        // `codec_available` keeps the lock off while the pinned encoder
+        // cannot run on this host; the viewer gets an explicit
+        // "codec unavailable" status instead of a frozen stream.
         apply_video_mode(*options_.capture, video_mode, preference,
-                         enter_percent, secure_desktop);
+                         enter_percent, secure_desktop, codec_available);
       }
+      // An explicit encoder is a lock: it also overrides a "tiles" video
+      // mode. Only the explicit "tiles" preference itself means tiles.
       const bool stream_allowed =
-          secure_desktop ||
+          secure_desktop || explicit_codec ||
           (video_mode != "tiles" && preference != "tiles");
       // While the secure desktop is in front, keep renewing the forced-stream
       // window: a one-shot request expired after ten seconds and the static
@@ -4000,18 +4054,45 @@ void session_supervisor::run() {
       // CPU SVT-AV1 at a few frames per second is worse than any other
       // stream, so "auto" only ranks AV1 first when this host has a hardware
       // AV1 encoder (NVENC). Pinning AV1 by hand still selects it.
-      const stream_choice stream =
-          live && viewers > 0 && stream_allowed && !no_subsampling
-              ? (pinned != stream_choice::none
-                     ? pinned
-                     : choose_video_codec(
-                           allow && host_av1, all_stream,
-                           all_h264_stream && host_h264,
-                           all_vp9_stream && host_vp9,
-                           all_vp8_stream && host_vp8, av1_hardware))
-              : stream_choice::none;
+      // An explicit codec is never substituted: if it is unavailable the
+      // result is `none` (tiles) and the viewer shows the error, rather than
+      // silently switching to another encoder.
+      stream_choice stream = stream_choice::none;
+      if (live && viewers > 0 && stream_allowed && codec_available) {
+        if (explicit_codec) {
+          stream = pinned;
+        } else if (!no_subsampling_effective) {
+          stream = pinned != stream_choice::none
+                       ? pinned
+                       : choose_video_codec(
+                             allow && host_av1, all_stream,
+                             all_h264_stream && host_h264,
+                             all_vp9_stream && host_vp9,
+                             all_vp8_stream && host_vp8, av1_hardware);
+        }
+      }
       options_.capture->set_av1_stream_allowed(stream == stream_choice::av1);
       options_.capture->set_h264_stream_allowed(stream == stream_choice::h264);
+      // Tell viewers when an explicit codec cannot run here. The status is
+      // sent on change only; `available` false keeps the picture on tiles but
+      // the UI names the encoder instead of pretending it is running.
+      {
+        static std::string reported_codec;
+        static bool reported_available = true;
+        if (preference != reported_codec ||
+            codec_available != reported_available) {
+          reported_codec = preference;
+          reported_available = codec_available;
+          uvcpp_json status;
+          status["type"] = "codec-status";
+          status["codec"] = preference;
+          status["available"] = codec_available;
+          for (const session_info& peer : registry_->snapshot()) {
+            if (!peer.authenticated || !peer.transport) continue;
+            send_json(peer.transport.get(), status);
+          }
+        }
+      }
       if (std::getenv("MOLINK_STREAM_LOG") != nullptr) {
         static int last_stream = -1;
         if (static_cast<int>(stream) != last_stream) {
