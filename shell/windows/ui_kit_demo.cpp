@@ -38,6 +38,7 @@
 
 #include "avatar_image.h"
 #include "clipboard_sync.h"
+#include "input_state.h"
 #include "preset_message.h"
 #include "session_client.h"
 #include "ui_kit.h"
@@ -46,6 +47,96 @@ using namespace molink::ui;
 using namespace molink::net;
 
 namespace {
+
+// input_state.h carries the Win32 virtual-key numbers as plain integers so
+// the same table builds and is tested on Linux. If the SDK ever changes a
+// value, the Windows build stops here instead of sending a wrong key.
+#define MOLINK_VK_CHECK(name)                                        \
+  static_assert(::molink::input::vk::K_##name == VK_##name,          \
+                "VK_" #name " changed")
+MOLINK_VK_CHECK(CANCEL);
+MOLINK_VK_CHECK(BACK);
+MOLINK_VK_CHECK(TAB);
+MOLINK_VK_CHECK(CLEAR);
+MOLINK_VK_CHECK(RETURN);
+MOLINK_VK_CHECK(SHIFT);
+MOLINK_VK_CHECK(CONTROL);
+MOLINK_VK_CHECK(MENU);
+MOLINK_VK_CHECK(PAUSE);
+MOLINK_VK_CHECK(CAPITAL);
+MOLINK_VK_CHECK(KANA);
+MOLINK_VK_CHECK(HANJA);
+MOLINK_VK_CHECK(ESCAPE);
+MOLINK_VK_CHECK(CONVERT);
+MOLINK_VK_CHECK(NONCONVERT);
+MOLINK_VK_CHECK(SPACE);
+MOLINK_VK_CHECK(PRIOR);
+MOLINK_VK_CHECK(NEXT);
+MOLINK_VK_CHECK(END);
+MOLINK_VK_CHECK(HOME);
+MOLINK_VK_CHECK(LEFT);
+MOLINK_VK_CHECK(UP);
+MOLINK_VK_CHECK(RIGHT);
+MOLINK_VK_CHECK(DOWN);
+MOLINK_VK_CHECK(SELECT);
+MOLINK_VK_CHECK(EXECUTE);
+MOLINK_VK_CHECK(SNAPSHOT);
+MOLINK_VK_CHECK(INSERT);
+MOLINK_VK_CHECK(DELETE);
+MOLINK_VK_CHECK(HELP);
+MOLINK_VK_CHECK(LWIN);
+MOLINK_VK_CHECK(RWIN);
+MOLINK_VK_CHECK(APPS);
+MOLINK_VK_CHECK(SLEEP);
+MOLINK_VK_CHECK(NUMPAD0);
+MOLINK_VK_CHECK(NUMPAD9);
+MOLINK_VK_CHECK(MULTIPLY);
+MOLINK_VK_CHECK(ADD);
+MOLINK_VK_CHECK(SEPARATOR);
+MOLINK_VK_CHECK(SUBTRACT);
+MOLINK_VK_CHECK(DECIMAL);
+MOLINK_VK_CHECK(DIVIDE);
+MOLINK_VK_CHECK(F1);
+MOLINK_VK_CHECK(F24);
+MOLINK_VK_CHECK(NUMLOCK);
+MOLINK_VK_CHECK(SCROLL);
+MOLINK_VK_CHECK(OEM_NEC_EQUAL);
+MOLINK_VK_CHECK(LSHIFT);
+MOLINK_VK_CHECK(RSHIFT);
+MOLINK_VK_CHECK(LCONTROL);
+MOLINK_VK_CHECK(RCONTROL);
+MOLINK_VK_CHECK(LMENU);
+MOLINK_VK_CHECK(RMENU);
+MOLINK_VK_CHECK(BROWSER_BACK);
+MOLINK_VK_CHECK(BROWSER_FORWARD);
+MOLINK_VK_CHECK(BROWSER_REFRESH);
+MOLINK_VK_CHECK(BROWSER_STOP);
+MOLINK_VK_CHECK(BROWSER_SEARCH);
+MOLINK_VK_CHECK(BROWSER_FAVORITES);
+MOLINK_VK_CHECK(BROWSER_HOME);
+MOLINK_VK_CHECK(VOLUME_MUTE);
+MOLINK_VK_CHECK(VOLUME_DOWN);
+MOLINK_VK_CHECK(VOLUME_UP);
+MOLINK_VK_CHECK(MEDIA_NEXT_TRACK);
+MOLINK_VK_CHECK(MEDIA_PREV_TRACK);
+MOLINK_VK_CHECK(MEDIA_STOP);
+MOLINK_VK_CHECK(MEDIA_PLAY_PAUSE);
+MOLINK_VK_CHECK(LAUNCH_MAIL);
+MOLINK_VK_CHECK(LAUNCH_APP1);
+MOLINK_VK_CHECK(LAUNCH_APP2);
+MOLINK_VK_CHECK(OEM_1);
+MOLINK_VK_CHECK(OEM_PLUS);
+MOLINK_VK_CHECK(OEM_COMMA);
+MOLINK_VK_CHECK(OEM_MINUS);
+MOLINK_VK_CHECK(OEM_PERIOD);
+MOLINK_VK_CHECK(OEM_2);
+MOLINK_VK_CHECK(OEM_3);
+MOLINK_VK_CHECK(OEM_4);
+MOLINK_VK_CHECK(OEM_5);
+MOLINK_VK_CHECK(OEM_6);
+MOLINK_VK_CHECK(OEM_7);
+MOLINK_VK_CHECK(OEM_102);
+#undef MOLINK_VK_CHECK
 
 struct app_state {
   HWND window = nullptr;
@@ -109,6 +200,10 @@ struct app_state {
   /// Win32 listener/reads/writes stay in this file; the rules are shared with
   /// the Linux unit tests (clipboard_sync.cpp).
   molink::clipboard::text_sync clipboard_sync;
+  /// Codes the remote currently has held, shared with the Linux tests. Used
+  /// to drop Windows' auto-repeat and to send key-ups when the picture stops
+  /// being the input target.
+  molink::input::key_state pressed_keys;
   // The web defaults to control mode (its home mode switch starts on
   // `control` unless the user picked `view`); the toolbar button still turns
   // it off for a view-only session.
@@ -579,7 +674,7 @@ enum hover_slot {
   hv_qp_preset4, hv_qp_preset5, hv_qp_preset6,
   hv_qp_rate0, hv_qp_rate1, hv_qp_rate2, hv_qp_format, hv_qp_reset,
   hv_menu_item0, hv_menu_item1, hv_menu_item2, hv_menu_item3, hv_menu_item4,
-  hv_menu_item5, hv_menu_item6, hv_menu_item7,
+  hv_menu_item5, hv_menu_item6, hv_menu_item7, hv_menu_item8, hv_menu_item9,
   hv_set_close, hv_set_nav0, hv_set_nav1, hv_set_nav2, hv_set_nav3,
   hv_set_nav4, hv_set_nav5,
   hv_set_theme0, hv_set_theme1, hv_set_theme2,
@@ -795,18 +890,38 @@ float bar_width(const std::vector<bar_slot>& slots) {
 }
 
 /// Menus: 0 fps, 1 codec, 2 resolution, 3 image format, 4 clipboard,
-/// 5 tools, 6 appearance (the compact toolbar's groups, like the web).
+/// 5 tools, 6 appearance, 7 shortcuts (the compact toolbar's groups, like the
+/// web).
+/// Defined with the remote-input helpers; the shortcut entries are only
+/// enabled while the picture is the key target.
+bool remote_input_active();
+
 int menu_count(int which) {
   if (which == 0) return 4;
   if (which == 1) return 6;
   if (which == 2) return 4;
   if (which == 3) return 4;
   if (which == 4) return 3;
-  if (which == 5) return 4;
+  if (which == 5) return 5;
   if (which == 6) return 2;
+  if (which == 7) return static_cast<int>(molink::input::combo_count());
   if (which == 10) return 6;
   if (which == 11) return 4;
   return 2;
+}
+
+/// The shortcut display names ("Win+R", ...), converted once for DirectWrite.
+const std::vector<std::wstring>& combo_labels() {
+  static const std::vector<std::wstring> labels = [] {
+    std::vector<std::wstring> out;
+    const molink::input::key_combo* list = molink::input::combos();
+    for (std::size_t i = 0; i < molink::input::combo_count(); ++i) {
+      const char* text = list[i].display;
+      out.emplace_back(text, text + std::strlen(text));
+    }
+    return out;
+  }();
+  return labels;
 }
 
 const wchar_t* menu_label(int which, int index) {
@@ -833,8 +948,15 @@ const wchar_t* menu_label(int which, int index) {
   if (which == 5) {
     if (index == 0) return L"聊天";
     if (index == 1) return L"文件";
-    return index == 2 ? (g.control_on ? L"停止控制" : L"开始控制")
-                      : L"Ctrl+Alt+Del";
+    if (index == 2) return g.control_on ? L"停止控制" : L"开始控制";
+    return index == 3 ? L"Ctrl+Alt+Del" : L"组合键";
+  }
+  if (which == 7) {
+    const std::vector<std::wstring>& labels = combo_labels();
+    if (index >= 0 && index < static_cast<int>(labels.size())) {
+      return labels[index].c_str();
+    }
+    return L"";
   }
   return index == 0 ? L"切换主题" : L"设置";
 }
@@ -861,6 +983,10 @@ bool menu_active(int which, int index) {
 
 bool menu_disabled(int which, int index) {
   if (which == 4 && index > 0 && !g.clipboard_on) return true;
+  // Shortcuts and the submenu only make sense while the host accepts input.
+  const bool remote_ready = remote_input_active();
+  if (which == 5 && index == 4 && !remote_ready) return true;
+  if (which == 7) return !remote_ready;
   // A direct client paints 自动/平铺 only; with a decoding core the stream
   // codecs are real again. H.264 needs a GPU encoder and stays off.
   if (which == 1 && index >= 2) {
@@ -2899,13 +3025,20 @@ void send_quality() {
   g.session->send_session_preset(current_preset_json());
 }
 
-void menu_apply(int which, int index) {
+/// Implemented with the other remote-input helpers; declared here so the
+/// toolbar menu can inject a shortcut.
+void send_key_combo(const molink::input::key_combo& combo);
+
+/// Applies a menu choice and returns the menu that should stay open (-1
+/// closes it). The tools menu uses a positive result to open the shortcut
+/// submenu in place.
+int menu_apply(int which, int index) {
   if (which == 0) {
     g.fps_index = index;
     // 自动 keeps the value the host reports; the others set it directly.
     if (index > 0) g.fps_value = (index == 1 ? 15 : (index == 2 ? 30 : 60));
     send_quality();
-    return;
+    return -1;
   }
   if (which == 1) {
     g.codec_index = index;
@@ -2913,17 +3046,17 @@ void menu_apply(int which, int index) {
                                    "av1"};
     session_send("{\"type\":\"stream-codec\",\"value\":\"" +
                  std::string(codecs[index]) + "\"}");
-    return;
+    return -1;
   }
   if (which == 10) {
     g.settings_lock = index;
-    return;
+    return -1;
   }
   if (which == 11) {
     g.fps_index = index;
     if (index > 0) g.fps_value = (index == 1 ? 15 : (index == 2 ? 30 : 60));
     send_quality();
-    return;
+    return -1;
   }
   if (which == 2) {
     g.res_index = index;
@@ -2934,14 +3067,14 @@ void menu_apply(int which, int index) {
                    std::to_string(width) + ",\"height\":" +
                    std::to_string(height) + "}");
     }
-    return;
+    return -1;
   }
   if (which == 3) {
     g.format_index = index;
     g.chroma = chroma_for_format(index, g.preset);
     g.custom_active = true;
     send_quality();
-    return;
+    return -1;
   }
   if (which == 4) {
     if (index == 0) {
@@ -2951,7 +3084,7 @@ void menu_apply(int which, int index) {
     } else {
       clipboard_set();
     }
-    return;
+    return -1;
   }
   if (which == 5) {
     if (index == 0) {
@@ -2970,11 +3103,20 @@ void menu_apply(int which, int index) {
       g.quality_open = false;
     } else if (index == 2) {
       g.control_on = !g.control_on;
-    } else {
+    } else if (index == 3) {
       session_send("{\"type\":\"input\",\"k\":\"sas\"}");
       show_toast(L"已发送 Ctrl+Alt+Del");
+    } else {
+      // Open the shortcut list in the same popover position.
+      return 7;
     }
-    return;
+    return -1;
+  }
+  if (which == 7) {
+    if (index >= 0 && index < static_cast<int>(molink::input::combo_count())) {
+      send_key_combo(molink::input::combos()[index]);
+    }
+    return -1;
   }
   if (index == 0) {
     g.mode = g.theme == &kLight ? app_state::theme_mode::dark
@@ -2986,6 +3128,7 @@ void menu_apply(int which, int index) {
     g.quality_open = false;
     g.focus_field = 0;
   }
+  return -1;
 }
 
 std::wstring quality_label() {
@@ -3643,6 +3786,9 @@ void draw_menu(ID2D1RenderTarget* t, const palette& th,
                                         ? (g.control_on ? icon::hand
                                                         : icon::pointer)
                                         : icon::keyboard));
+      } else if (g.open_menu == 7) {
+        // Every shortcut row is a key sequence; one glyph is enough.
+        glyph = icon::keyboard;
       } else {
         glyph = i == 0 ? (g.theme == &kLight ? icon::moon : icon::sun)
                        : icon::settings;
@@ -4491,6 +4637,10 @@ void release_remote_buttons() {
   g.remote_mouse_down = false;
 }
 
+/// Defined next to send_remote_key(); declared here because closing the tab
+/// releases keys before the session socket goes away.
+void release_remote_keys();
+
 void close_session_tab() {
   // Cancel any in-flight connect (including a reconnect attempt) so its
   // worker cannot re-open the tab after the user closed it.
@@ -4506,6 +4656,8 @@ void close_session_tab() {
   g.bar_dx = g.bar_dy = 0;
   clear_text_selection();
   release_remote_buttons();
+  // The host must not keep a modifier down after the socket goes away.
+  release_remote_keys();
   mark_recent_offline(g.connect_target);
   if (g.session != nullptr) {
     g.session->stop();
@@ -4523,80 +4675,46 @@ void send_remote_wheel(float dx, float dy) {
   g.session->send_json(buffer);
 }
 
-/// Maps a Windows virtual key to the browser `KeyboardEvent.code` string the
-/// remote core expects (KeyA, Digit1, ArrowLeft, ControlLeft, ...).
-std::string browser_key_code(WPARAM vk) {
-  if (vk >= 'A' && vk <= 'Z') {
-    return std::string("Key") + static_cast<char>(vk);
-  }
-  if (vk >= '0' && vk <= '9') {
-    return std::string("Digit") + static_cast<char>(vk);
-  }
-  switch (vk) {
-    case VK_RETURN: return "Enter";
-    case VK_ESCAPE: return "Escape";
-    case VK_TAB: return "Tab";
-    case VK_BACK: return "Backspace";
-    case VK_DELETE: return "Delete";
-    case VK_INSERT: return "Insert";
-    case VK_SPACE: return "Space";
-    case VK_LEFT: return "ArrowLeft";
-    case VK_RIGHT: return "ArrowRight";
-    case VK_UP: return "ArrowUp";
-    case VK_DOWN: return "ArrowDown";
-    case VK_HOME: return "Home";
-    case VK_END: return "End";
-    case VK_PRIOR: return "PageUp";
-    case VK_NEXT: return "PageDown";
-    case VK_SHIFT:
-    case VK_LSHIFT: return "ShiftLeft";
-    case VK_RSHIFT: return "ShiftRight";
-    case VK_CONTROL:
-    case VK_LCONTROL: return "ControlLeft";
-    case VK_RCONTROL: return "ControlRight";
-    case VK_MENU:
-    case VK_LMENU: return "AltLeft";
-    case VK_RMENU: return "AltRight";
-    case VK_LWIN: return "MetaLeft";
-    case VK_RWIN: return "MetaRight";
-    case VK_CAPITAL: return "CapsLock";
-    case VK_NUMLOCK: return "NumLock";
-    case VK_SCROLL: return "ScrollLock";
-    case VK_PAUSE: return "Pause";
-    case VK_SNAPSHOT: return "PrintScreen";
-    case VK_OEM_MINUS: return "Minus";
-    case VK_OEM_PLUS: return "Equal";
-    case VK_OEM_4: return "BracketLeft";
-    case VK_OEM_6: return "BracketRight";
-    case VK_OEM_5: return "Backslash";
-    case VK_OEM_1: return "Semicolon";
-    case VK_OEM_7: return "Quote";
-    case VK_OEM_COMMA: return "Comma";
-    case VK_OEM_PERIOD: return "Period";
-    case VK_OEM_2: return "Slash";
-    case VK_OEM_3: return "Backquote";
-    case VK_ADD: return "NumpadAdd";
-    case VK_SUBTRACT: return "NumpadSubtract";
-    case VK_MULTIPLY: return "NumpadMultiply";
-    case VK_DIVIDE: return "NumpadDivide";
-    case VK_DECIMAL: return "NumpadDecimal";
-    default: break;
-  }
-  if (vk >= VK_F1 && vk <= VK_F24) {
-    return std::string("F") + std::to_string(vk - VK_F1 + 1);
-  }
-  if (vk >= VK_NUMPAD0 && vk <= VK_NUMPAD9) {
-    return std::string("Numpad") + static_cast<char>('0' + (vk - VK_NUMPAD0));
-  }
-  return std::string();
+/// Sends one key event from the shared state machine. A key-down only goes
+/// out while control is on; a key-up always does (turning control off or the
+/// window losing focus must release what the host already holds).
+void send_key_event(const molink::input::key_event& event) {
+  if (event.code.empty()) return;
+  if (!g.session || !g.session->live()) return;
+  if (event.down && !g.control_on) return;
+  g.session->send_json("{\"type\":\"input\",\"k\":\"key\",\"code\":\"" +
+                       event.code + "\",\"down\":" +
+                       (event.down ? "true" : "false") + "}");
 }
 
-void send_remote_key(WPARAM vk, bool down) {
-  if (!g.session || !g.session->live() || !g.control_on) return;
-  const std::string code = browser_key_code(vk);
-  if (code.empty()) return;
-  g.session->send_json("{\"type\":\"input\",\"k\":\"key\",\"code\":\"" + code +
-                       "\",\"down\":" + (down ? "true" : "false") + "}");
+void send_key_events(const std::vector<molink::input::key_event>& events) {
+  for (const molink::input::key_event& event : events) {
+    send_key_event(event);
+  }
+}
+
+/// A physical key. `lparam` supplies the extended bit (24) and Windows'
+/// auto-repeat flag (30); the shared state machine drops the repeat and
+/// records what the host now holds.
+void send_remote_key(WPARAM vk, LPARAM lparam, bool down) {
+  const ULONG_PTR bits = static_cast<ULONG_PTR>(lparam);
+  const bool extended = (bits & (1u << 24)) != 0;
+  const bool repeat = down && (bits & (1u << 30)) != 0;
+  const bool numlock_on = (GetKeyState(VK_NUMLOCK) & 1) != 0;
+  send_key_events(g.pressed_keys.key(static_cast<int>(vk), extended,
+                                     numlock_on, repeat, down));
+}
+
+/// Releases everything the host still thinks is held. Called on focus loss,
+/// when the session ends, when a local panel takes the pointer/keyboard and
+/// on exit, so the remote never keeps a modifier down.
+void release_remote_keys() { send_key_events(g.pressed_keys.release_all()); }
+
+/// One toolbar shortcut, in the Web's keySequence() order. Every event goes
+/// through the same state machine as a physical key, so nothing sticks.
+void send_key_combo(const molink::input::key_combo& combo) {
+  if (!remote_input_active()) return;
+  send_key_events(g.pressed_keys.combo(combo));
 }
 
 /// Click routing for the session toolbar. Returns true when the click was
@@ -4609,10 +4727,12 @@ bool session_click(float x, float y) {
     const int picked =
         menu_hit(g.menu_field, g.open_menu, count, window_w, x, y);
     if (picked >= 0) {
+      int next = -1;
       if (!menu_disabled(g.open_menu, picked)) {
-        menu_apply(g.open_menu, picked);
+        next = menu_apply(g.open_menu, picked);
       }
-      g.open_menu = -1;
+      // A positive result keeps a submenu (the shortcuts list) open.
+      g.open_menu = next;
       return true;
     }
     const bool on_field = inside(g.menu_field, x, y);
@@ -7397,8 +7517,7 @@ void settings_click(float x, float y) {
     const int picked =
         menu_hit(g.menu_field, g.open_menu, count, window_w, x, y);
     if (picked >= 0) {
-      menu_apply(g.open_menu, picked);
-      g.open_menu = -1;
+      g.open_menu = menu_apply(g.open_menu, picked);
       return;
     }
     g.open_menu = -1;
@@ -8644,6 +8763,15 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
       info->ptMinTrackSize.y = static_cast<LONG>(520 * scale);
       return 0;
     }
+    // Losing keyboard focus (another window, the tray, an Alt+Tab away)
+    // releases every key the host still thinks is held. Without this a
+    // modifier pressed as the window went away stayed down remotely.
+    case WM_KILLFOCUS:
+      release_remote_keys();
+      break;
+    case WM_ACTIVATE:
+      if (LOWORD(wparam) == WA_INACTIVE) release_remote_keys();
+      break;
     case WM_CLOSE:
       if (g.quitting || !g.session_open) {
         DestroyWindow(window);
@@ -9636,19 +9764,19 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
     }
     case WM_SYSKEYDOWN:
       if (remote_input_active() && wparam != VK_F11) {
-        send_remote_key(wparam, true);
+        send_remote_key(wparam, lparam, true);
         return 0;
       }
       break;
     case WM_SYSKEYUP:
       if (remote_input_active() && wparam != VK_F11) {
-        send_remote_key(wparam, false);
+        send_remote_key(wparam, lparam, false);
         return 0;
       }
       break;
     case WM_KEYUP:
       if (remote_input_active() && wparam != VK_F11) {
-        send_remote_key(wparam, false);
+        send_remote_key(wparam, lparam, false);
         return 0;
       }
       break;
@@ -9736,7 +9864,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
         return 0;
       }
       if (remote_input_active() && wparam != VK_F11) {
-        send_remote_key(wparam, true);
+        send_remote_key(wparam, lparam, true);
         return 0;
       }
       // Esc unwinds one layer at a time, like the web: menu, then toolbar,
@@ -10110,6 +10238,9 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
       }
       return 0;
     case WM_DESTROY:
+      // Exit is the last chance to release held keys; the core socket may
+      // still be open when the window is torn down.
+      release_remote_keys();
       remove_tray_icon();
       if (g.tray_icon != nullptr) {
         DestroyIcon(g.tray_icon);
@@ -10334,9 +10465,17 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
       nullptr);
   if (window == nullptr) return 1;
   MSG message{};
+  bool keys_remote = false;
   while (GetMessageW(&message, nullptr, 0, 0) > 0) {
     TranslateMessage(&message);
     DispatchMessageW(&message);
+    // Whenever the picture stops being the key target — a local panel opened,
+    // control was switched off, the tab closed, the session dropped — release
+    // every key the host still holds. The mouse keeps its existing explicit
+    // release path.
+    const bool remote = remote_input_active();
+    if (keys_remote && !remote) release_remote_keys();
+    keys_remote = remote;
   }
   return 0;
 }
