@@ -111,7 +111,9 @@ struct app_state {
   bool files_open = false;
   float audio_volume = 0.8f;
   int display_mode = 0;               // 0 fit, 1 actual, 2 fill
-  int fps_index = 2;                  // 自动 / 15 / 30 / 60
+  // -1 = show the tier's own rate (smooth starts at 24 fps); 0/1/2/3 are the
+  // legacy 自动/15/30/60 choices.
+  int fps_index = -1;
   int codec_index = 0;                // 自动 / H.264 / VP9 / VP8 / AV1
   int res_index = 0;
   int open_menu = -1;  // -1 none, 0 fps, 1 codec, 2 resolution, 3 format
@@ -6865,7 +6867,8 @@ void draw_settings_modal(float w, float h) {
         L"默认：24 帧、16 位色、快速压缩，低带宽下也流畅。",
         L"30 帧、4:2:0 视频，压缩自适应，日常桌面最稳妥。",
         L"画质优先：30–60 帧、高质量 4:2:0 视频，靠 QP 与码率提升画质。",
-        L"真彩色（不压缩色度，使用平铺）：4:4:4 不抽样、最高质量。",
+        L"真彩色（不压缩色度，使用平铺）：4:4:4 不抽样、最高质量，"
+        L"总走平铺而不是视频流，帧率降到 18 以保画质。",
         L"按延迟、带宽和画面变化自动选挡；只有选中它才允许自适应。"};
     for (int i = 0; i < kPresetCount; ++i) {
       const D2D1_RECT_F card =
