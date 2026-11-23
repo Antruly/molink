@@ -224,6 +224,7 @@ set(MOLINK_CORE_SOURCES
   src/clipboard/x11_clipboard.cpp
   src/clipboard/windows_clipboard.cpp
   src/clipboard/windows_data_object.cpp
+  src/clipboard/clipboard_files.cpp
   src/clipboard/x11_clipboard_fuse.cpp
   src/clipboard_stage.cpp
   src/clipboard_lazy.cpp
@@ -819,6 +820,18 @@ set_target_properties(molink-core-clipboard-pull-test PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 add_test(NAME clipboard_pull COMMAND molink-core-clipboard-pull-test)
 
+# CF_HDROP enumeration -> clipboard_file list. The Windows drag-and-drop API
+# itself is not portable; the mapping, invalid-entry handling and the
+# "session layer owns the caps" rule are.
+add_executable(molink-core-clipboard-files-test
+  tests/clipboard_files_test.cpp
+  src/clipboard/clipboard_files.cpp
+)
+target_include_directories(molink-core-clipboard-files-test PRIVATE src)
+set_target_properties(molink-core-clipboard-files-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME clipboard_files COMMAND molink-core-clipboard-files-test)
+
 # Virtual clipboard lifecycle: offer caps and naming, mount/unmount on a new
 # announcement, bridge relay and the read-failure path. The FUSE layer itself
 # is not linked; the test supplies a fake mount factory.
@@ -875,6 +888,7 @@ if(WIN32)
     tests/windows_clipboard_stream_test.cpp
     src/clipboard/windows_clipboard.cpp
     src/clipboard/windows_data_object.cpp
+    src/clipboard/clipboard_files.cpp
     src/clipboard_lazy.cpp
   )
   target_include_directories(molink-core-windows-clipboard-stream-test

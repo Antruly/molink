@@ -317,27 +317,10 @@ void send_clipboard_files_to(
     const std::shared_ptr<session_registry>& registry, const session_info& peer,
     const std::vector<clipboard_file>& files, bool nested_rdp) {
   if (!peer.authenticated || !peer.transport) return;
-  {
-    uint64_t total = 0;
-    for (const clipboard_file& file : files) total += file.size;
-    std::vector<diag_field> fields;
-    fields.push_back({"peer", peer.peer_ip});
-    fields.push_back({"files", std::to_string(files.size())});
-    fields.push_back({"bytes", std::to_string(total)});
-    fields.push_back({"nested_rdp", nested_rdp ? "1" : "0"});
-    diag().log(diag_level::info, "clipboard.announce", std::string(), fields);
-  }
-  uvcpp_json legacy_list = uvcpp_json::array();
-  for (const clipboard_file& file : files) {
-    uvcpp_json legacy;
-    legacy["name"] = file.name;
-    legacy["path"] = file.path;
-    legacy["size"] = file.size;
-    legacy_list.push_back(std::move(legacy));
-  }
 
-  // The id list is capped exactly like the viewer caps it: 8 files, 256 MiB
-  // each, 2 GiB total. The viewer learns how many were left out.
+  // The id list is capped exactly like the viewer caps it: 8 files, 1 TiB
+  // each, 4 TiB total. The viewer learns how many were left out; the host
+  // also records a warning so a copy that silently lost files leaves a trace.
   std::size_t advertised = 0;
   uint64_t total = 0;
   for (const clipboard_file& file : files) {
@@ -348,6 +331,44 @@ void send_clipboard_files_to(
     ++advertised;
   }
   const std::size_t omitted = files.size() - advertised;
+  // `ole` means the bytes are behind the inner RDP client's FileContents
+  // streams; `hdrop` means an ordinary local path copy (CF_HDROP on Windows).
+  const char* source = "hdrop";
+  for (const clipboard_file& file : files) {
+    if (file.stream_id != 0) {
+      source = "ole";
+      break;
+    }
+  }
+  {
+    std::vector<diag_field> fields;
+    fields.push_back({"peer", peer.peer_ip});
+    fields.push_back({"files", std::to_string(files.size())});
+    fields.push_back({"bytes", std::to_string(total)});
+    fields.push_back({"source", source});
+    fields.push_back({"nested_rdp", nested_rdp ? "1" : "0"});
+    if (omitted > 0) fields.push_back({"omitted", std::to_string(omitted)});
+    diag().log(diag_level::info, "clipboard.announce", std::string(), fields);
+  }
+  if (omitted > 0) {
+    diag().log(diag_level::warn, "clipboard.announce.truncated",
+               "clipboard file list hit the pull caps",
+               {{"peer", peer.peer_ip},
+                {"files", std::to_string(files.size())},
+                {"advertised", std::to_string(advertised)},
+                {"omitted", std::to_string(omitted)},
+                {"max_files", std::to_string(kClipboardPullMaxFiles)},
+                {"max_file_bytes",
+                 std::to_string(kClipboardPullMaxFileBytes)}});
+  }
+  uvcpp_json legacy_list = uvcpp_json::array();
+  for (const clipboard_file& file : files) {
+    uvcpp_json legacy;
+    legacy["name"] = file.name;
+    legacy["path"] = file.path;
+    legacy["size"] = file.size;
+    legacy_list.push_back(std::move(legacy));
+  }
 
   if (peer.clipboard_pull) {
     // Only a client that advertised clipboard_pull gets the id list. An
