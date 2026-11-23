@@ -608,6 +608,9 @@ void tooltip(ID2D1RenderTarget* t, const palette& theme,
 struct toast_state {
   std::wstring text;
   uint64_t until_ms = 0;
+  /// 0 info, 1 warning, 2 error. The shell uses the red/amber ink for the
+  /// clipboard-file failures the Web shows as warn/error toasts.
+  int level = 0;
 };
 void toast(ID2D1RenderTarget* t, const palette& theme,
            IDWriteTextFormat* small, const D2D1_SIZE_F& size,

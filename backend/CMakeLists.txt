@@ -989,6 +989,20 @@ set_target_properties(molink-core-clipboard-sync-test PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 add_test(NAME clipboard_sync COMMAND molink-core-clipboard-sync-test)
 
+# Clipboard *files* without Win32: the 8 / 1 TiB / 4 TiB pull caps and
+# omitted count, the 256 KiB range boundaries, the staging path, the retry
+# budget and the echo table are shared with the native shell and tested here.
+add_executable(molink-core-native-clipboard-files-test
+  tests/native_clipboard_files_test.cpp
+  "${CMAKE_CURRENT_SOURCE_DIR}/../shell/windows/clipboard_files.cpp"
+)
+target_include_directories(molink-core-native-clipboard-files-test PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../shell/windows")
+set_target_properties(molink-core-native-clipboard-files-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME native_clipboard_files
+         COMMAND molink-core-native-clipboard-files-test)
+
 # File-panel rules without Win32: the path grammar (typing C:\Windows, ~,
 # relative paths, drive/UNC crumbs), the Ctrl/Shift selection model and the
 # per-task aggregation are shared with the native shell and tested here.

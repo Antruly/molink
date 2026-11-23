@@ -42,11 +42,11 @@
 | A10 | 会话与画质 | truecolor/4:4:4 的 BGRA 语义 | gap | 原生格式表有 BGRA，但无法请求 4:4:4/no_subsampling | `ui_kit_demo.cpp:479` |
 | B1 | 剪贴板 | 文本入站实时同步 | ok | 宿主推送文本时原生会写入本机剪贴板 | `session_client.cpp:1489` |
 | B2 | 剪贴板 | 文本出站实时同步 + 192 KiB | gap | 原生只有手动“发送到远端”，没有本地轮询 | `ui_kit_demo.cpp:2476` |
-| C1 | 剪贴板 | 主控→被控文件（虚拟流/延迟渲染） | gap | 原生 hello 不宣告 clipboard_stream，也没有文件剪贴板发送 | `session_client.cpp:506` |
-| C2 | 剪贴板 | 被控→主控文件（按需区间拉取） | gap | 原生只取文本，忽略 files/omitted，无 `clipboard-pull` | `session_client.cpp:1489` |
-| C3 | 剪贴板 | 文件上限、omitted、嵌套 RDP | gap | 原生不解析 caps/omitted/nested_rdp，也没有提示 | `session_client.cpp:1489` |
-| C4 | 剪贴板 | 粘贴进度与失败提示 | gap | 原生没有剪贴板文件 offer 横幅/进度/失败 toast | `ui_kit_demo.cpp:7341` |
-| C5 | 剪贴板 | 回显抑制（hash/chain、2 分钟表） | gap | 原生无自动文件同步，因此也没有 echo 表 | — |
+| C1 | 剪贴板 | 主控→被控文件（虚拟流/延迟渲染） | partial | 已宣告并实现 `clipboard-offer`/`fetch` 延迟流；旧主机的 eager 回退未做 | `session_client.cpp` |
+| C2 | 剪贴板 | 被控→主控文件（按需区间拉取） | ok | `clipboard-sync.files` + 256 KiB `clipboard-pull`/0x18，落盘后 CF_HDROP | `session_client.cpp` |
+| C3 | 剪贴板 | 文件上限、omitted、嵌套 RDP | ok | 8 / 1 TiB / 4 TiB 裁剪、omitted 提示、`nested_rdp` 标记 | `clipboard_files.cpp`、`session_client.cpp` |
+| C4 | 剪贴板 | 粘贴进度与失败提示 | partial | 每文件一行进度 + warn/error toast；没有独立 offer 横幅（上限内自动接收） | `session_client.cpp`、`ui_kit_demo.cpp` |
+| C5 | 剪贴板 | 回显抑制（hash/chain、2 分钟表） | ok | 文件路径/name+size 的 2 分钟、64 条 echo 表 | `clipboard_files.cpp` |
 | F1 | 文件面板 | 本地 \| 远程双栏 | gap | 仍是“发送/接收”两个互斥 tab（各有本地/远程浏览器），不能同屏双栏 | `ui_kit_demo.cpp:8390` |
 | F2 | 文件面板 | 本地绝对路径/盘符/根目录 | ok | 本地栏有路径框、盘符/主目录下拉、面包屑与 `FindFirstFileW` 列表 | `ui_kit_demo.cpp:6793` |
 | F3 | 文件面板 | 远程绝对路径/盘符枚举/面包屑 | ok | 解析 `parent/roots/truncated`，路径框、roots 下拉、可点面包屑、非法路径内联报错 | `session_client.cpp:790` |
@@ -78,7 +78,9 @@
 | U6 | 界面 | 通知/toast 行为 | partial | 单条 2.5 s 纯文本；Web 6 s、分 info/warn/error | `ui_kit_demo.cpp:2487` |
 | U7 | 界面 | 托盘行为与语言/关闭行为 | partial | 托盘菜单写死中文；关闭默认询问而非隐藏 | `ui_kit_demo.cpp:3002` |
 
-统计：`items=47 gap=27 partial=16 ok=4`。
+统计：`items=47 gap=22 partial=18 ok=7`。
+
+> C1–C5 的状态已按“原生剪贴板文件”批次更新；各节正文仍保留审计时的现状描述。
 
 ---
 

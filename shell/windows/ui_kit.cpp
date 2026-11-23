@@ -266,7 +266,17 @@ void toast(ID2D1RenderTarget* t, const palette& theme,
   shadow(t, theme, r, 8);
   fill_round(t, r, 8, theme.panel_strong);
   stroke_round(t, r, 8, theme.line);
-  text(t, small, state.text, r, theme.ink);
+  // Dark theme uses the pale status inks; the light theme needs the darker
+  // variants for contrast on the white panel.
+  D2D1_COLOR_F ink = theme.ink;
+  if (state.level == 2) {
+    ink = theme.ink.r > 0.5f ? D2D1::ColorF(0xff8f87)
+                             : D2D1::ColorF(0xc0392b);
+  } else if (state.level == 1) {
+    ink = theme.ink.r > 0.5f ? D2D1::ColorF(0xfbbf24)
+                             : D2D1::ColorF(0xb45309);
+  }
+  text(t, small, state.text, r, ink);
 }
 
 void modal_scrim(ID2D1RenderTarget* t, const D2D1_SIZE_F& size) {

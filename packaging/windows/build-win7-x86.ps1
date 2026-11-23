@@ -317,6 +317,7 @@ if ($LASTEXITCODE -ne 0) { throw 'native resources failed' }
   (Join-Path $Repo 'shell\windows\session_client.cpp') `
   (Join-Path $Repo 'shell\windows\preset_message.cpp') `
   (Join-Path $Repo 'shell\windows\clipboard_sync.cpp') `
+  (Join-Path $Repo 'shell\windows\clipboard_files.cpp') `
   (Join-Path $Repo 'shell\windows\input_state.cpp') `
   (Join-Path $Repo 'shell\windows\puff.c') `
   $nativeRes $webpLibs `

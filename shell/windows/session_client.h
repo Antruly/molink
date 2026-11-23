@@ -7,12 +7,14 @@
 #include <deque>
 #include <fstream>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
+#include "clipboard_files.h"
 #include "preset_message.h"
 #include "ui_kit.h"
 #include "ws_client.h"
@@ -68,6 +70,22 @@ struct file_event {
   /// JSON messages so `eof` can never overtake the final bytes.
   uint64_t offset = 0;
   std::vector<uint8_t> chunk_data;
+  /// `action == "fetch"`: host's virtual-file request id, offered index and
+  /// range length. `offset` above is the requested offset.
+  uint32_t index = 0;
+  uint64_t length = 0;
+  /// `clipboard-pull-chunk` (0x18): 0 ok, 1 read error, 2 clipboard changed.
+  uint32_t status = 0;
+  /// `clipboard-pull-offer`: the host's `clipboard-sync.files` list, the
+  /// number it omitted, and whether an inner RDP client owns its clipboard.
+  std::vector<molink::clipboard_files::entry> clip_files;
+  std::size_t clip_omitted = 0;
+  bool clip_nested_rdp = false;
+  /// `clipboard-done`: how many files were placed on the local clipboard.
+  int count = 0;
+  /// `clipboard-offer` reply: the host will fetch ranges instead of asking
+  /// for an eager upload.
+  bool stream = false;
 };
 
 /// Row for the shell's transfer list.
@@ -205,6 +223,29 @@ class session_client {
   std::vector<file_event> take_file_events();
   /// Current uploads and downloads, newest last.
   std::vector<file_transfer_state> file_transfers();
+  /// The local clipboard gained a file list (CF_HDROP). Filters echoes,
+  /// caps the selection at the host's 8 files / 2 GiB delayed-render limit
+  /// and sends `{"type":"file","action":"clipboard-offer"}`; the bytes travel
+  /// only when the host answers with a `fetch` after a paste. Returns false
+  /// when nothing was offered (not authenticated, empty, duplicate, echo).
+  bool clipboard_files_changed(const std::vector<std::string>& paths);
+  /// The local clipboard no longer holds files (text/empty). Allows the same
+  /// file selection to be offered again after the host's lazy clipboard was
+  /// replaced; the existing offer stays answerable until a new one replaces
+  /// it.
+  void clipboard_files_cleared();
+  /// `welcome.clipboard_stream` / `clipboard_pull`: the host confirms it can
+  /// render an offer lazily and serve an id-based pull. `nested_rdp` is a
+  /// badge only and no longer disables either path.
+  bool host_clipboard_stream() const { return host_clipboard_stream_; }
+  bool host_clipboard_pull() const { return host_clipboard_pull_; }
+  bool host_nested_rdp() const { return host_nested_rdp_; }
+  /// True while an inbound clipboard-file batch is still moving bytes, so the
+  /// drawer repaints its per-file progress even when no JSON event arrived.
+  bool clipboard_pull_active() const {
+    return clipboard_pull_ != nullptr && !clipboard_pull_->complete &&
+           !clipboard_pull_->failed && !clipboard_pull_->cancelled;
+  }
   /// Sends a viewer-owned `session-preset` message (the JSON is built by
   /// `molink::preset`) and asks for a keyframe afterwards, like the Web's
   /// `requestKeyframe()` after a tier change. Returns false when the socket
@@ -280,6 +321,47 @@ class session_client {
     uint64_t last_progress_at = 0;
     std::ofstream out;
   };
+  /// One file the host announced through `clipboard-sync.files`, being pulled
+  /// in 256 KiB ranges. The bytes land in a `.part` file and are renamed only
+  /// after the whole batch is complete, so a half file can never reach the
+  /// clipboard.
+  struct clipboard_pull_file {
+    uint32_t id = 0;
+    /// One drawer task per file, so the receive list shows a line (name +
+    /// progress bar) per clipboard file rather than one aggregate card.
+    uint32_t task = 0;
+    std::string name;
+    uint64_t size = 0;
+    uint64_t received = 0;
+    std::wstring temp_path;
+    std::wstring final_path;
+    std::ofstream out;
+    int state = 0;  ///< 0 queued, 1 active, 2 done, 3 failed/cancelled
+    bool cancelled = false;
+    molink::clipboard_files::range_retry retry;
+    uint64_t requested_at = 0;
+    std::wstring message;
+  };
+  struct clipboard_pull_batch {
+    uint32_t sequence = 0;
+    uint64_t total = 0;
+    uint64_t received = 0;
+    std::size_t omitted = 0;
+    bool nested_rdp = false;
+    bool failed = false;
+    bool cancelled = false;
+    bool complete = false;
+    int active = -1;
+    std::wstring directory;
+    std::vector<clipboard_pull_file> files;
+  };
+  /// A local file described to the host by `clipboard-offer`. `path` is read
+  /// only when the host answers a paste with `fetch`.
+  struct clipboard_offered_file {
+    std::string name;
+    std::wstring path;
+    uint64_t size = 0;
+  };
   /// One recursive download. Folders are listed one at a time; each listing
   /// queues its child folders and sends a `request` for every file.
   struct download_walk {
@@ -313,6 +395,40 @@ class session_client {
   /// keeps a static desktop at zero traffic with no full-screen refreshes.
   void handle_tile_clock(const uint8_t* payload, uint32_t len);
   void handle_file_json(const std::string& text);
+  /// `clipboard-sync.files`: plan the list (8 / 1 TiB / 4 TiB), create the
+  /// staging folder and open the `.part` files. Called on the UI thread from
+  /// `pump_files()`.
+  void start_clipboard_pull(const file_event& offer);
+  /// Sends the next `clipboard-pull` range, or the next queued file; also
+  /// enforces the per-range timeout. Called from `pump_files()`.
+  void pump_clipboard_pull(uint64_t now_ms);
+  /// One `0x18` reply: validate the range, write it, then ask for the rest.
+  void handle_clipboard_chunk(const file_event& event);
+  /// Host paste on a lazy offer: answer `fetch` with a `0x17` range packet.
+  void handle_clipboard_fetch(const file_event& event);
+  void request_clipboard_range(clipboard_pull_file& file, uint64_t now_ms);
+  void advance_clipboard_pull(uint64_t now_ms);
+  /// Every byte arrived: rename `.part` files, put the final paths on the
+  /// local clipboard and tell the shell.
+  void finish_clipboard_pull();
+  /// Abandon the active batch and delete every temporary/final file. The rows
+  /// stay visible with their failure reason.
+  void fail_clipboard_pull(const std::wstring& message);
+  /// Drop the batch and delete its files (a newer selection supersedes it).
+  void discard_clipboard_pull();
+  /// User cancellation from the file drawer's synthetic row id.
+  void cancel_clipboard_pull();
+  std::wstring clipboard_base_directory() const;
+  std::wstring clipboard_batch_directory(uint32_t sequence) const;
+  bool set_clipboard_files(const std::vector<std::wstring>& paths);
+  bool send_clipboard_range(uint32_t id, uint32_t code, uint64_t offset,
+                            const uint8_t* data, size_t len);
+  /// Queues a shell event that the UI turns into a toast. `action` is
+  /// `clipboard-done`, `clipboard-warn` or `clipboard-error`.
+  void queue_clipboard_toast(const wchar_t* action,
+                             const std::wstring& message, int count = 0);
+  static constexpr uint32_t kClipboardTaskFlag = 0x40000000u;
+  static constexpr uint32_t kClipboardRowFlag = 0x20000000u;
   /// Completes a download once `eof` and every byte have both been seen.
   void finish_download(uint32_t id);
   /// Defaults `download_dir_` and creates it; returns false when unavailable.
@@ -338,7 +454,7 @@ class session_client {
   pending_browse take_pending_browse();
   bool send_file_chunk(uint32_t id, uint64_t offset, const uint8_t* data,
                        size_t len);
-  void send_file_action(const std::string& action, uint32_t id,
+  bool send_file_action(const std::string& action, uint32_t id,
                         const std::string& extra);
   static bool find_number(const std::string& json, const char* key, int* out);
   static bool find_u64(const std::string& json, const char* key,
@@ -386,6 +502,20 @@ class session_client {
   std::deque<pending_browse> pending_browses_;
   std::map<uint32_t, download_walk> download_walks_;
   uint32_t next_walk_id_ = 1;
+  /// Inbound clipboard-file pull (host -> this machine's clipboard).
+  std::unique_ptr<clipboard_pull_batch> clipboard_pull_;
+  std::string clipboard_session_;
+  uint32_t clipboard_batch_seq_ = 0;
+  uint32_t next_clipboard_task_ = 1;
+  /// Outbound delayed offer (this machine's clipboard -> host). The bytes are
+  /// read from `path` only when the host sends `fetch`.
+  std::vector<clipboard_offered_file> clipboard_offered_;
+  std::string clipboard_offer_key_;
+  /// Two-minute suppression for paths/descriptors this machine just handled.
+  molink::clipboard_files::file_echo clipboard_echo_;
+  bool host_clipboard_stream_ = false;
+  bool host_clipboard_pull_ = false;
+  bool host_nested_rdp_ = false;
   uint32_t next_upload_key_ = 1;
   /// Lowest upload key not offered yet; keys complete in order, so the pump
   /// never has to rescan a 20000-file queue.

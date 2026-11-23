@@ -1,5 +1,8 @@
 #include "session_client.h"
 
+#include <shellapi.h>
+#include <shlobj.h>
+
 #include <algorithm>
 #include <cctype>
 #include <cstddef>
@@ -474,6 +477,20 @@ bool session_client::start(const std::string& core_host, int core_port,
   downloads_.clear();
   uploads_.clear();
   upload_slots_.clear();
+  // A new socket owns a fresh clipboard-file state. Partial pulls from the
+  // previous connection are deleted, and echoes from it must not suppress a
+  // genuine copy in this one.
+  discard_clipboard_pull();
+  clipboard_offered_.clear();
+  clipboard_offer_key_.clear();
+  clipboard_echo_.clear();
+  clipboard_session_ = "s" + std::to_string(GetCurrentProcessId()) + "-" +
+                       std::to_string(GetTickCount64());
+  clipboard_batch_seq_ = 0;
+  next_clipboard_task_ = 1;
+  host_clipboard_stream_ = false;
+  host_clipboard_pull_ = false;
+  host_nested_rdp_ = false;
   next_offer_key_ = next_upload_key_;
   pending_downloads_.clear();
   request_queue_.clear();
@@ -552,7 +569,8 @@ bool session_client::start(const std::string& core_host, int core_port,
     access_pending_ = true;
     hello_text_ =
         "{\"type\":\"request-access\",\"name\":\"moLink native\","
-        "\"client\":\"molink-native\"}";
+        "\"client\":\"molink-native\",\"clipboard_stream\":true,"
+        "\"clipboard_pull\":true}";
   } else {
     // In surface mode the local core decodes AV1/VP9/VP8 and publishes the
     // native surface, so the stream capabilities are real. A direct client
@@ -577,7 +595,12 @@ bool session_client::start(const std::string& core_host, int core_port,
     hello_text_ +=
         ",\"seq_clock\":true,\"video_push\":true,\"h264_stream\":false,"
         "\"vp9_stream\":" + std::string(stream_cap) + ",\"vp8_stream\":" +
-        stream_cap + ",\"av1_native\":" + stream_cap + "}";
+        stream_cap + ",\"av1_native\":" + stream_cap +
+        // This shell can answer a range fetch for a file on the local
+        // clipboard (`clipboard-stream`: the host's CF_HDROP/FileContents
+        // path) and understands `clipboard-sync.files` + `clipboard-pull`.
+        ",\"clipboard_stream\":true,\"clipboard_pull\":true,"
+        "\"protocol\":1}";
   }
   hello_sent_at_ = GetTickCount64();
   return ws_.send_text(hello_text_);
@@ -602,6 +625,23 @@ void session_client::handle_binary(const uint8_t* data, size_t size) {
     file_event event;
     event.action = L"chunk";
     event.id = read_u32(payload);
+    event.offset = read_u64(payload + 8);
+    event.chunk_data.assign(payload + 16, payload + payload_len);
+    std::lock_guard<std::mutex> lock(file_mutex_);
+    file_events_.push_back(std::move(event));
+    return;
+  }
+  if (type == 0x18) {
+    // clipboard_file range reply: u32 id, u32 status, u64 offset, then the
+    // bytes (little-endian; host `send_clipboard_file_reply`). It joins the
+    // same ordered queue as `clipboard-pull-offer` and file_data, so ranges
+    // are written in the order they arrived.
+    if (payload_len < 16) return;
+    const uint8_t* payload = data + 32;
+    file_event event;
+    event.action = L"clipboard-pull-chunk";
+    event.id = read_u32(payload);
+    event.status = read_u32(payload + 4);
     event.offset = read_u64(payload + 8);
     event.chunk_data.assign(payload + 16, payload + payload_len);
     std::lock_guard<std::mutex> lock(file_mutex_);
@@ -811,8 +851,16 @@ void session_client::handle_file_json(const std::string& text) {
     event.chunk = static_cast<uint32_t>(number);
   }
   if (json_u64_field(text, "size", 0, &number)) event.size = number;
+  if (json_u64_field(text, "index", 0, &number)) {
+    event.index = static_cast<uint32_t>(number);
+  }
+  if (json_u64_field(text, "length", 0, &number)) event.length = number;
+  if (json_u64_field(text, "offset", 0, &number)) event.offset = number;
   bool flag = true;
   if (json_bool_field(text, "ok", 0, &flag)) event.ok = flag;
+  flag = false;
+  if (json_bool_field(text, "stream", 0, &flag)) event.stream = flag;
+  if (json_bool_field(text, "nested_rdp", 0, &flag)) event.clip_nested_rdp = flag;
   std::string value;
   if (json_string_field(text, "name", 0, &value)) event.name = wide_of(value);
   if (json_string_field(text, "path", 0, &value)) event.path = wide_of(value);
@@ -876,13 +924,13 @@ void session_client::handle_file_json(const std::string& text) {
   file_events_.push_back(std::move(event));
 }
 
-void session_client::send_file_action(const std::string& action, uint32_t id,
+bool session_client::send_file_action(const std::string& action, uint32_t id,
                                       const std::string& extra) {
   std::string text = "{\"type\":\"file\",\"action\":\"" + action + "\"";
   if (id != 0) text += ",\"id\":" + std::to_string(id);
   text += extra;
   text += "}";
-  ws_.send_text(text);
+  return ws_.send_text(text);
 }
 
 bool session_client::send_file_chunk(uint32_t id, uint64_t offset,
@@ -1116,6 +1164,11 @@ void session_client::handle_walk_listing(const file_event& event,
 }
 
 void session_client::file_cancel(uint32_t id) {
+  if ((id & kClipboardRowFlag) != 0) {
+    // Synthetic row id from `file_transfers()` for an inbound clipboard pull.
+    cancel_clipboard_pull();
+    return;
+  }
   if (id == 0) {
     for (auto& [key, upload] : uploads_) {
       if (upload.state == 0 || upload.state == 1) {
@@ -1336,6 +1389,23 @@ void session_client::pump_files() {
   };
   for (file_event& event : incoming) {
     const std::wstring& action = event.action;
+    if (action == L"clipboard-pull-offer") {
+      start_clipboard_pull(event);
+      continue;
+    }
+    if (action == L"clipboard-pull-chunk") {
+      handle_clipboard_chunk(event);
+      continue;
+    }
+    if (action == L"fetch") {
+      handle_clipboard_fetch(event);
+      continue;
+    }
+    if (action == L"clipboard-offer" && (!event.ok || !event.stream)) {
+      // The host rejected the delayed offer (or would need the eager path).
+      // Forget the dedup key so copying the same files again retries.
+      clipboard_files_cleared();
+    }
     if (action == L"listing") {
       // `browse` answers arrive in request order, so the FIFO tells a
       // recursive download's listing apart from a panel navigation.
@@ -1620,6 +1690,9 @@ void session_client::pump_files() {
   // A finished download frees a host slot: start the next queued request
   // before the timeout pass so a large folder keeps moving.
   pump_download_requests();
+  // Clipboard-file ranges are independent of the host's eight file-transfer
+  // slots; drive them from the UI timer as well so a lost 0x18 is retried.
+  pump_clipboard_pull(GetTickCount64());
 
   // A missing chunk or end marker must not leave the row spinning forever.
   const uint64_t now_ms = GetTickCount64();
@@ -1745,7 +1818,646 @@ std::vector<file_transfer_state> session_client::file_transfers() {
     row.message = download.message;
     out.push_back(std::move(row));
   }
+  // Inbound clipboard files share the drawer's progress rows. Their ids are
+  // synthetic (the host ids restart at 1 for every selection) and carry
+  // `kClipboardRowFlag`, which `file_cancel` routes to the pull batch.
+  if (clipboard_pull_ != nullptr) {
+    const clipboard_pull_batch& batch = *clipboard_pull_;
+    for (std::size_t i = 0; i < batch.files.size(); ++i) {
+      const clipboard_pull_file& file = batch.files[i];
+      file_transfer_state row;
+      row.id = kClipboardRowFlag | static_cast<uint32_t>(i + 1);
+      row.task = file.task;
+      row.name = L"剪贴板 · " + wide_of(file.name);
+      row.size = file.size;
+      row.sent = file.received;
+      row.download = true;
+      row.state = file.state;
+      row.cancelled = file.cancelled;
+      row.message = file.message;
+      out.push_back(std::move(row));
+    }
+  }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// Clipboard files: inbound pulls (clipboard-sync.files + clipboard-pull/0x18)
+// and outbound delayed offers (clipboard-offer + fetch/0x17).
+// ---------------------------------------------------------------------------
+
+std::wstring session_client::clipboard_base_directory() const {
+  wchar_t local[MAX_PATH] = {};
+  if (GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH) > 0) {
+    return std::wstring(local) + L"\\moLink";
+  }
+  wchar_t profile[MAX_PATH] = {};
+  if (GetEnvironmentVariableW(L"USERPROFILE", profile, MAX_PATH) > 0) {
+    return std::wstring(profile) + L"\\AppData\\Local\\moLink";
+  }
+  return std::wstring();
+}
+
+std::wstring session_client::clipboard_batch_directory(uint32_t sequence) const {
+  const std::wstring base = clipboard_base_directory();
+  if (base.empty()) return std::wstring();
+  const std::string relative = molink::clipboard_files::staging_relative_directory(
+      clipboard_session_, sequence);
+  std::wstring path = base;
+  // The module returns UTF-8 segments separated by '/'; create every level so
+  // `%LOCALAPPDATA%\moLink\clipboard\<session>\<sequence>` exists before the
+  // first `.part` file is opened.
+  size_t start = 0;
+  while (start <= relative.size()) {
+    const size_t slash = relative.find('/', start);
+    const size_t end = slash == std::string::npos ? relative.size() : slash;
+    const std::string segment = relative.substr(start, end - start);
+    if (!segment.empty()) {
+      path += L"\\";
+      path += wide_of(segment);
+      CreateDirectoryW(path.c_str(), nullptr);
+    }
+    if (slash == std::string::npos) break;
+    start = slash + 1;
+  }
+  return path;
+}
+
+void session_client::queue_clipboard_toast(const wchar_t* action,
+                                           const std::wstring& message,
+                                           int count) {
+  file_event event;
+  event.action = action;
+  event.message = message;
+  event.count = count;
+  shell_file_events_.push_back(std::move(event));
+}
+
+bool session_client::set_clipboard_files(
+    const std::vector<std::wstring>& paths) {
+  if (paths.empty()) return false;
+  std::size_t characters = 1;  // final list terminator
+  for (const std::wstring& path : paths) characters += path.size() + 1;
+  const std::size_t bytes =
+      sizeof(DROPFILES) + characters * sizeof(wchar_t);
+  for (int attempt = 0; attempt < 5; ++attempt) {
+    if (!OpenClipboard(nullptr)) {
+      Sleep(10);
+      continue;
+    }
+    EmptyClipboard();
+    HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if (memory != nullptr) {
+      auto* drop = static_cast<DROPFILES*>(GlobalLock(memory));
+      if (drop != nullptr) {
+        ZeroMemory(drop, sizeof(DROPFILES));
+        drop->pFiles = sizeof(DROPFILES);
+        drop->fWide = TRUE;
+        auto* cursor = reinterpret_cast<wchar_t*>(
+            reinterpret_cast<BYTE*>(drop) + sizeof(DROPFILES));
+        for (const std::wstring& path : paths) {
+          std::memcpy(cursor, path.c_str(), path.size() * sizeof(wchar_t));
+          cursor += path.size();
+          *cursor++ = L'\0';
+        }
+        *cursor = L'\0';
+        GlobalUnlock(memory);
+        if (SetClipboardData(CF_HDROP, memory) != nullptr) {
+          CloseClipboard();
+          return true;
+        }
+      }
+      GlobalFree(memory);
+    }
+    CloseClipboard();
+  }
+  return false;
+}
+
+bool session_client::send_clipboard_range(uint32_t id, uint32_t code,
+                                          uint64_t offset,
+                                          const uint8_t* data, size_t len) {
+  std::vector<uint8_t> packet(32 + 16 + len, 0);
+  packet[0] = 'M';
+  packet[1] = 'O';
+  packet[2] = 'L';
+  packet[3] = 'K';
+  packet[4] = 1;     // protocol version
+  packet[5] = 0x17;  // packet_type::clipboard_range
+  write_u32(packet.data() + 24, static_cast<uint32_t>(16 + len));
+  write_u32(packet.data() + 32, id);
+  write_u32(packet.data() + 36, code);
+  write_u64(packet.data() + 40, offset);
+  if (len != 0 && data != nullptr) {
+    std::memcpy(packet.data() + 48, data, len);
+  }
+  return ws_.send_binary(packet.data(), packet.size());
+}
+
+void session_client::discard_clipboard_pull() {
+  if (!clipboard_pull_) return;
+  for (clipboard_pull_file& file : clipboard_pull_->files) {
+    if (file.out.is_open()) file.out.close();
+    if (!file.temp_path.empty()) DeleteFileW(file.temp_path.c_str());
+    // A completed batch is referenced by the local clipboard; its final
+    // files must outlive the selection so an Explorer paste still works.
+    if (file.state != 2 && !file.final_path.empty()) {
+      DeleteFileW(file.final_path.c_str());
+    }
+  }
+  clipboard_pull_.reset();
+}
+
+bool session_client::clipboard_files_changed(
+    const std::vector<std::string>& paths) {
+  if (!ws_.is_open() || !authenticated_ || paths.empty()) return false;
+  // The Web only uses delayed rendering when the host echoed the capability;
+  // an older host would need the eager upload path (not implemented here).
+  if (!host_clipboard_stream_) {
+    queue_clipboard_toast(L"clipboard-warn",
+                          L"远端不支持剪贴板文件，未发送");
+    return false;
+  }
+
+  const uint64_t now = GetTickCount64();
+  std::vector<molink::clipboard_files::entry> raw;
+  std::vector<uint64_t> stamps;
+  std::size_t skipped = 0;
+  for (const std::string& utf8_path : paths) {
+    if (utf8_path.empty()) continue;
+    if (clipboard_echo_.suppress_path(utf8_path, now)) continue;
+    const std::wstring wide_path = wide_of(utf8_path);
+    if (wide_path.empty()) {
+      ++skipped;
+      continue;
+    }
+    WIN32_FILE_ATTRIBUTE_DATA info{};
+    if (!GetFileAttributesExW(wide_path.c_str(), GetFileExInfoStandard,
+                              &info) ||
+        (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+      // A folder copy is not a file list; the host's lazy path expects files.
+      ++skipped;
+      continue;
+    }
+    molink::clipboard_files::entry file;
+    file.id = static_cast<std::uint32_t>(raw.size() + 1);
+    file.name = utf8_of(wbase_name(wide_path));
+    file.size = (static_cast<uint64_t>(info.nFileSizeHigh) << 32) |
+                static_cast<uint64_t>(info.nFileSizeLow);
+    file.path = utf8_path;
+    raw.push_back(std::move(file));
+    // Re-copying a file whose contents changed but whose name and size did
+    // not is still a new selection. The Web keys on the local core's content
+    // hash; the mtime is the native equivalent here.
+    stamps.push_back((static_cast<uint64_t>(info.ftLastWriteTime.dwHighDateTime)
+                      << 32) |
+                     static_cast<uint64_t>(info.ftLastWriteTime.dwLowDateTime));
+  }
+
+  const molink::clipboard_files::plan plan =
+      molink::clipboard_files::plan_offer_entries(raw);
+  const std::size_t omitted = plan.omitted + skipped;
+  if (plan.files.empty()) {
+    if (raw.empty() && skipped > 0) {
+      // Explorer can copy folders too; the host's lazy file list has no
+      // directory entry the remote apps could paste.
+      queue_clipboard_toast(L"clipboard-warn",
+                            L"剪贴板中的文件夹暂不支持发送");
+    } else if (omitted > 0) {
+      queue_clipboard_toast(
+          L"clipboard-warn",
+          L"剪贴板文件超出上限，未发送给远端");
+    }
+    return false;
+  }
+
+  std::string key;
+  for (std::size_t i = 0; i < plan.files.size(); ++i) {
+    const molink::clipboard_files::entry& file = plan.files[i];
+    if (!key.empty()) key.push_back('|');
+    key += file.name + ':' + std::to_string(file.size) + ':' +
+           std::to_string(i < stamps.size() ? stamps[i] : 0);
+  }
+  if (key == clipboard_offer_key_) return false;
+
+  std::string files_json;
+  for (const molink::clipboard_files::entry& file : plan.files) {
+    if (!files_json.empty()) files_json.push_back(',');
+    files_json += "{\"name\":\"";
+    files_json += json_escape(file.name);
+    files_json += "\",\"size\":" + std::to_string(file.size) + "}";
+  }
+  const std::string extra =
+      ",\"files\":[" + files_json +
+      "],\"dest\":\"~/moLink/clipboard-lazy\"";
+  // docs/protocol.md §文件传输: a viewer's own selection is announced with
+  // `clipboard-offer`; `clipboard-sync` is the host -> viewer direction.
+  if (!send_file_action("clipboard-offer", 0, extra)) return false;
+
+  clipboard_offered_.clear();
+  for (const molink::clipboard_files::entry& file : plan.files) {
+    clipboard_offered_file offered;
+    offered.name = file.name;
+    offered.path = wide_of(file.path);
+    offered.size = file.size;
+    clipboard_offered_.push_back(std::move(offered));
+    clipboard_echo_.remember_descriptor(file.name, file.size, now);
+  }
+  clipboard_offer_key_ = key;
+  if (omitted > 0) {
+    queue_clipboard_toast(
+        L"clipboard-warn",
+        L"剪贴板文件超出上限，只发送了 " +
+            std::to_wstring(plan.files.size()) + L" 个");
+  }
+  return true;
+}
+
+void session_client::clipboard_files_cleared() {
+  // Keep `clipboard_offered_` answerable: the host may already be inside a
+  // paste whose fetch is in flight. Only the dedup key is dropped, so the
+  // same files may be offered again once the clipboard holds them again.
+  clipboard_offer_key_.clear();
+}
+
+void session_client::start_clipboard_pull(const file_event& offer) {
+  const uint64_t now = GetTickCount64();
+  if (offer.clip_files.empty()) {
+    // The remote clipboard became text (or was cleared): the announced ids no
+    // longer name anything, so abandon the batch and delete its partials.
+    discard_clipboard_pull();
+    return;
+  }
+
+  std::vector<molink::clipboard_files::entry> raw;
+  raw.reserve(offer.clip_files.size());
+  for (const molink::clipboard_files::entry& file : offer.clip_files) {
+    if (clipboard_echo_.suppress_descriptor(file.name, file.size, now)) {
+      continue;
+    }
+    raw.push_back(file);
+  }
+  if (raw.empty()) return;  // our own offer came back
+
+  const molink::clipboard_files::plan plan =
+      molink::clipboard_files::plan_pull_entries(raw);
+  const std::size_t omitted = plan.omitted + offer.clip_omitted;
+  if (plan.files.empty()) {
+    // The whole new selection is over a limit (or malformed). It supersedes
+    // whatever was in flight, exactly like a new valid selection does.
+    discard_clipboard_pull();
+    if (omitted > 0) {
+      queue_clipboard_toast(
+          L"clipboard-warn",
+          L"远端剪贴板有 " + std::to_wstring(omitted) +
+              L" 个文件超出上限，未接收");
+    }
+    return;
+  }
+
+  // A new real selection supersedes the previous one. Do this only after the
+  // echo filter, so a host echo of our own offer cannot cancel an unrelated
+  // download that is already running.
+  discard_clipboard_pull();
+
+  const uint32_t sequence = ++clipboard_batch_seq_;
+  std::wstring directory = clipboard_batch_directory(sequence);
+  auto batch = std::make_unique<clipboard_pull_batch>();
+  batch->sequence = sequence;
+  batch->total = plan.bytes;
+  batch->omitted = omitted;
+  batch->nested_rdp = offer.clip_nested_rdp;
+
+  if (directory.empty()) {
+    queue_clipboard_toast(L"clipboard-error",
+                          L"无法创建剪贴板目录，未接收文件");
+    return;
+  }
+  batch->directory = directory;
+  clipboard_pull_ = std::move(batch);
+
+  for (const molink::clipboard_files::entry& source : plan.files) {
+    clipboard_pull_file file;
+    file.id = source.id;
+    file.task = kClipboardTaskFlag | (next_clipboard_task_++);
+    file.name = source.name;
+    file.size = source.size;
+    file.final_path = directory + L"\\" + wide_of(source.name);
+    file.temp_path = file.final_path + L".part";
+    file.out.open(file.temp_path.c_str(),
+                  std::ios::binary | std::ios::trunc);
+    if (!file.out) {
+      fail_clipboard_pull(L"无法写入剪贴板文件");
+      return;
+    }
+    if (file.size == 0) {
+      file.out.close();
+      file.state = 2;  // an empty file needs no range request
+    }
+    clipboard_pull_->files.push_back(std::move(file));
+  }
+
+  if (offer.clip_nested_rdp) {
+    queue_clipboard_toast(L"clipboard-info",
+                          L"远端剪贴板来自内层 RDP 会话");
+  }
+  if (omitted > 0) {
+    queue_clipboard_toast(
+        L"clipboard-warn",
+        L"远端剪贴板另有 " + std::to_wstring(omitted) +
+            L" 个文件超出上限，未接收");
+  }
+  pump_clipboard_pull(now);
+}
+
+void session_client::request_clipboard_range(clipboard_pull_file& file,
+                                             uint64_t now_ms) {
+  const uint64_t length =
+      molink::clipboard_files::chunk_length(file.size, file.received);
+  if (length == 0) {
+    file.state = 2;
+    if (file.out.is_open()) file.out.close();
+    return;
+  }
+  file.state = 1;
+  file.requested_at = now_ms;
+  if (!send_file_action("clipboard-pull", file.id,
+                        ",\"offset\":" + std::to_string(file.received) +
+                            ",\"length\":" + std::to_string(length))) {
+    // The socket is gone; waiting out the range timeout would only delay the
+    // user-visible failure.
+    fail_clipboard_pull(L"连接已断开，剪贴板文件接收失败");
+  }
+}
+
+void session_client::advance_clipboard_pull(uint64_t now_ms) {
+  // A finished/invalid active file releases the slot first.
+  if (clipboard_pull_->active >= 0) {
+    clipboard_pull_file& active =
+        clipboard_pull_->files[static_cast<std::size_t>(
+            clipboard_pull_->active)];
+    if (active.state == 1) return;  // waiting for its range reply
+    clipboard_pull_->active = -1;
+  }
+  for (std::size_t i = 0; i < clipboard_pull_->files.size(); ++i) {
+    clipboard_pull_file& file = clipboard_pull_->files[i];
+    if (file.state != 0) continue;
+    if (file.size == 0 || file.received >= file.size) {
+      if (file.out.is_open()) file.out.close();
+      file.state = 2;
+      continue;
+    }
+    clipboard_pull_->active = static_cast<int>(i);
+    request_clipboard_range(file, now_ms);
+    return;
+  }
+  bool all_done = true;
+  for (const clipboard_pull_file& file : clipboard_pull_->files) {
+    if (file.state != 2) {
+      all_done = false;
+      break;
+    }
+  }
+  if (all_done) finish_clipboard_pull();
+}
+
+void session_client::pump_clipboard_pull(uint64_t now_ms) {
+  if (!clipboard_pull_ || clipboard_pull_->failed ||
+      clipboard_pull_->cancelled) {
+    return;
+  }
+  if (clipboard_pull_->active >= 0) {
+    clipboard_pull_file& file = clipboard_pull_->files[static_cast<std::size_t>(
+        clipboard_pull_->active)];
+    if (file.state == 1) {
+      if (file.received >= file.size) {
+        if (file.out.is_open()) file.out.close();
+        file.state = 2;
+        clipboard_pull_->active = -1;
+      } else if (now_ms - file.requested_at >=
+                 molink::clipboard_files::range_timeout_ms) {
+        if (file.retry.failed()) {
+          request_clipboard_range(file, now_ms);
+        } else {
+          fail_clipboard_pull(L"剪贴板文件接收超时");
+        }
+        return;
+      } else {
+        return;
+      }
+    } else {
+      clipboard_pull_->active = -1;
+    }
+  }
+  advance_clipboard_pull(now_ms);
+}
+
+void session_client::handle_clipboard_chunk(const file_event& event) {
+  if (!clipboard_pull_ || clipboard_pull_->failed ||
+      clipboard_pull_->cancelled || clipboard_pull_->active < 0) {
+    return;
+  }
+  clipboard_pull_file& file = clipboard_pull_->files[static_cast<std::size_t>(
+      clipboard_pull_->active)];
+  if (file.id != event.id || file.state != 1) return;
+  // A timed-out range that was re-requested can still produce an earlier
+  // reply. Once a newer reply has advanced the file, a success that ends at
+  // or before the current offset is a stale duplicate, not a short read.
+  if (event.offset < file.received) {
+    if (event.status == 1) return;
+    if (event.status == 0 &&
+        event.offset + event.chunk_data.size() <= file.received) {
+      return;
+    }
+  }
+
+  const uint64_t expected =
+      molink::clipboard_files::chunk_length(file.size, file.received);
+  const molink::clipboard_files::chunk_state check =
+      molink::clipboard_files::check_chunk(
+          event.status, event.offset, file.received, expected,
+          event.chunk_data.size());
+  switch (check) {
+    case molink::clipboard_files::chunk_state::ok:
+      break;
+    case molink::clipboard_files::chunk_state::gone:
+      fail_clipboard_pull(L"远端剪贴板已变化，请重新复制");
+      return;
+    case molink::clipboard_files::chunk_state::incomplete:
+      fail_clipboard_pull(L"剪贴板文件接收不完整");
+      return;
+    case molink::clipboard_files::chunk_state::failed:
+      if (file.retry.failed()) {
+        request_clipboard_range(file, GetTickCount64());
+      } else {
+        fail_clipboard_pull(L"剪贴板文件接收失败");
+      }
+      return;
+  }
+
+  if (!event.chunk_data.empty()) {
+    file.out.write(
+        reinterpret_cast<const char*>(event.chunk_data.data()),
+        static_cast<std::streamsize>(event.chunk_data.size()));
+    if (!file.out) {
+      fail_clipboard_pull(L"无法写入剪贴板文件");
+      return;
+    }
+  }
+  file.received += event.chunk_data.size();
+  clipboard_pull_->received += event.chunk_data.size();
+  file.retry.succeeded();
+  if (file.received >= file.size) {
+    file.out.close();
+    if (!file.out) {
+      fail_clipboard_pull(L"无法写入剪贴板文件");
+      return;
+    }
+    file.state = 2;
+    clipboard_pull_->active = -1;
+  } else {
+    request_clipboard_range(file, GetTickCount64());
+    return;
+  }
+  pump_clipboard_pull(GetTickCount64());
+}
+
+void session_client::finish_clipboard_pull() {
+  if (!clipboard_pull_ || clipboard_pull_->complete ||
+      clipboard_pull_->failed || clipboard_pull_->cancelled) {
+    return;
+  }
+  std::vector<std::wstring> finals;
+  finals.reserve(clipboard_pull_->files.size());
+  for (clipboard_pull_file& file : clipboard_pull_->files) {
+    if (file.state != 2 || file.received != file.size) {
+      fail_clipboard_pull(L"剪贴板文件接收不完整");
+      return;
+    }
+    if (file.out.is_open()) file.out.close();
+    if (!MoveFileExW(file.temp_path.c_str(), file.final_path.c_str(),
+                     MOVEFILE_REPLACE_EXISTING)) {
+      fail_clipboard_pull(L"无法保存剪贴板文件");
+      return;
+    }
+    finals.push_back(file.final_path);
+  }
+
+  const uint64_t now = GetTickCount64();
+  // Record the paths before the clipboard write: the resulting
+  // WM_CLIPBOARDUPDATE must be recognised as an echo, not a new local copy.
+  for (const std::wstring& path : finals) {
+    clipboard_echo_.remember_path(utf8_of(path), now);
+  }
+  if (!set_clipboard_files(finals)) {
+    fail_clipboard_pull(L"无法写入本机剪贴板");
+    return;
+  }
+  clipboard_pull_->complete = true;
+  clipboard_pull_->received = clipboard_pull_->total;
+  // The local clipboard now describes the host's selection, so a later copy
+  // of a previous outbound selection must be treated as a fresh offer.
+  clipboard_offer_key_.clear();
+  queue_clipboard_toast(
+      L"clipboard-done",
+      L"已接收 " + std::to_wstring(finals.size()) + L" 个剪贴板文件",
+      static_cast<int>(finals.size()));
+}
+
+void session_client::fail_clipboard_pull(const std::wstring& message) {
+  if (!clipboard_pull_) return;
+  clipboard_pull_->failed = true;
+  clipboard_pull_->active = -1;
+  for (clipboard_pull_file& file : clipboard_pull_->files) {
+    if (file.out.is_open()) file.out.close();
+    if (!file.temp_path.empty()) DeleteFileW(file.temp_path.c_str());
+    if (!file.final_path.empty()) DeleteFileW(file.final_path.c_str());
+    file.state = 3;
+    file.message = message;
+  }
+  queue_clipboard_toast(L"clipboard-error", message);
+}
+
+void session_client::cancel_clipboard_pull() {
+  if (!clipboard_pull_ || clipboard_pull_->complete) return;
+  clipboard_pull_->cancelled = true;
+  clipboard_pull_->active = -1;
+  for (clipboard_pull_file& file : clipboard_pull_->files) {
+    if (file.out.is_open()) file.out.close();
+    if (!file.temp_path.empty()) DeleteFileW(file.temp_path.c_str());
+    if (!file.final_path.empty()) DeleteFileW(file.final_path.c_str());
+    if (file.state != 2) {
+      file.state = 3;
+      file.cancelled = true;
+      file.message = L"已取消";
+    }
+  }
+  queue_clipboard_toast(L"clipboard-warn", L"已取消接收剪贴板文件");
+}
+
+void session_client::handle_clipboard_fetch(const file_event& event) {
+  if (!authenticated_) return;
+  // Prefer the name over the index: a newer local copy may have replaced the
+  // offered list between the host's paste and this fetch, and serving the
+  // file now at that index would paste the wrong bytes under a still-valid
+  // request id. The planner makes names unique within one offer.
+  std::size_t index = clipboard_offered_.size();
+  const std::string name = utf8_of(event.name);
+  if (!name.empty()) {
+    for (std::size_t i = 0; i < clipboard_offered_.size(); ++i) {
+      if (clipboard_offered_[i].name == name) {
+        index = i;
+        break;
+      }
+    }
+    if (index >= clipboard_offered_.size()) {
+      // The host still has a request for an offer this machine replaced. Do
+      // not serve whatever now sits at that index.
+      send_clipboard_range(event.id, 1, event.offset, nullptr, 0);
+      return;
+    }
+  } else if (event.index < clipboard_offered_.size()) {
+    index = event.index;
+  }
+  if (index >= clipboard_offered_.size()) {
+    send_clipboard_range(event.id, 1, event.offset, nullptr, 0);
+    return;
+  }
+  const clipboard_offered_file& file = clipboard_offered_[index];
+  uint64_t offset = event.offset;
+  uint64_t length = event.length;
+  if (length == 0) length = molink::clipboard_files::chunk_bytes;
+  if (offset > file.size) {
+    send_clipboard_range(event.id, 1, offset, nullptr, 0);
+    return;
+  }
+  uint64_t take = file.size - offset;
+  take = (std::min)(take, length);
+  take = (std::min)(take, molink::clipboard_files::chunk_bytes);
+  if (take == 0) {
+    send_clipboard_range(event.id, 0, offset, nullptr, 0);
+    return;
+  }
+
+  std::ifstream in(file.path.c_str(), std::ios::binary);
+  if (!in) {
+    send_clipboard_range(event.id, 1, offset, nullptr, 0);
+    return;
+  }
+  in.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+  std::vector<uint8_t> data(static_cast<std::size_t>(take));
+  if (!in) {
+    send_clipboard_range(event.id, 1, offset, nullptr, 0);
+    return;
+  }
+  in.read(reinterpret_cast<char*>(data.data()),
+          static_cast<std::streamsize>(data.size()));
+  const std::streamsize got = in.gcount();
+  if (got != static_cast<std::streamsize>(data.size())) {
+    send_clipboard_range(event.id, 1, offset, nullptr, 0);
+    return;
+  }
+  send_clipboard_range(event.id, 0, offset, data.data(), data.size());
 }
 
 std::vector<std::string> session_client::take_chat() {
@@ -1907,6 +2619,20 @@ void session_client::handle_text(const std::string& text) {
     if (find_string(text, "security", &security) && !security.empty()) {
       security_ = wide_of(security);
     }
+    // Clipboard-file capabilities. `clipboard_stream` is the host confirming
+    // it will fetch ranges from our lazy offer; `clipboard_pull` is the
+    // reverse direction (`clipboard-sync.files` + 0x18). `nested_rdp` is only
+    // a badge: the host streams the inner client's files either way.
+    bool clipboard_flag = false;
+    if (json_bool_field(text, "clipboard_stream", 0, &clipboard_flag)) {
+      host_clipboard_stream_ = clipboard_flag;
+    }
+    if (json_bool_field(text, "clipboard_pull", 0, &clipboard_flag)) {
+      host_clipboard_pull_ = clipboard_flag;
+    }
+    if (json_bool_field(text, "clipboard_nested_rdp", 0, &clipboard_flag)) {
+      host_nested_rdp_ = clipboard_flag;
+    }
   } else if (type == "codec") {
     const uint64_t now = GetTickCount64();
     if (now - last_ping_ >= 1000) {
@@ -1980,6 +2706,46 @@ void session_client::handle_text(const std::string& text) {
       chat_inbox_.push_back(message);
     }
   } else if (type == "clipboard" || type == "clipboard-sync") {
+    // The id-based pull list is a different message shape from the legacy
+    // `clipboard action=files` list: only `clipboard-sync` carries session
+    // ids, and only that list may be downloaded (the legacy one is for the
+    // Web files panel / older clients).
+    if (type == "clipboard-sync") {
+      std::string clip_probe;
+      if (text.find("\"files\"") != std::string::npos) {
+        file_event event;
+        event.action = L"clipboard-pull-offer";
+        for (const std::string& item : json_object_array(text, "files")) {
+          molink::clipboard_files::entry file;
+          uint64_t number = 0;
+          std::string value;
+          if (json_u64_field(item, "id", 0, &number)) {
+            file.id = static_cast<uint32_t>(number);
+          }
+          if (json_string_field(item, "name", 0, &value)) file.name = value;
+          if (json_u64_field(item, "size", 0, &number)) file.size = number;
+          if (json_string_field(item, "path", 0, &value)) file.path = value;
+          event.clip_files.push_back(std::move(file));
+        }
+        uint64_t omitted = 0;
+        if (json_u64_field(text, "omitted", 0, &omitted)) {
+          event.clip_omitted = static_cast<std::size_t>(omitted);
+        }
+        bool nested = false;
+        if (json_bool_field(text, "nested_rdp", 0, &nested)) {
+          event.clip_nested_rdp = nested;
+        }
+        std::lock_guard<std::mutex> lock(file_mutex_);
+        file_events_.push_back(std::move(event));
+      } else if (find_string(text, "text", &clip_probe) && !clip_probe.empty()) {
+        // Text replaced the files: any in-flight pull now addresses ids that
+        // no longer exist. Abandon it before the next range comes back gone.
+        file_event event;
+        event.action = L"clipboard-pull-offer";
+        std::lock_guard<std::mutex> lock(file_mutex_);
+        file_events_.push_back(std::move(event));
+      }
+    }
     std::string action;
     std::string clip;
     const bool has_action = find_string(text, "action", &action);
