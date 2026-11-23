@@ -6790,52 +6790,61 @@ std::wstring local_listing_error(DWORD error) {
 
 /// Lists a local folder (or the drive list when `path` is empty). Win32 is
 /// synchronous, so this runs from the UI thread like the picker does.
+///
+/// The new rows are built beside the old ones: a rejected path keeps the
+/// previous listing (like the host browser) and only reports inline, so a bad
+/// path can never look like an empty folder.
 void local_browse(const std::wstring& path) {
-  g.local_error.clear();
-  g.local_selection.clear();
-  g.local_scroll = 0;
-  g.local_entries.clear();
-  g.local_path = path;
-  g.local_input = path;
-  g.local_caret = path.size();
-  refresh_local_roots();
-
+  std::vector<app_state::local_entry> entries;
   if (path.empty()) {
+    refresh_local_roots();
     for (const molink::net::file_listing_root& root : g.local_roots) {
       app_state::local_entry entry;
       entry.name = root.name;
       entry.path = root.path;
       entry.dir = true;
-      g.local_entries.push_back(std::move(entry));
+      entries.push_back(std::move(entry));
     }
-    return;
+  } else {
+    const std::wstring query = local_join(path, L"*");
+    WIN32_FIND_DATAW data{};
+    HANDLE find = FindFirstFileW(query.c_str(), &data);
+    if (find == INVALID_HANDLE_VALUE) {
+      // Keep local_path and the rows the user is looking at; the path box
+      // keeps the text that was tried so the reason has something to explain.
+      g.local_error = local_listing_error(GetLastError());
+      g.local_input = path;
+      g.local_caret = path.size();
+      return;
+    }
+    do {
+      const std::wstring name = data.cFileName;
+      if (name == L"." || name == L"..") continue;
+      app_state::local_entry entry;
+      entry.name = name;
+      entry.dir = (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+      entry.size = (static_cast<uint64_t>(data.nFileSizeHigh) << 32) |
+                   static_cast<uint64_t>(data.nFileSizeLow);
+      entries.push_back(std::move(entry));
+    } while (FindNextFileW(find, &data) != FALSE);
+    FindClose(find);
+    refresh_local_roots();
+    // Folders first, then a case-insensitive name order, like the host listing.
+    std::sort(entries.begin(), entries.end(),
+              [](const app_state::local_entry& a,
+                 const app_state::local_entry& b) {
+                if (a.dir != b.dir) return a.dir;
+                return _wcsicmp(a.name.c_str(), b.name.c_str()) < 0;
+              });
   }
 
-  const std::wstring query = local_join(path, L"*");
-  WIN32_FIND_DATAW data{};
-  HANDLE find = FindFirstFileW(query.c_str(), &data);
-  if (find == INVALID_HANDLE_VALUE) {
-    g.local_error = local_listing_error(GetLastError());
-    return;
-  }
-  do {
-    const std::wstring name = data.cFileName;
-    if (name == L"." || name == L"..") continue;
-    app_state::local_entry entry;
-    entry.name = name;
-    entry.dir = (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
-    entry.size = (static_cast<uint64_t>(data.nFileSizeHigh) << 32) |
-                 static_cast<uint64_t>(data.nFileSizeLow);
-    g.local_entries.push_back(std::move(entry));
-  } while (FindNextFileW(find, &data) != FALSE);
-  FindClose(find);
-  // Folders first, then a case-insensitive name order, like the host listing.
-  std::sort(g.local_entries.begin(), g.local_entries.end(),
-            [](const app_state::local_entry& a,
-               const app_state::local_entry& b) {
-              if (a.dir != b.dir) return a.dir;
-              return _wcsicmp(a.name.c_str(), b.name.c_str()) < 0;
-            });
+  g.local_error.clear();
+  g.local_selection.clear();
+  g.local_scroll = 0;
+  g.local_path = path;
+  g.local_input = path;
+  g.local_caret = path.size();
+  g.local_entries = std::move(entries);
 }
 
 /// Enter in the local path bar: `~`, absolute paths and `..` all go through
@@ -6897,6 +6906,23 @@ void remote_open_input() {
   const std::string resolved = molink::files::resolve_remote_path(
       utf8_of(g.files_input), utf8_of(g.files_path), utf8_of(g.files_root));
   request_files_browse_path(wide_of(resolved));
+}
+
+/// Leave a text field. The path boxes snap back to the folder that is actually
+/// displayed (Web `setRemoteInput(listing.path)` / `setLocalInput(localLabel)`)
+/// and drop the reason left by an abandoned attempt; other fields just blur.
+void blur_text_field() {
+  if (g.focus_field == 30) {
+    g.files_input = g.files_path;
+    g.files_caret = g.files_input.size();
+    g.files_error.clear();
+  } else if (g.focus_field == 31) {
+    g.local_input = g.local_path;
+    g.local_caret = g.local_input.size();
+    g.local_error.clear();
+  }
+  g.focus_field = 0;
+  clear_text_selection();
 }
 
 bool uploads_busy() {
@@ -8567,13 +8593,30 @@ void draw_files_drawer(float w, float h) {
   const D2D1_RECT_F browse_rect =
       D2D1::RectF(panel.right - 60, content_top + 30, panel.right - 16,
                   content_top + 54);
+  // Both panes draw the same box; only the active tab's rect is hit-tested,
+  // but both are stored so caret placement and text selection work either way.
   g.hit_files_input = input_rect;
   g.hit_files_browse = browse_rect;
+  g.hit_local_input = input_rect;
+  g.hit_local_browse = browse_rect;
   const int focus_field = remote ? 30 : 31;
   const bool focused = g.focus_field == focus_field;
   fill_round(g.target, input_rect, 6, g.theme->panel);
   stroke_round(g.target, input_rect, 6,
-               focused ? g.theme->accent : g.theme->line_soft, 1.0f);
+               focused ? g.theme->accent
+                       : (!error.empty() ? danger : g.theme->line_soft),
+               1.0f);
+  if (focused && g.sel_field == focus_field && g.sel_start < g.sel_end) {
+    const float x0 = input_rect.left + 7;
+    const float xa =
+        x0 + measure_text(g.mono_small, input.substr(0, g.sel_start));
+    const float xb =
+        x0 + measure_text(g.mono_small, input.substr(0, g.sel_end));
+    fill_round(g.target,
+               D2D1::RectF(xa, input_rect.top + 4, xb, input_rect.bottom - 4),
+               2, D2D1::ColorF(g.theme->accent.r, g.theme->accent.g,
+                               g.theme->accent.b, 0.22f));
+  }
   const std::wstring shown_input =
       input.empty() && !focused
           ? (remote ? files_text::kPathPlaceholderRemote
@@ -9112,7 +9155,11 @@ void files_click(float x, float y, HWND window) {
     }
     return;
   }
-  if (inside(g.hit_files_input, x, y)) {
+  const D2D1_RECT_F& input_hit =
+      remote ? g.hit_files_input : g.hit_local_input;
+  const D2D1_RECT_F& browse_hit =
+      remote ? g.hit_files_browse : g.hit_local_browse;
+  if (inside(input_hit, x, y)) {
     g.focus_field = remote ? 30 : 31;
     size_t* caret = focus_caret(g.focus_field);
     if (caret != nullptr) *caret = caret_for_field(g.focus_field, x);
@@ -9122,7 +9169,7 @@ void files_click(float x, float y, HWND window) {
     if (g.window != nullptr) SetCapture(g.window);
     return;
   }
-  if (inside(g.hit_files_browse, x, y)) {
+  if (inside(browse_hit, x, y)) {
     if (remote) {
       remote_open_input();
     } else {
@@ -9908,7 +9955,10 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
             field = 3;
           } else if (inside(g.hit_retry_input, x, y)) {
             field = 11;
-          } else if (g.files_open && inside(g.hit_files_input, x, y)) {
+          } else if (g.files_open &&
+                     inside(g.files_tab == 1 ? g.hit_files_input
+                                             : g.hit_local_input,
+                            x, y)) {
             field = g.files_tab == 1 ? 30 : 31;
           }
         }
@@ -10935,7 +10985,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
         } else if (g.immersive) {
           g.immersive = false;
         } else if (g.focus_field != 0) {
-          g.focus_field = 0;
+          blur_text_field();
         }
         InvalidateRect(window, nullptr, FALSE);
         return 0;
@@ -11084,8 +11134,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
             clear_text_selection();
           }
         } else if (wparam == VK_ESCAPE) {
-          g.focus_field = 0;
-          clear_text_selection();
+          blur_text_field();
         } else if (ctrl && (wparam == 'A' || wparam == 'a')) {
           g.sel_field = g.focus_field;
           g.sel_anchor = 0;
