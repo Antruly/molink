@@ -674,7 +674,7 @@ enum hover_slot {
   hv_qp_preset4, hv_qp_preset5, hv_qp_preset6,
   hv_qp_rate0, hv_qp_rate1, hv_qp_rate2, hv_qp_format, hv_qp_reset,
   hv_menu_item0, hv_menu_item1, hv_menu_item2, hv_menu_item3, hv_menu_item4,
-  hv_menu_item5, hv_menu_item6, hv_menu_item7,
+  hv_menu_item5, hv_menu_item6, hv_menu_item7, hv_menu_item8, hv_menu_item9,
   hv_set_close, hv_set_nav0, hv_set_nav1, hv_set_nav2, hv_set_nav3,
   hv_set_nav4, hv_set_nav5,
   hv_set_theme0, hv_set_theme1, hv_set_theme2,
