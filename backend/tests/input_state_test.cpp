@@ -64,6 +64,7 @@ void test_repeat_keydown_is_dropped() {
   key_state state;
   expect_events(state.key('A', false, true, false, true),
                 {{"KeyA", true}}, "the first key-down is sent");
+  expect(state.held("KeyA"), "the held set names the pressed code");
   expect_events(state.key('A', false, true, true, true), {},
                 "an auto-repeat key-down is dropped");
   expect_events(state.key('A', false, true, false, true), {},
@@ -71,6 +72,7 @@ void test_repeat_keydown_is_dropped() {
   expect(state.held_count() == 1, "the key stays held exactly once");
   expect_events(state.key('A', false, true, false, false),
                 {{"KeyA", false}}, "the key-up is sent");
+  expect(!state.held("KeyA"), "the key-up removes the code");
   expect(state.held_count() == 0, "the key-up clears the held state");
 }
 
