@@ -81,12 +81,12 @@ void test_size_limit_counts_utf8_bytes() {
   text_sync sync;
   // Three UTF-8 bytes per CJK code point, so the cap is reached at 64 Ki
   // characters, exactly the unit the host's std::string check uses.
-  const std::u16string cjk(65536, u'世');
+  const std::u16string cjk(65536, char16_t{0x4E16});
   const decision allowed = sync.on_local_text(cjk, 1000);
   expect(allowed.send, "192 KiB of 3-byte characters is allowed");
   expect(allowed.bytes == max_text_bytes, "the cap is measured in UTF-8 bytes");
 
-  const std::u16string over(65537, u'世');
+  const std::u16string over(65537, char16_t{0x4E16});
   const decision skipped = sync.on_local_text(over, 2000);
   expect(!skipped.send && skipped.reason == skip_reason::too_large,
          "one more 3-byte character crosses the cap");
