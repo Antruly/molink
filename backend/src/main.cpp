@@ -1,5 +1,6 @@
 #include <atomic>
 #include <chrono>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <csignal>
@@ -66,6 +67,7 @@
 #else
 #include <cerrno>
 #include <csignal>
+#include <fcntl.h>
 #include <unistd.h>
 #define MOLINK_GETPID getpid
 #endif
@@ -74,7 +76,159 @@ namespace {
 
 volatile std::sig_atomic_t g_stop = 0;
 
-void on_signal(int) { g_stop = 1; }
+/// Why this process is leaving. The first cause wins: a SIGTERM delivered
+/// while the parent watcher is already shutting the core down must not hide
+/// the real reason.
+enum class exit_reason : int {
+  none = 0,
+  normal,
+  signal,
+  parent_gone,
+  listen_failed,
+  exception,
+};
+
+std::atomic<int> g_exit_reason{static_cast<int>(exit_reason::none)};
+std::atomic<int> g_exit_signal{0};
+/// Set once app.exit has been written, so a terminate/abort pair does not log
+/// the same exit twice.
+std::atomic<bool> g_exit_logged{false};
+
+void note_exit_reason(exit_reason reason) {
+  int expected = static_cast<int>(exit_reason::none);
+  g_exit_reason.compare_exchange_strong(expected, static_cast<int>(reason));
+}
+
+void log_app_exit(const char* reason, int code, int signal_number = 0) {
+  // An abrupt crash can race the normal exit path; one line is enough.
+  if (g_exit_logged.exchange(true)) return;
+  try {
+    std::vector<molink::diag_field> fields;
+    fields.push_back({"reason", reason});
+    fields.push_back({"code", std::to_string(code)});
+    if (signal_number > 0) {
+      fields.push_back({"signal", std::to_string(signal_number)});
+    }
+    molink::diag().log(molink::diag_level::info, "app.exit", std::string(),
+                       fields);
+  } catch (...) {
+    // Logging must never turn a normal exit into a crash.
+  }
+}
+
+void on_signal(int signal_number) {
+  g_stop = 1;
+  g_exit_signal.store(signal_number);
+  note_exit_reason(exit_reason::signal);
+}
+
+#if !defined(_WIN32)
+/// A pre-opened diagnostic file for the fatal-signal handler. diag() uses
+/// mutexes and stdio and cannot run there; write(2) on this descriptor can.
+int g_crash_fd = -1;
+
+void refresh_crash_log() {
+  try {
+    const auto epoch_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::system_clock::now().time_since_epoch())
+                              .count();
+    const std::string path =
+        molink::default_diag_directory() + "/" +
+        molink::diag_log::file_name_for_day(epoch_ms);
+    std::error_code ec;
+    std::filesystem::create_directories(
+        std::filesystem::path(path).parent_path(), ec);
+    const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd < 0) return;
+    const int previous = g_crash_fd;
+    g_crash_fd = fd;
+    if (previous >= 0) ::close(previous);
+  } catch (...) {
+  }
+}
+
+/// Async-signal-safe integer append (no stdio, no allocation).
+void append_int(char*& cursor, char* end, unsigned value) {
+  char digits[16] = {};
+  int count = 0;
+  do {
+    digits[count++] = static_cast<char>('0' + (value % 10));
+    value /= 10;
+  } while (value != 0 && count < static_cast<int>(sizeof(digits)));
+  while (count > 0 && cursor < end) *cursor++ = digits[--count];
+}
+
+void write_crash_line(int signal_number) {
+  if (g_crash_fd < 0) return;
+  char line[96] = {};
+  char* cursor = line;
+  char* end = line + sizeof(line) - 2;
+  const char prefix[] = "app.exit reason=signal code=";
+  for (const char* p = prefix; *p != '\0' && cursor < end; ++p) {
+    *cursor++ = *p;
+  }
+  append_int(cursor, end, static_cast<unsigned>(signal_number));
+  if (cursor < end) *cursor++ = '\n';
+  const std::size_t length = static_cast<std::size_t>(cursor - line);
+  std::size_t written = 0;
+  while (written < length) {
+    const ssize_t n = ::write(g_crash_fd, line + written, length - written);
+    if (n <= 0) break;
+    written += static_cast<std::size_t>(n);
+  }
+}
+
+void on_fatal_signal(int signal_number) {
+  note_exit_reason(exit_reason::exception);
+  g_stop = 1;
+  write_crash_line(signal_number);
+  // Restore the default action and re-raise, so the OS still produces a core
+  // dump (and Windows Error Reporting, on that platform).
+  std::signal(signal_number, SIG_DFL);
+  std::raise(signal_number);
+}
+#endif  // !_WIN32
+
+#if defined(_WIN32)
+BOOL WINAPI on_console_ctrl(DWORD type) {
+  const char* reason = "console";
+  int code = static_cast<int>(type);
+  switch (type) {
+    case CTRL_C_EVENT:
+    case CTRL_BREAK_EVENT:
+      note_exit_reason(exit_reason::signal);
+      g_exit_signal.store(0);
+      g_stop = 1;
+      return TRUE;
+    case CTRL_CLOSE_EVENT:
+      reason = "console-close";
+      break;
+    case CTRL_LOGOFF_EVENT:
+      reason = "console-logoff";
+      break;
+    case CTRL_SHUTDOWN_EVENT:
+      reason = "console-shutdown";
+      break;
+    default:
+      break;
+  }
+  note_exit_reason(exit_reason::signal);
+  log_app_exit(reason, code);
+  // Returning FALSE lets the default handler terminate the process after the
+  // line above has reached the diagnostic file.
+  return FALSE;
+}
+
+LONG WINAPI on_unhandled_exception(EXCEPTION_POINTERS* info) {
+  note_exit_reason(exit_reason::exception);
+  int code = 0;
+  if (info != nullptr && info->ExceptionRecord != nullptr) {
+    code = static_cast<int>(info->ExceptionRecord->ExceptionCode);
+  }
+  log_app_exit("exception", code);
+  return EXCEPTION_EXECUTE_HANDLER;
+}
+#endif
 
 bool process_alive(long pid) {
 #ifdef _WIN32
@@ -410,6 +564,25 @@ int main(int argc, char** argv) {
     fields.push_back({"device", identity.device_id});
     diag().log(diag_level::info, "app.start", std::string(), fields);
   }
+#if defined(_WIN32)
+  // Console signals, logoff/shutdown and an unhandled C++/SEH exception all
+  // leave one app.exit line before the process disappears. Without this a
+  // core killed during a clipboard-pull left no trace at all.
+  SetConsoleCtrlHandler(on_console_ctrl, TRUE);
+  SetUnhandledExceptionFilter(on_unhandled_exception);
+#else
+  refresh_crash_log();
+  std::signal(SIGSEGV, on_fatal_signal);
+  std::signal(SIGABRT, on_fatal_signal);
+  std::signal(SIGFPE, on_fatal_signal);
+  std::signal(SIGILL, on_fatal_signal);
+  std::signal(SIGBUS, on_fatal_signal);
+#endif
+  std::set_terminate([] {
+    note_exit_reason(exit_reason::exception);
+    log_app_exit("exception", 134);
+    std::_Exit(134);
+  });
   // The first write of a new day also prunes, but a host that stays idle
   // overnight should still drop the eighth-oldest file at the day boundary.
   // The check inside cleanup_old_files() respects the recording switch.
@@ -418,6 +591,11 @@ int main(int argc, char** argv) {
       std::this_thread::sleep_for(std::chrono::minutes(30));
       if (g_stop) break;
       diag().cleanup_old_files();
+#if !defined(_WIN32)
+      // A long-running host crosses midnight; keep the fatal-signal log on
+      // the current day's file.
+      refresh_crash_log();
+#endif
     }
   }).detach();
   auto auth = std::make_shared<auth_state>(std::move(stored_settings));
@@ -967,6 +1145,8 @@ int main(int argc, char** argv) {
     std::cerr << "molink-core: failed to listen on "
               << format_url_host(cfg.host) << ":"
               << cfg.port << " (libuv error " << rc << ")\n";
+    note_exit_reason(exit_reason::listen_failed);
+    log_app_exit("listen-failed", 1);
     return 1;
   }
 
@@ -1092,6 +1272,7 @@ int main(int argc, char** argv) {
       while (!g_stop && !parent_gone.load()) {
         if (!process_alive(pid)) {
           parent_gone.store(true);
+          note_exit_reason(exit_reason::parent_gone);
           g_stop = 1;
           return;
         }
@@ -1157,6 +1338,20 @@ int main(int argc, char** argv) {
 
   while (g_stop == 0) {
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  }
+
+  // Record the exit before the shutdown sequence runs: a crash or a timeout
+  // while releasing capture/transport must still leave the reason behind.
+  {
+    const int reason = g_exit_reason.load();
+    if (reason == static_cast<int>(exit_reason::parent_gone)) {
+      log_app_exit("parent-gone", 0);
+    } else if (reason == static_cast<int>(exit_reason::signal)) {
+      const int signal_number = g_exit_signal.load();
+      log_app_exit("signal", signal_number, signal_number);
+    } else {
+      log_app_exit("shutdown", 0);
+    }
   }
 
   if (parent_watch.joinable()) parent_watch.join();

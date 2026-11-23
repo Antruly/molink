@@ -7,6 +7,7 @@
 #include <functional>
 #include <limits>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -224,6 +225,7 @@ class fake_blob_source final : public lazy_blob_source {
                   uint64_t, uint64_t) override {
     ++reads;
     lengths.push_back(length);
+    if (throw_on_read) throw std::runtime_error("fake reader threw");
     if (fail) {
       error = "fake failure";
       return false;
@@ -244,6 +246,7 @@ class fake_blob_source final : public lazy_blob_source {
   std::vector<uint32_t> lengths;
   bool fail = false;
   bool short_read = false;
+  bool throw_on_read = false;
 
  private:
   std::vector<lazy_clipboard_file> files_;
@@ -363,6 +366,39 @@ void test_remote_timeout() {
   expect(elapsed < std::chrono::seconds(1), "the timeout is bounded");
 }
 
+void test_remote_oversized_reply_fails() {
+  auto remote = make_remote_source(
+      make_files(1, 4),
+      [](remote_file_source& source, uint32_t id, uint64_t offset) {
+        // The host asked for four bytes; a buggy or hostile peer answers with
+        // far more. The waiter must reject it instead of allocating/using it.
+        const std::vector<uint8_t> huge(1024, 0x7f);
+        source.note_range(id, 0, offset, huge.data(), huge.size());
+      });
+  std::vector<uint8_t> out;
+  std::string error;
+  const auto started = std::chrono::steady_clock::now();
+  const bool ok = remote->read_range(0, 0, 4, out, error, 1000, 1000);
+  const auto elapsed = std::chrono::steady_clock::now() - started;
+  expect(!ok, "a reply larger than the request is rejected");
+  expect(elapsed < std::chrono::milliseconds(500),
+         "the oversized reply fails the read at once");
+}
+
+void test_remote_request_exception_fails() {
+  auto remote = std::make_shared<remote_file_source>(
+      make_files(1, 4),
+      [](std::size_t, uint32_t, uint64_t, uint32_t) -> bool {
+        throw std::runtime_error("post failed");
+      });
+  std::vector<uint8_t> out;
+  std::string error;
+  const bool ok = remote->read_range(0, 0, 4, out, error, 1000, 1000);
+  expect(!ok, "a throwing request callback fails the read");
+  expect(remote->pending_count() == 0,
+         "the failed request left no pending entry");
+}
+
 void test_remote_session_loss_wakes_waiter() {
   auto holder = std::make_shared<std::shared_ptr<remote_file_source>>();
   std::atomic<int> requests{0};
@@ -440,6 +476,19 @@ void test_range_reader_boundaries() {
                          1000, 1000),
          "a failed range fails the read");
   expect(read == 0, "a failed range produces no bytes");
+
+  // A backend that throws (a broken RDP COM stream, a custom reader) must be
+  // reported as a read failure; the exception cannot escape into Explorer's
+  // IStream::Read and terminate the host.
+  fake_blob_source throwing(1000);
+  throwing.throw_on_read = true;
+  position = 0;
+  read = 0;
+  expect(!read_lazy_blob(throwing, 0, position, buffer.data(), 100, read,
+                         error, 1000, 1000),
+         "a throwing range reader fails the read");
+  expect(read == 0 && !error.empty(),
+         "the throwing reader produces no bytes and a readable error");
 }
 
 void test_seek_arithmetic() {
@@ -477,6 +526,8 @@ int main() {
   test_remote_error_reply();
   test_remote_offset_mismatch();
   test_remote_timeout();
+  test_remote_oversized_reply_fails();
+  test_remote_request_exception_fails();
   test_remote_session_loss_wakes_waiter();
   test_range_reader_boundaries();
   test_seek_arithmetic();

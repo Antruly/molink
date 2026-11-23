@@ -589,19 +589,34 @@ class clipboard_object_reader final {
     // IStream::Read cannot be interrupted portably. Answer the viewer on time
     // and let the worker discard the late result; `wedged_` makes every
     // request until it recovers fail fast instead of queueing behind it.
-    std::thread([state, request, offset, per_read_timeout_ms, wedged = wedged_] {
-      std::unique_lock<std::mutex> lock(state->mutex);
-      if (state->cv.wait_for(lock,
-                             std::chrono::milliseconds(per_read_timeout_ms),
-                             [&state] { return state->done; })) {
-        return;
-      }
-      state->done = true;
-      lock.unlock();
-      request->timed_out.store(true);
-      wedged->store(true);
-      if (request->callback) request->callback(2, offset, {});
-    }).detach();
+    try {
+      std::thread([state, request, offset, per_read_timeout_ms,
+                   wedged = wedged_] {
+        std::unique_lock<std::mutex> lock(state->mutex);
+        if (state->cv.wait_for(lock,
+                               std::chrono::milliseconds(per_read_timeout_ms),
+                               [&state] { return state->done; })) {
+          return;
+        }
+        state->done = true;
+        lock.unlock();
+        request->timed_out.store(true);
+        wedged->store(true);
+        if (request->callback) {
+          // The callback posts to the session loop. If that throws, the core
+          // must keep running; the viewer's own pull timeout covers it.
+          try {
+            request->callback(2, offset, {});
+          } catch (...) {
+            clipboard_log("data-object timeout callback threw");
+          }
+        }
+      }).detach();
+    } catch (const std::exception& error) {
+      // Out of threads: the queued read still runs on the worker, so the
+      // callback will be delivered; only the deadline is lost.
+      clipboard_log("data-object timeout thread failed: %s", error.what());
+    }
   }
 
  private:
@@ -629,6 +644,36 @@ class clipboard_object_reader final {
     std::atomic<bool> timed_out{false};
   };
 
+  /// Answers a job that could not be completed. Used only by the exception
+  /// guard below, so a malformed OLE object cannot take down the core.
+  void fail_job(job& request, uint32_t status) {
+    if (request.type == job::kind::describe) {
+      {
+        std::lock_guard<std::mutex> lock(request.mutex);
+        request.ok = false;
+        request.files.clear();
+        request.done = true;
+      }
+      request.cv.notify_all();
+      return;
+    }
+    bool deliver = false;
+    {
+      std::lock_guard<std::mutex> lock(request.state->mutex);
+      if (!request.state->done) {
+        request.state->done = true;
+        deliver = true;
+      }
+    }
+    if (deliver && request.callback) {
+      try {
+        request.callback(status, request.offset, {});
+      } catch (...) {
+        clipboard_log("data-object failure callback threw");
+      }
+    }
+  }
+
   void run() {
     const HRESULT result = OleInitialize(nullptr);
     ole_ = SUCCEEDED(result);
@@ -643,10 +688,22 @@ class clipboard_object_reader final {
         next = queue_.front();
         queue_.pop_front();
       }
-      if (next->type == job::kind::describe) {
-        handle_describe(*next);
-      } else {
-        handle_read(*next);
+      // IDataObject/COM may throw std::bad_alloc or a vendor exception on a
+      // broken RDP channel. An exception escaping this thread calls
+      // std::terminate and takes the whole core (and every session) with it,
+      // which is exactly what a clipboard-pull used to do.
+      try {
+        if (next->type == job::kind::describe) {
+          handle_describe(*next);
+        } else {
+          handle_read(*next);
+        }
+      } catch (const std::exception& error) {
+        clipboard_log("data-object worker exception: %s", error.what());
+        fail_job(*next, 2);
+      } catch (...) {
+        clipboard_log("data-object worker unknown exception");
+        fail_job(*next, 2);
       }
     }
     release_cache();
@@ -1412,9 +1469,28 @@ class windows_clipboard final : public clipboard_service {
   void read_file_range(const clipboard_file& file, uint64_t offset,
                        uint64_t length,
                        file_range_callback callback) override {
-    reader_.read(file, offset, length, std::move(callback),
-                 static_cast<uint32_t>(kObjectReadTimeoutMs),
-                 static_cast<uint32_t>(kObjectReadTotalMs));
+    file_range_callback fallback = callback;
+    try {
+      reader_.read(file, offset, length, std::move(callback),
+                   static_cast<uint32_t>(kObjectReadTimeoutMs),
+                   static_cast<uint32_t>(kObjectReadTotalMs));
+    } catch (const std::exception& error) {
+      clipboard_log("data-object read start failed: %s", error.what());
+      if (fallback) {
+        try {
+          fallback(2, offset, {});
+        } catch (...) {
+        }
+      }
+    } catch (...) {
+      clipboard_log("data-object read start failed");
+      if (fallback) {
+        try {
+          fallback(2, offset, {});
+        } catch (...) {
+        }
+      }
+    }
   }
 
   bool set_files(const std::vector<std::string>& paths) override {

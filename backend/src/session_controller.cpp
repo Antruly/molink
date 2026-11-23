@@ -1564,9 +1564,9 @@ void session_controller::send_lazy_offer_reply(bool ok, bool stream,
   out["stream"] = ok && stream;
   // Legacy escape hatch: an older host used this to say that an inner RDP
   // session could not render a delayed offer. Current hosts accept the offer
-  // and fall back to the eager source when mstsc is the clipboard consumer,
-  // so `compat` is never sent any more; the field stays understood by the
-  // client for compatibility with old cores.
+  // and stream ranges through the OLE data object even when mstsc owns the
+  // clipboard, so `compat` is never sent any more; the field stays understood
+  // by the client for compatibility with old cores.
   if (compat) out["compat"] = true;
   if (!ok) {
     out["message"] = message;
@@ -2086,6 +2086,7 @@ void session_controller::send_clipboard_file_reply(uint32_t id,
                                                    uint64_t offset,
                                                    const uint8_t* data,
                                                    std::size_t len) {
+  try {
   std::shared_ptr<session_transport> transport = transport_.lock();
   if (!transport || !transport->is_open()) return;
   std::vector<uint8_t> payload(16 + len);
@@ -2116,6 +2117,13 @@ void session_controller::send_clipboard_file_reply(uint32_t id,
   // is up it has its own "file" channel; use it like an ordinary transfer.
   if (send_realtime_file(session_, out)) return;
   transport->send_binary(transport_channel::file, out.data(), out.size());
+  } catch (const std::exception& error) {
+    diag().log(diag_level::error, "clipboard.pull.error", error.what(),
+               {{"id", std::to_string(id)}, {"where", "reply"}});
+  } catch (...) {
+    diag().log(diag_level::error, "clipboard.pull.error", "unknown exception",
+               {{"id", std::to_string(id)}, {"where", "reply"}});
+  }
 }
 
 void session_controller::send_audio(std::vector<uint8_t> pcm) {
@@ -3437,86 +3445,161 @@ void session_controller::on_text(const std::string& text) {
       auto post = options_.post;
       auto registry_ref = registry_;
       std::shared_ptr<clipboard_service> clipboard = options_.clipboard;
-      clipboard->request_files(
+      // The clipboard backend calls this on its own thread. A throw there
+      // would unwind into a COM/clipboard worker or the event loop and take
+      // the whole core down; answer the viewer with a read error instead.
+      const auto reply_failure = [weak, file_id, offset]() noexcept {
+        try {
+          if (auto self = weak.lock()) {
+            self->send_clipboard_file_reply(
+                file_id, static_cast<uint32_t>(clipboard_pull_status::read_error),
+                offset, nullptr, 0);
+          }
+        } catch (...) {
+          // Nothing left to answer with; the log below is the only trace.
+        }
+      };
+      const auto receive_files =
           [weak, post, registry_ref, clipboard, session_id, file_id, offset,
-           length, pull_started_ms](std::vector<clipboard_file> current) {
-            const std::vector<clipboard_offer_entry> offered =
-                registry_ref->clipboard_offer(session_id);
-            clipboard_pull_result result = read_clipboard_pull(
-                current, offered, file_id, offset, length,
-                kClipboardPullChunkBytes);
-            if (result.status == clipboard_pull_status::ok && result.stream) {
-              // An inner RDP virtual file: the bytes are behind the OLE data
-              // object. read_clipboard_pull already validated the id, name
-              // and size; the backend reads the range on its worker thread so
-              // a blocked RDP channel cannot stall this loop.
-              const clipboard_file target = current[file_id - 1];
-              const uint64_t reply_offset = result.offset;
-              const uint64_t take = result.length;
-              clipboard->read_file_range(
-                  target, reply_offset, take,
-                  [weak, post, file_id, pull_started_ms](
-                      uint32_t status, uint64_t reply_at,
-                      std::vector<uint8_t> data) {
-                    auto deliver = [weak, file_id, status, reply_at,
-                                    pull_started_ms, data = std::move(data)] {
-                      if (auto self = weak.lock()) {
-                        std::vector<diag_field> fields;
-                        fields.push_back({"id", std::to_string(file_id)});
-                        fields.push_back({"status", std::to_string(status)});
-                        fields.push_back(
-                            {"bytes", std::to_string(data.size())});
-                        fields.push_back(
-                            {"offset", std::to_string(reply_at)});
-                        fields.push_back(
-                            {"ms", std::to_string(now_ms() -
-                                                  pull_started_ms)});
-                        fields.push_back({"mode", "stream"});
-                        diag().log(diag_level::info, "clipboard.pull.done",
-                                   std::string(), fields);
-                        self->send_clipboard_file_reply(
-                            file_id, status, reply_at,
-                            data.empty() ? nullptr : data.data(),
-                            data.size());
-                      }
-                    };
-                    if (post) {
-                      post(std::move(deliver));
-                    } else {
-                      deliver();
-                    }
-                  });
+           length, pull_started_ms,
+           reply_failure](std::vector<clipboard_file> current) {
+        try {
+          const std::vector<clipboard_offer_entry> offered =
+              registry_ref->clipboard_offer(session_id);
+          clipboard_pull_result result = read_clipboard_pull(
+              current, offered, file_id, offset, length,
+              kClipboardPullChunkBytes);
+          if (result.status == clipboard_pull_status::ok && result.stream) {
+            // An inner RDP virtual file: the bytes are behind the OLE data
+            // object. read_clipboard_pull already validated the id, name and
+            // size; the backend reads the range on its worker thread so a
+            // blocked RDP channel cannot stall this loop.
+            if (file_id == 0 || file_id > current.size()) {
+              reply_failure();
               return;
             }
-            auto deliver = [weak, file_id, pull_started_ms,
-                            result = std::move(result)] {
-              if (auto self = weak.lock()) {
-                std::vector<diag_field> fields;
-                fields.push_back({"id", std::to_string(file_id)});
-                fields.push_back(
-                    {"status",
-                     std::to_string(static_cast<uint32_t>(result.status))});
-                fields.push_back(
-                    {"bytes", std::to_string(result.data.size())});
-                fields.push_back({"offset", std::to_string(result.offset)});
-                fields.push_back(
-                    {"ms", std::to_string(now_ms() - pull_started_ms)});
-                fields.push_back({"mode", result.stream ? "range" : "eager"});
-                diag().log(diag_level::info, "clipboard.pull.done",
-                           std::string(), fields);
-                self->send_clipboard_file_reply(
-                    file_id, static_cast<uint32_t>(result.status),
-                    result.offset,
-                    result.data.empty() ? nullptr : result.data.data(),
-                    result.data.size());
-              }
-            };
-            if (post) {
-              post(std::move(deliver));
-            } else {
-              deliver();
+            const clipboard_file target = current[file_id - 1];
+            const uint64_t reply_offset = result.offset;
+            const uint64_t take = result.length;
+            try {
+              clipboard->read_file_range(
+                  target, reply_offset, take,
+                  [weak, post, file_id, pull_started_ms, reply_failure](
+                      uint32_t status, uint64_t reply_at,
+                      std::vector<uint8_t> data) {
+                    try {
+                      auto deliver = [weak, file_id, status, reply_at,
+                                      pull_started_ms,
+                                      data = std::move(data)] {
+                        if (auto self = weak.lock()) {
+                          std::vector<diag_field> fields;
+                          fields.push_back({"id", std::to_string(file_id)});
+                          fields.push_back({"status", std::to_string(status)});
+                          fields.push_back(
+                              {"bytes", std::to_string(data.size())});
+                          fields.push_back(
+                              {"offset", std::to_string(reply_at)});
+                          fields.push_back(
+                              {"ms", std::to_string(now_ms() -
+                                                    pull_started_ms)});
+                          fields.push_back({"mode", "stream"});
+                          diag().log(diag_level::info, "clipboard.pull.done",
+                                     std::string(), fields);
+                          self->send_clipboard_file_reply(
+                              file_id, status, reply_at,
+                              data.empty() ? nullptr : data.data(),
+                              data.size());
+                        }
+                      };
+                      if (post) {
+                        post(std::move(deliver));
+                      } else {
+                        deliver();
+                      }
+                    } catch (const std::exception& error) {
+                      diag().log(diag_level::error, "clipboard.pull.error",
+                                 error.what(),
+                                 {{"id", std::to_string(file_id)},
+                                  {"where", "read_file_range"}});
+                      reply_failure();
+                    } catch (...) {
+                      diag().log(diag_level::error, "clipboard.pull.error",
+                                 "unknown exception",
+                                 {{"id", std::to_string(file_id)},
+                                  {"where", "read_file_range"}});
+                      reply_failure();
+                    }
+                  });
+            } catch (const std::exception& error) {
+              diag().log(diag_level::error, "clipboard.pull.error",
+                         error.what(),
+                         {{"id", std::to_string(file_id)},
+                          {"where", "read_file_range-start"}});
+              reply_failure();
+            } catch (...) {
+              diag().log(diag_level::error, "clipboard.pull.error",
+                         "unknown exception",
+                         {{"id", std::to_string(file_id)},
+                          {"where", "read_file_range-start"}});
+              reply_failure();
             }
-          });
+            return;
+          }
+          auto deliver = [weak, file_id, pull_started_ms,
+                          result = std::move(result)] {
+            if (auto self = weak.lock()) {
+              std::vector<diag_field> fields;
+              fields.push_back({"id", std::to_string(file_id)});
+              fields.push_back(
+                  {"status",
+                   std::to_string(static_cast<uint32_t>(result.status))});
+              fields.push_back(
+                  {"bytes", std::to_string(result.data.size())});
+              fields.push_back({"offset", std::to_string(result.offset)});
+              fields.push_back(
+                  {"ms", std::to_string(now_ms() - pull_started_ms)});
+              fields.push_back({"mode", result.stream ? "range" : "eager"});
+              diag().log(diag_level::info, "clipboard.pull.done",
+                         std::string(), fields);
+              self->send_clipboard_file_reply(
+                  file_id, static_cast<uint32_t>(result.status),
+                  result.offset,
+                  result.data.empty() ? nullptr : result.data.data(),
+                  result.data.size());
+            }
+          };
+          if (post) {
+            post(std::move(deliver));
+          } else {
+            deliver();
+          }
+        } catch (const std::exception& error) {
+          diag().log(diag_level::error, "clipboard.pull.error", error.what(),
+                     {{"id", std::to_string(file_id)},
+                      {"where", "request_files"}});
+          reply_failure();
+        } catch (...) {
+          diag().log(diag_level::error, "clipboard.pull.error",
+                     "unknown exception",
+                     {{"id", std::to_string(file_id)},
+                      {"where", "request_files"}});
+          reply_failure();
+        }
+      };
+      try {
+        clipboard->request_files(receive_files);
+      } catch (const std::exception& error) {
+        diag().log(diag_level::error, "clipboard.pull.error", error.what(),
+                   {{"id", std::to_string(file_id)},
+                    {"where", "request_files-start"}});
+        reply_failure();
+      } catch (...) {
+        diag().log(diag_level::error, "clipboard.pull.error",
+                   "unknown exception",
+                   {{"id", std::to_string(file_id)},
+                    {"where", "request_files-start"}});
+        reply_failure();
+      }
       return;
     }
     if (action == "offer") {
@@ -3578,15 +3661,18 @@ void session_controller::on_text(const std::string& text) {
       // writes Explorer's target file directly and nothing is staged under
       // ~/moLink. Everyone else keeps the upload-then-CF_HDROP path.
       //
-      // In a nested RDP session mstsc consumes the host clipboard and is not
-      // guaranteed to read FileContents streams, so the safe default is the
-      // eager source: the file is materialised on this machine and CF_HDROP is
-      // offered (which mstsc definitely redirects). MOLINK_RDP_STREAM_PUSH=1
-      // lets a real-machine test try the virtual stream against mstsc.
+      // A nested RDP session is *not* a reason to materialise the file on
+      // this host. mstsc advertises FileGroupDescriptorW/FileContents and
+      // answers FILECONTENTS_RANGE, so the virtual stream is the path that
+      // reaches the inner desktop without a host-side copy. Forcing the eager
+      // source here made every nested copy download in full before the paste
+      // could start, and left a half-written staging file when it failed.
+      // MOLINK_RDP_STREAM_PUSH=0 is an escape hatch for a real machine whose
+      // inner client refuses the stream.
       bool stream = session->clipboard_stream;
       if (stream && options_.clipboard->nested_rdp()) {
-        const char* push = std::getenv("MOLINK_RDP_STREAM_PUSH");
-        if (push == nullptr || std::string(push) != "1") {
+        const char* eager = std::getenv("MOLINK_RDP_STREAM_PUSH");
+        if (eager != nullptr && std::string(eager) == "0") {
           stream = false;
         }
       }
@@ -3952,10 +4038,32 @@ void session_controller::on_binary(const uint8_t* data, std::size_t len) {
       std::memcpy(&id, pkt.payload.data(), sizeof(id));
       std::memcpy(&code, pkt.payload.data() + 4, sizeof(code));
       std::memcpy(&offset, pkt.payload.data() + 8, sizeof(offset));
-      if (stream_source_) {
-        stream_source_->note_range(id, code, offset,
-                                   pkt.payload.data() + 16,
-                                   pkt.payload.size() - 16);
+      try {
+        if (stream_source_) {
+          stream_source_->note_range(id, code, offset,
+                                     pkt.payload.data() + 16,
+                                     pkt.payload.size() - 16);
+        }
+      } catch (const std::exception& error) {
+        // A malformed/oversized reply must fail the waiting paste, not
+        // terminate the event loop.
+        diag().log(diag_level::error, "clipboard.pull.error", error.what(),
+                   {{"where", "note_range"}});
+        try {
+          if (stream_source_) {
+            stream_source_->note_range(id, 2, offset, nullptr, 0);
+          }
+        } catch (...) {
+        }
+      } catch (...) {
+        diag().log(diag_level::error, "clipboard.pull.error",
+                   "unknown exception", {{"where", "note_range"}});
+        try {
+          if (stream_source_) {
+            stream_source_->note_range(id, 2, offset, nullptr, 0);
+          }
+        } catch (...) {
+        }
       }
       break;
     }
