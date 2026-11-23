@@ -65,6 +65,7 @@ import { keyToCode, normalizeKeyCode } from '../lib/key-code'
 import { FADE_OPACITY_CLASS } from '../lib/proximity-fade'
 import { useProximityFade } from '../lib/use-proximity-fade'
 import { Codec, codecName } from '../lib/protocol'
+import { needsReconnect, type SessionToast } from '../lib/session-alerts'
 import { collectDropEntries, stageRemoteDrop } from '../lib/file-drop'
 import {
   comboForwardAnswer,
@@ -370,6 +371,61 @@ function formatOfferBytes(bytes: number): string {
   }`
 }
 
+function SessionToastBanner({
+  toast,
+  label,
+  onDismiss,
+}: {
+  toast: SessionToast | null | undefined
+  label: (message: string) => string
+  /// Receives the `at` stamp of the toast that was dismissed, so a queued fade
+  /// cannot clear a newer message that arrived in the meantime.
+  onDismiss: (at: number) => void
+}) {
+  // The parent keys this component by (id, at), so a refresh remounts it and
+  // restarts the fade. Manual dismissal fades first, then clears the store.
+  const [closing, setClosing] = useState(false)
+  if (!toast) return null
+  const dismiss = () => {
+    if (closing) return
+    setClosing(true)
+    window.setTimeout(() => onDismiss(toast.at), 150)
+  }
+  const tone =
+    toast.tone === 'error'
+      ? 'border-danger/40 bg-danger/10 text-danger'
+      : toast.tone === 'warn'
+        ? 'border-warn/40 bg-warn/10 text-warn'
+        : 'border-line bg-surface/95 text-ink'
+  return (
+    <div className="pointer-events-none absolute bottom-16 left-1/2 z-40 w-[min(92vw,32rem)] -translate-x-1/2">
+      <div
+        role="status"
+        aria-live="polite"
+        className={
+          'pointer-events-auto flex items-start gap-2 rounded-xl border px-3 py-2 text-[12px] shadow-lg backdrop-blur transition-opacity duration-150 ' +
+          tone +
+          ' ' +
+          (closing
+            ? 'opacity-0'
+            : 'opacity-100 animate-[molink-toast-lifetime_6000ms_ease-out_forwards]')
+        }
+      >
+        <span className="min-w-0 flex-1 break-words">{label(toast.message)}</span>
+        <button
+          type="button"
+          onClick={dismiss}
+          className="shrink-0 rounded px-1 opacity-70 hover:opacity-100"
+          aria-label={label('dismiss')}
+          title={label('dismiss')}
+        >
+          <X size={13} />
+        </button>
+      </div>
+    </div>
+  )
+}
+
 export function SessionView({
   tab,
   popout = false,
@@ -390,6 +446,8 @@ export function SessionView({
   const setImmersive = useAppStore((state) => state.setImmersive)
   const setWindowFullscreen = useAppStore((state) => state.setWindowFullscreen)
   const setClipboardEnabled = useAppStore((state) => state.setClipboardEnabled)
+  const pushToast = useAppStore((state) => state.pushToast)
+  const setTabToast = useAppStore((state) => state.setTabToast)
   const immersive = useAppStore((state) => state.immersive)
   const theme = useAppStore((state) => state.theme)
   const toggleTheme = useAppStore((state) => state.toggleTheme)
@@ -434,7 +492,6 @@ export function SessionView({
   const pressedKeys = useRef<Set<string>>(new Set())
   const pressedButtons = useRef<Set<number>>(new Set())
   const [surfaceSize, setSurfaceSize] = useState({ width: 0, height: 0 })
-  const [actionError, setActionError] = useState<string | null>(null)
   /// First-use dialog for combo forwarding. `combo` is the toolbar sequence
   /// that opened it (null when the trigger was a physical Win key, which is
   /// forwarded normally and does not need replaying).
@@ -443,9 +500,8 @@ export function SessionView({
     remember: boolean
   } | null>(null)
   // A rejected input event is transient: show the host's reason (the key code
-  // it did not understand) for a few seconds without touching the session.
-  const [inputNotice, setInputNotice] = useState<string | null>(null)
-  const inputNoticeTimer = useRef<number | null>(null)
+  // it did not understand) through the same corner toast as other local
+  // failures, so the session banner and its reconnect entry stay untouched.
   const [retryCode, setRetryCode] = useState('')
   const retryInputRef = useRef<HTMLInputElement>(null)
   const touchDevice = touchPrimary()
@@ -730,6 +786,11 @@ export function SessionView({
     tab.errorCode === 'display_mode_failed' ||
     tab.errorCode === 'display_mode_unsupported' ||
     tab.errorCode === 'display_mode_busy'
+  // Only a link/credential/handshake failure is fixed by reconnecting. A
+  // rejected input, a preset or a decoder error keeps the session usable; its
+  // banner gets a dismiss button instead of a reconnect prompt.
+  const reconnectAvailable =
+    tab.error !== null && needsReconnect(tab.errorCode ?? null, tab.error)
   const submitCode = () => {
     const value = retryCode.trim()
     if (value === '') return
@@ -906,26 +967,14 @@ export function SessionView({
       } else if (event.kind === 'call') {
         handleCallEvent(event)
       } else if (event.kind === 'notice') {
-        setInputNotice(event.message)
-        if (inputNoticeTimer.current !== null) {
-          window.clearTimeout(inputNoticeTimer.current)
-        }
-        inputNoticeTimer.current = window.setTimeout(() => {
-          inputNoticeTimer.current = null
-          setInputNotice(null)
-        }, 5000)
+        pushToast(
+          tab.id,
+          String(t('session.inputRejected', { message: event.message })),
+          'warn',
+        )
       }
     })
-  }, [connection])
-
-  useEffect(() => {
-    return () => {
-      if (inputNoticeTimer.current !== null) {
-        window.clearTimeout(inputNoticeTimer.current)
-        inputNoticeTimer.current = null
-      }
-    }
-  }, [])
+  }, [connection, pushToast, tab.id, t])
 
   // The automatic file clipboard sync lives in the connection so background
   // tabs (and popouts) keep mirroring local files too; only the files panel
@@ -2143,19 +2192,18 @@ export function SessionView({
   useEffect(() => () => setKeyboardGrab(false), [])
 
   const copyFromRemote = () => {
-    setActionError(null)
     connection()?.requestClipboard()
   }
 
   const sendToRemote = () => {
     if (!navigator.clipboard?.readText) {
-      setActionError(String(t('error.clipboard_unavailable')))
+      pushToast(tab.id, 'clipboard_unavailable', 'warn')
       return
     }
     navigator.clipboard
       .readText()
       .then((text) => connection()?.setClipboard(text))
-      .catch(() => setActionError(String(t('error.clipboard_read_failed'))))
+      .catch(() => pushToast(tab.id, 'clipboard_read_failed', 'warn'))
   }
 
   // The desktop eats Win/Alt shortcuts before the page sees them, so these are
@@ -2305,6 +2353,14 @@ export function SessionView({
                 : tab.streamCodec.toUpperCase()
               : t('session.watermarkTiles')
 
+  // Toasts carry protocol codes (`remote_clipboard_too_large`) as well as
+  // host prose (`unknown key code: MetaLeft`). Code-shaped messages get a
+  // translation lookup; anything with spaces is already user-facing text.
+  const toastLabel = (message: string): string =>
+    /^[a-z][a-z0-9_]*$/.test(message)
+      ? String(t(`error.${message}`, { defaultValue: message }))
+      : message
+
   return (
     <div
       ref={sessionRootRef}
@@ -2326,7 +2382,7 @@ export function SessionView({
           </div>
         </div>
       ) : null}
-      {tab.error || actionError ? (
+      {tab.error ? (
         <div
           className={
             (isFullscreen ? 'hidden' : 'flex flex-wrap items-center gap-2') +
@@ -2350,7 +2406,7 @@ export function SessionView({
                       ? String(
                           t(`error.${tab.error}`, { defaultValue: tab.error }),
                         )
-                      : actionError}
+                      : ''}
           </span>
           {needsCode ? (
             <form
@@ -2378,13 +2434,22 @@ export function SessionView({
               </button>
             </form>
           ) : null}
-          {tab.error && !needsCode && !displayModeError ? (
+          {tab.error && !needsCode && !displayModeError && reconnectAvailable ? (
             <button
               type="button"
               onClick={reconnect}
               className="btn h-7 px-2 text-[11px]"
             >
               {t('session.reconnect')}
+            </button>
+          ) : null}
+          {tab.error && !needsCode && !displayModeError && !reconnectAvailable ? (
+            <button
+              type="button"
+              onClick={() => connection()?.dismissError()}
+              className="btn h-7 px-2 text-[11px]"
+            >
+              {t('error.dismiss')}
             </button>
           ) : null}
           {displayModeError ? (
@@ -2461,24 +2526,6 @@ export function SessionView({
             type="button"
             onClick={() => connection()?.dismissClipboardOffer()}
             className="btn h-7 px-2 text-[11px]"
-            title={t('error.dismiss')}
-          >
-            <X size={12} />
-          </button>
-        </div>
-      ) : null}
-
-      {inputNotice && !isFullscreen ? (
-        <div className="flex flex-wrap items-center gap-2 border-b border-accent/30 bg-accent-soft/80 px-4 py-1.5 text-[12px] text-accent">
-          <Keyboard size={13} className="shrink-0" />
-          <span className="min-w-0 flex-1 break-words">
-            {t('session.inputRejected', { message: inputNotice })}
-          </span>
-          <button
-            type="button"
-            onClick={() => setInputNotice(null)}
-            className="rounded px-1.5 text-[11px] text-accent/80 hover:text-accent"
-            aria-label={t('error.dismiss')}
             title={t('error.dismiss')}
           >
             <X size={12} />
@@ -3654,6 +3701,22 @@ export function SessionView({
           </div>
         </div>
       ) : null}
+
+      <SessionToastBanner
+        key={
+          tab.toast === null || tab.toast === undefined
+            ? 'none'
+            : `${tab.toast.id}:${tab.toast.at}`
+        }
+        toast={tab.toast}
+        label={toastLabel}
+        onDismiss={(at) => {
+          const current = useAppStore
+            .getState()
+            .tabs.find((item) => item.id === tab.id)?.toast
+          if (current?.at === at) setTabToast(tab.id, null)
+        }}
+      />
 
     </div>
   )
