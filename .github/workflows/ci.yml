@@ -89,6 +89,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check the native build lists
+        # The Windows shell is built three ways; only the CMake target knows its
+        # sources, and four separate files have already broken the MinGW lists
+        # at link time after being added to it.
+        run: python3 tools/check-native-build-lists.py
+
       - name: Install GTK and WebKitGTK development packages
         run: |
           sudo apt-get update

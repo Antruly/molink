@@ -317,6 +317,9 @@ if ($LASTEXITCODE -ne 0) { throw 'native resources failed' }
   (Join-Path $Repo 'shell\windows\session_client.cpp') `
   (Join-Path $Repo 'shell\windows\preset_message.cpp') `
   (Join-Path $Repo 'shell\windows\file_panel_logic.cpp') `
+  (Join-Path $Repo 'shell\windows\adaptive_quality.cpp') `
+  (Join-Path $Repo 'shell\windows\display_selector.cpp') `
+  (Join-Path $Repo 'shell\windows\trackpad_mouse.cpp') `
   (Join-Path $Repo 'shell\windows\clipboard_sync.cpp') `
   (Join-Path $Repo 'shell\windows\clipboard_files.cpp') `
   (Join-Path $Repo 'shell\windows\input_state.cpp') `
