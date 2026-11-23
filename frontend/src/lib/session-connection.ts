@@ -999,7 +999,16 @@ export class SessionConnection {
   setSessionPreset(preset: SessionPresetMessage): void {
     this.pendingPreset = preset
     if (!this.client.isLive()) return
-    if (this.presetTimer !== null) window.clearTimeout(this.presetTimer)
+    if (this.presetTimer !== null) {
+      window.clearTimeout(this.presetTimer)
+      this.presetTimer = null
+    }
+    // The advanced panel already debounced the change for 300 ms; adding the
+    // toolbar's 120 ms coalescing on top would double the visible lag.
+    if (preset.preset === 'custom') {
+      this.flushPreset()
+      return
+    }
     this.presetTimer = window.setTimeout(() => {
       this.presetTimer = null
       this.flushPreset()

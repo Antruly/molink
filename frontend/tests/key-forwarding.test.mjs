@@ -43,4 +43,8 @@ test('keys are forwarded only when the remote picture is the input target', () =
   assert.equal(shouldForwardKeys({ ...ready, controlEnabled: false }), false)
   assert.equal(shouldForwardKeys({ ...ready, localTarget: true }), false)
   assert.equal(shouldForwardKeys({ ...ready, settingsOpen: true }), false)
+  // The quality panel is portaled outside the remote surface; while it is
+  // open its sliders and dropdowns must not type into the host.
+  assert.equal(shouldForwardKeys({ ...ready, localPanelOpen: true }), false)
+  assert.equal(shouldForwardKeys({ ...ready, localPanelOpen: false }), true)
 })

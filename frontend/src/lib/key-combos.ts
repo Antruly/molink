@@ -74,17 +74,22 @@ export interface KeyForwardState {
   controlEnabled: boolean
   localTarget: boolean
   settingsOpen: boolean
+  /// A toolbar popover (the quality panel) is open. It is portaled outside
+  /// the remote surface, so a focused slider would otherwise still send keys
+  /// to the host.
+  localPanelOpen?: boolean
 }
 
 /// Keys reach the host only while the remote picture is the active input
-/// target. A hidden/background window, a local form field, or an open settings
-/// dialog keeps the keyboard local.
+/// target. A hidden/background window, a local form field, an open toolbar
+/// panel, or the settings dialog keeps the keyboard local.
 export function shouldForwardKeys(state: KeyForwardState): boolean {
   return (
     state.hasFocus &&
     state.visible &&
     state.controlEnabled &&
     !state.localTarget &&
-    !state.settingsOpen
+    !state.settingsOpen &&
+    !state.localPanelOpen
   )
 }
