@@ -432,6 +432,36 @@ std::optional<std::filesystem::path> local_absolute_path(
   return std::filesystem::path(*normalized);
 }
 
+/// The Host header without a port, lowercased. `[::1]:28418` becomes `::1`.
+std::string host_header_name(const std::string& host) {
+  std::string name = host;
+  if (!name.empty() && name.front() == '[') {
+    const std::size_t close = name.find(']');
+    if (close != std::string::npos) name = name.substr(1, close - 1);
+  } else {
+    const std::size_t colon = name.find(':');
+    // A second colon means this is a bare IPv6 literal, not host:port.
+    if (colon != std::string::npos && name.find(':', colon + 1) ==
+                                          std::string::npos) {
+      name.resize(colon);
+    }
+  }
+  for (char& ch : name) ch = static_cast<char>(std::tolower(
+      static_cast<unsigned char>(ch)));
+  return name;
+}
+
+/// /api/device answers without the per-launch client token so a desktop shell
+/// can adopt a core it did not spawn (the moLinkSession service/helper owns
+/// one in the user session). The handler has always been loopback-only; also
+/// requiring a loopback Host closes the DNS-rebinding path that the client
+/// token used to guard, where a remote page resolving to 127.0.0.1 would be
+/// same-origin and could read the token.
+bool loopback_host_header(const uvcpp_web_request& req) {
+  const std::string host = req.header("Host");
+  return !host.empty() && is_loopback_host(host_header_name(host));
+}
+
 }  // namespace
 
 void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
@@ -539,16 +569,18 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
     }
     const std::string& path = req.path();
     // Do not gate hashed assets: the browser fetches them without custom
-    // headers. Gating the HTML entry point plus the state/device/login APIs is
+    // headers. Gating the HTML entry point plus the state/login APIs is
     // enough; a browser cannot use the UI without the HTML and cannot obtain a
     // session token without the client token.
     // /api/transports is the capability advertisement peer cores fetch before
     // they open a data channel; gating it behind the shell token would make
     // core-to-core transport negotiation impossible. It exposes only ports
     // and availability, which /healthz already implies.
+    // /api/device stays open on loopback so a shell can adopt a core started
+    // by the service/helper; the handler itself rejects non-loopback peers and
+    // non-loopback Host headers, so this does not undo the rebinding guard.
     const bool gated = path == "/" || path == "/index.html" ||
-                       path == "/api/state" || path == "/api/login" ||
-                       path == "/api/device";
+                       path == "/api/state" || path == "/api/login";
     const std::string* query_client = req.query("client");
     const bool token_ok =
         req.header("X-MoLink-Client") == deps.client_token ||
@@ -2181,7 +2213,7 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
             // Loopback-only, and the local UI is exempt from the idle lock.
             const std::string peer = req.peer_ip();
             const bool loopback = is_loopback_peer(peer);
-            if (!loopback) {
+            if (!loopback || !loopback_host_header(req)) {
               uvcpp_json body;
               body["type"] = "error";
               body["code"] = "loopback_only";
@@ -2196,8 +2228,14 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
             j["product"] = MOLINK_PRODUCT_NAME;
             j["version"] = MOLINK_VERSION;
             j["protocol"] = 1;
+            j["pid"] = current_pid();
+            j["tls"] = deps.tls_enabled;
             j["token"] = deps.auth ? deps.auth->local_session_token()
                                    : std::string();
+            // The desktop shell needs this to build the UI URL when it adopts
+            // a core that another process (the service or helper) started.
+            // The peer and Host checks above confine it to the local machine.
+            j["client_token"] = deps.client_token;
             const code_view code =
                 deps.auth ? deps.auth->view() : code_view{};
             if (deps.auth) deps.auth->refresh_daily();

@@ -30,6 +30,7 @@
 #include <cstring>
 #include <ctime>
 #include <fstream>
+#include <iterator>
 #include <string>
 #include <memory>
 #include <thread>
@@ -453,6 +454,13 @@ bool surface_stream_mode() {
   // us a running core through MOLINK_CORE_TOKEN with --surface.
   if (g.surface_path.empty()) return false;
   return g.surface_mode || std::getenv("MOLINK_CORE_TOKEN") != nullptr;
+}
+
+/// Whether the local core can turn stream frames into pixels. A core this
+/// shell did not start (adopted from the service/helper) was not asked for
+/// MOLINK_SURFACE, so sessions must ask the host for tiles instead.
+bool core_publishes_surface() {
+  return !g.surface_path.empty() && g.core_stream_decoders;
 }
 
 constexpr UINT WM_APP_CONNECT_DONE = WM_APP + 7;
@@ -1061,13 +1069,206 @@ std::wstring native_core_log_path() {
   return dir + L"\\native-core.log";
 }
 
+// Defined further down with the rest of the flat JSON readers.
+std::string json_text(const std::string& json, const char* key);
+int json_int(const std::string& json, const char* key, int fallback);
+
+/// A core that is already listening and answered /api/device. Since 0.12.9
+/// the moLinkSession service/helper keeps one resident in the user session;
+/// starting a second one only fails to bind the port.
+struct reused_core {
+  int port = 0;
+  long pid = 0;
+  std::string api_token;
+  std::string client_token;
+  bool tls = false;
+};
+
+/// The port the core persisted in %APPDATA%\moLink\tcp_port.
+int persisted_core_port() {
+  std::wstring base;
+  char override_dir[1024] = {};
+  const DWORD override_len =
+      GetEnvironmentVariableA("MOLINK_CONFIG_DIR", override_dir,
+                              static_cast<DWORD>(std::size(override_dir)));
+  if (override_len > 0) {
+    base = wide_of(override_dir);
+  } else {
+    wchar_t appdata[MAX_PATH] = {};
+    if (GetEnvironmentVariableW(L"APPDATA", appdata, MAX_PATH) == 0) return 0;
+    base = std::wstring(appdata) + L"\\moLink";
+  }
+  char value[32] = {};
+  FILE* file = _wfopen((base + L"\\tcp_port").c_str(), L"rb");
+  if (file == nullptr) return 0;
+  const size_t got = std::fread(value, 1, sizeof(value) - 1, file);
+  std::fclose(file);
+  if (got == 0) return 0;
+  const int port = std::atoi(value);
+  return port > 0 && port <= 65535 ? port : 0;
+}
+
+std::vector<int> core_probe_ports() {
+  std::vector<int> ports;
+  auto add = [&ports](int port) {
+    if (port <= 0 || port > 65535) return;
+    for (int existing : ports) {
+      if (existing == port) return;
+    }
+    ports.push_back(port);
+  };
+  if (g.local_core_port > 0) add(g.local_core_port);
+  if (const char* env_port = std::getenv("MOLINK_CORE_PORT")) {
+    add(std::atoi(env_port));
+  }
+  add(persisted_core_port());
+  add(28418);
+  return ports;
+}
+
+/// One short loopback GET, plain HTTP first and TLS second (encrypt_lan uses
+/// the core's self-signed certificate). Discovery must stay under ~500 ms.
+bool core_http_get(int port, bool tls, const wchar_t* path, std::string* body) {
+  if (body != nullptr) body->clear();
+  HINTERNET session = WinHttpOpen(
+      L"moLink-native/1.0", WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_NO_PROXY_NAME,
+      WINHTTP_NO_PROXY_BYPASS, 0);
+  if (session == nullptr) return false;
+  WinHttpSetTimeouts(session, 400, 400, 400, 500);
+  HINTERNET connection = WinHttpConnect(
+      session, L"127.0.0.1", static_cast<INTERNET_PORT>(port), 0);
+  HINTERNET request =
+      connection != nullptr
+          ? WinHttpOpenRequest(connection, L"GET", path, nullptr,
+                               WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+                               tls ? WINHTTP_FLAG_SECURE : 0)
+          : nullptr;
+  if (request != nullptr && tls) {
+    DWORD ignore = SECURITY_FLAG_IGNORE_UNKNOWN_CA |
+                   SECURITY_FLAG_IGNORE_CERT_CN_INVALID |
+                   SECURITY_FLAG_IGNORE_CERT_DATE_INVALID |
+                   SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE;
+    WinHttpSetOption(request, WINHTTP_OPTION_SECURITY_FLAGS, &ignore,
+                     sizeof(ignore));
+  }
+  bool ok = false;
+  if (request != nullptr &&
+      WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                         WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
+      WinHttpReceiveResponse(request, nullptr)) {
+    DWORD status = 0;
+    DWORD size = sizeof(status);
+    if (WinHttpQueryHeaders(request,
+                            WINHTTP_QUERY_STATUS_CODE |
+                                WINHTTP_QUERY_FLAG_NUMBER,
+                            WINHTTP_HEADER_NAME_BY_INDEX, &status, &size,
+                            WINHTTP_NO_HEADER_INDEX)) {
+      ok = status == 200;
+    }
+    if (body != nullptr && ok) {
+      char buffer[4096];
+      DWORD read = 0;
+      while (WinHttpReadData(request, buffer, sizeof(buffer), &read) &&
+             read > 0) {
+        body->append(buffer, read);
+        if (body->size() > 512 * 1024) break;
+      }
+    }
+  }
+  if (request != nullptr) WinHttpCloseHandle(request);
+  if (connection != nullptr) WinHttpCloseHandle(connection);
+  WinHttpCloseHandle(session);
+  return ok;
+}
+
+bool probe_core_port(int port, reused_core* out) {
+  for (int secure = 0; secure < 2; ++secure) {
+    std::string body;
+    if (!core_http_get(port, secure == 1, L"/api/device", &body)) continue;
+    const int parsed_port = json_int(body, "port", 0);
+    const std::string api_token = json_text(body, "token");
+    const std::string client_token = json_text(body, "client_token");
+    if (parsed_port <= 0 || api_token.empty() || client_token.empty()) continue;
+    out->port = parsed_port;
+    out->api_token = api_token;
+    out->client_token = client_token;
+    out->tls = body.find("\"tls\":true") != std::string::npos || secure == 1;
+    out->pid = json_int(body, "pid", 0);
+    return true;
+  }
+  return false;
+}
+
+/// The last @p count non-empty lines of captured core output.
+std::string tail_lines(const std::string& text, int count) {
+  std::vector<std::string> lines;
+  std::size_t start = 0;
+  while (start < text.size()) {
+    const std::size_t end = text.find('\n', start);
+    std::string line = text.substr(
+        start, end == std::string::npos ? std::string::npos : end - start);
+    while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) {
+      line.pop_back();
+    }
+    if (!line.empty()) lines.push_back(line);
+    if (lines.size() > static_cast<std::size_t>(count)) {
+      lines.erase(lines.begin());
+    }
+    if (end == std::string::npos) break;
+    start = end + 1;
+  }
+  std::string out;
+  for (const std::string& line : lines) {
+    if (!out.empty()) out += "\r\n";
+    out += line;
+  }
+  return out;
+}
+
+/// Adopt a core somebody else supervises. This shell must not terminate it:
+/// g.local_core_process stays nullptr, so WM_DESTROY and the watchdog leave it
+/// alone. Without MOLINK_SURFACE on that core there is no picture surface, so
+/// the session must ask for tiles instead of a decoded stream.
+bool adopt_running_core(int* port, std::string* client_token,
+                        std::wstring* surface, std::string* error) {
+  if (g.local_core_process != nullptr) return false;
+  for (int candidate : core_probe_ports()) {
+    reused_core found;
+    if (!probe_core_port(candidate, &found)) continue;
+    g.local_core_port = found.port;
+    g.local_core_token = found.client_token;
+    g.local_api_token = found.api_token;
+    g.local_core_started = true;
+    // A core we adopted was not asked for MOLINK_SURFACE, so it has no
+    // picture to publish. Keep an explicitly configured --surface launcher's
+    // expectations intact; otherwise sessions must request tiles.
+    if (g.surface_path.empty()) {
+      g.surface_mode = false;
+      g.core_stream_decoders = false;
+    }
+    if (port != nullptr) *port = found.port;
+    if (client_token != nullptr) *client_token = found.client_token;
+    if (surface != nullptr) surface->clear();
+    if (error != nullptr) error->clear();
+    native_log(L"shell: reusing core port=" + std::to_wstring(found.port) +
+               L" pid=" + std::to_wstring(found.pid) +
+               L" (started outside this shell)");
+    return true;
+  }
+  return false;
+}
+
 /// Local-core proxy mode: start molink-core with MOLINK_SURFACE=1, read its
 /// ready line and use its /ws/direct proxy. The core decodes streams and
 /// publishes the native picture surface, so H.264/VP9/AV1 work even though
 /// the demo itself only decodes tiles.
 bool start_local_core(int* port, std::string* client_token,
                       std::wstring* surface, std::string* error,
-                      int preferred_port = 28418) {
+                      int preferred_port = 28418,
+                      std::string* output_tail = nullptr) {
+  // Probe first: a resident core (the service/helper owns one) must be used
+  // as-is. Spawning anyway is exactly the regression this guards against.
+  if (adopt_running_core(port, client_token, surface, error)) return true;
   const std::wstring core = find_core_exe();
   if (core.empty()) {
     if (error != nullptr) *error = "molink-core.exe not found";
@@ -1132,6 +1333,13 @@ bool start_local_core(int* port, std::string* client_token,
     if (marker != std::string::npos && line.find('\n', marker) != std::string::npos) {
       break;
     }
+    // The machine-readable busy line means another core owns the port; do not
+    // wait out the ready deadline.
+    const size_t busy_marker = line.find("\"event\":\"busy\"");
+    if (busy_marker != std::string::npos &&
+        line.find('\n', busy_marker) != std::string::npos) {
+      break;
+    }
     // A core that could not bind the preferred port exits at once; retry with
     // an ephemeral port instead of waiting the full ten seconds.
     if (WaitForSingleObject(process.hProcess, 0) == WAIT_OBJECT_0) break;
@@ -1150,6 +1358,8 @@ bool start_local_core(int* port, std::string* client_token,
     }
   }
   CloseHandle(read_pipe);
+  if (output_tail != nullptr) *output_tail = tail_lines(line, 5);
+  const bool busy = line.find("\"event\":\"busy\"") != std::string::npos;
   // Keep only the ready JSON. nlohmann sorts object keys, so the line starts
   // with "capture", not "event": search for the marker and take the object
   // that contains it, starting after the previous newline.
@@ -1194,6 +1404,12 @@ bool start_local_core(int* port, std::string* client_token,
                std::wstring(line.begin(), line.end()));
     TerminateProcess(process.hProcess, 0);
     CloseHandle(process.hProcess);
+    // The service/helper may have won the port race while this core started.
+    // Re-probe once and adopt the winner instead of starting yet another core.
+    if (adopt_running_core(port, client_token, surface, error)) {
+      native_log(L"local core: adopted the core that won the port race");
+      return true;
+    }
     // The fixed port may be taken (an older install's core, another service).
     // An ephemeral port still registers correctly with the directory; the
     // firewall rule is program-based, so reachability does not depend on the
@@ -1201,9 +1417,13 @@ bool start_local_core(int* port, std::string* client_token,
     if (preferred_port != 0) {
       native_log(L"local core: port " + std::to_wstring(preferred_port) +
                  L" unavailable; retrying with an ephemeral port");
-      return start_local_core(port, client_token, surface, error, 0);
+      return start_local_core(port, client_token, surface, error, 0,
+                              output_tail);
     }
-    if (error != nullptr) *error = "core did not report a ready port";
+    if (error != nullptr) {
+      *error = busy ? "core could not bind the port: another process is using it"
+                    : "core did not report a ready port";
+    }
     return false;
   }
   native_log(L"local core: ready port " + std::to_wstring(ready_port));
@@ -1234,6 +1454,8 @@ bool start_local_core(int* port, std::string* client_token,
   g.surface_mode = true;
   if (!api_token.empty()) g.local_api_token = api_token;
   g.local_core_started = true;
+  native_log(L"shell: spawned core port=" + std::to_wstring(ready_port) +
+             L" pid=" + std::to_wstring(process.dwProcessId));
   return true;
 }
 
@@ -1954,14 +2176,15 @@ void start_connect(const std::wstring& target, const std::wstring& code) {
           }
         }
       }
-      client->set_request_tiles(false);
       // The local core publishes the decoded picture on the shared surface;
       // without this the hello claimed a tile-only viewer and the host never
       // produced a stream (the proxy branch used to leave this at false, so a
-      // `--proxy`/`--core` session stayed blank while input worked).
-      if (!g.surface_path.empty()) {
-        client->set_stream_decoding(g.core_stream_decoders);
-      }
+      // `--proxy`/`--core` session stayed blank while input worked). A core
+      // adopted without MOLINK_SURFACE has no picture to publish, so there the
+      // proxy must ask for tiles.
+      const bool have_surface = core_publishes_surface();
+      client->set_request_tiles(!have_surface);
+      client->set_stream_decoding(have_surface);
       endpoint.client_token = g.local_core_token;
       ok = client->start("127.0.0.1", g.local_core_port, endpoint, &g.stats,
                          &error);
@@ -2014,8 +2237,9 @@ void start_connect(const std::wstring& target, const std::wstring& code) {
         }
         g.core_connect = core_ready;
         if (core_ready) {
-          client->set_stream_decoding(g.core_stream_decoders);
-          client->set_request_tiles(false);
+          const bool have_surface = core_publishes_surface();
+          client->set_stream_decoding(have_surface);
+          client->set_request_tiles(!have_surface);
           proxied.client_token = g.local_core_token;
           // The core we started listens on its ephemeral ready-line port;
           // local_core_port() is only the MOLINK_CORE_PORT override.
@@ -2090,9 +2314,10 @@ void start_connect(const std::wstring& target, const std::wstring& code) {
           // The core decodes the stream and publishes the shared surface, so
           // the hello must advertise those decoders: without this the host
           // treats the viewer as tiles-only and a stream-mode host shows a
-          // blank picture.
-          client->set_stream_decoding(g.core_stream_decoders);
-          client->set_request_tiles(false);
+          // blank picture. An adopted core has no surface; ask for tiles.
+          const bool have_surface = core_publishes_surface();
+          client->set_stream_decoding(have_surface);
+          client->set_request_tiles(!have_surface);
           proxied.client_token = g.local_core_token;
           g.core_connect = true;
           ok = client->start("127.0.0.1", local_core_port(), proxied, &g.stats,
@@ -10025,12 +10250,29 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     std::string client_token;
     std::wstring surface;
     std::string core_error;
-    if (start_local_core(&core_port, &client_token, &surface, &core_error)) {
+    std::string core_output;
+    if (start_local_core(&core_port, &client_token, &surface, &core_error,
+                         28418, &core_output)) {
       if (!surface.empty()) g.surface_path = surface;
       native_log(L"host core: ready on port " +
                  std::to_wstring(core_port));
     } else {
       native_log(L"host core: " + wide_of(core_error));
+      // A silent failure left new installs with an unusable window and no
+      // explanation. Show what the core printed and where to look.
+      std::wstring message = L"moLink could not start its core:\r\n" +
+                             wide_of(core_error);
+      if (!core_output.empty()) {
+        message += L"\r\n\r\nLast output from molink-core:\r\n" +
+                   wide_of(core_output);
+      }
+      message +=
+          L"\r\n\r\nAn existing moLink instance may be running but not "
+          L"answering. Check %LOCALAPPDATA%\\moLink\\native-core.log and "
+          L"%ProgramData%\\moLink\\logs, or stop the moLinkSession service "
+          L"and try again.";
+      MessageBoxW(nullptr, message.c_str(), L"moLink",
+                  MB_ICONERROR | MB_OK);
     }
   }
   load_host_settings();

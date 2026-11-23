@@ -25,6 +25,7 @@
 #include <shellapi.h>
 #include <shlobj.h>
 #include <urlmon.h>
+#include <winhttp.h>
 
 #include <WebView2.h>
 
@@ -77,6 +78,31 @@ void start_update(const std::wstring& url);
 
 void fail_box(const wchar_t* message) {
   MessageBoxW(g_window, message, L"moLink", MB_ICONERROR | MB_OK);
+}
+
+/// The shell is a windowed process, so stderr usually goes nowhere. Keep a
+/// small log next to the other per-user state so a launch problem can be
+/// diagnosed after the fact (and so the core-reuse decisions are visible).
+void shell_log(const std::string& text) {
+  std::fprintf(stderr, "%s\n", text.c_str());
+  wchar_t base[MAX_PATH] = {};
+  if (GetEnvironmentVariableW(L"LOCALAPPDATA", base, MAX_PATH) == 0) return;
+  const fs::path dir = fs::path(base) / L"moLink";
+  std::error_code ec;
+  fs::create_directories(dir, ec);
+  std::ofstream out(dir / L"shell.log", std::ios::app);
+  if (!out) return;
+  SYSTEMTIME now{};
+  GetLocalTime(&now);
+  char stamp[40] = {};
+  std::snprintf(stamp, sizeof(stamp), "%04u-%02u-%02u %02u:%02u:%02u ",
+                static_cast<unsigned>(now.wYear),
+                static_cast<unsigned>(now.wMonth),
+                static_cast<unsigned>(now.wDay),
+                static_cast<unsigned>(now.wHour),
+                static_cast<unsigned>(now.wMinute),
+                static_cast<unsigned>(now.wSecond));
+  out << stamp << text << "\r\n";
 }
 
 bool g_browser_fallback = false;
@@ -157,6 +183,17 @@ std::wstring widen(const std::string& text) {
   std::wstring out(static_cast<std::size_t>(needed), L'\0');
   MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()),
                       out.data(), needed);
+  return out;
+}
+
+std::string narrow(const std::wstring& text) {
+  if (text.empty()) return std::string();
+  const int needed = WideCharToMultiByte(CP_UTF8, 0, text.data(),
+                                         static_cast<int>(text.size()), nullptr, 0,
+                                         nullptr, nullptr);
+  std::string out(static_cast<std::size_t>(needed), '\0');
+  WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()),
+                      out.data(), needed, nullptr, nullptr);
   return out;
 }
 
@@ -284,9 +321,187 @@ int g_core_port = 0;
 /// DevTool/CDP port for the WebView2 environment (0 = off).
 int g_debug_port = 0;
 
+/// A core that is already listening and answered /api/device. The desktop
+/// shell reuses it instead of starting a second process: since 0.12.9 the
+/// moLinkSession service/helper keeps one resident so the host stays
+/// reachable, and a second core would fail to bind 28418.
+struct running_core {
+  int port = 0;
+  long pid = 0;
+  std::string token;
+  std::string client_token;
+  bool tls = false;
+};
+
+/// The port the core persists in its config directory (`--port` overrides it).
+/// Spawning must probe this one as well as the default: a user who changed the
+/// setting would otherwise still collide with the resident core.
+int persisted_core_port() {
+  std::wstring path;
+  char override_dir[1024] = {};
+  const DWORD override_len =
+      GetEnvironmentVariableA("MOLINK_CONFIG_DIR", override_dir,
+                              static_cast<DWORD>(std::size(override_dir)));
+  if (override_len > 0) {
+    path = widen(override_dir);
+  } else {
+    wchar_t appdata[MAX_PATH] = {};
+    if (GetEnvironmentVariableW(L"APPDATA", appdata, MAX_PATH) == 0) return 0;
+    path = std::wstring(appdata) + L"\\moLink";
+  }
+  char value[32] = {};
+  FILE* file = _wfopen((path + L"\\tcp_port").c_str(), L"rb");
+  if (file == nullptr) return 0;
+  const size_t got = std::fread(value, 1, sizeof(value) - 1, file);
+  std::fclose(file);
+  if (got == 0) return 0;
+  const int port = std::atoi(value);
+  return port > 0 && port <= 65535 ? port : 0;
+}
+
+std::vector<int> core_probe_ports() {
+  std::vector<int> ports;
+  auto add = [&ports](int port) {
+    if (port <= 0 || port > 65535) return;
+    for (int existing : ports) {
+      if (existing == port) return;
+    }
+    ports.push_back(port);
+  };
+  if (g_core_port > 0) add(g_core_port);
+  add(persisted_core_port());
+  add(28418);
+  return ports;
+}
+
+/// One short loopback GET. Timeouts are deliberately tight (<500 ms per
+/// phase): discovery must not slow down a normal launch.
+bool core_http_get(int port, bool tls, const std::wstring& path,
+                   std::string& body, DWORD& status) {
+  body.clear();
+  status = 0;
+  HINTERNET session = WinHttpOpen(
+      L"moLink-shell/1.0", WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_NO_PROXY_NAME,
+      WINHTTP_NO_PROXY_BYPASS, 0);
+  if (session == nullptr) return false;
+  WinHttpSetTimeouts(session, 400, 400, 400, 500);
+  HINTERNET connection = WinHttpConnect(
+      session, L"127.0.0.1", static_cast<INTERNET_PORT>(port), 0);
+  HINTERNET request =
+      connection != nullptr
+          ? WinHttpOpenRequest(
+                connection, L"GET", path.c_str(), nullptr, WINHTTP_NO_REFERER,
+                WINHTTP_DEFAULT_ACCEPT_TYPES,
+                tls ? WINHTTP_FLAG_SECURE : 0)
+          : nullptr;
+  if (request != nullptr && tls) {
+    // The core's certificate is self-signed; this is a loopback probe, not a
+    // trust decision. The UI itself is trusted separately (origin handler).
+    DWORD ignore = SECURITY_FLAG_IGNORE_UNKNOWN_CA |
+                   SECURITY_FLAG_IGNORE_CERT_CN_INVALID |
+                   SECURITY_FLAG_IGNORE_CERT_DATE_INVALID |
+                   SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE;
+    WinHttpSetOption(request, WINHTTP_OPTION_SECURITY_FLAGS, &ignore,
+                     sizeof(ignore));
+  }
+  bool ok = false;
+  if (request != nullptr &&
+      WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                         WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
+      WinHttpReceiveResponse(request, nullptr)) {
+    DWORD size = sizeof(status);
+    DWORD code = 0;
+    if (WinHttpQueryHeaders(request,
+                            WINHTTP_QUERY_STATUS_CODE |
+                                WINHTTP_QUERY_FLAG_NUMBER,
+                            WINHTTP_HEADER_NAME_BY_INDEX, &code, &size,
+                            WINHTTP_NO_HEADER_INDEX)) {
+      status = code;
+      ok = true;
+    }
+    char buffer[4096];
+    DWORD read = 0;
+    while (WinHttpReadData(request, buffer, sizeof(buffer), &read) &&
+           read > 0) {
+      body.append(buffer, read);
+      if (body.size() > 512 * 1024) break;
+    }
+  }
+  if (request != nullptr) WinHttpCloseHandle(request);
+  if (connection != nullptr) WinHttpCloseHandle(connection);
+  WinHttpCloseHandle(session);
+  return ok;
+}
+
+/// Ask one port whether a usable core is there. A core started with
+/// encrypt_lan on serves TLS only, so try plain HTTP first and HTTPS second.
+bool probe_core(int port, running_core& out) {
+  for (int secure = 0; secure < 2; ++secure) {
+    std::string body;
+    DWORD status = 0;
+    if (!core_http_get(port, secure == 1, L"/api/device", body, status) ||
+        status != 200) {
+      continue;
+    }
+    long parsed_port = 0;
+    std::string token;
+    std::string client_token;
+    if (!json_number(body, "port", parsed_port) || parsed_port <= 0 ||
+        !json_string(body, "token", token) ||
+        !json_string(body, "client_token", client_token) ||
+        client_token.empty()) {
+      continue;
+    }
+    out.port = static_cast<int>(parsed_port);
+    out.token = token;
+    out.client_token = client_token;
+    out.tls = body.find("\"tls\":true") != std::string::npos || secure == 1;
+    out.pid = 0;
+    json_number(body, "pid", out.pid);
+    return true;
+  }
+  return false;
+}
+
+bool find_running_core(running_core& out) {
+  for (int port : core_probe_ports()) {
+    running_core candidate;
+    if (probe_core(port, candidate)) {
+      out = candidate;
+      return true;
+    }
+  }
+  return false;
+}
+
+/// The last @p count lines of the core's raw stdout, for the failure dialog.
+std::string tail_lines(const std::string& text, int count) {
+  std::vector<std::string> lines;
+  std::size_t start = 0;
+  while (start < text.size()) {
+    const std::size_t end = text.find('\n', start);
+    std::string line = text.substr(
+        start, end == std::string::npos ? std::string::npos : end - start);
+    while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) {
+      line.pop_back();
+    }
+    if (!line.empty()) lines.push_back(line);
+    if (lines.size() > static_cast<std::size_t>(count)) lines.erase(lines.begin());
+    if (end == std::string::npos) break;
+    start = end + 1;
+  }
+  std::string out;
+  for (const std::string& line : lines) {
+    if (!out.empty()) out += "\r\n";
+    out += line;
+  }
+  return out;
+}
+
 bool start_core(const std::wstring& core, const std::wstring& web_root, int& port,
                 std::string& token, std::string& client_token, bool& tls,
-                std::wstring& error) {
+                std::wstring& error, std::string& output_tail, bool& busy,
+                int& busy_port) {
   SECURITY_ATTRIBUTES attributes{};
   attributes.nLength = sizeof(attributes);
   attributes.bInheritHandle = TRUE;
@@ -333,6 +548,8 @@ bool start_core(const std::wstring& core, const std::wstring& web_root, int& por
   std::string line;
   const ULONGLONG deadline = GetTickCount64() + 10000;
   bool complete = false;
+  busy = false;
+  busy_port = 0;
   // The core's libuvcpp logger prints to stdout before the ready JSON, so keep
   // reading until the ready marker itself arrives; stopping at the first
   // newline parsed a log line and the shell then ran without a core.
@@ -341,6 +558,19 @@ bool start_core(const std::wstring& core, const std::wstring& web_root, int& por
     if (marker != std::string::npos &&
         line.find('\n', marker) != std::string::npos) {
       complete = true;
+      break;
+    }
+    // A core that lost the port to one that is already running reports it at
+    // once. Do not wait out the ten-second ready deadline: the caller probes
+    // and adopts the winner instead.
+    const size_t busy_marker = line.find("\"event\":\"busy\"");
+    if (busy_marker != std::string::npos &&
+        line.find('\n', busy_marker) != std::string::npos) {
+      busy = true;
+      long parsed_busy_port = 0;
+      if (json_number(line, "port", parsed_busy_port)) {
+        busy_port = static_cast<int>(parsed_busy_port);
+      }
       break;
     }
     DWORD available = 0;
@@ -359,6 +589,7 @@ bool start_core(const std::wstring& core, const std::wstring& web_root, int& por
     }
   }
   CloseHandle(read_pipe);
+  output_tail = tail_lines(line, 5);
   // Keep only the ready JSON. The JSON object's keys are sorted, so it starts
   // with "capture" or another key, never necessarily "event"; find the object
   // that contains the marker rather than assuming it starts the line.
@@ -380,6 +611,12 @@ bool start_core(const std::wstring& core, const std::wstring& web_root, int& por
   }
 
   long parsed_port = 0;
+  if (busy) {
+    error = L"molink-core could not bind port " +
+            std::to_wstring(busy_port > 0 ? busy_port : 28418) +
+            L": another instance is already using it";
+    return false;
+  }
   if (!complete || line.empty() || line.front() != '{' ||
       !json_number(line, "port", parsed_port) ||
       !json_string(line, "token", token) ||
@@ -1207,26 +1444,80 @@ int run(HINSTANCE instance) {
     g_url = g_url_override;
     g_origin = L"http://127.0.0.1:";
   } else {
-  const std::wstring core = find_core();
-  if (core.empty()) {
-    fail_box(L"molink-core.exe not found. Build backend/ or set MOLINK_CORE.");
-    return 1;
-  }
-  const std::wstring web_root = find_web_root();
-  if (web_root.empty()) {
-    fail_box(L"frontend/dist not found. Run pnpm build in frontend/.");
-    return 1;
-  }
-
   int port = 0;
   std::string token;
   std::string client_token;
   bool tls = false;
   std::wstring error;
-  if (!start_core(core, web_root, port, token, client_token, tls, error)) {
-    fail_box(error.c_str());
-    stop_core();
-    return 1;
+  running_core running;
+  // Since 0.12.9 the moLinkSession service/helper keeps a core resident in
+  // the user session. Probe for it before starting another one: the second
+  // process cannot bind the same port and used to leave the app on an error
+  // box. A reused core stays owned by its supervisor; this shell only points
+  // the WebView at it.
+  if (find_running_core(running)) {
+    port = running.port;
+    token = running.token;
+    client_token = running.client_token;
+    tls = running.tls;
+    shell_log("shell: reusing core port=" + std::to_string(port) +
+              " pid=" + std::to_string(running.pid) +
+              " (started outside this shell)");
+  } else {
+    // Only needed when there is no core to adopt: a resident core serves the
+    // UI itself, so a missing local binary or web root is not fatal then.
+    const std::wstring core = find_core();
+    if (core.empty()) {
+      fail_box(L"molink-core.exe not found. Build backend/ or set MOLINK_CORE.");
+      return 1;
+    }
+    const std::wstring web_root = find_web_root();
+    if (web_root.empty()) {
+      fail_box(L"frontend/dist not found. Run pnpm build in frontend/.");
+      return 1;
+    }
+    std::string output_tail;
+    bool busy = false;
+    int busy_port = 0;
+    if (!start_core(core, web_root, port, token, client_token, tls, error,
+                    output_tail, busy, busy_port)) {
+      shell_log("shell: core start failed: " + narrow(error) +
+                (busy ? " (busy port " + std::to_string(busy_port) + ")"
+                      : std::string()));
+      // The other process may have won the race while we were starting: the
+      // service can bring its core up at any moment.
+      stop_core();
+      if (find_running_core(running)) {
+        port = running.port;
+        token = running.token;
+        client_token = running.client_token;
+        tls = running.tls;
+        shell_log("shell: reusing core port=" + std::to_string(port) +
+                  " pid=" + std::to_string(running.pid) +
+                  " after a start failure");
+      } else {
+        std::wstring message = error;
+        if (!output_tail.empty()) {
+          message += L"\n\nLast output from molink-core:\n";
+          message += widen(output_tail);
+        }
+        message +=
+            L"\n\nAn existing moLink instance may be running but not "
+            L"answering. Check %ProgramData%\\moLink\\logs for details, or "
+            L"stop the moLinkSession service and try again.";
+        shell_log("shell: giving up: no reachable core");
+        if (g_smoke) {
+          std::printf("SHELL_SMOKE_FAIL %s\n", narrow(error).c_str());
+          std::fflush(stdout);
+          return 1;
+        }
+        fail_box(message.c_str());
+        return 1;
+      }
+    } else {
+      shell_log("shell: spawned core port=" + std::to_string(port) +
+                " pid=" + std::to_string(g_core_pid));
+    }
   }
 
   // The core publishes to a native surface: open the window that draws it, as

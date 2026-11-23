@@ -51,6 +51,9 @@ struct api_deps {
   std::shared_ptr<discovery_service> discovery;
   std::shared_ptr<ui_store> ui;
   std::shared_ptr<std::atomic<int>> bound_port;
+  /// True when the web port is served over TLS. /api/device reports it so a
+  /// shell adopting a core it did not spawn can build the right UI URL.
+  bool tls_enabled = false;
   /// True when this build can carry HTTP/2 (h2c) on the web port.
   bool http2_available = false;
   /// Set once the QUIC session listener is actually accepting.
