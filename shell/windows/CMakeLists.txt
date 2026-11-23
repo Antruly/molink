@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(moLinkWindows LANGUAGES CXX RC)
+project(moLinkWindows LANGUAGES C CXX RC)
 
 set(MOLINK_CXX_STANDARD 20 CACHE STRING
   "C++ standard for the Windows shell (17 for Win7 x86 / GCC 8)")
@@ -58,9 +58,6 @@ add_executable(moLink-native WIN32
   puff.c
   ui_kit_demo.rc
 )
-# puff.h has no extern "C" guard; the release build compiles puff.c as C++ so
-# session_client.cpp's plain declaration resolves.
-set_source_files_properties(puff.c PROPERTIES LANGUAGE CXX)
 target_include_directories(moLink-native PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}"
   # ui_kit_demo.rc names the icon as shell/assets/icons/icon.ico.
