@@ -478,8 +478,8 @@ jobs:
             '-o', 'build\windows\pkg\moLink-native.exe',
             'shell/windows/ui_kit_demo.cpp', 'shell/windows/ui_kit.cpp',
             'shell/windows/ws_client.cpp', 'shell/windows/session_client.cpp',
-            'shell/windows/preset_message.cpp', 'shell/windows/clipboard_sync.cpp',
-            'shell/windows/clipboard_files.cpp',
+            'shell/windows/preset_message.cpp', 'shell/windows/file_panel_logic.cpp',
+            'shell/windows/clipboard_sync.cpp', 'shell/windows/clipboard_files.cpp',
             'shell/windows/input_state.cpp',
             'shell/windows/puff.c', "$env:RUNNER_TEMP\native-res.o",
             "-L$mingwLib"
