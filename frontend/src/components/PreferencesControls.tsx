@@ -2,6 +2,7 @@ import {
   Check,
   ClipboardCopy,
   Cpu,
+  Focus,
   Gauge,
   KeyRound,
   Languages,
@@ -571,6 +572,8 @@ export function PreferencesControls({
   const setTheme = useAppStore((state) => state.setTheme)
   const quality = useAppStore((state) => state.qualityWatermark)
   const setQuality = useAppStore((state) => state.setQualityWatermark)
+  const watermarkFade = useAppStore((state) => state.watermarkFade)
+  const setWatermarkFade = useAppStore((state) => state.setWatermarkFade)
   const autoAudio = useAppStore((state) => state.autoAudio)
   const setAutoAudio = useAppStore((state) => state.setAutoAudio)
   const remoteClipboardFiles = useAppStore(
@@ -735,6 +738,23 @@ export function PreferencesControls({
               checked={quality}
               onChange={setQuality}
               label={t('settings.watermark')}
+            />
+          </div>
+
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <div className="flex items-center gap-2 text-[12px] font-medium text-ink">
+                <Focus size={14} className="text-accent" />
+                {t('settings.watermarkFade')}
+              </div>
+              <div className="mt-1 text-[11px] leading-relaxed text-muted">
+                {t('settings.watermarkFadeHint')}
+              </div>
+            </div>
+            <Toggle
+              checked={watermarkFade}
+              onChange={setWatermarkFade}
+              label={t('settings.watermarkFade')}
             />
           </div>
 
