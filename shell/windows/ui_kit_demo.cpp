@@ -9008,7 +9008,12 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
         }
         for (const std::string& clip : g.session->take_clipboard()) {
           if (g.clipboard_on) {
-            set_clipboard_text(wide_of(clip));
+            const std::wstring local = wide_of(clip);
+            // Record the value before writing it: the write raises
+            // WM_CLIPBOARDUPDATE, and without this the echo would be read as a
+            // fresh local copy and sent straight back to the host.
+            g.clipboard_sync.on_remote_text(u16_of(local), GetTickCount64());
+            set_clipboard_text(local);
             show_toast(L"已接收远端剪贴板");
             InvalidateRect(window, nullptr, FALSE);
           }

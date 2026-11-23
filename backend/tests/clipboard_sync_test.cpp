@@ -209,9 +209,10 @@ void test_utf16_to_utf8() {
   const std::u16string emoji = u"\U0001F600";
   expect(utf8_from_utf16(emoji) == "\xF0\x9F\x98\x80",
          "a surrogate pair becomes four UTF-8 bytes");
-  expect(utf8_from_utf16(std::u16string{u'\uD800'}) == "\xEF\xBF\xBD",
+  // Written as code units: a \uD800 literal is a compile error in C++.
+  expect(utf8_from_utf16(std::u16string{char16_t{0xD800}}) == "\xEF\xBF\xBD",
          "an unpaired high surrogate becomes U+FFFD");
-  expect(utf8_from_utf16(std::u16string{u'\uDC00'}) == "\xEF\xBF\xBD",
+  expect(utf8_from_utf16(std::u16string{char16_t{0xDC00}}) == "\xEF\xBF\xBD",
          "an unpaired low surrogate becomes U+FFFD");
 }
 
