@@ -25,12 +25,14 @@ bool contains(const std::vector<std::string>& values, const char* wanted) {
 struct fake_capture {
   int stream_always_calls = 0;
   bool last_stream_always = false;
+  bool last_stream_locked = false;
   int last_enter_percent = -1;
 
   void set_stream_always(bool always) {
     ++stream_always_calls;
     last_stream_always = always;
   }
+  void set_stream_locked(bool locked) { last_stream_locked = locked; }
   void set_stream_enter_percent(int percent) {
     last_enter_percent = percent;
   }
@@ -108,8 +110,42 @@ void test_stream_always_preference_overrides_mode() {
          "tiles never forces the stream");
   expect(!stream_always_for("tiles", "tiles"),
          "tiles + tiles never forces the stream");
-  expect(!stream_always_for("mixed", "av1"),
+  expect(!stream_always_for("mixed", "auto"),
          "the legacy mixed spelling normalises to auto, not stream");
+}
+
+void test_explicit_codec_locks_the_stream() {
+  using molink::effective_no_subsampling;
+  using molink::is_explicit_stream_codec;
+  using molink::stream_always_for;
+  using molink::stream_locked_for;
+  using molink::stream_codec_forces_420;
+
+  for (const char* codec : {"av1", "h264", "vp9", "vp8"}) {
+    expect(is_explicit_stream_codec(codec), "a real encoder is explicit");
+    expect(stream_always_for("auto", codec),
+           "an explicit encoder forces the stream even in auto mode");
+    expect(stream_always_for("tiles", codec),
+           "an explicit encoder wins over the tiles video mode");
+    expect(stream_locked_for(codec),
+           "an explicit encoder locks the stream path");
+  }
+  expect(!is_explicit_stream_codec("auto"), "auto is not an encoder");
+  expect(!is_explicit_stream_codec("tiles"), "tiles is not an encoder");
+  expect(!stream_locked_for("auto"), "auto may adapt between tiles and video");
+  expect(!stream_locked_for("tiles"), "an explicit tiles choice is not locked");
+  expect(stream_always_for("stream", "tiles") == false,
+         "the manual tiles choice still wins over the stream default");
+
+  // truecolor (4:4:4 / no subsampling) and an explicit encoder are mutually
+  // exclusive: the encoder's 4:2:0 wins, so the stream stays on.
+  expect(stream_codec_forces_420("vp9"), "VP9 is a 4:2:0 encoder");
+  expect(effective_no_subsampling(true, "vp9") == false,
+         "truecolor + VP9 resolves to 4:2:0, not tiles");
+  expect(effective_no_subsampling(true, "auto"),
+         "truecolor without a pinned encoder keeps the tile path");
+  expect(effective_no_subsampling(false, "vp9") == false,
+         "a non-truecolor request is never forced back to tiles");
 }
 
 void test_auto_releases_stream_always() {
@@ -120,12 +156,26 @@ void test_auto_releases_stream_always() {
          "the supervisor applies the video mode to the capture");
   expect(!capture.last_stream_always,
          "auto leaves stream_always false for the adaptive policy");
+  expect(!capture.last_stream_locked,
+         "auto never locks the stream path");
   expect(capture.last_enter_percent == 20,
          "the movement threshold is still applied");
+
+  apply_video_mode(capture, "auto", "vp9", 20);
+  expect(capture.last_stream_always,
+         "an explicit codec pins the stream even in auto mode");
+  expect(capture.last_stream_locked,
+         "an explicit codec locks out the tile fallback");
+
+  apply_video_mode(capture, "auto", "vp9", 20, false, false);
+  expect(!capture.last_stream_locked,
+         "an encoder this host cannot build does not lock the path");
 
   apply_video_mode(capture, "stream", "auto", 20);
   expect(capture.last_stream_always,
          "stream pins stream_always true");
+  expect(!capture.last_stream_locked,
+         "the stream mode still lets the adaptive policy own the lock");
 
   apply_video_mode(capture, "stream", "tiles", 20);
   expect(!capture.last_stream_always,
@@ -146,6 +196,7 @@ int main() {
   test_settings_values_normalise();
   test_welcome_advertises_both_paths_in_auto();
   test_stream_always_preference_overrides_mode();
+  test_explicit_codec_locks_the_stream();
   test_auto_releases_stream_always();
   std::printf("%d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;

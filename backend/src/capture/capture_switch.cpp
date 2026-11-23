@@ -57,6 +57,7 @@ void capture_switch::replay_settings(capture_source& source) const {
   source.set_vp9_stream_allowed(vp9_stream_allowed_.load());
   source.set_vp8_stream_allowed(vp8_stream_allowed_.load());
   source.set_stream_always(stream_always_.load());
+  source.set_stream_locked(stream_locked_.load());
   source.set_stream_enter_percent(stream_enter_percent_.load());
   // A forced-stream window outlives the swap: the secure desktop relies on it
   // from the moment the switch happens.
@@ -255,6 +256,11 @@ std::string capture_switch::stream_codec_name() const {
 void capture_switch::set_stream_always(bool always) {
   stream_always_.store(always);
   with([always](capture_source& s) { s.set_stream_always(always); });
+}
+
+void capture_switch::set_stream_locked(bool locked) {
+  stream_locked_.store(locked);
+  with([locked](capture_source& s) { s.set_stream_locked(locked); });
 }
 
 void capture_switch::set_vp9_stream_allowed(bool allowed) {

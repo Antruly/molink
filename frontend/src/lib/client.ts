@@ -110,6 +110,9 @@ export interface Welcome {
   stream_codecs?: string[]
   /** The host's global stream codec preference (auto/av1/h264/vp9/vp8). */
   codec_preference?: string
+  /** False when the pinned codec cannot run here (missing encoder or an
+   *  undecodable codec); the picture stays on tiles and the UI says why. */
+  codec_available?: boolean
   /** The host can offer a WebRTC video track (Phase 4). */
   webrtc?: boolean
   /** The host accepts a WebTransport session on its own port (Phase 5). */
@@ -338,6 +341,10 @@ export interface ClientHandlers {
   /// The host's global stream codec preference changed (another tab, or this
   /// one echoing back).
   onCodecPreference?: (value: string) => void
+  /// Whether the host's pinned encoder can actually run for this session. An
+  /// explicit codec this host cannot encode (or this page cannot decode)
+  /// stays on tiles; the UI names it instead of silently substituting one.
+  onCodecStatus?: (available: boolean, codec: string) => void
   /// The host applied a viewer-owned `session-preset` and reports the actual
   /// rate/codec/chroma. The reply never changes the viewer's selection.
   onSessionPresetApplied?: (applied: PresetApplied) => void
@@ -397,6 +404,9 @@ interface ControlMessage {
   protocol?: string
   /// Why a `stream-gap` notice was sent (currently "backpressure").
   reason?: string
+  /// `codec-status`: whether the pinned encoder can run, and which codec.
+  available?: boolean
+  codec?: string
   index?: number
   action?: string
   ok?: boolean
@@ -1825,6 +1835,12 @@ export class MolinkClient {
           this.preferredCodec = welcome.codec_preference
           this.handlers.onCodecPreference?.(welcome.codec_preference)
         }
+        if (typeof welcome.codec_available === 'boolean') {
+          this.handlers.onCodecStatus?.(
+            welcome.codec_available,
+            welcome.codec_preference ?? 'auto',
+          )
+        }
         this.handlers.onWelcome?.(welcome)
         this.retryAttempts = 0
         this.stopRetryTimers()
@@ -2022,6 +2038,14 @@ export class MolinkClient {
       case 'stream-codec':
         if (typeof message.value === 'string') {
           this.handlers.onCodecPreference?.(message.value)
+        }
+        break
+      case 'codec-status':
+        if (typeof message.available === 'boolean') {
+          this.handlers.onCodecStatus?.(
+            message.available,
+            typeof message.codec === 'string' ? message.codec : 'auto',
+          )
         }
         break
       case 'stream-gap':

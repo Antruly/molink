@@ -49,6 +49,7 @@ import {
 import { useTranslation } from 'react-i18next'
 import { MIN_FPS, fpsPlan } from '../lib/frame-rate'
 import {
+  codecExitsTruecolor,
   presetMessage,
   presetPlan,
   viewerPresetAfterReply,
@@ -64,6 +65,12 @@ import { keyToCode, normalizeKeyCode } from '../lib/key-code'
 import { Codec, codecName } from '../lib/protocol'
 import { collectDropEntries, stageRemoteDrop } from '../lib/file-drop'
 import {
+  comboForwardAnswer,
+  shouldAskComboForward,
+} from '../lib/combo-forward'
+import {
+  keyboardGrabApplicable,
+  keyboardGrabAvailable,
   setKeyboardGrab,
   shellInfo,
   windowAction,
@@ -372,6 +379,21 @@ export function SessionView({
   const setSettingsOpen = useAppStore((state) => state.setSettingsOpen)
   const settingsOpen = useAppStore((state) => state.settingsOpen)
   const keyboardGrab = useAppStore((state) => state.keyboardGrab)
+  const comboForwardAsked = useAppStore((state) => state.comboForwardAsked)
+  const comboForwardAnswered = useAppStore(
+    (state) => state.comboForwardAnswered,
+  )
+  const setComboForwardAsked = useAppStore(
+    (state) => state.setComboForwardAsked,
+  )
+  const markComboForwardAnswered = useAppStore(
+    (state) => state.markComboForwardAnswered,
+  )
+  /// Persists the combo-forwarding switch. The shell command above only moves
+  /// the actual X11 grab; this is the setting that survives a restart.
+  const setKeyboardGrabSetting = useAppStore(
+    (state) => state.setKeyboardGrab,
+  )
 
   const welcome = tab.welcome
   const synthetic = welcome?.tiles.synthetic === true
@@ -396,6 +418,13 @@ export function SessionView({
   const pressedButtons = useRef<Set<number>>(new Set())
   const [surfaceSize, setSurfaceSize] = useState({ width: 0, height: 0 })
   const [actionError, setActionError] = useState<string | null>(null)
+  /// First-use dialog for combo forwarding. `combo` is the toolbar sequence
+  /// that opened it (null when the trigger was a physical Win key, which is
+  /// forwarded normally and does not need replaying).
+  const [comboPrompt, setComboPrompt] = useState<{
+    combo: KeyCombo | null
+    remember: boolean
+  } | null>(null)
   // A rejected input event is transient: show the host's reason (the key code
   // it did not understand) for a few seconds without touching the session.
   const [inputNotice, setInputNotice] = useState<string | null>(null)
@@ -531,6 +560,13 @@ export function SessionView({
   // page can decode them. Empty for hosts that do not advertise the list.
   const codecOptions = tab.codecOptions ?? []
   const codecPreference = tab.codecPreference ?? 'auto'
+  // An explicit encoder the host cannot run (or this page cannot decode)
+  // keeps the picture on tiles. Say which one instead of silently leaving the
+  // stream off.
+  const codecUnavailable =
+    codecPreference !== 'auto' && codecPreference !== 'tiles' &&
+    (tab.codecAvailable === false ||
+      (codecOptions.length > 0 && !codecOptions.includes(codecPreference)))
   // Average frame rate: the preset's own rate (or the tier window in auto),
   // then lowered by the load controller while the host or link is saturated.
   // The host never raises it back.
@@ -1927,6 +1963,20 @@ export function SessionView({
       if (!shouldForwardKeys(forwardState(event.target))) return
       const code = codeFor(event)
       if (!code) return
+      // A physical Win key is the other first-use trigger: the shell's grab
+      // is what lets it reach the remote at all. Ask once, then keep
+      // forwarding this press as usual.
+      if (code === 'MetaLeft' || code === 'MetaRight') {
+        const state = useAppStore.getState()
+        if (shouldAskComboForward({
+          applicable: keyboardGrabApplicable() && keyboardGrabAvailable(),
+          enabled: state.keyboardGrab,
+          asked: state.comboForwardAsked,
+          answeredThisSession: state.comboForwardAnswered,
+        })) {
+          setComboPrompt({ combo: null, remember: true })
+        }
+      }
       event.preventDefault()
       keys.add(code)
       connection()?.sendInput({ k: 'key', code, down: true })
@@ -2066,11 +2116,7 @@ export function SessionView({
   // The desktop eats Win/Alt shortcuts before the page sees them, so these are
   // sent as ordinary key events straight from the toolbar. Nothing new goes on
   // the wire: the host already maps MetaLeft to VK_LWIN.
-  const sendKeyCombo = (combo: KeyCombo) => {
-    if (!tab.controlEnabled || !inputAvailable) return
-    if (combo.confirmKey && !window.confirm(String(t(combo.confirmKey)))) {
-      return
-    }
+  const deliverKeyCombo = (combo: KeyCombo) => {
     // A toolbar click normally means this window owns the keyboard, but a
     // popout or a webview that lost focus can still report no focus. Ask the
     // window to take it back before the sequence leaves the page.
@@ -2079,6 +2125,40 @@ export function SessionView({
     for (const step of keySequence(combo.keys)) {
       connection()?.sendInput({ k: 'key', code: step.code, down: step.down })
     }
+  }
+
+  const comboForwardNeeded = () =>
+    shouldAskComboForward({
+      applicable: keyboardGrabApplicable() && keyboardGrabAvailable(),
+      enabled: keyboardGrab,
+      asked: comboForwardAsked,
+      answeredThisSession: comboForwardAnswered,
+    })
+
+  const sendKeyCombo = (combo: KeyCombo) => {
+    if (!tab.controlEnabled || !inputAvailable) return
+    if (combo.confirmKey && !window.confirm(String(t(combo.confirmKey)))) {
+      return
+    }
+    // First use of the combo menu asks once whether to enable forwarding.
+    // The sequence itself is sent after the answer either way: declining only
+    // means no keyboard grab.
+    if (comboForwardNeeded()) {
+      setComboPrompt({ combo, remember: true })
+      return
+    }
+    deliverKeyCombo(combo)
+  }
+
+  const answerComboPrompt = (enable: boolean) => {
+    const pending = comboPrompt
+    if (!pending) return
+    const answer = comboForwardAnswer(enable, pending.remember)
+    setKeyboardGrabSetting(answer.enabled)
+    if (answer.asked !== null) setComboForwardAsked(answer.asked)
+    markComboForwardAnswered()
+    setComboPrompt(null)
+    if (pending.combo) deliverKeyCombo(pending.combo)
   }
 
   const comboMenu = inputAvailable ? (
@@ -2604,6 +2684,7 @@ export function SessionView({
               <QualityPanel
                 preset={presetId}
                 applied={tab.appliedPreset}
+                codecPreference={codecPreference}
                 onPreset={(next) => {
                   setTabPreset(tab.id, next)
                   // A new tier starts at its own resting rate instead of
@@ -2629,9 +2710,22 @@ export function SessionView({
                   <Cpu size={12} />
                   <select
                     value={codecPreference}
-                    onChange={(event) =>
-                      connection()?.setStreamCodec(event.target.value)
-                    }
+                    onChange={(event) => {
+                      const value = event.target.value
+                      // truecolour asks for 4:4:4 and the tile path; every
+                      // video encoder here is 4:2:0. Warn that choosing one
+                      // exits truecolour, then leave the tier so the UI and
+                      // the picture agree.
+                      if (codecExitsTruecolor(presetId, value)) {
+                        if (!window.confirm(
+                          String(t('session.codecExitsTruecolor')),
+                        )) {
+                          return
+                        }
+                        setTabPreset(tab.id, 'auto')
+                      }
+                      connection()?.setStreamCodec(value)
+                    }}
                     aria-label={t('session.codec')}
                     className="h-7 bg-transparent text-[11px] text-ink outline-none [&>option]:bg-surface [&>option]:text-ink"
                   >
@@ -2646,6 +2740,14 @@ export function SessionView({
                       </option>
                     ))}
                   </select>
+                  {codecUnavailable ? (
+                    <span
+                      className="shrink-0 text-[10px] text-danger"
+                      title={t('session.codecUnavailable')}
+                    >
+                      {t('session.codecUnavailableShort')}
+                    </span>
+                  ) : null}
                 </label>
               ) : null}
               <button
@@ -3360,6 +3462,61 @@ export function SessionView({
           ) : null}
         </div>
       </div>
+
+      {/* First-use combo forwarding dialog. A remembered answer is stored in
+          ui.json/localStorage; an unremembered one only mutes it for this
+          page session. */}
+      {comboPrompt ? (
+        <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/45 p-4">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="combo-forward-title"
+            className="w-[min(92vw,440px)] rounded-xl border border-line bg-surface p-4 shadow-2xl"
+          >
+            <h2
+              id="combo-forward-title"
+              className="text-[14px] font-medium text-ink"
+            >
+              {t('comboPrompt.title')}
+            </h2>
+            <p className="mt-2 text-[12px] leading-relaxed text-muted">
+              {t('comboPrompt.body')}
+            </p>
+            <label className="mt-3 flex cursor-pointer items-start gap-2 text-[12px] text-ink">
+              <input
+                type="checkbox"
+                checked={comboPrompt.remember}
+                onChange={(event) =>
+                  setComboPrompt((current) =>
+                    current
+                      ? { ...current, remember: event.target.checked }
+                      : current,
+                  )
+                }
+                className="mt-0.5"
+              />
+              <span>{t('comboPrompt.remember')}</span>
+            </label>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                className="btn btn-quiet"
+                onClick={() => answerComboPrompt(false)}
+              >
+                {t('comboPrompt.decline')}
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => answerComboPrompt(true)}
+              >
+                {t('comboPrompt.enable')}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
     </div>
   )
