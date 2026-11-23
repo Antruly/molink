@@ -25,6 +25,7 @@
 
 #include "config.h"
 #include "capture/frame_encode.h"
+#include "diag_log.h"
 #include "compression.h"
 #include "capture/replay_policy.h"
 #include "capture/video_push.h"
@@ -240,6 +241,16 @@ void send_json(session_transport* transport, const uvcpp_json& j) {
 
 void send_error(session_transport* transport, const char* code,
                 const std::string& message) {
+  // Every error handed to a viewer is also a host-side diagnostic. `err_code`
+  // rather than `code` keeps the redactor from mistaking a machine error name
+  // for a verification code.
+  std::vector<diag_field> fields;
+  fields.push_back({"err_code", code});
+  if (transport != nullptr) {
+    fields.push_back({"peer", transport->peer_ip()});
+    fields.push_back({"proto", transport->name()});
+  }
+  diag().log(diag_level::error, "session.error", message, fields);
   uvcpp_json j;
   j["type"] = "error";
   j["code"] = code;
@@ -305,6 +316,16 @@ void send_clipboard_files_to(
     const std::shared_ptr<session_registry>& registry, const session_info& peer,
     const std::vector<clipboard_file>& files, bool nested_rdp) {
   if (!peer.authenticated || !peer.transport) return;
+  {
+    uint64_t total = 0;
+    for (const clipboard_file& file : files) total += file.size;
+    std::vector<diag_field> fields;
+    fields.push_back({"peer", peer.peer_ip});
+    fields.push_back({"files", std::to_string(files.size())});
+    fields.push_back({"bytes", std::to_string(total)});
+    fields.push_back({"nested_rdp", nested_rdp ? "1" : "0"});
+    diag().log(diag_level::info, "clipboard.announce", std::string(), fields);
+  }
   uvcpp_json legacy_list = uvcpp_json::array();
   for (const clipboard_file& file : files) {
     uvcpp_json legacy;
@@ -1346,6 +1367,15 @@ void send_welcome(session_transport* transport, const session_info& session,
   // reads as path=relay, protocol=quic.
   j["transport"] = transport->name();
   j["transport_path"] = transport->path();
+  {
+    std::vector<diag_field> fields;
+    fields.push_back({"peer", session.peer_ip});
+    fields.push_back({"session_id", session.public_id});
+    fields.push_back({"proto", transport->name()});
+    fields.push_back({"path", transport->path()});
+    fields.push_back({"version", opt.version});
+    diag().log(diag_level::info, "session.welcome", std::string(), fields);
+  }
   // The host's alternatives, not just the protocol this session happened to
   // use: a QUIC session still has the WebSocket door for older clients.
   j["transports"] = uvcpp_json::array();
@@ -1537,7 +1567,12 @@ void session_controller::send_lazy_offer_reply(bool ok, bool stream,
   // so `compat` is never sent any more; the field stays understood by the
   // client for compatibility with old cores.
   if (compat) out["compat"] = true;
-  if (!ok) out["message"] = message;
+  if (!ok) {
+    out["message"] = message;
+    diag().log(diag_level::warn, "clipboard.offer-rejected", message,
+               {{"peer", transport->peer_ip()},
+                {"mode", stream ? "stream" : "eager"}});
+  }
   send_json(transport.get(), out);
 }
 
@@ -1616,9 +1651,17 @@ void session_controller::on_upload_event(int tag,
       source->note_progress(static_cast<std::size_t>(index), received);
       break;
     case file_transfer::upload_event::failed:
+      diag().log(diag_level::warn, "clipboard.upload", "file failed",
+                 {{"index", std::to_string(index)},
+                  {"received", std::to_string(received)},
+                  {"bytes", std::to_string(size)}});
       source->note_failed(static_cast<std::size_t>(index));
       break;
     case file_transfer::upload_event::done: {
+      diag().log(diag_level::info, "clipboard.upload", "file rendered",
+                 {{"index", std::to_string(index)},
+                  {"bytes", std::to_string(received)},
+                  {"path", path}});
       source->note_done(static_cast<std::size_t>(index), path);
       // The host is about to put a real path on CF_HDROP for this viewer.
       // Suppress the clipboard watcher so it is not announced straight back.
@@ -1644,6 +1687,14 @@ bool session_controller::start(const std::string* initial_token) {
   std::shared_ptr<session_transport> transport = transport_.lock();
   if (!transport) return false;
   const std::string peer_ip = transport->peer_ip();
+  {
+    std::vector<diag_field> fields;
+    fields.push_back({"peer", peer_ip});
+    fields.push_back({"port", std::to_string(transport->peer_port())});
+    fields.push_back({"proto", transport->name()});
+    fields.push_back({"path", transport->path()});
+    diag().log(diag_level::info, "session.connect", std::string(), fields);
+  }
 
   if (options_.lock) {
     const int delay = options_.lock->attempt_delay(peer_ip);
@@ -1702,6 +1753,8 @@ bool session_controller::start(const std::string* initial_token) {
                         !is_loopback_peer(peer_ip);
     if (!locked && options_.auth && options_.auth->authenticate(
                                          *initial_token, /*consume=*/true)) {
+      diag().log(diag_level::info, "session.auth", "token accepted",
+                 {{"peer", peer_ip}, {"method", "token"}, {"ok", "1"}});
       registry_->set_authenticated(session);
       if (options_.auth->valid_session(*initial_token)) {
         resume_token_ = *initial_token;
@@ -1710,6 +1763,8 @@ bool session_controller::start(const std::string* initial_token) {
       }
       if (options_.lock) options_.lock->record_success(peer_ip);
     } else if (!locked) {
+      diag().log(diag_level::warn, "session.auth", "token rejected",
+                 {{"peer", peer_ip}, {"method", "token"}, {"ok", "0"}});
       if (options_.lock) {
         const int delay = options_.lock->record_failure(peer_ip);
         if (delay != 0) {
@@ -2180,6 +2235,69 @@ void session_controller::on_text(const std::string& text) {
     return false;
   };
 
+  if (type == "logs") {
+    // Reading the host's diagnostics is a privileged operation: the tail can
+    // name peers and paths, even though credentials and clipboard content are
+    // stripped before they are ever written.
+    if (!require_auth()) return;
+    const std::string action = string_field(j, "action");
+    if (action == "tail") {
+      int lines = 500;
+      if (const auto it = j.find("lines");
+          it != j.end() && it->is_number()) {
+        lines = static_cast<int>(it->get<double>());
+      }
+      if (lines < 1) lines = 1;
+      if (lines > 5000) lines = 5000;
+      const std::string text = diag().tail(lines);
+      uvcpp_json out;
+      out["type"] = "logs";
+      out["action"] = "tail";
+      out["tail"] = text;
+      out["size"] = static_cast<uint64_t>(text.size());
+      out["lines"] = lines;
+      send_json(transport.get(), out);
+      return;
+    }
+    if (action == "info") {
+      const diag_log::info info = diag().describe();
+      uvcpp_json out;
+      out["type"] = "logs";
+      out["action"] = "info";
+      out["enabled"] = info.enabled;
+      out["directory"] = info.directory;
+      out["retention_days"] = info.retention_days;
+      out["current_bytes"] = info.current_bytes;
+      out["file"] = info.current_file;
+      send_json(transport.get(), out);
+      return;
+    }
+    if (action == "enable" || action == "disable") {
+      const bool on = action == "enable";
+      if (!on) {
+        // Record the switch itself before closing the file handle.
+        diag().log(diag_level::info, "logs.state", "recording disabled",
+                   {{"peer", peer_ip}});
+      }
+      if (options_.auth) options_.auth->set_diag_logs_enabled(on);
+      diag().set_enabled(on);
+      if (on) {
+        diag().cleanup_old_files();
+        diag().log(diag_level::info, "logs.state", "recording enabled",
+                   {{"peer", peer_ip}});
+      }
+      uvcpp_json out;
+      out["type"] = "logs";
+      out["action"] = "state";
+      out["enabled"] = on;
+      send_json(transport.get(), out);
+      return;
+    }
+    send_error(transport.get(), "bad_logs_action",
+               "action must be tail, info, enable or disable");
+    return;
+  }
+
   if (type == "hello") {
     // Optional client identity; the shared chat uses it to say who typed a
     // message when several people are connected.
@@ -2263,6 +2381,11 @@ void session_controller::on_text(const std::string& text) {
       issue_resume_token();
     }
     if (!authenticated) {
+      diag().log(diag_level::warn, "session.auth", "hello rejected",
+                 {{"peer", peer_ip},
+                  {"method", resume.empty() ? "code" : "resume"},
+                  {"ok", "0"},
+                  {"locked", locked_for_peer ? "1" : "0"}});
       if (std::getenv("MOLINK_STREAM_LOG") != nullptr) {
         // Never the credential itself: only which one was presented, so a
         // replay that lost its code can be told from a wrong code.
@@ -2290,6 +2413,11 @@ void session_controller::on_text(const std::string& text) {
       transport->close(transport_close::policy, "invalid token");
       return;
     }
+    diag().log(diag_level::info, "session.auth", "hello accepted",
+               {{"peer", peer_ip},
+                {"method", resume.empty() ? "code" : "resume"},
+                {"ok", "1"},
+                {"locked", locked_for_peer ? "1" : "0"}});
     read_hello_capabilities();
     if (std::getenv("MOLINK_AV1_LOG") != nullptr) {
       std::fprintf(stderr, "host: session av1=%d\n", session->av1 ? 1 : 0);
@@ -2431,6 +2559,21 @@ void session_controller::on_text(const std::string& text) {
     session->viewer_rx_rate = rx < 0 ? 0 : rx;
     session->viewer_rtt_ms = rtt < 0 ? 0 : rtt;
     session->viewer_stats_ms = now_ms();
+    // A viewer reporting a slow round trip is the earliest sign of a bad
+    // relay/P2P path. One line per ten seconds per host keeps it useful.
+    if (rtt > 500) {
+      static std::atomic<uint64_t> last_rtt_log_ms{0};
+      const uint64_t now = now_ms();
+      uint64_t previous = last_rtt_log_ms.load();
+      if (now > previous + 10000 &&
+          last_rtt_log_ms.compare_exchange_strong(previous, now)) {
+        diag().log(diag_level::warn, "transport.rtt", "viewer round trip high",
+                   {{"peer", peer_ip},
+                    {"rtt_ms", std::to_string(static_cast<int>(rtt))},
+                    {"fps", std::to_string(static_cast<int>(fps))},
+                    {"dropped", std::to_string(static_cast<int>(dropped))}});
+      }
+    }
     return;
   }
 
@@ -2546,6 +2689,19 @@ void session_controller::on_text(const std::string& text) {
     ack["actual"]["chroma"] =
         streaming ? (resolved.chroma == "444" ? "444" : "420") : actual.chroma;
     ack["actual"]["codec"] = stream_codec;
+    {
+      std::vector<diag_field> fields;
+      fields.push_back({"peer", peer_ip});
+      fields.push_back({"preset", resolved.preset});
+      fields.push_back({"fps", std::to_string(actual.fps)});
+      fields.push_back({"quality", actual.quality});
+      fields.push_back({"format", actual.format});
+      fields.push_back({"codec", stream_codec});
+      fields.push_back({"chroma", ack["actual"]["chroma"].get<std::string>()});
+      fields.push_back({"encoder_rebuild", reinit ? "1" : "0"});
+      fields.push_back({"first", first ? "1" : "0"});
+      diag().log(diag_level::info, "quality.preset", std::string(), fields);
+    }
     send_json(transport.get(), ack);
     return;
   }
@@ -2667,6 +2823,19 @@ void session_controller::on_text(const std::string& text) {
                                   : "auto");
     ack["scope"] = "viewer";
     if (fps != 0) ack["fps"] = fps;
+    {
+      std::vector<diag_field> fields;
+      fields.push_back({"peer", peer_ip});
+      fields.push_back({"mode", quality_mode_name(options_.capture->quality())});
+      fields.push_back({"format", tile_format_name(effective_format)});
+      fields.push_back({"qp", std::to_string(options_.capture->stream_qp())});
+      fields.push_back(
+          {"kbps", std::to_string(options_.capture->stream_bitrate_kbps())});
+      fields.push_back({"rate", ack["rate_mode"].get<std::string>()});
+      fields.push_back({"changed", knobs_changed ? "1" : "0"});
+      if (fps != 0) fields.push_back({"fps", std::to_string(fps)});
+      diag().log(diag_level::info, "quality.apply", std::string(), fields);
+    }
     send_json(transport.get(), ack);
     return;
   }
@@ -2726,6 +2895,13 @@ void session_controller::on_text(const std::string& text) {
 
     if (options_.clipboard) options_.clipboard->set_text(text);
     clipboard_reset_files_signature();
+    {
+      // Length only: the text itself never reaches the log.
+      std::vector<diag_field> fields;
+      fields.push_back({"peer", peer_ip});
+      fields.push_back({"bytes", std::to_string(text.size())});
+      diag().log(diag_level::info, "clipboard.sync", std::string(), fields);
+    }
     for (const session_info& peer : registry_->snapshot()) {
       if (peer.id == session->id || !peer.authenticated || !peer.transport) {
         continue;
@@ -2803,6 +2979,9 @@ void session_controller::on_text(const std::string& text) {
       auto post = options_.post;
       options_.clipboard->request_files(
           [target, post](std::vector<clipboard_file> files) {
+            diag().log(diag_level::info, "clipboard.files",
+                       std::string(),
+                       {{"count", std::to_string(files.size())}});
             uvcpp_json list = uvcpp_json::array();
             for (const clipboard_file& file : files) {
               uvcpp_json item;
@@ -2831,6 +3010,9 @@ void session_controller::on_text(const std::string& text) {
                    "clipboard text exceeds 192 KiB");
         return;
       }
+      diag().log(diag_level::info, "clipboard.set", std::string(),
+                 {{"peer", peer_ip},
+                  {"bytes", std::to_string(text_value.size())}});
       options_.clipboard->set_text(std::move(text_value));
       clipboard_reset_files_signature();
       return;
@@ -2846,6 +3028,8 @@ void session_controller::on_text(const std::string& text) {
                   clipboard_text = std::move(clipboard_text)] {
               const auto live = registry_ref->find(session_id);
               if (!live || !live->transport) return;
+              diag().log(diag_level::info, "clipboard.get", std::string(),
+                         {{"bytes", std::to_string(clipboard_text.size())}});
               uvcpp_json reply;
               reply["type"] = "clipboard";
               reply["text"] = clipboard_text;
@@ -3172,6 +3356,16 @@ void session_controller::on_text(const std::string& text) {
       }
       if (length > kClipboardPullChunkBytes) length = kClipboardPullChunkBytes;
       const uint32_t file_id = id;
+      const uint64_t pull_started_ms = now_ms();
+      {
+        std::vector<diag_field> fields;
+        fields.push_back({"peer", peer_ip});
+        fields.push_back({"id", std::to_string(file_id)});
+        fields.push_back({"offset", std::to_string(offset)});
+        fields.push_back({"length", std::to_string(length)});
+        diag().log(diag_level::info, "clipboard.pull.start", std::string(),
+                   fields);
+      }
       if (!options_.clipboard || !options_.clipboard->available()) {
         send_clipboard_file_reply(
             file_id, static_cast<uint32_t>(clipboard_pull_status::gone),
@@ -3185,7 +3379,7 @@ void session_controller::on_text(const std::string& text) {
       std::shared_ptr<clipboard_service> clipboard = options_.clipboard;
       clipboard->request_files(
           [weak, post, registry_ref, clipboard, session_id, file_id, offset,
-           length](std::vector<clipboard_file> current) {
+           length, pull_started_ms](std::vector<clipboard_file> current) {
             const std::vector<clipboard_offer_entry> offered =
                 registry_ref->clipboard_offer(session_id);
             clipboard_pull_result result = read_clipboard_pull(
@@ -3201,11 +3395,25 @@ void session_controller::on_text(const std::string& text) {
               const uint64_t take = result.length;
               clipboard->read_file_range(
                   target, reply_offset, take,
-                  [weak, post, file_id](uint32_t status, uint64_t reply_at,
-                                        std::vector<uint8_t> data) {
+                  [weak, post, file_id, pull_started_ms](
+                      uint32_t status, uint64_t reply_at,
+                      std::vector<uint8_t> data) {
                     auto deliver = [weak, file_id, status, reply_at,
-                                    data = std::move(data)] {
+                                    pull_started_ms, data = std::move(data)] {
                       if (auto self = weak.lock()) {
+                        std::vector<diag_field> fields;
+                        fields.push_back({"id", std::to_string(file_id)});
+                        fields.push_back({"status", std::to_string(status)});
+                        fields.push_back(
+                            {"bytes", std::to_string(data.size())});
+                        fields.push_back(
+                            {"offset", std::to_string(reply_at)});
+                        fields.push_back(
+                            {"ms", std::to_string(now_ms() -
+                                                  pull_started_ms)});
+                        fields.push_back({"mode", "stream"});
+                        diag().log(diag_level::info, "clipboard.pull.done",
+                                   std::string(), fields);
                         self->send_clipboard_file_reply(
                             file_id, status, reply_at,
                             data.empty() ? nullptr : data.data(),
@@ -3220,8 +3428,22 @@ void session_controller::on_text(const std::string& text) {
                   });
               return;
             }
-            auto deliver = [weak, file_id, result = std::move(result)] {
+            auto deliver = [weak, file_id, pull_started_ms,
+                            result = std::move(result)] {
               if (auto self = weak.lock()) {
+                std::vector<diag_field> fields;
+                fields.push_back({"id", std::to_string(file_id)});
+                fields.push_back(
+                    {"status",
+                     std::to_string(static_cast<uint32_t>(result.status))});
+                fields.push_back(
+                    {"bytes", std::to_string(result.data.size())});
+                fields.push_back({"offset", std::to_string(result.offset)});
+                fields.push_back(
+                    {"ms", std::to_string(now_ms() - pull_started_ms)});
+                fields.push_back({"mode", result.stream ? "range" : "eager"});
+                diag().log(diag_level::info, "clipboard.pull.done",
+                           std::string(), fields);
                 self->send_clipboard_file_reply(
                     file_id, static_cast<uint32_t>(result.status),
                     result.offset,
@@ -3250,6 +3472,11 @@ void session_controller::on_text(const std::string& text) {
           it != j.end() && it->is_number()) {
         tag = it->get<int>();
       }
+      diag().log(diag_level::info, "file.offer", std::string(),
+                 {{"peer", peer_ip},
+                  {"name", string_field(j, "name")},
+                  {"bytes", std::to_string(size)},
+                  {"dest", string_field(j, "dest")}});
       files_->offer(string_field(j, "name"), size, string_field(j, "dest"),
                     tag);
       update_file_retry_timer();
@@ -3369,6 +3596,21 @@ void session_controller::on_text(const std::string& text) {
         send_lazy_offer_reply(false, stream, install_error);
         return;
       }
+      {
+        uint64_t total = 0;
+        for (const lazy_clipboard_file& file : offered) total += file.size;
+        std::vector<diag_field> fields;
+        fields.push_back({"peer", peer_ip});
+        fields.push_back({"files", std::to_string(offered.size())});
+        fields.push_back({"bytes", std::to_string(total)});
+        fields.push_back({"dest", string_field(j, "dest")});
+        fields.push_back({"mode", stream ? "stream" : "eager"});
+        fields.push_back(
+            {"nested_rdp",
+             options_.clipboard && options_.clipboard->nested_rdp() ? "1"
+                                                                   : "0"});
+        diag().log(diag_level::info, "clipboard.offer", std::string(), fields);
+      }
       send_lazy_offer_reply(true, stream, std::string());
     } else if (action == "clipboard-fetch-failed") {
       // The viewer could not read the local file any more (the clipboard
@@ -3378,15 +3620,21 @@ void session_controller::on_text(const std::string& text) {
           it != j.end() && it->is_number()) {
         index = it->get<uint64_t>();
       }
+      diag().log(diag_level::warn, "clipboard.fetch-failed", std::string(),
+                 {{"peer", peer_ip}, {"index", std::to_string(index)}});
       if (lazy_source_ && index < lazy_source_->size()) {
         lazy_source_->note_failed(static_cast<std::size_t>(index));
       }
     } else if (action == "mkdir") {
       files_->mkdir(string_field(j, "path"), string_field(j, "dest"));
     } else if (action == "complete") {
+      diag().log(diag_level::info, "file.complete", std::string(),
+                 {{"peer", peer_ip}, {"id", std::to_string(id)}});
       files_->complete(id);
       update_file_retry_timer();
     } else if (action == "cancel") {
+      diag().log(diag_level::info, "file.cancel", std::string(),
+                 {{"peer", peer_ip}, {"id", std::to_string(id)}});
       files_->cancel(id);
       update_file_retry_timer();
     } else if (action == "browse") {
@@ -3397,9 +3645,13 @@ void session_controller::on_text(const std::string& text) {
       }
       files_->browse(string_field(j, "path"), roots);
     } else if (action == "request") {
+      diag().log(diag_level::info, "file.request", std::string(),
+                 {{"peer", peer_ip}, {"path", string_field(j, "path")}});
       files_->request(string_field(j, "path"));
       update_file_retry_timer();
     } else if (action == "pull") {
+      diag().log(diag_level::info, "file.pull", std::string(),
+                 {{"peer", peer_ip}, {"id", std::to_string(id)}});
       files_->pull(id);
       update_file_retry_timer();
     } else if (action == "clipboard-set") {
@@ -3419,6 +3671,12 @@ void session_controller::on_text(const std::string& text) {
       const bool applied =
           options_.clipboard && options_.clipboard->available() &&
           !resolved.empty() && options_.clipboard->set_files(resolved);
+      diag().log(applied ? diag_level::info : diag_level::warn,
+                 "file.clipboard-set", std::string(),
+                 {{"peer", peer_ip},
+                  {"ok", applied ? "1" : "0"},
+                  {"requested", std::to_string(requested.size())},
+                  {"resolved", std::to_string(resolved.size())}});
       uvcpp_json out;
       out["type"] = "file";
       out["action"] = "clipboard";
@@ -3520,6 +3778,10 @@ void session_controller::on_text(const std::string& text) {
       note_pointer(j);
     }
     if (rejected) {
+      diag().log(diag_level::warn, "input.rejected",
+                 input_error.empty() ? "input event was rejected"
+                                     : input_error,
+                 {{"peer", peer_ip}});
       // Injection failures used to leave this empty, so the page could only
       // show the raw `bad_input` code. The injector now names the value, but
       // keep a last-resort message for an older or future backend.
@@ -3533,6 +3795,8 @@ void session_controller::on_text(const std::string& text) {
       const std::uint64_t now = now_ms();
       if (now - last_input_error_ms_ >= 5000) {
         last_input_error_ms_ = now;
+        diag().log(diag_level::warn, "input.unavailable",
+                   "the host could not inject input", {{"peer", peer_ip}});
         send_error(transport.get(), "input_unavailable",
                    "the host could not inject input");
       }
@@ -3649,6 +3913,21 @@ void session_controller::on_binary(const uint8_t* data, std::size_t len) {
 void session_controller::on_close(int code, const std::string& reason) {
   std::shared_ptr<session_info> session = session_.lock();
   if (!session) return;
+  {
+    const uint64_t now = now_ms();
+    const uint64_t duration =
+        session->connected_ms != 0 && now > session->connected_ms
+            ? now - session->connected_ms
+            : 0;
+    std::vector<diag_field> fields;
+    fields.push_back({"peer", session->peer_ip});
+    fields.push_back({"session_id", session->public_id});
+    fields.push_back({"close_code", std::to_string(code)});
+    if (!reason.empty()) fields.push_back({"reason", reason});
+    fields.push_back({"ms", std::to_string(duration)});
+    fields.push_back({"auth", session->authenticated ? "1" : "0"});
+    diag().log(diag_level::info, "session.close", std::string(), fields);
+  }
   if (chat_subscription_ != 0 && options_.chat) {
     options_.chat->unsubscribe(chat_subscription_);
     chat_subscription_ = 0;
@@ -3734,8 +4013,10 @@ void session_supervisor::start() {
       const std::string hash = clipboard_hash(text);
       if (!clipboard_take_hash(hash)) return;
       auto deliver = [registry, text = std::move(text), hash, device] {
+        std::size_t sent = 0;
         for (const session_info& peer : registry->snapshot()) {
           if (!peer.authenticated || !peer.transport) continue;
+          ++sent;
           uvcpp_json out;
           out["type"] = "clipboard-sync";
           out["text"] = text;
@@ -3743,6 +4024,11 @@ void session_supervisor::start() {
           out["chain"] = device;
           send_json(peer.transport.get(), out);
         }
+        // Bytes and viewer count only: never the text itself.
+        diag().log(diag_level::info, "clipboard.announce",
+                   "host text copied",
+                   {{"bytes", std::to_string(text.size())},
+                    {"viewers", std::to_string(sent)}});
       };
       if (post) {
         post(deliver);

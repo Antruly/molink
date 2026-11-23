@@ -3,21 +3,27 @@ import {
   Check,
   Copy,
   Download,
+  ScrollText,
   Search,
   Trash2,
 } from 'lucide-react'
 import { useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
+  buildCopyLogText,
   buildDiagText,
   clearDiag,
   formatDiagLine,
   getDiagEntries,
+  isDiagRecordingEnabled,
   MAX_DIAG_ENTRIES,
+  setDiagRecordingEnabled,
   subscribeDiag,
   type DiagEntry,
 } from '../lib/diag-log'
-import { useAppStore } from '../store/app'
+import type { HostLogInfo } from '../lib/client'
+import { openLogDirectory } from '../lib/shell'
+import { sessionConnection, useAppStore } from '../store/app'
 
 type Filter = 'all' | 'warn' | 'error'
 
@@ -64,6 +70,12 @@ function downloadText(name: string, text: string): void {
   window.setTimeout(() => URL.revokeObjectURL(url), 10000)
 }
 
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 KiB'
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KiB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`
+}
+
 function exportFileName(version: string): string {
   const stamp = new Date()
   const pad = (value: number) => String(value).padStart(2, '0')
@@ -83,10 +95,79 @@ export function DiagLogPanel({ onBack }: { onBack?: () => void }) {
   const version = useAppStore(
     (state) => state.server?.version ?? state.device?.version ?? '',
   )
+  const activeTabId = useAppStore((state) => state.activeTabId)
+  const connection = sessionConnection(activeTabId)
+  const live = connection?.isLive() ?? false
   const [filter, setFilter] = useState<Filter>('all')
   const [query, setQuery] = useState('')
   const [copied, setCopied] = useState(false)
+  const [recording, setRecording] = useState(isDiagRecordingEnabled())
+  const [hostInfo, setHostInfo] = useState<HostLogInfo | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
   const [clearArmed, setClearArmed] = useState(false)
+
+  useEffect(() => {
+    // Nothing to fetch when the session is down; the stale value is not
+    // rendered either (see `shownHostInfo`), so no state is cleared here:
+    // a synchronous setState inside an effect would cascade renders.
+    if (!live || connection === undefined) return
+    let cancelled = false
+    void connection.requestLogInfo().then((info) => {
+      if (!cancelled) setHostInfo(info)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [live, connection])
+
+  // A host that is no longer live contributes nothing to the panel.
+  const shownHostInfo = live ? hostInfo : null
+
+  useEffect(() => {
+    if (!notice) return
+    const timer = window.setTimeout(() => setNotice(null), 4000)
+    return () => window.clearTimeout(timer)
+  }, [notice])
+
+  const toggleRecording = (enabled: boolean) => {
+    setRecording(enabled)
+    setDiagRecordingEnabled(enabled)
+    connection?.setHostLoggingEnabled(enabled)
+    setNotice(
+      enabled
+        ? t('diagnostics.recordingOn')
+        : t('diagnostics.recordingOff'),
+    )
+  }
+
+  const copyRecent = async () => {
+    const connected = connection?.isLive() ?? false
+    const host = connected ? await connection?.requestLogTail(500) : null
+    const text = buildCopyLogText({
+      version,
+      hostVersion: connection?.hostVersion(),
+      connected,
+      hostTail: host?.tail,
+      localLines: 200,
+    })
+    if (await copyText(text)) {
+      setCopied(true)
+      setNotice(t('diagnostics.copiedForSupport'))
+    } else {
+      setNotice(t('diagnostics.copyFailed'))
+    }
+  }
+
+  const openDirectory = () => {
+    if (!openLogDirectory()) {
+      setNotice(t('diagnostics.openDirUnsupported'))
+    }
+  }
+
+  const localBytes = useMemo(
+    () => entries.reduce((sum, entry) => sum + JSON.stringify(entry).length, 0),
+    [entries],
+  )
 
   useEffect(() => {
     if (!clearArmed) return
@@ -185,6 +266,74 @@ export function DiagLogPanel({ onBack }: { onBack?: () => void }) {
         <span className="chip shrink-0 font-mono">
           {entries.length}/{MAX_DIAG_ENTRIES}
         </span>
+      </div>
+
+      <div className="space-y-2 rounded-lg border border-line bg-panel/50 p-3">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="text-[12px] font-medium text-ink">
+              {t('diagnostics.recording')}
+            </div>
+            <div className="mt-0.5 text-[10px] leading-relaxed text-muted">
+              {t('diagnostics.recordingHint')}
+            </div>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={recording}
+            aria-label={t('diagnostics.recording')}
+            onClick={() => toggleRecording(!recording)}
+            className={
+              'relative h-6 w-11 shrink-0 rounded-full border transition ' +
+              (recording
+                ? 'border-accent/50 bg-accent/80'
+                : 'border-line bg-panel')
+            }
+          >
+            <span
+              className={
+                'absolute top-0.5 rounded-full bg-surface shadow transition-all ' +
+                (recording ? 'left-[22px]' : 'left-0.5')
+              }
+              style={{ width: '1.125rem', height: '1.125rem' }}
+            />
+          </button>
+        </div>
+        <div className="truncate font-mono text-[10px] text-muted" title={
+          shownHostInfo?.directory || t('diagnostics.localOnlyLocation')
+        }>
+          {shownHostInfo?.directory
+            ? t('diagnostics.hostDir', {
+                dir: shownHostInfo.directory,
+                size: formatBytes(shownHostInfo.currentBytes),
+                days: shownHostInfo.retentionDays,
+              })
+            : t('diagnostics.localDir', {
+                size: formatBytes(localBytes),
+              })}
+        </div>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => void copyRecent()}
+            className="btn btn-primary h-7 gap-1 px-2 text-[11px]"
+          >
+            {copied ? <Check size={12} /> : <Copy size={12} />}
+            {t('diagnostics.copyRecent')}
+          </button>
+          <button
+            type="button"
+            onClick={openDirectory}
+            className="btn h-7 gap-1 px-2 text-[11px]"
+          >
+            <ScrollText size={12} />
+            {t('diagnostics.openDir')}
+          </button>
+          {notice ? (
+            <span className="text-[10px] text-accent">{notice}</span>
+          ) : null}
+        </div>
       </div>
 
       <div className="flex flex-wrap items-center gap-1.5">

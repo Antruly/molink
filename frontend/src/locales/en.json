@@ -887,6 +887,18 @@
     "clearConfirm": "Clear all?",
     "empty": "No entries yet. Connection and decode problems will show up here.",
     "noMatch": "No matching entries.",
-    "privacy": "The log stays in local storage and never contains codes, chat or clipboard content."
+    "recording": "Record diagnostics",
+    "recordingHint": "On by default. Kept on this device for 7 days and never uploaded; turning it off keeps only the in-memory buffer.",
+    "hostDir": "Host: {{dir}} · {{size}} · keeps {{days}} days",
+    "localDir": "This device: browser storage · {{size}} · keeps 7 days",
+    "localOnlyLocation": "local storage",
+    "copyRecent": "Copy recent logs",
+    "openDir": "Open log folder",
+    "copiedForSupport": "Copied — paste it to the maintainer",
+    "copyFailed": "Copy failed",
+    "openDirUnsupported": "Only the desktop shell can open the folder",
+    "recordingOn": "Recording on",
+    "recordingOff": "Recording off",
+    "privacy": "The log stays on this device and is never uploaded. It never contains codes, chat or clipboard content."
   }
 }

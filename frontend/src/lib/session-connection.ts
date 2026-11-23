@@ -9,7 +9,7 @@ import {
 } from './client'
 import type { Frame } from './protocol'
 import { FrameFlag } from './protocol'
-import { logDiag } from './diag-log'
+import { isDiagRecordingEnabled, logDiag } from './diag-log'
 import { PcmPlayer } from './audio'
 import { ClipboardEcho } from './clipboard-echo'
 import { lazyCapability, type LazyCapability } from './clipboard-lazy'
@@ -174,6 +174,9 @@ export class SessionConnection {
   /// "host:port" for the diagnostics buffer; the tab id alone is meaningless
   /// once the tab is closed.
   private target = ''
+  /// The last welcome, for the diagnostics export header (host version) and
+  /// to know whether the session is live.
+  private lastWelcome: Welcome | null = null
   /// Frame drops are aggregated: one entry per burst, not one per frame.
   private dropLogAt = 0
   private dropLogCount = 0
@@ -262,6 +265,7 @@ export class SessionConnection {
         })
       },
       onWelcome: (welcome) => {
+        this.lastWelcome = welcome
         this.clipboardLazy = lazyCapability(welcome)
         this.clipboardPull = welcome.clipboard_pull === true
         if (welcome.clipboard_nested_rdp === true) {
@@ -308,6 +312,10 @@ export class SessionConnection {
         // The host is live now; hand it the viewer's tier before the first
         // frame so a session never opens on the host's own default.
         this.flushPreset()
+        // The recording switch is page-local; a host that the user switched
+        // off stays off on the next connect. Only "off" is mirrored here:
+        // turning it on is an explicit settings action.
+        if (!isDiagRecordingEnabled()) this.client.setLoggingEnabled(false)
       },
       onDisplay: (index) => this.sink.onPatch({ displayIndex: index }),
       onWireFrame: () => {
@@ -865,6 +873,28 @@ export class SessionConnection {
 
   reconnectNow(): void {
     this.client.reconnectNow()
+  }
+
+  isLive(): boolean {
+    return this.client.isLive()
+  }
+
+  /// The host's version from its welcome, shown in the copied diagnostics.
+  hostVersion(): string {
+    return this.lastWelcome?.version ?? ''
+  }
+
+  requestLogTail(lines = 500) {
+    return this.client.requestLogTail(lines)
+  }
+
+  requestLogInfo() {
+    return this.client.requestLogInfo()
+  }
+
+  setHostLoggingEnabled(enabled: boolean): void {
+    if (!this.client.isLive()) return
+    this.client.setLoggingEnabled(enabled)
   }
 
   private startClipboardSync(): void {

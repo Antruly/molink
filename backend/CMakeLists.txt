@@ -230,6 +230,7 @@ set(MOLINK_CORE_SOURCES
   src/access_requests.cpp
   src/auth_state.cpp
   src/compression.cpp
+  src/diag_log.cpp
   src/discovery.cpp
   src/settings.cpp
   src/ui_store.cpp
@@ -665,6 +666,22 @@ endforeach()
 enable_testing()
 add_test(NAME protocol COMMAND molink-core-protocol-test)
 
+# Diagnostic log rotation, retention, tailing and redaction. Pure filesystem
+# plus a fake clock, so it builds without libuvcpp.
+add_executable(molink-core-diag-log-test
+  tests/diag_log_test.cpp
+  src/diag_log.cpp
+)
+target_include_directories(molink-core-diag-log-test PRIVATE src)
+set_target_properties(molink-core-diag-log-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
+  string(TOUPPER "${uvp_config}" uvp_config_upper)
+  set_target_properties(molink-core-diag-log-test PROPERTIES
+    "RUNTIME_OUTPUT_DIRECTORY_${uvp_config_upper}" "${CMAKE_BINARY_DIR}")
+endforeach()
+add_test(NAME diag_log COMMAND molink-core-diag-log-test)
+
 # Rectangle merging is pure computation: no libuvcpp and no AV1 SDK needed.
 add_executable(molink-core-dirty-rects-test
   tests/dirty_rects_test.cpp
@@ -1041,6 +1058,7 @@ if(MOLINK_BUILD_CORE AND UVP_UVCPP_TARGET)
     tests/file_transfer_backpressure_test.cpp
     src/file_transfer.cpp
     src/directory_listing.cpp
+    src/diag_log.cpp
     src/util.cpp
   )
   target_include_directories(molink-core-file-transfer-backpressure-test PRIVATE
@@ -1064,6 +1082,7 @@ if(MOLINK_BUILD_CORE AND UVP_UVCPP_TARGET)
     tests/file_browse_test.cpp
     src/file_transfer.cpp
     src/directory_listing.cpp
+    src/diag_log.cpp
     src/util.cpp
   )
   target_include_directories(molink-core-file-browse-test PRIVATE

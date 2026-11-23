@@ -26,6 +26,10 @@ struct app_settings {
   /// User preference for the optional Windows service. Persisted so a manual
   /// stop survives restarts; an overwrite install must not force it on.
   bool service_desired_running = true;
+  /// Local diagnostic log recording. On by default; switching it off keeps
+  /// the in-memory ring buffer, stops writing files and does not delete the
+  /// files that already exist.
+  bool diag_logs_enabled = true;
   std::string device_name;
 
   /// Host-side AV1 encoding. When on, the capture thread encodes the changed
