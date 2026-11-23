@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -198,6 +199,53 @@ bool json_u64_field(const std::string& json, const char* key, size_t start,
   if (!any) return false;
   *out = value;
   return true;
+}
+
+std::wstring wbase_name(const std::wstring& path) {
+  const size_t slash = path.find_last_of(L"\\/");
+  return slash == std::wstring::npos ? path : path.substr(slash + 1);
+}
+
+/// Splits `"key": [ {...}, {...} ]` into one substring per object. Names may
+/// contain quotes and braces, so the scanner walks strings instead of using
+/// raw find(). Nested arrays are not expected in the file protocol.
+std::vector<std::string> json_object_array(const std::string& text,
+                                           const char* key) {
+  std::vector<std::string> out;
+  const size_t at = text.find(std::string("\"") + key + "\"");
+  const size_t array = at == std::string::npos ? std::string::npos
+                                               : text.find('[', at);
+  if (array == std::string::npos) return out;
+  size_t pos = array + 1;
+  while (pos < text.size()) {
+    skip_ws(text, &pos);
+    if (pos < text.size() && text[pos] == ',') {
+      ++pos;
+      continue;
+    }
+    if (pos >= text.size() || text[pos] != '{') break;
+    const size_t begin = pos;
+    bool in_string = false;
+    bool escaped = false;
+    while (pos < text.size()) {
+      const char c = text[pos++];
+      if (in_string) {
+        if (escaped) {
+          escaped = false;
+        } else if (c == '\\') {
+          escaped = true;
+        } else if (c == '"') {
+          in_string = false;
+        }
+      } else if (c == '"') {
+        in_string = true;
+      } else if (c == '}') {
+        break;
+      }
+    }
+    out.push_back(text.substr(begin, pos - begin));
+  }
+  return out;
 }
 
 bool json_bool_field(const std::string& json, const char* key, size_t start,
@@ -768,54 +816,48 @@ void session_client::handle_file_json(const std::string& text) {
     if (json_string_field(text, "root", 0, &value)) {
       event.listing_root = wide_of(value);
     }
-    // entries: [{name, dir, size, mtime}, ...] — scan objects without
-    // trusting quotes inside names (walk strings, not raw find).
-    const size_t key = text.find("\"entries\"");
-    const size_t array = key == std::string::npos
-                             ? std::string::npos
-                             : text.find('[', key);
-    if (array != std::string::npos) {
-      size_t pos = array + 1;
-      while (pos < text.size()) {
-        skip_ws(text, &pos);
-        if (pos < text.size() && text[pos] == ',') {
-          ++pos;
-          continue;
-        }
-        if (pos >= text.size() || text[pos] != '{') break;
-        const size_t begin = pos;
-        bool in_string = false;
-        bool escaped = false;
-        while (pos < text.size()) {
-          const char c = text[pos++];
-          if (in_string) {
-            if (escaped) {
-              escaped = false;
-            } else if (c == '\\') {
-              escaped = true;
-            } else if (c == '"') {
-              in_string = false;
-            }
-          } else if (c == '"') {
-            in_string = true;
-          } else if (c == '}') {
-            break;
-          }
-        }
-        const std::string item = text.substr(begin, pos - begin);
-        file_listing_entry entry;
-        std::string name;
-        if (json_string_field(item, "name", 0, &name)) {
-          entry.name = wide_of(name);
-        }
-        bool dir = false;
-        json_bool_field(item, "dir", 0, &dir);
-        entry.dir = dir;
-        uint64_t size = 0;
-        if (json_u64_field(item, "size", 0, &size)) entry.size = size;
-        if (json_u64_field(item, "mtime", 0, &size)) entry.mtime = size;
-        if (!entry.name.empty()) event.entries.push_back(std::move(entry));
+    if (json_string_field(text, "parent", 0, &value)) {
+      event.listing_parent = wide_of(value);
+    }
+    bool truncated = false;
+    if (json_bool_field(text, "truncated", 0, &truncated)) {
+      event.truncated = truncated;
+    }
+    for (const std::string& item : json_object_array(text, "roots")) {
+      file_listing_root root;
+      if (json_string_field(item, "name", 0, &value)) {
+        root.name = wide_of(value);
       }
+      if (json_string_field(item, "path", 0, &value)) {
+        root.path = wide_of(value);
+      }
+      if (json_string_field(item, "kind", 0, &value)) {
+        root.kind = wide_of(value);
+      }
+      if (!root.name.empty() || !root.path.empty()) {
+        event.roots.push_back(std::move(root));
+      }
+    }
+    // entries: [{name, dir, size, mtime, path, kind}, ...]
+    for (const std::string& item : json_object_array(text, "entries")) {
+      file_listing_entry entry;
+      std::string name;
+      if (json_string_field(item, "name", 0, &name)) {
+        entry.name = wide_of(name);
+      }
+      bool dir = false;
+      json_bool_field(item, "dir", 0, &dir);
+      entry.dir = dir;
+      uint64_t size = 0;
+      if (json_u64_field(item, "size", 0, &size)) entry.size = size;
+      if (json_u64_field(item, "mtime", 0, &size)) entry.mtime = size;
+      if (json_string_field(item, "path", 0, &value)) {
+        entry.path = wide_of(value);
+      }
+      if (json_string_field(item, "kind", 0, &value)) {
+        entry.kind = wide_of(value);
+      }
+      if (!entry.name.empty()) event.entries.push_back(std::move(entry));
     }
   }
   std::lock_guard<std::mutex> lock(file_mutex_);
@@ -854,14 +896,17 @@ void session_client::set_download_dir(const std::wstring& dir) {
 
 bool session_client::file_offer(const std::wstring& name,
                                 const std::wstring& local_path,
-                                const std::wstring& destination) {
+                                const std::wstring& destination,
+                                uint32_t task) {
   if (!ws_.is_open()) return false;
   WIN32_FILE_ATTRIBUTE_DATA info{};
   if (!GetFileAttributesExW(local_path.c_str(), GetFileExInfoStandard, &info)) {
     return false;
   }
+  if ((info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) return false;
   upload_state upload;
   upload.key = next_upload_key_++;
+  upload.task = task;
   upload.name = name.empty() ? local_path : name;
   upload.path = local_path;
   upload.dest = destination;
@@ -877,7 +922,8 @@ void session_client::file_browse(const std::wstring& path) {
                    ",\"path\":\"" + json_escape(utf8_of(path)) + "\"");
 }
 
-void session_client::file_request(const std::wstring& path) {
+void session_client::file_request(const std::wstring& path, uint32_t task) {
+  pending_downloads_.push_back({path, task});
   send_file_action("request", 0,
                    ",\"path\":\"" + json_escape(utf8_of(path)) + "\"");
 }
@@ -891,6 +937,7 @@ void session_client::file_cancel(uint32_t id) {
         }
         upload.in.close();
         upload.state = 3;
+        upload.cancelled = true;
         upload.message = L"已取消";
         if (active_offer_key_ == key) active_offer_key_ = 0;
         return;
@@ -903,6 +950,7 @@ void session_client::file_cancel(uint32_t id) {
       send_file_action("cancel", id, "");
       upload.in.close();
       upload.state = 3;
+      upload.cancelled = true;
       upload.message = L"已取消";
       if (active_offer_key_ == key) active_offer_key_ = 0;
       return;
@@ -914,6 +962,8 @@ void session_client::file_cancel(uint32_t id) {
     it->second.out.close();
     if (!it->second.path.empty()) DeleteFileW(it->second.path.c_str());
     it->second.state = 3;
+    it->second.cancelled = true;
+    it->second.message = L"已取消";
   }
 }
 
@@ -993,6 +1043,26 @@ void session_client::pump_files() {
     std::lock_guard<std::mutex> lock(file_mutex_);
     incoming.swap(file_events_);
   }
+  // Each `sending` answer belongs to the oldest request still waiting for one;
+  // a name match picks the right entry if a rejected request (host id 0) made
+  // the queue skip. The host answers requests in order.
+  auto take_pending_download = [&](const std::wstring& name) {
+    pending_download result;
+    if (pending_downloads_.empty()) return result;
+    size_t index = 0;
+    if (!name.empty()) {
+      for (size_t i = 0; i < pending_downloads_.size(); ++i) {
+        if (wbase_name(pending_downloads_[i].path) == name) {
+          index = i;
+          break;
+        }
+      }
+    }
+    result = pending_downloads_[index];
+    pending_downloads_.erase(
+        pending_downloads_.begin() + static_cast<std::ptrdiff_t>(index));
+    return result;
+  };
   for (file_event& event : incoming) {
     const std::wstring& action = event.action;
     if (action == L"chunk") {
@@ -1019,6 +1089,7 @@ void session_client::pump_files() {
         download.out.close();
         if (!download.path.empty()) DeleteFileW(download.path.c_str());
         download.state = 3;
+        download.message = L"文件接收不完整";
         continue;
       }
       download.out.write(
@@ -1030,6 +1101,7 @@ void session_client::pump_files() {
         download.out.close();
         DeleteFileW(download.path.c_str());
         download.state = 3;
+        download.message = L"无法写入本地文件";
         continue;
       }
       if (download.received < download.size && !download.eof_seen) {
@@ -1051,6 +1123,8 @@ void session_client::pump_files() {
           send_file_action("cancel", upload.host_id, "");
           upload.state = 3;
           upload.message = L"无法读取本地文件";
+          event.task = upload.task;
+          event.message = upload.message;
           shell_file_events_.push_back(event);
           continue;
         }
@@ -1078,13 +1152,20 @@ void session_client::pump_files() {
       if (target != nullptr) {
         target->in.close();
         if (event.name.empty()) event.name = target->name;
+        event.task = target->task;
         if (action == L"done" && event.ok) {
           target->state = 2;
           target->saved_path = event.path;
         } else {
           target->state = 3;
+          target->cancelled =
+              action == L"cancel" || action == L"cancelled";
           target->message = event.message;
-          if (target->message.empty()) target->message = L"传输失败";
+          if (target->message.empty()) {
+            target->message =
+                target->cancelled ? L"已取消" : L"传输失败";
+          }
+          event.message = target->message;
         }
         if (uploads_.find(active_offer_key_) != uploads_.end()) {
           active_offer_key_ = 0;
@@ -1094,12 +1175,39 @@ void session_client::pump_files() {
       continue;
     }
     if (action == L"sending") {
+      const pending_download pending = take_pending_download(event.name);
       if (std::getenv("MOLINK_WS_LOG") != nullptr) {
-        std::fprintf(stderr, "file rx sending id=%u size=%llu\n", event.id,
-                     static_cast<unsigned long long>(event.size));
+        std::fprintf(stderr, "file rx sending id=%u size=%llu ok=%d\n",
+                     event.id, static_cast<unsigned long long>(event.size),
+                     event.ok ? 1 : 0);
+      }
+      if (!event.ok) {
+        // The host refused the request (`not a file`, too large, 8 slots
+        // busy...). Keep a failed row so the task summary and the reason are
+        // visible instead of only a transient toast.
+        download_state failed_state;
+        failed_state.id = event.id;
+        failed_state.task = pending.task;
+        failed_state.name =
+            event.name.empty() ? wbase_name(pending.path) : event.name;
+        if (failed_state.name.empty()) failed_state.name = L"file";
+        failed_state.size = event.size;
+        failed_state.state = 3;
+        failed_state.message =
+            event.message.empty() ? L"文件接收失败" : event.message;
+        // Host ids start at 1; keep synthetic failed rows in a separate range
+        // so they can never overwrite a real download with the same number.
+        const uint32_t key =
+            event.id != 0 ? event.id
+                          : (0x80000000u | next_download_key_++);
+        downloads_[key] = std::move(failed_state);
+        event.task = pending.task;
+        shell_file_events_.push_back(std::move(event));
+        continue;
       }
       download_state download;
       download.id = event.id;
+      download.task = pending.task;
       download.name = event.name.empty() ? L"file" : event.name;
       download.size = event.size;
       download.state = 1;
@@ -1115,11 +1223,15 @@ void session_client::pump_files() {
       download.out.open(download.path.c_str(),
                         std::ios::binary | std::ios::trunc);
       if (!download.out) {
+        download.state = 3;
+        download.message = L"无法创建本地文件";
         file_event failed;
         failed.action = L"error";
         failed.id = download.id;
+        failed.task = download.task;
         failed.name = download.name;
-        failed.message = L"无法创建本地文件";
+        failed.message = download.message;
+        downloads_[download.id] = std::move(download);
         shell_file_events_.push_back(std::move(failed));
         continue;
       }
@@ -1147,9 +1259,12 @@ void session_client::pump_files() {
           download.out.close();
           DeleteFileW(download.path.c_str());
           download.state = 3;
+          download.message =
+              event.message.empty() ? L"文件接收失败" : event.message;
           event.action = L"error";
           event.name = download.name;
-          if (event.message.empty()) event.message = L"文件接收失败";
+          event.task = download.task;
+          event.message = download.message;
           shell_file_events_.push_back(std::move(event));
           continue;
         }
@@ -1176,11 +1291,13 @@ void session_client::pump_files() {
     download.out.close();
     DeleteFileW(download.path.c_str());
     download.state = 3;
+    download.message = L"文件接收不完整";
     file_event failed;
     failed.action = L"error";
     failed.id = download.id;
+    failed.task = download.task;
     failed.name = download.name;
-    failed.message = L"文件接收不完整";
+    failed.message = download.message;
     shell_file_events_.push_back(std::move(failed));
   }
 
@@ -1243,21 +1360,27 @@ std::vector<file_transfer_state> session_client::file_transfers() {
   for (const auto& [key, upload] : uploads_) {
     file_transfer_state row;
     row.id = upload.host_id;
+    row.task = upload.task;
     row.name = upload.name;
     row.size = upload.size;
     row.sent = upload.sent;
     row.download = false;
     row.state = upload.state;
+    row.cancelled = upload.cancelled;
+    row.message = upload.message;
     out.push_back(std::move(row));
   }
   for (const auto& [id, download] : downloads_) {
     file_transfer_state row;
     row.id = download.id;
+    row.task = download.task;
     row.name = download.name;
     row.size = download.size;
     row.sent = download.received;
     row.download = true;
     row.state = download.state;
+    row.cancelled = download.cancelled;
+    row.message = download.message;
     out.push_back(std::move(row));
   }
   return out;

@@ -47,14 +47,14 @@
 | C3 | 剪贴板 | 文件上限、omitted、嵌套 RDP | gap | 原生不解析 caps/omitted/nested_rdp，也没有提示 | `session_client.cpp:1489` |
 | C4 | 剪贴板 | 粘贴进度与失败提示 | gap | 原生没有剪贴板文件 offer 横幅/进度/失败 toast | `ui_kit_demo.cpp:7341` |
 | C5 | 剪贴板 | 回显抑制（hash/chain、2 分钟表） | gap | 原生无自动文件同步，因此也没有 echo 表 | — |
-| F1 | 文件面板 | 本地 \| 远程双栏 | gap | 原生只有“发送/接收”两个 tab，没有本地文件浏览 | `ui_kit_demo.cpp:7341` |
-| F2 | 文件面板 | 本地绝对路径/盘符/根目录 | gap | 原生本地侧只有文件选择器/拖放 | `ui_kit_demo.cpp:7397` |
-| F3 | 文件面板 | 远程绝对路径/盘符枚举/面包屑 | partial | 原生只能点列表和“上一级”，无路径输入、无 roots | `session_client.cpp:764` |
-| F4 | 文件面板 | 多选与全选 | partial | 只支持选择器多选上传；列表不能勾选 | `ui_kit_demo.cpp:6172` |
-| F5 | 文件面板 | 上传目录递归、空目录、自定义 dest | gap | 原生一文件一 offer，bare name，无 mkdir/dest | `session_client.cpp:855` |
+| F1 | 文件面板 | 本地 \| 远程双栏 | gap | 仍是“发送/接收”两个互斥 tab（各有本地/远程浏览器），不能同屏双栏 | `ui_kit_demo.cpp:8390` |
+| F2 | 文件面板 | 本地绝对路径/盘符/根目录 | ok | 本地栏有路径框、盘符/主目录下拉、面包屑与 `FindFirstFileW` 列表 | `ui_kit_demo.cpp:6793` |
+| F3 | 文件面板 | 远程绝对路径/盘符枚举/面包屑 | ok | 解析 `parent/roots/truncated`，路径框、roots 下拉、可点面包屑、非法路径内联报错 | `session_client.cpp:790` |
+| F4 | 文件面板 | 多选与全选 | ok | 本地/远程列表都有勾选、Ctrl/Shift 多选与全选，动作按钮由选择集合驱动 | `ui_kit_demo.cpp:8972` |
+| F5 | 文件面板 | 上传目录递归、空目录、自定义 dest | gap | 选择上传已带当前远程目录作 `dest`，但仍一文件一 offer，无递归/空目录/mkdir | `session_client.cpp:897` |
 | F6 | 文件面板 | 下载目录递归与树形落盘 | gap | 原生只请求单个文件，平铺写入下载目录 | `ui_kit_demo.cpp:7617` |
-| F7 | 文件面板 | 每任务进度/汇总/失败原因 | partial | 只显示最近 3 行、百分比和“失败”，无任务树/汇总 | `ui_kit_demo.cpp:7495` |
-| F8 | 文件面板 | 并发/大小上限/超时策略 | partial | 有 30 s/3 s 超时；无上限提示、无 busy 原因 | `session_client.cpp:1167` |
+| F7 | 文件面板 | 每任务进度/汇总/失败原因 | ok | 任务卡按批次聚合进度/字节/成功-失败-取消-跳过，失败可展开看原因 | `ui_kit_demo.cpp:8379` |
+| F8 | 文件面板 | 并发/大小上限/超时策略 | ok | 8 GiB 上传预检、宿主 8 槽 reject/超时都有中文原因；按钮按 busy/无选择/无目标禁用 | `session_client.cpp:1280` |
 | F9 | 文件面板 | 拖入/拖出 | partial | 有 WM_DROPFILES 拖入；文件夹不展开，不能拖出到系统 | `ui_kit_demo.cpp:9633` |
 | F10 | 文件面板 | 剪贴板文件卡片（接收全部） | gap | 原生没有剪贴板文件列表 | `ui_kit_demo.cpp:7341` |
 | D1 | 输入 | 完整键码映射 | partial | 缺媒体/浏览器/IME/ContextMenu/NumpadEnter 等 | `ui_kit_demo.cpp:4095` |

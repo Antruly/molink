@@ -23,6 +23,17 @@ struct file_listing_entry {
   bool dir = false;
   uint64_t size = 0;
   uint64_t mtime = 0;
+  /// Roots view: the absolute volume path paired with the row, and its kind
+  /// (`fixed`, `removable`, `network`, `home`, ...).
+  std::wstring path;
+  std::wstring kind;
+};
+
+/// One volume/root from a listing's `roots` array.
+struct file_listing_root {
+  std::wstring name;
+  std::wstring path;
+  std::wstring kind;
 };
 
 /// File-protocol message surfaced to the shell.
@@ -30,6 +41,7 @@ struct file_event {
   std::wstring action;  ///< listing/sending/eof/done/reject/cancel/error
                         ///< (the shell also synthesizes `downloaded`)
   uint32_t id = 0;
+  uint32_t task = 0;   ///< UI batch the event belongs to (synthesized rows)
   uint32_t chunk = 0;  ///< `accept`: bytes per file_data packet
   bool ok = true;
   uint64_t size = 0;
@@ -38,6 +50,9 @@ struct file_event {
   std::wstring message;
   std::wstring listing_path;
   std::wstring listing_root;
+  std::wstring listing_parent;  ///< "" at a volume/share root
+  bool truncated = false;
+  std::vector<file_listing_root> roots;
   std::vector<file_listing_entry> entries;
   /// `action == "chunk"`: one file_data payload, kept in stream order with the
   /// JSON messages so `eof` can never overtake the final bytes.
@@ -48,11 +63,14 @@ struct file_event {
 /// Row for the shell's transfer list.
 struct file_transfer_state {
   uint32_t id = 0;
+  uint32_t task = 0;  ///< UI-selected batch id (0 = standalone row)
   std::wstring name;
   uint64_t size = 0;
   uint64_t sent = 0;
   bool download = false;
-  int state = 0;  ///< 0 queued, 1 active, 2 done, 3 failed
+  int state = 0;  ///< 0 queued, 1 active, 2 done, 3 failed/cancelled
+  bool cancelled = false;
+  std::wstring message;  ///< host reject/error text, or the local reason
 };
 
 struct session_endpoint {
@@ -138,11 +156,14 @@ class session_client {
   void set_download_dir(const std::wstring& dir);
   /// Queue a local file to send. Returns false when no session is live.
   bool file_offer(const std::wstring& name, const std::wstring& local_path,
-                  const std::wstring& destination = std::wstring());
-  /// Browse the host's home folder (empty path = home itself).
+                  const std::wstring& destination = std::wstring(),
+                  uint32_t task = 0);
+  /// Browse a host folder. An empty path is the volume list (the panel's
+  /// "roots view"); a non-empty path is resolved by the host against home.
   void file_browse(const std::wstring& path);
-  /// Ask the host to send a file inside its home folder.
-  void file_request(const std::wstring& path);
+  /// Ask the host to send a file. `task` groups several requests made by one
+  /// "传回来" click so the panel can show one task row.
+  void file_request(const std::wstring& path, uint32_t task = 0);
   /// Cancel an upload/download by the host-assigned id (0 cancels the next
   /// queued offer).
   void file_cancel(uint32_t id);
@@ -188,6 +209,7 @@ class session_client {
   struct upload_state {
     uint32_t key = 0;       ///< local row key
     uint32_t host_id = 0;   ///< id from `accept`
+    uint32_t task = 0;      ///< UI batch that started this row
     std::wstring name;
     std::wstring path;
     std::wstring dest;        ///< host destination folder ("" = ~/moLink)
@@ -197,6 +219,7 @@ class session_client {
     uint64_t sent = 0;
     uint32_t chunk = 256 * 1024;
     int state = 0;          ///< 0 queued, 1 active, 2 done, 3 failed
+    bool cancelled = false;
     bool offer_sent = false;
     bool complete_sent = false;
     /// Set after the final chunk; `complete` goes out on the next pump so the
@@ -206,11 +229,14 @@ class session_client {
   };
   struct download_state {
     uint32_t id = 0;
+    uint32_t task = 0;      ///< UI batch that requested this row
     std::wstring name;
     std::wstring path;      ///< local path being written
+    std::wstring message;
     uint64_t size = 0;
     uint64_t received = 0;
     int state = 0;
+    bool cancelled = false;
     bool eof_seen = false;
     uint64_t eof_at = 0;
     uint64_t last_progress_at = 0;
@@ -259,7 +285,17 @@ class session_client {
   std::vector<file_event> shell_file_events_;  ///< pump -> shell
   std::map<uint32_t, upload_state> uploads_;
   std::map<uint32_t, download_state> downloads_;
+  /// `file_request` paths waiting for the host's `sending` answer. The host
+  /// handles requests in order, so the oldest entry owns the next row; a name
+  /// match keeps a rejected request from shifting the queue.
+  struct pending_download {
+    std::wstring path;
+    uint32_t task = 0;
+  };
+  std::vector<pending_download> pending_downloads_;
   uint32_t next_upload_key_ = 1;
+  /// Failed requests carry host id 0; they still need a unique row key.
+  uint32_t next_download_key_ = 1;
   uint32_t active_offer_key_ = 0;
   std::wstring download_dir_;
   uint64_t last_ping_ = 0;
