@@ -47,6 +47,8 @@ inline constexpr wchar_t kFileTooLarge[] =
 inline constexpr wchar_t kFileTooLargeReceive[] =
     L"文件超过 8 GiB 上限，无法接收";
 inline constexpr wchar_t kTruncated[] = L"条目过多，仅显示前一部分";
+inline constexpr wchar_t kWalkTruncated[] =
+    L"目录太大，只处理了前 20000 项。";
 inline constexpr wchar_t kNotAFile[] = L"这不是文件。";
 inline constexpr wchar_t kTooManyActive[] =
     L"同时传输的文件已达上限（8 个），请稍后再试。";

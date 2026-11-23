@@ -4,9 +4,11 @@
 
 #include <atomic>
 #include <cstdint>
+#include <deque>
 #include <fstream>
 #include <map>
 #include <mutex>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -27,6 +29,8 @@ struct file_listing_entry {
   /// (`fixed`, `removable`, `network`, `home`, ...).
   std::wstring path;
   std::wstring kind;
+  /// Symlink/junction: list it, but a recursive walk never descends it.
+  bool link = false;
 };
 
 /// One volume/root from a listing's `roots` array.
@@ -54,6 +58,12 @@ struct file_event {
   bool truncated = false;
   std::vector<file_listing_root> roots;
   std::vector<file_listing_entry> entries;
+  /// `action == "walk-done"`: the synthetic end marker of a recursive
+  /// download. It never travels on the wire; `session_client` emits it after
+  /// the last folder of one `file_download_tree` has been listed.
+  int walk_files = 0;
+  int walk_dirs = 0;
+  int walk_skipped = 0;
   /// `action == "chunk"`: one file_data payload, kept in stream order with the
   /// JSON messages so `eof` can never overtake the final bytes.
   uint64_t offset = 0;
@@ -68,6 +78,7 @@ struct file_transfer_state {
   uint64_t size = 0;
   uint64_t sent = 0;
   bool download = false;
+  bool mkdir = false;  ///< an empty-folder create, not a file row
   int state = 0;  ///< 0 queued, 1 active, 2 done, 3 failed/cancelled
   bool cancelled = false;
   std::wstring message;  ///< host reject/error text, or the local reason
@@ -154,9 +165,17 @@ class session_client {
   /// Folder downloads are written to (`%USERPROFILE%\Downloads\moLink` by
   /// default). Missing directories are created on the first download.
   void set_download_dir(const std::wstring& dir);
-  /// Queue a local file to send. Returns false when no session is live.
+  /// Queue a local file to send. Returns false when no session is live, the
+  /// same name/destination is already queued, or the file exceeds 8 GiB.
+  /// `name` may be a slash-separated path (`photos/a.jpg`); the host creates
+  /// the relative parents under `destination`.
   bool file_offer(const std::wstring& name, const std::wstring& local_path,
                   const std::wstring& destination = std::wstring(),
+                  uint32_t task = 0);
+  /// Queue an explicit empty-folder create under `destination`. Web
+  /// `file action=mkdir`; the host answers with a `mkdir` event.
+  bool file_mkdir(const std::wstring& relative,
+                  const std::wstring& destination,
                   uint32_t task = 0);
   /// Browse a host folder. An empty path is the volume list (the panel's
   /// "roots view"); a non-empty path is resolved by the host against home.
@@ -164,6 +183,18 @@ class session_client {
   /// Ask the host to send a file. `task` groups several requests made by one
   /// "传回来" click so the panel can show one task row.
   void file_request(const std::wstring& path, uint32_t task = 0);
+  /// Ask for a file that belongs to a recursive download. `relative` (slash
+  /// separated, relative to the download root) decides where it is written:
+  /// the remote tree is recreated under the download directory.
+  bool file_request_relative(const std::wstring& path,
+                             const std::wstring& relative,
+                             uint32_t task = 0);
+  /// Download a remote folder recursively. Every file is requested with its
+  /// path below `relative`, and empty folders are created locally. One
+  /// `walk-done` event closes the task. Returns false with no live session.
+  bool file_download_tree(const std::wstring& path,
+                          const std::wstring& relative,
+                          uint32_t task = 0);
   /// Cancel an upload/download by the host-assigned id (0 cancels the next
   /// queued offer).
   void file_cancel(uint32_t id);
@@ -222,6 +253,11 @@ class session_client {
     bool cancelled = false;
     bool offer_sent = false;
     bool complete_sent = false;
+    /// Empty-folder create: sent as `mkdir`, has no local input or bytes.
+    bool mkdir = false;
+    /// When the offer/mkdir went out, so a lost answer cannot wedge the
+    /// single active-upload slot forever.
+    uint64_t sent_at = 0;
     /// Set after the final chunk; `complete` goes out on the next pump so the
     /// core proxy cannot deliver it ahead of the last binary frame.
     bool complete_pending = false;
@@ -232,6 +268,8 @@ class session_client {
     uint32_t task = 0;      ///< UI batch that requested this row
     std::wstring name;
     std::wstring path;      ///< local path being written
+    std::wstring rel;       ///< remote tree path ("" = a flat download)
+    std::wstring remote_path;  ///< for duplicate-request detection
     std::wstring message;
     uint64_t size = 0;
     uint64_t received = 0;
@@ -241,6 +279,29 @@ class session_client {
     uint64_t eof_at = 0;
     uint64_t last_progress_at = 0;
     std::ofstream out;
+  };
+  /// One recursive download. Folders are listed one at a time; each listing
+  /// queues its child folders and sends a `request` for every file.
+  struct download_walk {
+    uint32_t task = 0;
+    struct folder {
+      std::wstring path;  ///< remote path sent to `browse`
+      std::wstring rel;   ///< local path below the download root
+    };
+    std::vector<folder> pending;
+    std::size_t next = 0;
+    std::size_t entries = 0;
+    int files = 0;
+    int dirs = 0;
+    int skipped = 0;
+    bool truncated = false;
+  };
+  /// A browse whose answer is either shown (user navigation) or consumed by
+  /// a recursive walk. The host answers in order, so a FIFO matches them.
+  struct pending_browse {
+    std::wstring path;
+    bool walk = false;
+    uint32_t walk_id = 0;
   };
   void handle_text(const std::string& text);
   void handle_binary(const uint8_t* data, size_t size);
@@ -254,6 +315,27 @@ class session_client {
   void handle_file_json(const std::string& text);
   /// Completes a download once `eof` and every byte have both been seen.
   void finish_download(uint32_t id);
+  /// Defaults `download_dir_` and creates it; returns false when unavailable.
+  bool ensure_download_root();
+  /// Creates the local folder chain for a slash-separated relative path.
+  bool ensure_local_directory(const std::wstring& relative);
+  /// The local file path for a download: safe segments below `download_dir_`.
+  /// Returns "" when the path cannot be represented safely.
+  std::wstring local_download_path(const std::wstring& relative,
+                                   std::wstring* display_name);
+  /// Sends `request` for a file and queues the matching `sending` answer.
+  bool queue_download_request(const std::wstring& path,
+                              const std::wstring& relative, uint32_t task);
+  /// Starts queued `request`s up to the host's eight download slots.
+  void pump_download_requests();
+  /// Sends the next `browse` of a recursive download, or emits `walk-done`.
+  void advance_download_walk(uint32_t walk_id);
+  /// Releases the queued-name slot when an upload finishes, so the same file
+  /// can be sent again after a failure.
+  void release_upload_slot(const upload_state& upload);
+  /// Consumes one listing answer for a recursive download.
+  void handle_walk_listing(const file_event& event, uint32_t walk_id);
+  pending_browse take_pending_browse();
   bool send_file_chunk(uint32_t id, uint64_t offset, const uint8_t* data,
                        size_t len);
   void send_file_action(const std::string& action, uint32_t id,
@@ -290,10 +372,24 @@ class session_client {
   /// match keeps a rejected request from shifting the queue.
   struct pending_download {
     std::wstring path;
+    std::wstring rel;  ///< remote-tree path ("" = flat download)
     uint32_t task = 0;
   };
   std::vector<pending_download> pending_downloads_;
+  /// Queued/active `dest + name` pairs, so accepting a 20000-file folder does
+  /// not rescan every row for each offer.
+  std::set<std::wstring> upload_slots_;
+  /// Requests not sent yet, because the host keeps only eight downloads open.
+  std::deque<pending_download> request_queue_;
+  int active_requests_ = 0;  ///< sent and not yet finished (any state)
+  /// Browse answers are consumed in the order the requests were sent.
+  std::deque<pending_browse> pending_browses_;
+  std::map<uint32_t, download_walk> download_walks_;
+  uint32_t next_walk_id_ = 1;
   uint32_t next_upload_key_ = 1;
+  /// Lowest upload key not offered yet; keys complete in order, so the pump
+  /// never has to rescan a 20000-file queue.
+  uint32_t next_offer_key_ = 1;
   /// Failed requests carry host id 0; they still need a unique row key.
   uint32_t next_download_key_ = 1;
   uint32_t active_offer_key_ = 0;

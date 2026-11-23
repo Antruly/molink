@@ -560,9 +560,14 @@ struct app_state {
   int files_task_scroll = 0;
   std::vector<uint32_t> files_task_expanded;  ///< task ids showing reasons
   std::wstring download_dir;
-  /// Test hook: `--send-file <path>` offers the file once the session is up.
+  /// Test hook: `--send-file <path>` offers the file/folder once the session
+  /// is up; `--download-folder <remote path>` walks a remote folder back.
   std::wstring send_after_connect;
   bool send_after_done = false;
+  std::wstring download_after_connect;
+  bool download_after_done = false;
+  /// Test hook: `--download-dir <path>` overrides the receive directory.
+  std::wstring cli_download_dir;
   D2D1_RECT_F hit_chat_panel{}, hit_chat_close{}, hit_chat_input{},
       hit_chat_send{}, hit_files_panel{}, hit_files_close{}, hit_files_pick{},
       hit_files_drop{}, hit_files_tab[2]{}, hit_files_up{}, hit_files_home{},
@@ -6947,157 +6952,190 @@ bool can_send_files() {
   return g.session != nullptr && g.session->live();
 }
 
-/// Web `sendFiles`: offer the local selection as one task. Folders are called
-/// out instead of being sent as zero-byte files (batch 6 adds recursion), and
-/// files beyond the host's 8 GiB ceiling are refused before the wire.
+/// Lists one local folder for `molink::files::walk_tree`. A reparse point is
+/// reported as `link` so the walk lists the folder without following it.
+bool list_local_directory(const std::string& utf8_path,
+                          std::vector<molink::files::walk_entry>& children,
+                          std::string* error) {
+  children.clear();
+  const std::wstring path = local_native_path(utf8_path);
+  WIN32_FIND_DATAW data{};
+  HANDLE find = FindFirstFileW(local_join(path, L"*").c_str(), &data);
+  if (find == INVALID_HANDLE_VALUE) {
+    if (error != nullptr) {
+      *error = utf8_of(local_listing_error(GetLastError()));
+    }
+    return false;
+  }
+  do {
+    const std::wstring name = data.cFileName;
+    if (name == L"." || name == L"..") continue;
+    molink::files::walk_entry entry;
+    entry.name = utf8_of(name);
+    entry.dir = (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    entry.link = (data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+    entry.size = (static_cast<uint64_t>(data.nFileSizeHigh) << 32) |
+                 static_cast<uint64_t>(data.nFileSizeLow);
+    children.push_back(std::move(entry));
+  } while (FindNextFileW(find, &data) != FALSE);
+  FindClose(find);
+  return true;
+}
+
+/// Expands selection roots and queues one task: relative names for files,
+/// explicit `mkdir` for empty folders (Web `buildUploadPlan` + `runUploadPlan`).
+void send_upload_roots(const std::vector<molink::files::walk_root>& roots,
+                       const std::wstring& dest, uint32_t task) {
+  using namespace molink::files;
+  using namespace molink::files::text;
+  if (roots.empty()) return;
+  const walk_result plan = walk_tree(roots, list_local_directory);
+  int skipped = plan.skipped;
+  int too_large = 0;
+  int sent = 0;
+  // Empty folders go first, like the Web's upload plan: `offer` creates the
+  // parents of every file, but only an explicit `mkdir` creates a folder with
+  // no file beneath it.
+  int dirs = 0;
+  for (const std::string& dir : plan.empty_dirs) {
+    if (g.session->file_mkdir(wide_of(dir), dest, task)) ++dirs;
+    else ++skipped;
+  }
+  for (const walk_file& file : plan.files) {
+    if (file.size > kMaxFileBytes) {
+      ++too_large;
+      continue;
+    }
+    if (g.session->file_offer(wide_of(file.rel),
+                              local_native_path(file.path), dest, task)) {
+      ++sent;
+    } else {
+      ++skipped;
+    }
+  }
+  skipped += too_large;
+  if (skipped > 0) g.files_task_skipped[task] += skipped;
+  if (sent + dirs > 0) {
+    g.files_open = true;
+    g.chat_open = false;
+    g.files_tab = 0;
+  }
+  if (plan.truncated) {
+    show_toast(kWalkTruncated);
+  } else if (too_large > 0) {
+    show_toast(kFileTooLarge);
+  } else if (sent + dirs == 0) {
+    show_toast(kSendFailed);
+  }
+}
+
+/// Web `sendFiles`: recursively expand the local selection into one task.
 void send_local_selection() {
   using namespace molink::files::text;
   if (!can_send_files()) {
     show_toast(L"请先连接会话后再发送文件");
     return;
   }
-  const uint32_t task = new_file_task();
-  int sent = 0;
-  int skipped_dirs = 0;
-  int skipped_large = 0;
-  const std::wstring dest = g.files_path;
+  if (g.local_selection.empty()) return;
+  std::vector<molink::files::walk_root> roots;
   for (std::size_t index : g.local_selection.indexes()) {
     if (index >= g.local_entries.size()) continue;
     const app_state::local_entry& entry = g.local_entries[index];
-    if (entry.dir) {
-      ++skipped_dirs;
-      continue;
-    }
     const std::wstring full = entry.path.empty()
                                   ? local_join(g.local_path, entry.name)
                                   : entry.path;
-    if (entry.size > molink::files::kMaxFileBytes) {
-      ++skipped_large;
-      continue;
-    }
-    if (g.session->file_offer(entry.name, full, dest, task)) {
-      ++sent;
-    } else {
-      ++skipped_large;
-    }
+    roots.push_back({utf8_of(full), utf8_of(entry.name), entry.dir,
+                     entry.dir ? 0 : entry.size});
   }
-  if (sent == 0) {
-    if (skipped_dirs > 0) {
-      show_toast(FolderSkipped(skipped_dirs));
-    } else if (skipped_large > 0) {
-      show_toast(kFileTooLarge);
-    }
-    return;
-  }
-  g.files_task_skipped[task] = skipped_dirs + skipped_large;
-  if (skipped_dirs > 0) show_toast(FolderSkipped(skipped_dirs));
-  else if (skipped_large > 0) show_toast(kFileTooLarge);
-  g.files_open = true;
-  g.chat_open = false;
-  g.files_tab = 0;
+  send_upload_roots(roots, g.files_path, new_file_task());
 }
 
-/// Web `receiveBack`: request every selected remote file as one task. A
-/// folder selection is refused with the explicit batch-6 message rather than
-/// being sent as a file request the host would answer with `not a file`.
+/// Web `receiveBack`: request every selected remote entry as one task. A
+/// folder is walked with directory handles and recreated locally; a file is
+/// requested with its name as the relative path.
 void receive_remote_selection() {
   using namespace molink::files::text;
   if (!can_send_files()) return;
-  const uint32_t task = new_file_task();
-  int requested = 0;
-  int skipped_dirs = 0;
+  if (g.files_selection.empty()) return;
+  struct selected_remote {
+    std::wstring path;
+    std::wstring rel;
+    bool dir = false;
+  };
+  std::vector<selected_remote> selected;
   for (std::size_t index : g.files_selection.indexes()) {
     if (index >= g.files_entries.size()) continue;
     const molink::net::file_listing_entry& entry = g.files_entries[index];
-    if (entry.dir) {
-      ++skipped_dirs;
-      continue;
+    selected.push_back({entry.path.empty()
+                            ? host_child_path(g.files_path, entry.name)
+                            : entry.path,
+                        entry.name, entry.dir});
+  }
+  // A folder selection already covers a nested file/folder; requesting both
+  // would queue the same bytes twice.
+  std::vector<selected_remote> chosen;
+  for (const selected_remote& item : selected) {
+    bool covered = false;
+    for (const selected_remote& other : selected) {
+      if (!other.dir || other.path == item.path) continue;
+      if (!molink::files::relative_within(utf8_of(other.path),
+                                          utf8_of(item.path)).empty()) {
+        covered = true;
+        break;
+      }
     }
-    const std::wstring path =
-        entry.path.empty() ? host_child_path(g.files_path, entry.name)
-                           : entry.path;
-    g.session->file_request(path, task);
-    ++requested;
+    if (!covered) chosen.push_back(item);
+  }
+  const uint32_t task = new_file_task();
+  int requested = 0;
+  for (const selected_remote& item : chosen) {
+    if (item.dir) {
+      if (g.session->file_download_tree(item.path, item.rel, task)) {
+        ++requested;
+      }
+    } else if (g.session->file_request_relative(item.path, item.rel, task)) {
+      ++requested;
+    }
   }
   if (requested == 0) {
-    if (skipped_dirs > 0) show_toast(kFolderUnsupported);
+    show_toast(kSendFailed);
     return;
   }
-  g.files_task_skipped[task] = skipped_dirs;
-  if (skipped_dirs > 0) show_toast(FolderSkipped(skipped_dirs));
   g.files_open = true;
   g.chat_open = false;
   g.files_tab = 1;
 }
 
-/// One dropped/picked file is still one file; drag-drop of several paths
-/// shares one task so the panel shows a single aggregate row.
+/// One dropped/picked path (file or folder) goes through the same recursive
+/// plan as a selection, sharing one task row for the whole drop.
+void add_transfer_batch(const std::vector<std::wstring>& paths);
+
 void add_transfer(const std::wstring& path) {
-  if (path.empty()) return;
-  if (g.session == nullptr || !g.session->live()) {
-    show_toast(L"请先连接会话后再发送文件");
-    return;
-  }
-  if (local_is_directory(path)) {
-    show_toast(molink::files::text::kFolderUnsupported);
-    return;
-  }
-  if (file_bytes(path) > molink::files::kMaxFileBytes) {
-    show_toast(molink::files::text::kFileTooLarge);
-    return;
-  }
-  const std::wstring name = base_name(path);
-  if (!g.session->file_offer(name, path, g.files_path, new_file_task())) {
-    show_toast(L"无法发送 " + name);
-    return;
-  }
-  g.files_open = true;
-  g.chat_open = false;
-  g.files_tab = 0;
-  if (g.local_path.empty() && g.local_entries.empty()) {
-    local_browse(home_directory());
-  }
+  add_transfer_batch(std::vector<std::wstring>{path});
 }
 
-/// Drop / picker batch: folders are refused once for the whole drop.
+/// Drop / picker batch: every folder is expanded recursively, and the drop
+/// keeps its folder name as the first remote segment (`photos/a.jpg`).
 void add_transfer_batch(const std::vector<std::wstring>& paths) {
-  using namespace molink::files::text;
   if (paths.empty()) return;
   if (g.session == nullptr || !g.session->live()) {
     show_toast(L"请先连接会话后再发送文件");
     return;
   }
-  const uint32_t task = new_file_task();
-  int sent = 0;
-  int skipped_dirs = 0;
-  int skipped_large = 0;
+  std::vector<molink::files::walk_root> roots;
+  std::vector<std::wstring> seen;
   for (const std::wstring& path : paths) {
     if (path.empty()) continue;
-    if (local_is_directory(path)) {
-      ++skipped_dirs;
-      continue;
-    }
-    if (file_bytes(path) > molink::files::kMaxFileBytes) {
-      ++skipped_large;
-      continue;
-    }
-    if (g.session->file_offer(base_name(path), path, g.files_path, task)) {
-      ++sent;
-    } else {
-      ++skipped_large;
-    }
+    if (std::find(seen.begin(), seen.end(), path) != seen.end()) continue;
+    seen.push_back(path);
+    const bool dir = local_is_directory(path);
+    roots.push_back({utf8_of(path), utf8_of(base_name(path)), dir,
+                     dir ? 0 : file_bytes(path)});
   }
-  if (sent > 0) {
-    g.files_open = true;
-    g.chat_open = false;
-    g.files_tab = 0;
-    if (g.local_path.empty() && g.local_entries.empty()) {
-      local_browse(home_directory());
-    }
+  send_upload_roots(roots, g.files_path, new_file_task());
+  if (g.local_path.empty() && g.local_entries.empty()) {
+    local_browse(home_directory());
   }
-  if (skipped_dirs > 0) show_toast(FolderSkipped(skipped_dirs));
-  else if (skipped_large > 0) show_toast(kFileTooLarge);
-  else if (sent == 0) show_toast(kSendFailed);
 }
 
 /// Pumps the file protocol and turns host events into drawer state and
@@ -7125,6 +7163,17 @@ void handle_file_events() {
         g.files_scroll = 0;
         g.files_error.clear();
       }
+      InvalidateRect(g.window, nullptr, FALSE);
+    } else if (event.action == L"walk-done") {
+      // One recursive download finished walking: fold its unreadable folders
+      // into the task summary and explain a truncated walk once.
+      if (event.walk_skipped > 0) {
+        g.files_task_skipped[event.task] += event.walk_skipped;
+      }
+      if (event.truncated) show_toast(molink::files::text::kWalkTruncated);
+      InvalidateRect(g.window, nullptr, FALSE);
+    } else if (event.action == L"mkdir") {
+      if (!event.ok) show_toast(transfer_error_text(event.message, false));
       InvalidateRect(g.window, nullptr, FALSE);
     } else if (event.action == L"sending") {
       if (!event.ok) {
@@ -8463,6 +8512,9 @@ void draw_files_drawer(float w, float h) {
   std::vector<task_group> tasks;
   for (size_t i = 0; i < transfers.size(); ++i) {
     const molink::net::file_transfer_state& row = transfers[i];
+    // An empty-folder `mkdir` shares the task but is not a file row; the
+    // summary counts files only (the Web keeps dirsDone separate as well).
+    if (row.mkdir) continue;
     const uint32_t id =
         row.task != 0 ? row.task : (0x80000000u | static_cast<uint32_t>(i));
     auto it = std::find_if(tasks.begin(), tasks.end(),
@@ -9048,6 +9100,7 @@ void files_click(float x, float y, HWND window) {
     std::vector<task_group> tasks;
     for (size_t i = 0; i < transfers.size(); ++i) {
       const molink::net::file_transfer_state& row = transfers[i];
+      if (row.mkdir) continue;  // directory create, not a task file row
       const uint32_t id = row.task != 0
                               ? row.task
                               : (0x80000000u | static_cast<uint32_t>(i));
@@ -10218,6 +10271,14 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
             g.send_after_done = true;
             add_transfer(g.send_after_connect);
             g.send_after_connect.clear();
+          }
+          if (!g.download_after_connect.empty() &&
+              !g.download_after_done) {
+            g.download_after_done = true;
+            g.session->file_download_tree(
+                g.download_after_connect,
+                base_name(g.download_after_connect), new_file_task());
+            g.download_after_connect.clear();
           }
         }
         for (const std::string& message : g.session->take_chat()) {
@@ -11435,6 +11496,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     if (wcscmp(__wargv[i], L"--send-file") == 0 && i + 1 < __argc) {
       g.send_after_connect = __wargv[++i];
     }
+    if (wcscmp(__wargv[i], L"--download-folder") == 0 && i + 1 < __argc) {
+      g.download_after_connect = __wargv[++i];
+    }
+    if (wcscmp(__wargv[i], L"--download-dir") == 0 && i + 1 < __argc) {
+      g.cli_download_dir = __wargv[++i];
+    }
     if (wcscmp(__wargv[i], L"--core") == 0 && i + 1 < __argc) {
       g.core_path = __wargv[++i];
       g.proxy_mode = true;
@@ -11524,7 +11591,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     g.session_open = true;
   }
   load_recents();
-  g.download_dir = default_download_dir();
+  g.download_dir = g.cli_download_dir.empty() ? default_download_dir()
+                                              : g.cli_download_dir;
   WNDCLASSEXW cls{};
   cls.cbSize = sizeof(cls);
   // Double-click in the address/code fields selects the whole value.
