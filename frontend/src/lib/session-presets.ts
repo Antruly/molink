@@ -325,6 +325,33 @@ export function viewerPresetAfterReply(
   return selected
 }
 
+/// True for the four real stream encoders. "auto" and "tiles" are modes, not
+/// encoders: auto lets the host adapt, tiles is the explicit never-stream
+/// choice.
+export function isExplicitStreamCodec(codec?: string): boolean {
+  return codec === 'av1' || codec === 'h264' || codec === 'vp9' ||
+    codec === 'vp8'
+}
+
+/// The chroma a preset actually gets when the host has pinned an encoder.
+/// Every stream encoder here is 4:2:0, so truecolour's 4:4:4 gives way to
+/// 4:2:0 rather than silently leaving the stream off.
+export function effectivePresetChroma(
+  chroma: PresetChroma,
+  codec?: string,
+): PresetChroma {
+  return isExplicitStreamCodec(codec) && chroma === '444' ? '420' : chroma
+}
+
+/// True when selecting `codec` would leave the selected picture tier on the
+/// tile path and must therefore warn the viewer about the exit.
+export function codecExitsTruecolor(
+  preset: SessionPresetId,
+  codec?: string,
+): boolean {
+  return preset === 'truecolor' && isExplicitStreamCodec(codec)
+}
+
 export function chromaLabel(chroma?: string): string {
   switch (chroma) {
     case '444':

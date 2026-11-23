@@ -68,6 +68,9 @@ export interface TabPatch {
   codecOptions?: string[]
   /// The host's global stream codec preference.
   codecPreference?: string
+  /// False when the pinned encoder cannot run here; `codecError` names it.
+  codecAvailable?: boolean
+  codecError?: string
   /// True when the wire carries AV1 only, not AV1 patches over a tile image.
   av1Full?: boolean
   av1WireBytes?: number
@@ -456,6 +459,14 @@ export class SessionConnection {
           value,
         })
         this.sink.onPatch({ codecPreference: value })
+      },
+      onCodecStatus: (available, codec) => {
+        logDiag(available ? 'info' : 'warn', 'session.codec-status', undefined, {
+          target: this.target || undefined,
+          codec,
+          available,
+        })
+        this.sink.onPatch({ codecAvailable: available, codecError: codec })
       },
       onSessionPresetApplied: (applied) =>
         this.sink.onPatch({ appliedPreset: applied }),

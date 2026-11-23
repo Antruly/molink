@@ -346,6 +346,10 @@ class capture_source {
   virtual std::string stream_codec_name() const { return "tiles"; }
   /// "Video encoding" mode: the stream is always the picture, no tiles.
   virtual void set_stream_always(bool always) { (void)always; }
+  /// The user pinned a codec (not "auto"): the adaptive policy must not hand
+  /// the picture back to tiles. Unlike set_stream_always, this also ignores
+  /// the drag/back-pressure/encoder-timeout vetoes.
+  virtual void set_stream_locked(bool locked) { (void)locked; }
   virtual void set_vp9_stream_allowed(bool allowed) { (void)allowed; }
   virtual void set_vp8_stream_allowed(bool allowed) { (void)allowed; }
 
@@ -685,6 +689,9 @@ class capture_base : public capture_source {
   void set_stream_always(bool always) override {
     stream_always_.store(always);
   }
+  void set_stream_locked(bool locked) override {
+    stream_locked_.store(locked);
+  }
   void request_stream(uint64_t ms) override {
     stream_nudge_until_.store(monotonic_ms() + ms);
     request_keyframe();
@@ -861,6 +868,10 @@ class capture_base : public capture_source {
   /// Streaming is forced until this monotonic deadline (codec switch).
   std::atomic<uint64_t> stream_nudge_until_{0};
   std::atomic<bool> stream_always_{false};
+  /// An explicit encoder is pinned: keep streaming whatever the content,
+  /// drag, send backlog or encoder latency says. Only a codec change clears
+  /// this.
+  std::atomic<bool> stream_locked_{false};
   std::atomic<bool> stream_keyframe_pending_{true};
   /// A viewer is behind; box-average large tiles and stop lifting the AV1
   /// downscale while it lasts.
