@@ -254,15 +254,19 @@ void tooltip(ID2D1RenderTarget* t, const palette& theme,
   text(t, small, label, r, theme.ink);
 }
 
+D2D1_RECT_F toast_rect(const toast_state& state, const D2D1_SIZE_F& size) {
+  const float w = 28 + 7.0f * static_cast<float>(state.text.size()) + 22;
+  const float h = 32;
+  const float left = (size.width - w) / 2;
+  const float top = size.height - h - 24;
+  return D2D1::RectF(left, top, left + w, top + h);
+}
+
 void toast(ID2D1RenderTarget* t, const palette& theme,
            IDWriteTextFormat* small, const D2D1_SIZE_F& size,
            const toast_state& state, uint64_t now_ms) {
   if (state.text.empty() || now_ms >= state.until_ms) return;
-  const float w = 28 + 7.0f * static_cast<float>(state.text.size());
-  const float h = 32;
-  const float left = (size.width - w) / 2;
-  const float top = size.height - h - 24;
-  const D2D1_RECT_F r = D2D1::RectF(left, top, left + w, top + h);
+  const D2D1_RECT_F r = toast_rect(state, size);
   shadow(t, theme, r, 8);
   fill_round(t, r, 8, theme.panel_strong);
   stroke_round(t, r, 8, theme.line);
@@ -276,7 +280,14 @@ void toast(ID2D1RenderTarget* t, const palette& theme,
     ink = theme.ink.r > 0.5f ? D2D1::ColorF(0xfbbf24)
                              : D2D1::ColorF(0xb45309);
   }
-  text(t, small, state.text, r, ink);
+  text(t, small, state.text,
+       D2D1::RectF(r.left + 12, r.top, r.right - 24, r.bottom), ink);
+  // A small × on the right: the shell routes a click there (or anywhere on
+  // the toast) to dismissal.
+  const float cx = r.right - 12;
+  const float cy = (r.top + r.bottom) / 2;
+  line(t, cx - 3, cy - 3, cx + 3, cy + 3, theme.muted, 1.2f);
+  line(t, cx - 3, cy + 3, cx + 3, cy - 3, theme.muted, 1.2f);
 }
 
 void modal_scrim(ID2D1RenderTarget* t, const D2D1_SIZE_F& size) {

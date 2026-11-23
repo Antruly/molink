@@ -88,6 +88,26 @@ struct file_event {
   bool stream = false;
 };
 
+/// Last diagnostics answer from the host (`logs tail` / `logs info`).
+struct host_log_state {
+  bool has_tail = false;
+  std::string tail;       ///< UTF-8 text, already truncated by the host
+  uint64_t tail_size = 0;
+  int tail_lines = 0;
+  uint64_t tail_at = 0;   ///< GetTickCount64 when the tail arrived
+  bool has_info = false;
+  bool enabled = false;
+  std::string directory;
+  int retention_days = 7;
+  uint64_t current_bytes = 0;
+  std::string file;
+  uint64_t info_at = 0;   ///< GetTickCount64 when the info arrived
+  /// `welcome`: the host's version, shown next to its port and log path.
+  std::string version;
+  /// The port this client tried to reach. Zero for an ID-only target.
+  int port = 0;
+};
+
 /// Row for the shell's transfer list.
 struct file_transfer_state {
   uint32_t id = 0;
@@ -162,6 +182,24 @@ class session_client {
   /// Machine-readable part of the last host `error` (invalid_code,
   /// access_denied, locked, ...), empty when none.
   const std::wstring& last_error_code() const { return last_error_code_; }
+  /// Bumped on every host error/close-policy answer so the UI can tell a new
+  /// occurrence from the same text still sitting in `last_error()`.
+  unsigned error_seq() const { return error_seq_.load(); }
+  /// Feature failures (input/clipboard/file/settings) are kept on a separate
+  /// channel: a `bad_input` must never overwrite the banner's credential error
+  /// (and turn its code field into a plain reconnect button).
+  const std::wstring& last_feature_error() const { return last_feature_error_; }
+  const std::wstring& last_feature_error_code() const {
+    return last_feature_error_code_;
+  }
+  unsigned feature_error_seq() const { return feature_error_seq_.load(); }
+  /// Host diagnostics (E2). Tail and info are privileged and require an
+  /// authenticated session; the state is copied under a mutex because the
+  /// reader thread writes it and the UI polls it.
+  bool request_log_tail(int lines = 500);
+  bool request_log_info();
+  bool set_host_logging(bool enabled);
+  host_log_state host_logs() const;
   /// Host cursor (`cursor-position`), in remote-screen pixels.
   int cursor_x() const { return cursor_x_.load(); }
   int cursor_y() const { return cursor_y_.load(); }
@@ -570,6 +608,16 @@ class session_client {
   std::atomic<int> screen_height_{0};
   std::wstring last_error_;
   std::wstring last_error_code_;
+  /// Incremented after `last_error_`/`last_error_code_` change.
+  std::atomic<unsigned> error_seq_{0};
+  /// The feature channel (toast only).
+  std::wstring last_feature_error_;
+  std::wstring last_feature_error_code_;
+  std::atomic<unsigned> feature_error_seq_{0};
+  /// Host diagnostics state; guarded by `log_mutex_` because handle_text()
+  /// runs on the reader thread while the UI polls it.
+  mutable std::mutex log_mutex_;
+  host_log_state host_logs_;
   std::wstring video_mode_;
   std::string resume_token_;
   std::wstring avatar_;

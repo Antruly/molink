@@ -726,6 +726,48 @@ foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
 endforeach()
 add_test(NAME diag_log COMMAND molink-core-diag-log-test)
 
+# The native client's diagnostics keep the same daily file name, retention,
+# 32 MiB roll and redaction as the core, plus the level gate. No Win32: the
+# Windows file calls are compiled only on Windows, and the Linux job exercises
+# the POSIX path against the same behaviour.
+add_executable(molink-core-native-diag-test
+  tests/native_diag_test.cpp
+  "${CMAKE_CURRENT_SOURCE_DIR}/../shell/windows/native_diag.cpp"
+)
+target_include_directories(molink-core-native-diag-test PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../shell/windows")
+set_target_properties(molink-core-native-diag-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
+  string(TOUPPER "${uvp_config}" uvp_config_upper)
+  set_target_properties(molink-core-native-diag-test PROPERTIES
+    "RUNTIME_OUTPUT_DIRECTORY_${uvp_config_upper}" "${CMAKE_BINARY_DIR}")
+endforeach()
+add_test(NAME native_diag COMMAND molink-core-native-diag-test)
+
+# Which failures reach the session banner and which belong to a toast. Pure
+# headers: the native shell compiles the same source into its Windows build.
+add_executable(molink-core-error-policy-test
+  tests/error_policy_test.cpp
+  "${CMAKE_CURRENT_SOURCE_DIR}/../shell/windows/error_policy.cpp"
+)
+target_include_directories(molink-core-error-policy-test PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../shell/windows")
+set_target_properties(molink-core-error-policy-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME error_policy COMMAND molink-core-error-policy-test)
+
+# The disconnected overlay's countdown must use the Web's retry schedule.
+add_executable(molink-core-reconnect-policy-test
+  tests/reconnect_policy_test.cpp
+  "${CMAKE_CURRENT_SOURCE_DIR}/../shell/windows/reconnect_policy.cpp"
+)
+target_include_directories(molink-core-reconnect-policy-test PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../shell/windows")
+set_target_properties(molink-core-reconnect-policy-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME reconnect_policy COMMAND molink-core-reconnect-policy-test)
+
 # Rectangle merging is pure computation: no libuvcpp and no AV1 SDK needed.
 add_executable(molink-core-dirty-rects-test
   tests/dirty_rects_test.cpp

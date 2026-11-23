@@ -320,6 +320,9 @@ if ($LASTEXITCODE -ne 0) { throw 'native resources failed' }
   (Join-Path $Repo 'shell\windows\clipboard_sync.cpp') `
   (Join-Path $Repo 'shell\windows\clipboard_files.cpp') `
   (Join-Path $Repo 'shell\windows\input_state.cpp') `
+  (Join-Path $Repo 'shell\windows\native_diag.cpp') `
+  (Join-Path $Repo 'shell\windows\error_policy.cpp') `
+  (Join-Path $Repo 'shell\windows\reconnect_policy.cpp') `
   (Join-Path $Repo 'shell\windows\puff.c') `
   $nativeRes $webpLibs `
   -ld2d1 -ldwrite -lole32 -luser32 -lgdi32 -ladvapi32 -lwindowscodecs `

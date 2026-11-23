@@ -11,7 +11,9 @@
 #include <cstring>
 #include <set>
 
+#include "error_policy.h"
 #include "file_panel_logic.h"
+#include "native_diag.h"
 #include "puff.h"
 
 namespace molink::net {
@@ -172,43 +174,83 @@ void skip_ws(const std::string& json, size_t* pos) {
 bool json_string_field(const std::string& json, const char* key, size_t start,
                        std::string* out, size_t* after = nullptr) {
   const std::string needle = std::string("\"") + key + "\"";
-  const size_t at = json.find(needle, start);
-  if (at == std::string::npos) return false;
-  size_t pos = at + needle.size();
-  skip_ws(json, &pos);
-  if (pos >= json.size() || json[pos] != ':') return false;
-  ++pos;
-  skip_ws(json, &pos);
-  if (!parse_json_string(json, &pos, out)) return false;
-  if (after != nullptr) *after = pos;
-  return true;
+  // The first textual match can be a value (`"action":"tail"`), so keep
+  // looking until a match is followed by ':' and parses as a string.
+  size_t at = start;
+  while ((at = json.find(needle, at)) != std::string::npos) {
+    size_t pos = at + needle.size();
+    skip_ws(json, &pos);
+    if (pos < json.size() && json[pos] == ':') {
+      ++pos;
+      skip_ws(json, &pos);
+      if (!parse_json_string(json, &pos, out)) return false;
+      if (after != nullptr) *after = pos;
+      return true;
+    }
+    at += needle.size();
+  }
+  return false;
 }
 
 bool json_u64_field(const std::string& json, const char* key, size_t start,
                     uint64_t* out) {
   const std::string needle = std::string("\"") + key + "\"";
-  const size_t at = json.find(needle, start);
-  if (at == std::string::npos) return false;
-  size_t pos = at + needle.size();
-  skip_ws(json, &pos);
-  if (pos >= json.size() || json[pos] != ':') return false;
-  ++pos;
-  skip_ws(json, &pos);
-  uint64_t value = 0;
-  bool any = false;
-  while (pos < json.size() && json[pos] >= '0' && json[pos] <= '9') {
-    value = value * 10 + static_cast<uint64_t>(json[pos] - '0');
+  size_t at = start;
+  while ((at = json.find(needle, at)) != std::string::npos) {
+    size_t pos = at + needle.size();
+    skip_ws(json, &pos);
+    if (pos >= json.size() || json[pos] != ':') {
+      at += needle.size();
+      continue;
+    }
     ++pos;
-    any = true;
+    skip_ws(json, &pos);
+    uint64_t value = 0;
+    bool any = false;
+    while (pos < json.size() && json[pos] >= '0' && json[pos] <= '9') {
+      value = value * 10 + static_cast<uint64_t>(json[pos] - '0');
+      ++pos;
+      any = true;
+    }
+    if (!any) return false;
+    *out = value;
+    return true;
   }
-  if (!any) return false;
-  *out = value;
-  return true;
+  return false;
 }
 
 std::wstring wbase_name(const std::wstring& path) {
   const size_t slash = path.find_last_of(L"\\/");
   return slash == std::wstring::npos ? path : path.substr(slash + 1);
+}
+
+/// Host error codes name their feature. Logging under that component keeps a
+/// "why did this fail" searchable by channel; unknown codes stay `session`.
+molink::native_diag::component diag_component_for(const std::string& code) {
+  using molink::native_diag::component;
+  if (code == "unauthorized" || code == "invalid_token" ||
+      code == "invalid_code" || code == "too_many_attempts" ||
+      code == "ip_banned" || code == "locked" || code == "access_denied") {
+    return component::auth;
+  }
+  if (code == "bad_input" || code.rfind("input_", 0) == 0) {
+    return component::input;
+  }
+  if (code.rfind("clipboard_", 0) == 0 ||
+      code.rfind("remote_clipboard_", 0) == 0) {
+    return component::clipboard;
+  }
+  if (code == "bad_file_action" || code.rfind("file_", 0) == 0) {
+    return component::files;
+  }
+  if (code == "bad_preset" || code == "bad_quality" || code == "bad_fps" ||
+      code == "bad_qp" || code == "bad_bitrate" ||
+      code == "bad_rate_mode" || code == "bad_format" ||
+      code == "bad_display" || code == "bad_display_mode" ||
+      code.rfind("display_mode_", 0) == 0) {
+    return component::video;
+  }
+  return component::session;
 }
 
 /// Splits `"key": [ {...}, {...} ]` into one substring per object. Names may
@@ -256,20 +298,25 @@ std::vector<std::string> json_object_array(const std::string& text,
 bool json_bool_field(const std::string& json, const char* key, size_t start,
                      bool* out) {
   const std::string needle = std::string("\"") + key + "\"";
-  const size_t at = json.find(needle, start);
-  if (at == std::string::npos) return false;
-  size_t pos = at + needle.size();
-  skip_ws(json, &pos);
-  if (pos >= json.size() || json[pos] != ':') return false;
-  ++pos;
-  skip_ws(json, &pos);
-  if (json.compare(pos, 4, "true") == 0) {
-    *out = true;
-    return true;
-  }
-  if (json.compare(pos, 5, "false") == 0) {
-    *out = false;
-    return true;
+  size_t at = start;
+  while ((at = json.find(needle, at)) != std::string::npos) {
+    size_t pos = at + needle.size();
+    skip_ws(json, &pos);
+    if (pos >= json.size() || json[pos] != ':') {
+      at += needle.size();
+      continue;
+    }
+    ++pos;
+    skip_ws(json, &pos);
+    if (json.compare(pos, 4, "true") == 0) {
+      *out = true;
+      return true;
+    }
+    if (json.compare(pos, 5, "false") == 0) {
+      *out = false;
+      return true;
+    }
+    return false;
   }
   return false;
 }
@@ -461,6 +508,13 @@ bool session_client::start(const std::string& core_host, int core_port,
   }
   last_error_.clear();
   last_error_code_.clear();
+  last_feature_error_.clear();
+  last_feature_error_code_.clear();
+  {
+    std::lock_guard<std::mutex> lock(log_mutex_);
+    host_logs_ = host_log_state{};
+    host_logs_.port = endpoint.port;
+  }
   video_mode_.clear();
   avatar_.clear();
   close_detail_.clear();
@@ -521,6 +575,11 @@ bool session_client::start(const std::string& core_host, int core_port,
         close_detail_ = L"connection lost (no close frame)";
       }
     }
+    molink::native_diag::diag().log(
+        molink::native_diag::level::warn,
+        molink::native_diag::component::session, "close", utf8_of(close_detail_),
+        {{"authenticated", authenticated_ ? "1" : "0"},
+         {"ws_code", std::to_string(ws_.close_code())}});
     if (stats_ != nullptr) stats_->codec = L"-";
     // Some transports deliver only the close frame (the web reads the same
     // reasons): surface a policy answer before the session is accepted.
@@ -547,11 +606,17 @@ bool session_client::start(const std::string& core_host, int core_port,
       code = "too_many_attempts";
     } else if (has("banned")) {
       code = "ip_banned";
+    } else if (has("hello") || has("handshake") || has("timed out") ||
+               has("timeout")) {
+      // The host's 1008 handshake answers ("hello timeout", "invalid hello")
+      // belong in the session banner, not in a feature toast.
+      code = "handshake_failed";
     } else {
       return;
     }
     last_error_code_ = std::wstring(code.begin(), code.end());
     last_error_ = wide_of(code + ": " + reason);
+    error_seq_.fetch_add(1);
     access_pending_ = false;
   };
   if (!ws_.connect(core_host, core_port, quality_path(endpoint), error)) {
@@ -982,6 +1047,12 @@ bool session_client::file_offer(const std::wstring& name,
   upload.size = size;
   upload.state = 0;
   uploads_.emplace(upload.key, std::move(upload));
+  molink::native_diag::diag().log(
+      molink::native_diag::level::info,
+      molink::native_diag::component::files, "offer",
+      std::string(), {{"name", utf8_of(offer_name)},
+                      {"size", std::to_string(size)},
+                      {"dest", utf8_of(destination)}});
   return true;
 }
 
@@ -1036,6 +1107,10 @@ bool session_client::queue_download_request(const std::wstring& path,
   }
   request_queue_.push_back({path, relative, task});
   pump_download_requests();
+  molink::native_diag::diag().log(
+      molink::native_diag::level::info,
+      molink::native_diag::component::files, "request", std::string(),
+      {{"name", utf8_of(path)}, {"relative", utf8_of(relative)}});
   return true;
 }
 
@@ -2070,6 +2145,11 @@ bool session_client::clipboard_files_changed(
         L"剪贴板文件超出上限，只发送了 " +
             std::to_wstring(plan.files.size()) + L" 个");
   }
+  molink::native_diag::diag().log(
+      molink::native_diag::level::info,
+      molink::native_diag::component::clipboard, "offer", std::string(),
+      {{"files", std::to_string(plan.files.size())},
+       {"omitted", std::to_string(omitted)}});
   return true;
 }
 
@@ -2135,6 +2215,12 @@ void session_client::start_clipboard_pull(const file_event& offer) {
   }
   batch->directory = directory;
   clipboard_pull_ = std::move(batch);
+  molink::native_diag::diag().log(
+      molink::native_diag::level::info,
+      molink::native_diag::component::clipboard, "pull.start", std::string(),
+      {{"files", std::to_string(plan.files.size())},
+       {"bytes", std::to_string(plan.bytes)},
+       {"omitted", std::to_string(omitted)}});
 
   for (const molink::clipboard_files::entry& source : plan.files) {
     clipboard_pull_file file;
@@ -2358,6 +2444,11 @@ void session_client::finish_clipboard_pull() {
   // The local clipboard now describes the host's selection, so a later copy
   // of a previous outbound selection must be treated as a fresh offer.
   clipboard_offer_key_.clear();
+  molink::native_diag::diag().log(
+      molink::native_diag::level::info,
+      molink::native_diag::component::clipboard, "pull.done", std::string(),
+      {{"files", std::to_string(finals.size())},
+       {"bytes", std::to_string(clipboard_pull_->total)}});
   queue_clipboard_toast(
       L"clipboard-done",
       L"已接收 " + std::to_wstring(finals.size()) + L" 个剪贴板文件",
@@ -2375,6 +2466,10 @@ void session_client::fail_clipboard_pull(const std::wstring& message) {
     file.state = 3;
     file.message = message;
   }
+  molink::native_diag::diag().log(
+      molink::native_diag::level::warn,
+      molink::native_diag::component::clipboard, "pull.fail",
+      utf8_of(message));
   queue_clipboard_toast(L"clipboard-error", message);
 }
 
@@ -2633,6 +2728,18 @@ void session_client::handle_text(const std::string& text) {
     if (json_bool_field(text, "clipboard_nested_rdp", 0, &clipboard_flag)) {
       host_nested_rdp_ = clipboard_flag;
     }
+    std::string version;
+    if (json_string_field(text, "version", 0, &version) &&
+        !version.empty()) {
+      std::lock_guard<std::mutex> lock(log_mutex_);
+      host_logs_.version = version;
+    }
+    molink::native_diag::diag().log(
+        molink::native_diag::level::info,
+        molink::native_diag::component::session, "welcome", std::string(),
+        {{"version", version},
+         {"security", utf8_of(security_)},
+         {"video_mode", utf8_of(video_mode_)}});
   } else if (type == "codec") {
     const uint64_t now = GetTickCount64();
     if (now - last_ping_ >= 1000) {
@@ -2651,6 +2758,10 @@ void session_client::handle_text(const std::string& text) {
     if (find_string(text, "protocol", &protocol) && !protocol.empty()) {
       protocol_label_ = wide_of(protocol);
     }
+    molink::native_diag::diag().log(
+        molink::native_diag::level::info,
+        molink::native_diag::component::transport, "path", std::string(),
+        {{"path", path}, {"protocol", protocol}});
   } else if (type == "access-requested") {
     access_pending_ = true;
   } else if (type == "hello_required") {
@@ -2678,9 +2789,77 @@ void session_client::handle_text(const std::string& text) {
       combined += message;
     }
     if (combined.empty()) combined = "host error";
-    last_error_ = wide_of(combined);
-    last_error_code_ = wide_of(code);
-    access_pending_ = false;
+    if (message.empty()) message = combined;
+    // Keep the two channels apart: a feature failure must not overwrite the
+    // credential error the banner is showing.
+    const auto route = molink::native::alerts::classify(code, message);
+    if (route.where == molink::native::alerts::surface::banner) {
+      last_error_ = wide_of(combined);
+      last_error_code_ = wide_of(code);
+      error_seq_.fetch_add(1);
+      access_pending_ = false;
+    } else {
+      last_feature_error_ = wide_of(combined);
+      last_feature_error_code_ = wide_of(code);
+      feature_error_seq_.fetch_add(1);
+    }
+    molink::native_diag::diag().log(
+        molink::native_diag::level::warn, diag_component_for(code), "error",
+        message, {{"err_code", code}});
+  } else if (type == "logs") {
+    // E2: the host's own diagnostic tail/info. The tail is UI state, not a
+    // log line: writing it back into our copy would duplicate every entry.
+    std::string action;
+    json_string_field(text, "action", 0, &action);
+    const uint64_t now = GetTickCount64();
+    std::lock_guard<std::mutex> lock(log_mutex_);
+    if (action == "tail") {
+      std::string tail;
+      if (json_string_field(text, "tail", 0, &tail)) {
+        host_logs_.tail = std::move(tail);
+        host_logs_.has_tail = true;
+      }
+      uint64_t number = 0;
+      if (json_u64_field(text, "size", 0, &number)) {
+        host_logs_.tail_size = number;
+      }
+      if (json_u64_field(text, "lines", 0, &number)) {
+        host_logs_.tail_lines = static_cast<int>(number);
+      }
+      host_logs_.tail_at = now;
+    } else if (action == "info") {
+      bool flag = false;
+      if (json_bool_field(text, "enabled", 0, &flag)) {
+        host_logs_.enabled = flag;
+      }
+      std::string value;
+      if (json_string_field(text, "directory", 0, &value)) {
+        host_logs_.directory = std::move(value);
+      }
+      if (json_string_field(text, "file", 0, &value)) {
+        host_logs_.file = std::move(value);
+      }
+      uint64_t number = 0;
+      if (json_u64_field(text, "retention_days", 0, &number)) {
+        host_logs_.retention_days = static_cast<int>(number);
+      }
+      if (json_u64_field(text, "current_bytes", 0, &number)) {
+        host_logs_.current_bytes = number;
+      }
+      host_logs_.has_info = true;
+      host_logs_.info_at = now;
+    } else if (action == "state") {
+      bool flag = false;
+      if (json_bool_field(text, "enabled", 0, &flag)) {
+        host_logs_.enabled = flag;
+        host_logs_.has_info = true;
+        host_logs_.info_at = now;
+      }
+    }
+    molink::native_diag::diag().log(
+        molink::native_diag::level::debug,
+        molink::native_diag::component::session, "logs.reply", std::string(),
+        {{"action", action}});
   } else if (type == "pong") {
     // The host echoes the ping's `t`, so the RTT needs no shared state.
     uint64_t sent = 0;
@@ -2890,6 +3069,30 @@ bool session_client::send_session_preset(const std::string& json) {
 preset::applied_reply session_client::applied_preset() const {
   std::lock_guard<std::mutex> lock(applied_mutex_);
   return applied_;
+}
+
+bool session_client::request_log_tail(int lines) {
+  if (!ws_.is_open() || !authenticated_) return false;
+  if (lines < 1) lines = 1;
+  if (lines > 5000) lines = 5000;
+  return ws_.send_text("{\"type\":\"logs\",\"action\":\"tail\",\"lines\":" +
+                       std::to_string(lines) + "}");
+}
+
+bool session_client::request_log_info() {
+  if (!ws_.is_open() || !authenticated_) return false;
+  return ws_.send_text("{\"type\":\"logs\",\"action\":\"info\"}");
+}
+
+bool session_client::set_host_logging(bool enabled) {
+  if (!ws_.is_open() || !authenticated_) return false;
+  return ws_.send_text(std::string("{\"type\":\"logs\",\"action\":\"") +
+                       (enabled ? "enable" : "disable") + "\"}");
+}
+
+host_log_state session_client::host_logs() const {
+  std::lock_guard<std::mutex> lock(log_mutex_);
+  return host_logs_;
 }
 
 bool session_client::send_json(const std::string& text) {
