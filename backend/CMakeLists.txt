@@ -989,6 +989,19 @@ set_target_properties(molink-core-clipboard-sync-test PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 add_test(NAME clipboard_sync COMMAND molink-core-clipboard-sync-test)
 
+# File-panel rules without Win32: the path grammar (typing C:\Windows, ~,
+# relative paths, drive/UNC crumbs), the Ctrl/Shift selection model and the
+# per-task aggregation are shared with the native shell and tested here.
+add_executable(molink-core-file-panel-logic-test
+  tests/file_panel_logic_test.cpp
+  "${CMAKE_CURRENT_SOURCE_DIR}/../shell/windows/file_panel_logic.cpp"
+)
+target_include_directories(molink-core-file-panel-logic-test PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../shell/windows")
+set_target_properties(molink-core-file-panel-logic-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME file_panel_logic COMMAND molink-core-file-panel-logic-test)
+
 # Keyboard translation and the pressed-key state machine without Win32: the
 # keypad/NumLock mapping, duplicate key-down filtering, blur release and the
 # shortcut injection order are shared with the native shell and tested here.

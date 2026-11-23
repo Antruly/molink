@@ -31,6 +31,7 @@
 #include <ctime>
 #include <fstream>
 #include <iterator>
+#include <map>
 #include <string>
 #include <memory>
 #include <thread>
@@ -38,6 +39,8 @@
 
 #include "avatar_image.h"
 #include "clipboard_sync.h"
+#include "file_panel_logic.h"
+#include "file_panel_strings.h"
 #include "input_state.h"
 #include "preset_message.h"
 #include "session_client.h"
@@ -516,14 +519,46 @@ struct app_state {
   float chat_anim = 0.0f;
   int chat_unread = 0;
   float files_anim = 0.0f;
-  /// Web FileTransferPanel tabs: 0 send, 1 receive (host browser).
+  /// Web FileTransferPanel tabs: 0 send (local), 1 receive (host browser).
   int files_tab = 0;
-  std::wstring files_path;   ///< host path being listed
+  std::wstring files_path;   ///< host path being listed ("" = roots view)
   std::wstring files_root;   ///< host home root from the listing
+  std::wstring files_parent; ///< listing.parent ("" at a volume/share root)
   std::wstring files_error;
   bool files_loading = false;
+  bool files_truncated = false;
   int files_scroll = 0;
   std::vector<molink::net::file_listing_entry> files_entries;
+  std::vector<molink::net::file_listing_root> files_roots;
+  std::wstring files_input;  ///< remote path bar contents
+  size_t files_caret = 0;
+  molink::files::selection_model files_selection;
+  bool files_roots_open = false;
+
+  struct local_entry {
+    std::wstring name;
+    std::wstring path;  ///< set for drive rows; empty means child of local_path
+    bool dir = false;
+    uint64_t size = 0;
+  };
+  std::wstring local_path;   ///< local folder being listed ("" = drives)
+  std::wstring local_error;
+  int local_scroll = 0;
+  std::vector<local_entry> local_entries;
+  std::vector<molink::net::file_listing_root> local_roots;
+  std::wstring local_input;  ///< local path bar contents
+  size_t local_caret = 0;
+  molink::files::selection_model local_selection;
+  bool local_roots_open = false;
+
+  /// One "传过去"/"传回来" click gets one task id so the panel can show a
+  /// single aggregate row for several files.
+  uint32_t next_file_task = 1;
+  /// Files/folders a "传过去/传回来" click refused (folder, 8 GiB) so the task
+  /// summary can print 跳过 N 项 even though no transfer row exists for them.
+  std::map<uint32_t, int> files_task_skipped;
+  int files_task_scroll = 0;
+  std::vector<uint32_t> files_task_expanded;  ///< task ids showing reasons
   std::wstring download_dir;
   /// Test hook: `--send-file <path>` offers the file once the session is up.
   std::wstring send_after_connect;
@@ -532,6 +567,15 @@ struct app_state {
       hit_chat_send{}, hit_files_panel{}, hit_files_close{}, hit_files_pick{},
       hit_files_drop{}, hit_files_tab[2]{}, hit_files_up{}, hit_files_home{},
       hit_files_refresh{}, hit_files_entry[12]{}, hit_files_cancel[6]{};
+  D2D1_RECT_F hit_files_roots{}, hit_files_roots_item[16]{},
+      hit_files_input{}, hit_files_browse{}, hit_files_crumb[8]{},
+      hit_files_select_all{}, hit_files_action{}, hit_files_task_detail[4]{},
+      hit_files_task_cancel[4]{}, hit_files_task_row[4]{},
+      hit_files_task_area{}, hit_files_list_area{};
+  D2D1_RECT_F hit_local_roots{}, hit_local_roots_item[16]{},
+      hit_local_input{}, hit_local_browse{}, hit_local_crumb[8]{},
+      hit_local_select_all{}, hit_local_action{};
+  bool hit_files_entry_box[12]{};  ///< row k drew the checkbox
   // Delayed tooltips, matching the web's `title` attributes.
   int tip_id = -1;
   int tip_candidate = -1;
@@ -576,6 +620,9 @@ void show_toast(const std::wstring& text);
 size_t caret_for_field(int field, float x);
 void clear_text_selection();
 void request_files_browse();
+void local_browse(const std::wstring& path);
+std::wstring home_directory();
+size_t* focus_caret(int field);
 
 /// Web `SESSION_PRESETS` order, with the same zh-CN labels. The wire ids live
 /// in `molink::preset` so the JSON and the table have one source.
@@ -4885,6 +4932,9 @@ bool session_click(float x, float y) {
       if (g.focus_field == 3) g.focus_field = 0;
       g.open_menu = -1;
       g.quality_open = false;
+      if (g.local_path.empty() && g.local_entries.empty()) {
+        local_browse(home_directory());
+      }
       if (g.files_tab == 1) request_files_browse();
     }
     return true;
@@ -6665,29 +6715,389 @@ void configure_session(molink::net::session_client* client) {
   }
 }
 
-/// Web `sendFiles`: offer each picked/dropped file to the host. The transfer
-/// list is fed by session_client::file_transfers().
+uint32_t new_file_task() { return g.next_file_task++; }
+
+/// Joins a listing entry onto a host path (the host accepts both slashes).
+std::wstring host_child_path(const std::wstring& base,
+                             const std::wstring& name) {
+  return wide_of(molink::files::join_path(utf8_of(base), utf8_of(name)));
+}
+
+std::wstring home_directory() {
+  wchar_t profile[MAX_PATH] = {};
+  if (GetEnvironmentVariableW(L"USERPROFILE", profile, MAX_PATH) == 0) {
+    return std::wstring();
+  }
+  return std::wstring(profile);
+}
+
+bool local_is_directory(const std::wstring& path) {
+  const DWORD attrs = GetFileAttributesW(path.c_str());
+  return attrs != INVALID_FILE_ATTRIBUTES &&
+         (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+}
+
+std::wstring local_join(const std::wstring& base, const std::wstring& name) {
+  if (base.empty()) return name;
+  const wchar_t last = base.back();
+  if (last == L'\\' || last == L'/') return base + name;
+  return base + L"\\" + name;
+}
+
+/// Converts the Web path grammar's output (`/` separators) to a Win32 path.
+std::wstring local_native_path(const std::string& utf8_path) {
+  std::wstring out = wide_of(utf8_path);
+  for (wchar_t& c : out) {
+    if (c == L'/') c = L'\\';
+  }
+  return out;
+}
+
+/// Drive list plus home, matching the host's `roots` rows for the local side.
+void refresh_local_roots() {
+  g.local_roots.clear();
+  const DWORD mask = GetLogicalDrives();
+  for (int index = 0; index < 26; ++index) {
+    if ((mask & (1u << index)) == 0) continue;
+    molink::net::file_listing_root root;
+    root.name = std::wstring(1, static_cast<wchar_t>(L'A' + index)) + L":";
+    root.path = root.name + L"\\";
+    switch (GetDriveTypeW(root.path.c_str())) {
+      case DRIVE_REMOVABLE: root.kind = L"removable"; break;
+      case DRIVE_FIXED: root.kind = L"fixed"; break;
+      case DRIVE_REMOTE: root.kind = L"network"; break;
+      case DRIVE_CDROM: root.kind = L"cdrom"; break;
+      case DRIVE_RAMDISK: root.kind = L"ram"; break;
+      default: root.kind = L"unknown"; break;
+    }
+    g.local_roots.push_back(std::move(root));
+  }
+  const std::wstring home = home_directory();
+  if (!home.empty()) {
+    g.local_roots.push_back({L"Home", home, L"home"});
+  }
+}
+
+std::wstring local_listing_error(DWORD error) {
+  using namespace molink::files::text;
+  if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) {
+    return kNoSuchFolder;
+  }
+  if (error == ERROR_ACCESS_DENIED) return kPermissionDenied;
+  if (error == ERROR_DIRECTORY) return kNotAFolder;
+  return kReadFolderFailed;
+}
+
+/// Lists a local folder (or the drive list when `path` is empty). Win32 is
+/// synchronous, so this runs from the UI thread like the picker does.
+///
+/// The new rows are built beside the old ones: a rejected path keeps the
+/// previous listing (like the host browser) and only reports inline, so a bad
+/// path can never look like an empty folder.
+void local_browse(const std::wstring& path) {
+  std::vector<app_state::local_entry> entries;
+  if (path.empty()) {
+    refresh_local_roots();
+    for (const molink::net::file_listing_root& root : g.local_roots) {
+      app_state::local_entry entry;
+      entry.name = root.name;
+      entry.path = root.path;
+      entry.dir = true;
+      entries.push_back(std::move(entry));
+    }
+  } else {
+    const std::wstring query = local_join(path, L"*");
+    WIN32_FIND_DATAW data{};
+    HANDLE find = FindFirstFileW(query.c_str(), &data);
+    if (find == INVALID_HANDLE_VALUE) {
+      // Keep local_path and the rows the user is looking at; the path box
+      // keeps the text that was tried so the reason has something to explain.
+      g.local_error = local_listing_error(GetLastError());
+      g.local_input = path;
+      g.local_caret = path.size();
+      return;
+    }
+    do {
+      const std::wstring name = data.cFileName;
+      if (name == L"." || name == L"..") continue;
+      app_state::local_entry entry;
+      entry.name = name;
+      entry.dir = (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+      entry.size = (static_cast<uint64_t>(data.nFileSizeHigh) << 32) |
+                   static_cast<uint64_t>(data.nFileSizeLow);
+      entries.push_back(std::move(entry));
+    } while (FindNextFileW(find, &data) != FALSE);
+    FindClose(find);
+    refresh_local_roots();
+    // Folders first, then a case-insensitive name order, like the host listing.
+    std::sort(entries.begin(), entries.end(),
+              [](const app_state::local_entry& a,
+                 const app_state::local_entry& b) {
+                if (a.dir != b.dir) return a.dir;
+                return _wcsicmp(a.name.c_str(), b.name.c_str()) < 0;
+              });
+  }
+
+  g.local_error.clear();
+  g.local_selection.clear();
+  g.local_scroll = 0;
+  g.local_path = path;
+  g.local_input = path;
+  g.local_caret = path.size();
+  g.local_entries = std::move(entries);
+}
+
+/// Enter in the local path bar: `~`, absolute paths and `..` all go through
+/// the same resolver as the remote bar.
+void local_open_input() {
+  const std::wstring home = home_directory();
+  const std::wstring base = g.local_path.empty() ? home : g.local_path;
+  const std::string resolved = molink::files::resolve_remote_path(
+      utf8_of(g.local_input), utf8_of(base), utf8_of(home));
+  local_browse(local_native_path(resolved));
+}
+
+std::wstring listing_error_text(const std::wstring& raw) {
+  using namespace molink::files::text;
+  if (raw.empty()) return kHostUnreachable;
+  if (raw == L"invalid path") return kInvalidPath;
+  if (raw == L"no such folder") return kNoSuchFolder;
+  if (raw == L"not a folder") return kNotAFolder;
+  if (raw == L"permission denied") return kPermissionDenied;
+  if (raw == L"could not read the folder") return kReadFolderFailed;
+  return raw;
+}
+
+/// Maps the host's short English failure reasons to the panel's Chinese copy.
+std::wstring transfer_error_text(const std::wstring& raw, bool download) {
+  using namespace molink::files::text;
+  if (raw.empty()) return download ? L"文件接收失败" : L"传输失败";
+  if (raw == L"file is larger than 8 GiB") {
+    return download ? kFileTooLargeReceive : kFileTooLarge;
+  }
+  if (raw == L"too many active downloads" ||
+      raw == L"too many active uploads") {
+    return kTooManyActive;
+  }
+  if (raw == L"invalid path") return kInvalidPath;
+  if (raw == L"not a file") return kNotAFile;
+  if (raw == L"could not read the file") return kFileReadFailed;
+  if (raw == L"could not open the file") return kFileOpenFailed;
+  return raw;
+}
+
+void request_files_browse_path(const std::wstring& path) {
+  if (g.session == nullptr || !g.session->live()) return;
+  g.files_loading = true;
+  g.files_error.clear();
+  g.files_roots_open = false;
+  g.files_input = path;
+  g.files_caret = path.size();
+  g.files_selection.clear();
+  g.session->file_browse(path);
+}
+
+void request_files_browse() {
+  request_files_browse_path(g.files_path);
+}
+
+/// Enter in the remote path bar (Web `openRemotePath`).
+void remote_open_input() {
+  const std::string resolved = molink::files::resolve_remote_path(
+      utf8_of(g.files_input), utf8_of(g.files_path), utf8_of(g.files_root));
+  request_files_browse_path(wide_of(resolved));
+}
+
+/// Leave a text field. The path boxes snap back to the folder that is actually
+/// displayed (Web `setRemoteInput(listing.path)` / `setLocalInput(localLabel)`)
+/// and drop the reason left by an abandoned attempt; other fields just blur.
+void blur_text_field() {
+  if (g.focus_field == 30) {
+    g.files_input = g.files_path;
+    g.files_caret = g.files_input.size();
+    g.files_error.clear();
+  } else if (g.focus_field == 31) {
+    g.local_input = g.local_path;
+    g.local_caret = g.local_input.size();
+    g.local_error.clear();
+  }
+  g.focus_field = 0;
+  clear_text_selection();
+}
+
+bool uploads_busy() {
+  if (g.session == nullptr) return false;
+  for (const molink::net::file_transfer_state& row :
+       g.session->file_transfers()) {
+    if (!row.download && (row.state == 0 || row.state == 1)) return true;
+  }
+  return false;
+}
+
+bool downloads_busy() {
+  if (g.session == nullptr) return false;
+  for (const molink::net::file_transfer_state& row :
+       g.session->file_transfers()) {
+    if (row.download && (row.state == 0 || row.state == 1)) return true;
+  }
+  return false;
+}
+
+bool can_send_files() {
+  return g.session != nullptr && g.session->live();
+}
+
+/// Web `sendFiles`: offer the local selection as one task. Folders are called
+/// out instead of being sent as zero-byte files (batch 6 adds recursion), and
+/// files beyond the host's 8 GiB ceiling are refused before the wire.
+void send_local_selection() {
+  using namespace molink::files::text;
+  if (!can_send_files()) {
+    show_toast(L"请先连接会话后再发送文件");
+    return;
+  }
+  const uint32_t task = new_file_task();
+  int sent = 0;
+  int skipped_dirs = 0;
+  int skipped_large = 0;
+  const std::wstring dest = g.files_path;
+  for (std::size_t index : g.local_selection.indexes()) {
+    if (index >= g.local_entries.size()) continue;
+    const app_state::local_entry& entry = g.local_entries[index];
+    if (entry.dir) {
+      ++skipped_dirs;
+      continue;
+    }
+    const std::wstring full = entry.path.empty()
+                                  ? local_join(g.local_path, entry.name)
+                                  : entry.path;
+    if (entry.size > molink::files::kMaxFileBytes) {
+      ++skipped_large;
+      continue;
+    }
+    if (g.session->file_offer(entry.name, full, dest, task)) {
+      ++sent;
+    } else {
+      ++skipped_large;
+    }
+  }
+  if (sent == 0) {
+    if (skipped_dirs > 0) {
+      show_toast(FolderSkipped(skipped_dirs));
+    } else if (skipped_large > 0) {
+      show_toast(kFileTooLarge);
+    }
+    return;
+  }
+  g.files_task_skipped[task] = skipped_dirs + skipped_large;
+  if (skipped_dirs > 0) show_toast(FolderSkipped(skipped_dirs));
+  else if (skipped_large > 0) show_toast(kFileTooLarge);
+  g.files_open = true;
+  g.chat_open = false;
+  g.files_tab = 0;
+}
+
+/// Web `receiveBack`: request every selected remote file as one task. A
+/// folder selection is refused with the explicit batch-6 message rather than
+/// being sent as a file request the host would answer with `not a file`.
+void receive_remote_selection() {
+  using namespace molink::files::text;
+  if (!can_send_files()) return;
+  const uint32_t task = new_file_task();
+  int requested = 0;
+  int skipped_dirs = 0;
+  for (std::size_t index : g.files_selection.indexes()) {
+    if (index >= g.files_entries.size()) continue;
+    const molink::net::file_listing_entry& entry = g.files_entries[index];
+    if (entry.dir) {
+      ++skipped_dirs;
+      continue;
+    }
+    const std::wstring path =
+        entry.path.empty() ? host_child_path(g.files_path, entry.name)
+                           : entry.path;
+    g.session->file_request(path, task);
+    ++requested;
+  }
+  if (requested == 0) {
+    if (skipped_dirs > 0) show_toast(kFolderUnsupported);
+    return;
+  }
+  g.files_task_skipped[task] = skipped_dirs;
+  if (skipped_dirs > 0) show_toast(FolderSkipped(skipped_dirs));
+  g.files_open = true;
+  g.chat_open = false;
+  g.files_tab = 1;
+}
+
+/// One dropped/picked file is still one file; drag-drop of several paths
+/// shares one task so the panel shows a single aggregate row.
 void add_transfer(const std::wstring& path) {
   if (path.empty()) return;
   if (g.session == nullptr || !g.session->live()) {
     show_toast(L"请先连接会话后再发送文件");
     return;
   }
+  if (local_is_directory(path)) {
+    show_toast(molink::files::text::kFolderUnsupported);
+    return;
+  }
+  if (file_bytes(path) > molink::files::kMaxFileBytes) {
+    show_toast(molink::files::text::kFileTooLarge);
+    return;
+  }
   const std::wstring name = base_name(path);
-  if (!g.session->file_offer(name, path)) {
+  if (!g.session->file_offer(name, path, g.files_path, new_file_task())) {
     show_toast(L"无法发送 " + name);
     return;
   }
   g.files_open = true;
   g.chat_open = false;
   g.files_tab = 0;
+  if (g.local_path.empty() && g.local_entries.empty()) {
+    local_browse(home_directory());
+  }
 }
 
-void request_files_browse() {
-  if (g.session == nullptr || !g.session->live()) return;
-  g.files_loading = true;
-  g.files_error.clear();
-  g.session->file_browse(g.files_path);
+/// Drop / picker batch: folders are refused once for the whole drop.
+void add_transfer_batch(const std::vector<std::wstring>& paths) {
+  using namespace molink::files::text;
+  if (paths.empty()) return;
+  if (g.session == nullptr || !g.session->live()) {
+    show_toast(L"请先连接会话后再发送文件");
+    return;
+  }
+  const uint32_t task = new_file_task();
+  int sent = 0;
+  int skipped_dirs = 0;
+  int skipped_large = 0;
+  for (const std::wstring& path : paths) {
+    if (path.empty()) continue;
+    if (local_is_directory(path)) {
+      ++skipped_dirs;
+      continue;
+    }
+    if (file_bytes(path) > molink::files::kMaxFileBytes) {
+      ++skipped_large;
+      continue;
+    }
+    if (g.session->file_offer(base_name(path), path, g.files_path, task)) {
+      ++sent;
+    } else {
+      ++skipped_large;
+    }
+  }
+  if (sent > 0) {
+    g.files_open = true;
+    g.chat_open = false;
+    g.files_tab = 0;
+    if (g.local_path.empty() && g.local_entries.empty()) {
+      local_browse(home_directory());
+    }
+  }
+  if (skipped_dirs > 0) show_toast(FolderSkipped(skipped_dirs));
+  else if (skipped_large > 0) show_toast(kFileTooLarge);
+  else if (sent == 0) show_toast(kSendFailed);
 }
 
 /// Pumps the file protocol and turns host events into drawer state and
@@ -6699,17 +7109,29 @@ void handle_file_events() {
     if (event.action == L"listing") {
       g.files_loading = false;
       if (!event.ok) {
-        g.files_error =
-            event.message.empty() ? L"无法读取主机文件夹" : event.message;
+        // Inline under the path bar: a rejected path must not look like an
+        // empty folder.
+        g.files_error = listing_error_text(event.message);
       } else {
         g.files_entries = event.entries;
-        if (!event.listing_path.empty()) g.files_path = event.listing_path;
+        g.files_roots = event.roots;
+        g.files_path = event.listing_path;
+        g.files_parent = event.listing_parent;
+        g.files_truncated = event.truncated;
         if (!event.listing_root.empty()) g.files_root = event.listing_root;
+        g.files_input = event.listing_path;
+        g.files_caret = g.files_input.size();
+        g.files_selection.clear();
         g.files_scroll = 0;
         g.files_error.clear();
       }
       InvalidateRect(g.window, nullptr, FALSE);
     } else if (event.action == L"sending") {
+      if (!event.ok) {
+        show_toast(transfer_error_text(event.message, true));
+        InvalidateRect(g.window, nullptr, FALSE);
+        continue;
+      }
       // The host started sending a file: show the receive tab like the web.
       g.files_open = true;
       g.chat_open = false;
@@ -6724,7 +7146,7 @@ void handle_file_events() {
       InvalidateRect(g.window, nullptr, FALSE);
     } else if (event.action == L"reject" || event.action == L"error" ||
                event.action == L"cancel" || event.action == L"cancelled") {
-      show_toast(event.message.empty() ? L"文件传输失败" : event.message);
+      show_toast(transfer_error_text(event.message, true));
       InvalidateRect(g.window, nullptr, FALSE);
     }
   }
@@ -6745,15 +7167,17 @@ bool pick_files(HWND window) {
   const wchar_t* first = buffer.data();
   const size_t first_len = wcslen(first);
   const wchar_t* second = first + first_len + 1;
+  std::vector<std::wstring> paths;
   if (*second == L'\0') {
-    add_transfer(first);
+    paths.emplace_back(first);
   } else {
     const std::wstring dir = first;
     for (const wchar_t* name = second; *name != L'\0';
          name += wcslen(name) + 1) {
-      add_transfer(dir + L"\\" + name);
+      paths.push_back(dir + L"\\" + name);
     }
   }
+  add_transfer_batch(paths);
   return true;
 }
 
@@ -7890,8 +8314,94 @@ void chat_click(float x, float y) {
   }
 }
 
+namespace files_text = molink::files::text;
+
+std::wstring root_kind_text(const std::wstring& kind) {
+  if (kind == L"removable") return files_text::kDriveRemovable;
+  if (kind == L"network") return files_text::kDriveNetwork;
+  if (kind == L"cdrom") return files_text::kDriveCdrom;
+  if (kind == L"ram") return files_text::kDriveRam;
+  if (kind == L"home") return files_text::kDriveHome;
+  if (kind == L"unknown") return files_text::kDriveUnknown;
+  return std::wstring();
+}
+
+std::wstring root_label(const molink::net::file_listing_root& root) {
+  const std::wstring kind = root_kind_text(root.kind);
+  return kind.empty() ? root.name : root.name + L" · " + kind;
+}
+
+/// The drive a listing path lives under, so the roots button shows `C:` rather
+/// than the generic label (Web `remoteActiveRoot`).
+std::wstring active_root_path(
+    const std::wstring& path,
+    const std::vector<molink::net::file_listing_root>& roots) {
+  if (path.empty()) return std::wstring();
+  for (const molink::net::file_listing_root& root : roots) {
+    std::wstring base = root.path;
+    while (!base.empty() && (base.back() == L'\\' || base.back() == L'/')) {
+      base.pop_back();
+    }
+    if (path == root.path || path == base) return root.path;
+    if (path.size() > base.size() && path.compare(0, base.size(), base) == 0 &&
+        (path[base.size()] == L'\\' || path[base.size()] == L'/')) {
+      return root.path;
+    }
+  }
+  return std::wstring();
+}
+
+bool task_is_expanded(uint32_t id) {
+  return std::find(g.files_task_expanded.begin(),
+                   g.files_task_expanded.end(),
+                   id) != g.files_task_expanded.end();
+}
+
+void toggle_task_expanded(uint32_t id) {
+  const auto it = std::find(g.files_task_expanded.begin(),
+                            g.files_task_expanded.end(), id);
+  if (it == g.files_task_expanded.end()) {
+    g.files_task_expanded.push_back(id);
+  } else {
+    g.files_task_expanded.erase(it);
+  }
+}
+
+void draw_checkbox(const D2D1_RECT_F& r, bool checked, bool enabled) {
+  const D2D1_COLOR_F border =
+      checked ? g.theme->accent_strong : g.theme->line;
+  fill_round(g.target, r, 3,
+             checked ? g.theme->accent_soft
+                     : D2D1::ColorF(g.theme->surface.r, g.theme->surface.g,
+                                    g.theme->surface.b, enabled ? 0.9f : 0.4f));
+  stroke_round(g.target, r, 3, enabled ? border : g.theme->line_soft, 1.0f);
+  if (checked) {
+    draw_icon(g.target, icon::check, (r.left + r.right) / 2,
+              (r.top + r.bottom) / 2, g.theme->accent_strong);
+  }
+}
+
+const wchar_t* block_reason_text(molink::files::transfer_block reason,
+                                 bool upload) {
+  switch (reason) {
+    case molink::files::transfer_block::no_selection:
+      return files_text::kNoSelection;
+    case molink::files::transfer_block::no_target:
+      return files_text::kNeedRemoteTarget;
+    case molink::files::transfer_block::no_source:
+      return files_text::kNeedLocalSource;
+    case molink::files::transfer_block::busy:
+      return files_text::kBusy;
+    case molink::files::transfer_block::unsupported:
+      return files_text::kFolderUnsupported;
+    case molink::files::transfer_block::none:
+      break;
+  }
+  return upload ? files_text::kSendToHint : files_text::kReceiveFromHint;
+}
+
 /// File drawer, copied from the web's FileTransferPanel: 380 px, right edge,
-/// drop zone and a transfer list.
+/// a local and a remote browser plus the aggregate task list.
 void draw_files_drawer(float w, float h) {
   if (!g.files_open && g.files_anim <= 0.01f) return;
   const float e = clampf(g.files_anim, 0.0f, 1.0f);
@@ -7939,180 +8449,567 @@ void draw_files_drawer(float w, float h) {
     g.hit_files_tab[i] = tab;
   }
 
-  // Bottom transfer list (both tabs), fed by the real file protocol.
+  const D2D1_COLOR_F danger = g.theme == &kLight
+                                  ? D2D1::ColorF(0xc0392b)
+                                  : D2D1::ColorF(0xff8f87);
+
+  // ----------------------------------------------------------------- tasks
   std::vector<molink::net::file_transfer_state> transfers;
   if (g.session != nullptr) transfers = g.session->file_transfers();
-  const int shown_transfers =
-      (std::min)(3, static_cast<int>(transfers.size()));
-  const float list_h = shown_transfers * 40 + 8;
-  const float content_top = panel.top + 88;
-  const float content_bottom = panel.bottom - 8 - list_h;
+  struct task_group {
+    uint32_t id = 0;
+    std::vector<molink::net::file_transfer_state> rows;
+  };
+  std::vector<task_group> tasks;
+  for (size_t i = 0; i < transfers.size(); ++i) {
+    const molink::net::file_transfer_state& row = transfers[i];
+    const uint32_t id =
+        row.task != 0 ? row.task : (0x80000000u | static_cast<uint32_t>(i));
+    auto it = std::find_if(tasks.begin(), tasks.end(),
+                           [id](const task_group& task) {
+                             return task.id == id;
+                           });
+    if (it == tasks.end()) {
+      tasks.push_back(task_group{});
+      it = tasks.end() - 1;
+      it->id = id;
+    }
+    it->rows.push_back(row);
+  }
 
-  if (g.files_tab == 0) {
-    // Drop zone / picker.
-    const float zone_h = (std::max)(90.0f, content_bottom - content_top - 12);
-    const D2D1_RECT_F zone =
-        D2D1::RectF(panel.left + 16, content_top, panel.right - 16,
-                    content_top + (std::min)(zone_h, 124.0f));
-    g.hit_files_drop = zone;
-    g.hit_files_pick = zone;
-    const bool zone_hover = inside(zone, g.hover_x, g.hover_y);
-    fill_round(g.target, zone, 12,
-               D2D1::ColorF(g.theme->panel.r, g.theme->panel.g,
-                            g.theme->panel.b, zone_hover ? 0.75f : 0.40f));
-    dashed_round(g.target, zone, 12,
-                 zone_hover ? g.theme->accent : g.theme->line_soft, 1.0f);
-    draw_icon(g.target, icon::folder, (zone.left + zone.right) / 2,
-              zone.top + 40, g.theme->muted);
-    text(g.target, g.body_center, L"拖放文件到此处",
-         D2D1::RectF(zone.left, zone.top + 56, zone.right, zone.top + 82),
-         g.theme->ink);
-    text(g.target, g.small, L"或点击选择文件",
-         D2D1::RectF(zone.left, zone.top + 80, zone.right, zone.top + 102),
+  // ---------------------------------------------------------------- layout
+  const float content_top = panel.top + 88;
+  const float bottom = panel.bottom - 8;
+  const float action_h = 32;
+  const float action_top = bottom - action_h;
+  const float reason_top = action_top - 18;
+  const float list_header_top = content_top + 98;
+  float task_h = 0;
+  if (!tasks.empty()) {
+    task_h = (std::min)(200.0f, 26.0f + tasks.size() * 54.0f);
+    const float room = reason_top - 6 - list_header_top - 60;
+    if (room < task_h) task_h = (std::max)(0.0f, room);
+  }
+  const float task_top = reason_top - 6 - task_h;
+  const float list_bottom =
+      task_h > 0 ? task_top - 8 : reason_top - 6;
+
+  // The current tab's rows, normalised so both panes draw the same way.
+  struct row_view {
+    std::wstring name;
+    bool dir = false;
+    uint64_t size = 0;
+    std::wstring path;  ///< roots view: the absolute path to open
+  };
+  const bool remote = g.files_tab == 1;
+  std::vector<row_view> rows;
+  if (remote) {
+    for (const molink::net::file_listing_entry& entry : g.files_entries) {
+      rows.push_back({entry.name, entry.dir, entry.size, entry.path});
+    }
+  } else {
+    for (const app_state::local_entry& entry : g.local_entries) {
+      rows.push_back({entry.name, entry.dir, entry.size, entry.path});
+    }
+  }
+  const std::wstring& path = remote ? g.files_path : g.local_path;
+  std::wstring& input = remote ? g.files_input : g.local_input;
+  size_t& caret = remote ? g.files_caret : g.local_caret;
+  const std::wstring& error = remote ? g.files_error : g.local_error;
+  const bool loading = remote && g.files_loading;
+  const bool truncated = remote && g.files_truncated;
+  const std::vector<molink::net::file_listing_root>& roots =
+      remote ? g.files_roots : g.local_roots;
+  bool& roots_open = remote ? g.files_roots_open : g.local_roots_open;
+  int& scroll = remote ? g.files_scroll : g.local_scroll;
+  molink::files::selection_model& selection =
+      remote ? g.files_selection : g.local_selection;
+
+  // ------------------------------------------------------------- toolbar
+  const D2D1_RECT_F roots_button =
+      D2D1::RectF(panel.left + 16, content_top, panel.left + 120,
+                  content_top + 24);
+  g.hit_files_roots = roots_button;
+  std::wstring root_name = files_text::kRoots;
+  if (!path.empty()) {
+    const std::wstring active = active_root_path(path, roots);
+    if (!active.empty()) {
+      for (const molink::net::file_listing_root& root : roots) {
+        if (root.path == active) {
+          root_name = root_label(root);
+          break;
+        }
+      }
+    }
+  }
+  if (root_name.size() > 14) root_name = root_name.substr(0, 13) + L"…";
+  fill_round(g.target, roots_button, 6,
+             inside(roots_button, g.hover_x, g.hover_y) ? g.theme->panel
+                                                        : g.theme->panel);
+  stroke_round(g.target, roots_button, 6, g.theme->line_soft, 1.0f);
+  text(g.target, g.small_left, root_name,
+       D2D1::RectF(roots_button.left + 7, roots_button.top,
+                   roots_button.right - 18, roots_button.bottom),
+       g.theme->ink);
+  draw_icon(g.target, icon::chevron_down, roots_button.right - 10,
+            roots_button.top + 12, g.theme->muted);
+  note_tip(1900 + (remote ? 0 : 1), files_text::kRoots, roots_button,
+           inside(roots_button, g.hover_x, g.hover_y));
+
+  const D2D1_RECT_F up =
+      D2D1::RectF(panel.right - 90, content_top, panel.right - 66,
+                  content_top + 24);
+  const D2D1_RECT_F home =
+      D2D1::RectF(panel.right - 64, content_top, panel.right - 40,
+                  content_top + 24);
+  const D2D1_RECT_F refresh =
+      D2D1::RectF(panel.right - 38, content_top, panel.right - 14,
+                  content_top + 24);
+  g.hit_files_up = up;
+  g.hit_files_home = home;
+  g.hit_files_refresh = refresh;
+  for (const D2D1_RECT_F* button : {&up, &home, &refresh}) {
+    if (inside(*button, g.hover_x, g.hover_y)) {
+      fill_round(g.target, *button, 6, g.theme->panel);
+    }
+  }
+  const bool up_enabled = !path.empty() && !(remote && g.files_loading);
+  draw_icon(g.target, icon::arrow_up_right, up.left + 12, up.top + 12,
+            up_enabled ? g.theme->muted : g.theme->line);
+  draw_icon(g.target, icon::monitor, home.left + 12, home.top + 12,
+            g.theme->muted);
+  draw_icon(g.target, icon::rotate, refresh.left + 12, refresh.top + 12,
+            g.theme->muted);
+  note_tip(1910, files_text::kUp, up, inside(up, g.hover_x, g.hover_y));
+  note_tip(1911, remote ? files_text::kHomeRemote : files_text::kHomeLocal,
+           home, inside(home, g.hover_x, g.hover_y));
+  note_tip(1912, files_text::kRefresh, refresh,
+           inside(refresh, g.hover_x, g.hover_y));
+
+  // Path box + 浏览.
+  const D2D1_RECT_F input_rect =
+      D2D1::RectF(panel.left + 16, content_top + 30, panel.right - 66,
+                  content_top + 54);
+  const D2D1_RECT_F browse_rect =
+      D2D1::RectF(panel.right - 60, content_top + 30, panel.right - 16,
+                  content_top + 54);
+  // Both panes draw the same box; only the active tab's rect is hit-tested,
+  // but both are stored so caret placement and text selection work either way.
+  g.hit_files_input = input_rect;
+  g.hit_files_browse = browse_rect;
+  g.hit_local_input = input_rect;
+  g.hit_local_browse = browse_rect;
+  const int focus_field = remote ? 30 : 31;
+  const bool focused = g.focus_field == focus_field;
+  fill_round(g.target, input_rect, 6, g.theme->panel);
+  stroke_round(g.target, input_rect, 6,
+               focused ? g.theme->accent
+                       : (!error.empty() ? danger : g.theme->line_soft),
+               1.0f);
+  if (focused && g.sel_field == focus_field && g.sel_start < g.sel_end) {
+    const float x0 = input_rect.left + 7;
+    const float xa =
+        x0 + measure_text(g.mono_small, input.substr(0, g.sel_start));
+    const float xb =
+        x0 + measure_text(g.mono_small, input.substr(0, g.sel_end));
+    fill_round(g.target,
+               D2D1::RectF(xa, input_rect.top + 4, xb, input_rect.bottom - 4),
+               2, D2D1::ColorF(g.theme->accent.r, g.theme->accent.g,
+                               g.theme->accent.b, 0.22f));
+  }
+  const std::wstring shown_input =
+      input.empty() && !focused
+          ? (remote ? files_text::kPathPlaceholderRemote
+                    : files_text::kPathPlaceholderLocal)
+          : input;
+  text(g.target, g.mono_small, shown_input,
+       D2D1::RectF(input_rect.left + 7, input_rect.top,
+                   input_rect.right - 6, input_rect.bottom),
+       input.empty() && !focused ? g.theme->muted : g.theme->ink);
+  if (focused && g.caret_on) {
+    const float caret_x =
+        input_rect.left + 7 + measure_text(g.mono_small, input.substr(0, caret));
+    line(g.target, caret_x, input_rect.top + 5, caret_x, input_rect.bottom - 5,
+         g.theme->accent, 1.0f);
+  }
+  fill_round(g.target, browse_rect, 6,
+             inside(browse_rect, g.hover_x, g.hover_y) ? g.theme->accent_soft
+                                                       : g.theme->panel);
+  text(g.target, g.small, files_text::kBrowse, browse_rect, g.theme->ink);
+
+  // Breadcrumbs.
+  float crumb_x = panel.left + 16;
+  const float crumb_y = content_top + 60;
+  for (int i = 0; i < 8; ++i) g.hit_files_crumb[i] = D2D1::RectF(0, 0, 0, 0);
+  if (!path.empty()) {
+    const std::vector<molink::files::path_crumb> crumbs =
+        molink::files::path_crumbs(utf8_of(path));
+    int slot = 0;
+    for (size_t i = 0; i < crumbs.size() && slot < 8; ++i) {
+      const std::wstring name = wide_of(crumbs[i].name);
+      const float text_w = measure_text(g.tiny, name);
+      if (i > 0) {
+        text(g.target, g.tiny, L"›", D2D1::RectF(crumb_x, crumb_y,
+                                                crumb_x + 10, crumb_y + 16),
+             g.theme->line);
+        crumb_x += 10;
+      }
+      if (crumb_x + text_w + 6 > panel.right - 16) break;
+      const D2D1_RECT_F crumb =
+          D2D1::RectF(crumb_x, crumb_y, crumb_x + text_w + 6, crumb_y + 16);
+      if (inside(crumb, g.hover_x, g.hover_y)) {
+        fill_round(g.target, crumb, 4, g.theme->panel);
+      }
+      text(g.target, g.tiny, name, crumb, g.theme->muted);
+      g.hit_files_crumb[slot++] = crumb;
+      crumb_x += text_w + 8;
+    }
+  } else {
+    text(g.target, g.tiny, files_text::kRootsShort,
+         D2D1::RectF(crumb_x, crumb_y, crumb_x + 20, crumb_y + 16),
+         g.theme->muted);
+  }
+
+  // Select all + selected count + truncation note.
+  const D2D1_RECT_F select_all =
+      D2D1::RectF(panel.left + 16, content_top + 78, panel.right - 16,
+                  content_top + 96);
+  g.hit_files_select_all = select_all;
+  const bool all_selected = selection.all_selected(rows.size());
+  const D2D1_RECT_F select_box =
+      D2D1::RectF(select_all.left + 1, select_all.top + 1,
+                  select_all.left + 13, select_all.top + 13);
+  draw_checkbox(select_box, all_selected, !rows.empty());
+  text(g.target, g.small_left, files_text::kSelectAll,
+       D2D1::RectF(select_box.right + 6, select_all.top,
+                   select_all.left + 70, select_all.bottom),
+       g.theme->muted);
+  if (!selection.empty()) {
+    text(g.target, g.tiny, files_text::SelectedCount(selection.size()),
+         D2D1::RectF(select_all.left + 72, select_all.top,
+                     select_all.left + 160, select_all.bottom),
+         g.theme->accent);
+  }
+  if (truncated) {
+    text(g.target, g.tiny, files_text::kTruncated,
+         D2D1::RectF(panel.right - 158, select_all.top, panel.right - 16,
+                     select_all.bottom),
+         danger);
+  }
+
+  // ------------------------------------------------------------------ list
+  for (int i = 0; i < 12; ++i) {
+    g.hit_files_entry[i] = D2D1::RectF(0, 0, 0, 0);
+    g.hit_files_entry_box[i] = false;
+  }
+  float ry = content_top + 98;
+  if (!error.empty()) {
+    text(g.target, g.small_left, error,
+         D2D1::RectF(panel.left + 16, ry, panel.right - 16, ry + 20), danger);
+    ry += 20;
+  }
+  if (loading) {
+    text(g.target, g.small_left, files_text::kLoading,
+         D2D1::RectF(panel.left + 16, ry, panel.right - 16, ry + 18),
+         g.theme->muted);
+    ry += 18;
+  }
+  const int total = static_cast<int>(rows.size());
+  const int capacity = (std::max)(
+      1, (std::min)(12, static_cast<int>((list_bottom - ry) / 26)));
+  scroll = (std::max)(0, (std::min)(scroll, (std::max)(0, total - capacity)));
+  if (total == 0 && error.empty() && !loading) {
+    text(g.target, g.small, files_text::kEmptyFolder,
+         D2D1::RectF(panel.left + 16, ry, panel.right - 16, ry + 20),
          g.theme->muted);
   } else {
-    // Host browser: up + path + refresh, then the folder listing.
-    const D2D1_RECT_F up =
-        D2D1::RectF(panel.left + 16, content_top, panel.left + 42,
-                    content_top + 26);
-    const D2D1_RECT_F refresh =
-        D2D1::RectF(panel.right - 42, content_top, panel.right - 16,
-                    content_top + 26);
-    g.hit_files_up = up;
-    g.hit_files_refresh = refresh;
-    for (const D2D1_RECT_F* button : {&up, &refresh}) {
-      if (inside(*button, g.hover_x, g.hover_y)) {
-        fill_round(g.target, *button, 6, g.theme->panel);
+    for (int k = 0; k < capacity && scroll + k < total; ++k) {
+      const int index = scroll + k;
+      const row_view& row = rows[index];
+      const D2D1_RECT_F row_rect =
+          D2D1::RectF(panel.left + 10, ry, panel.right - 10, ry + 24);
+      const bool hovered = inside(row_rect, g.hover_x, g.hover_y);
+      const bool selected = selection.contains(static_cast<size_t>(index));
+      if (selected) {
+        fill_round(g.target, row_rect, 6, g.theme->accent_soft);
+      } else if (hovered) {
+        fill_round(g.target, row_rect, 6, g.theme->panel);
       }
+      const D2D1_RECT_F box =
+          D2D1::RectF(panel.left + 18, ry + 6, panel.left + 30, ry + 18);
+      draw_checkbox(box, selected, true);
+      draw_icon(g.target, row.dir ? icon::folder : icon::clipboard,
+                panel.left + 42, ry + 12,
+                row.dir ? g.theme->accent : g.theme->muted);
+      text(g.target, g.small_left, row.name,
+           D2D1::RectF(panel.left + 54, ry, panel.right - 78, ry + 24),
+           g.theme->ink);
+      if (!row.dir) {
+        text(g.target, g.small_right, format_bytes(row.size),
+             D2D1::RectF(panel.right - 74, ry, panel.right - 16, ry + 24),
+             g.theme->muted);
+      }
+      g.hit_files_entry[k] = row_rect;
+      g.hit_files_entry_box[k] = true;
+      ry += 26;
     }
-    draw_icon(g.target, icon::arrow_up_right, up.left + 13, up.top + 13,
-              g.theme->muted);
-    draw_icon(g.target, icon::rotate, refresh.left + 13, refresh.top + 13,
-              g.theme->muted);
-    std::wstring shown_path =
-        g.files_path.empty() ? L"主机主目录" : g.files_path;
-    if (shown_path.size() > 34) {
-      shown_path = L"…" + shown_path.substr(shown_path.size() - 32);
-    }
-    text(g.target, g.small_left, shown_path,
-         D2D1::RectF(up.right + 8, content_top, refresh.left - 8,
-                     content_top + 26),
+  }
+
+  // ----------------------------------------------------------------- tasks
+  g.hit_files_task_area = task_h > 0
+                              ? D2D1::RectF(panel.left + 10, task_top,
+                                            panel.right - 10, task_top + task_h)
+                              : D2D1::RectF(0, 0, 0, 0);
+  for (int i = 0; i < 4; ++i) {
+    g.hit_files_task_row[i] = D2D1::RectF(0, 0, 0, 0);
+    g.hit_files_task_detail[i] = D2D1::RectF(0, 0, 0, 0);
+    g.hit_files_task_cancel[i] = D2D1::RectF(0, 0, 0, 0);
+  }
+  if (task_h > 0) {
+    text(g.target, g.tiny, files_text::kTransfers,
+         D2D1::RectF(panel.left + 16, task_top, panel.left + 90,
+                     task_top + 18),
          g.theme->muted);
-
-    float ry = content_top + 32;
-    const int capacity = (std::max)(
-        1, (std::min)(12, static_cast<int>((content_bottom - ry) / 28)));
-    const int total = static_cast<int>(g.files_entries.size());
-    g.files_scroll = (std::max)(
-        0, (std::min)(g.files_scroll, (std::max)(0, total - capacity)));
-    for (int i = 0; i < 12; ++i) g.hit_files_entry[i] = D2D1::RectF(0, 0, 0, 0);
-    if (total == 0) {
-      text(g.target, g.small, g.files_loading ? L"正在读取主机文件夹…"
-                           : g.files_error.empty()
-                               ? L"文件夹为空（点击 ↻ 读取）"
-                               : g.files_error,
-           D2D1::RectF(panel.left + 16, ry, panel.right - 16, ry + 24),
-           g.files_error.empty() ? g.theme->muted
-                                 : (g.theme == &kLight
-                                        ? D2D1::ColorF(0xc0392b)
-                                        : D2D1::ColorF(0xff8f87)));
-    } else {
-      for (int k = 0; k < capacity && g.files_scroll + k < total; ++k) {
-        const molink::net::file_listing_entry& entry =
-            g.files_entries[g.files_scroll + k];
-        const D2D1_RECT_F row =
-            D2D1::RectF(panel.left + 10, ry, panel.right - 10, ry + 26);
-        if (inside(row, g.hover_x, g.hover_y)) {
-          fill_round(g.target, row, 6, g.theme->panel);
+    text(g.target, g.tiny,
+         files_text::TaskCount(tasks.size()),
+         D2D1::RectF(panel.left + 76, task_top, panel.left + 140,
+                     task_top + 18),
+         g.theme->muted);
+    g.files_task_scroll = (std::max)(
+        0, (std::min)(g.files_task_scroll,
+                      (std::max)(0, static_cast<int>(tasks.size()) - 1)));
+    float ty = task_top + 22;
+    int slot = 0;
+    for (int i = g.files_task_scroll;
+         i < static_cast<int>(tasks.size()) && slot < 4; ++i) {
+      const task_group& task = tasks[static_cast<size_t>(i)];
+      if (task.rows.empty()) continue;
+      std::vector<molink::files::transfer_item> items;
+      std::vector<const molink::net::file_transfer_state*> failures;
+      for (const molink::net::file_transfer_state& row : task.rows) {
+        molink::files::transfer_item item;
+        item.size = row.size;
+        item.progress = row.sent;
+        if (row.state == 2) {
+          item.status = molink::files::transfer_status::done;
+        } else if (row.state == 3) {
+          item.status = row.cancelled
+                            ? molink::files::transfer_status::cancelled
+                            : molink::files::transfer_status::error;
+          if (!row.cancelled) failures.push_back(&row);
+        } else if (row.state == 1) {
+          item.status = molink::files::transfer_status::running;
+        } else {
+          item.status = molink::files::transfer_status::queued;
         }
-        draw_icon(g.target, entry.dir ? icon::folder : icon::clipboard,
-                  panel.left + 24, ry + 13,
-                  entry.dir ? g.theme->accent : g.theme->muted);
-        text(g.target, g.small_left, entry.name,
-             D2D1::RectF(panel.left + 38, ry, panel.right - 80, ry + 26),
-             g.theme->ink);
-        if (!entry.dir) {
-          text(g.target, g.small_right, format_bytes(entry.size),
-               D2D1::RectF(panel.right - 76, ry, panel.right - 16, ry + 26),
-               g.theme->muted);
-        }
-        g.hit_files_entry[k] = row;
-        ry += 28;
+        items.push_back(item);
       }
+      const molink::files::transfer_summary summary =
+          molink::files::summarize_transfers(items);
+      const bool expanded = !failures.empty() && task_is_expanded(task.id);
+      const float card_h =
+          54.0f + (expanded ? (std::min)(3, static_cast<int>(failures.size())) *
+                                  17.0f +
+                                  4.0f
+                            : 0.0f);
+      if (ty + card_h > task_top + task_h + 1) break;
+      const D2D1_RECT_F card =
+          D2D1::RectF(panel.left + 10, ty, panel.right - 10, ty + card_h);
+      fill_round(g.target, card, 8, g.theme->panel);
+      stroke_round(g.target, card, 8, g.theme->line_soft, 1.0f);
+      const bool download = task.rows.front().download;
+      draw_icon(g.target, download ? icon::arrow_up_right : icon::upload,
+                panel.left + 22, ty + 12,
+                summary.status == molink::files::transfer_status::error
+                    ? danger
+                    : g.theme->accent);
+      std::wstring task_name;
+      if (task.rows.size() == 1) {
+        task_name = task.rows.front().name;
+      } else {
+        task_name = files_text::FileCountWithRest(task.rows.front().name,
+                                                  task.rows.size());
+      }
+      text(g.target, g.small_left, task_name,
+           D2D1::RectF(panel.left + 34, ty, panel.right - 86, ty + 20),
+           g.theme->ink);
+      const bool active = summary.status ==
+                          molink::files::transfer_status::running;
+      if (active) {
+        const D2D1_RECT_F cancel =
+            D2D1::RectF(panel.right - 28, ty + 5, panel.right - 12, ty + 21);
+        if (inside(cancel, g.hover_x, g.hover_y)) {
+          fill_round(g.target, cancel, 4,
+                     D2D1::ColorF(danger.r, danger.g, danger.b, 0.15f));
+        }
+        draw_icon(g.target, icon::close, cancel.left + 8, cancel.top + 8,
+                  inside(cancel, g.hover_x, g.hover_y) ? danger
+                                                       : g.theme->muted);
+        g.hit_files_task_cancel[slot] = cancel;
+      }
+      text(g.target, g.tiny,
+           std::to_wstring(summary.percent) + L"%",
+           D2D1::RectF(panel.right - 84, ty, panel.right - 32, ty + 18),
+           g.theme->muted);
+      const float bar_left = panel.left + 34;
+      const float bar_right = panel.right - 16;
+      fill_round(g.target,
+                 D2D1::RectF(bar_left, ty + 21, bar_right, ty + 25), 2,
+                 g.theme->line_soft);
+      fill_round(g.target,
+                 D2D1::RectF(bar_left, ty + 21,
+                             bar_left + (bar_right - bar_left) *
+                                            (summary.percent / 100.0f),
+                             ty + 25),
+                 2, summary.status == molink::files::transfer_status::error
+                        ? danger
+                        : g.theme->accent_strong);
+      std::wstring status_text;
+      switch (summary.status) {
+        case molink::files::transfer_status::running:
+          status_text = files_text::kSending;
+          break;
+        case molink::files::transfer_status::error:
+          status_text = files_text::kFailed;
+          break;
+        case molink::files::transfer_status::cancelled:
+          status_text = files_text::kCancelled;
+          break;
+        default:
+          status_text = files_text::kDone;
+          break;
+      }
+      const D2D1_COLOR_F status_color =
+          summary.status == molink::files::transfer_status::error
+              ? danger
+              : g.theme->muted;
+      text(g.target, g.tiny, status_text,
+           D2D1::RectF(panel.left + 34, ty + 28, panel.left + 104, ty + 42),
+           status_color);
+      const auto skipped_it = g.files_task_skipped.find(task.id);
+      const int task_skipped =
+          skipped_it == g.files_task_skipped.end() ? 0 : skipped_it->second;
+      std::wstring counts;
+      if (summary.status == molink::files::transfer_status::running) {
+        if (task.rows.size() > 1) {
+          counts = std::to_wstring(summary.done_files) + L"/" +
+                   std::to_wstring(task.rows.size()) + L" · ";
+        }
+        counts += format_bytes(summary.done_bytes) + L" / " +
+                  format_bytes(summary.total_bytes);
+      } else {
+        counts = files_text::Summary(summary.done_files, summary.failed_files,
+                                     summary.cancelled_files);
+        if (task_skipped > 0) {
+          counts += L" · " + files_text::SkippedCount(task_skipped);
+        }
+      }
+      text(g.target, g.tiny, counts,
+           D2D1::RectF(panel.left + 106, ty + 28, panel.right - 16, ty + 42),
+           g.theme->muted);
+      if (summary.failed_files > 0 && !failures.empty()) {
+        const D2D1_RECT_F detail =
+            D2D1::RectF(panel.right - 58, ty + 28, panel.right - 16,
+                        ty + 42);
+        if (inside(detail, g.hover_x, g.hover_y)) {
+          fill_round(g.target, detail, 4, g.theme->panel);
+        }
+        text(g.target, g.tiny,
+             expanded ? files_text::kCollapse : files_text::kDetails, detail,
+             g.theme->accent);
+        g.hit_files_task_detail[slot] = detail;
+      }
+      if (expanded) {
+        float fy = ty + 50;
+        int shown = 0;
+        for (const molink::net::file_transfer_state* row : failures) {
+          if (shown >= 3) break;
+          const std::wstring reason =
+              transfer_error_text(row->message, download);
+          text(g.target, g.tiny, row->name + L"：" + reason,
+               D2D1::RectF(panel.left + 34, fy, panel.right - 16, fy + 16),
+               danger);
+          fy += 17;
+          ++shown;
+        }
+      }
+      g.hit_files_task_row[slot] = card;
+      ty += card_h + 4;
+      ++slot;
     }
   }
 
-  // Transfers: name, direction, progress.
-  float ty = content_bottom + 6;
-  int transfer_slot = 0;
-  for (int s = 0; s < 3; ++s) g.hit_files_cancel[s] = D2D1::RectF(0, 0, 0, 0);
-  for (int i = static_cast<int>(transfers.size()) - shown_transfers;
-       i < static_cast<int>(transfers.size()); ++i) {
-    if (i < 0) continue;
-    const int slot = transfer_slot++;
-    const molink::net::file_transfer_state& item = transfers[i];
-    const D2D1_COLOR_F danger =
-        g.theme == &kLight ? D2D1::ColorF(0xc0392b)
-                           : D2D1::ColorF(0xff8f87);
-    draw_icon(g.target, item.download ? icon::arrow_up_right : icon::upload,
-              panel.left + 24, ty + 10,
-              item.state == 3 ? danger : g.theme->accent);
-    text(g.target, g.small_left, item.name,
-         D2D1::RectF(panel.left + 38, ty - 2, panel.right - 90, ty + 18),
-         g.theme->ink);
-    std::wstring status;
-    if (item.state == 2) {
-      status = L"已完成";
-    } else if (item.state == 3) {
-      status = L"失败";
-    } else if (item.size > 0) {
-      status = std::to_wstring(item.sent * 100 / item.size) + L"%";
-    } else {
-      status = L"等待";
-    }
-    const bool active = item.state == 0 || item.state == 1;
-    const float status_right = active ? panel.right - 38 : panel.right - 16;
-    text(g.target, g.small_right, status,
-         D2D1::RectF(panel.right - 104, ty - 2, status_right, ty + 18),
-         item.state == 3 ? danger : g.theme->muted);
-    if (active && slot < 3) {
-      const D2D1_RECT_F cancel =
-          D2D1::RectF(panel.right - 32, ty, panel.right - 14, ty + 18);
-      if (inside(cancel, g.hover_x, g.hover_y)) {
-        fill_round(g.target, cancel, 4,
-                   D2D1::ColorF(danger.r, danger.g, danger.b, 0.15f));
-      }
-      draw_icon(g.target, icon::close, cancel.left + 9, cancel.top + 9,
-                inside(cancel, g.hover_x, g.hover_y) ? danger
-                                                     : g.theme->muted);
-      g.hit_files_cancel[slot] = cancel;
-    }
-    const float bar_left = panel.left + 38;
-    const float bar_right = panel.right - 16;
-    const float fraction = item.size > 0
-                               ? clampf(static_cast<float>(item.sent) /
-                                            static_cast<float>(item.size),
-                                        0.0f, 1.0f)
-                               : 0.0f;
-    fill_round(g.target,
-               D2D1::RectF(bar_left, ty + 24, bar_right, ty + 28), 2,
-               g.theme->line_soft);
-    fill_round(g.target,
-               D2D1::RectF(bar_left, ty + 24,
-                           bar_left + (bar_right - bar_left) * fraction,
-                           ty + 28),
-               2, item.state == 3 ? danger : g.theme->accent_strong);
-    ty += 40;
+  // --------------------------------------------------------------- action
+  const size_t selected = selection.size();
+  const bool busy = remote ? downloads_busy() : uploads_busy();
+  const bool has_source = !g.local_path.empty() || !g.local_entries.empty();
+  const bool has_target =
+      !g.files_path.empty() && g.files_error.empty() && can_send_files();
+  const molink::files::transfer_block block =
+      remote ? molink::files::download_block_reason(selected, busy)
+             : molink::files::upload_block_reason(selected, has_source,
+                                                  has_target, busy);
+  const bool enabled = block == molink::files::transfer_block::none;
+  const D2D1_RECT_F action =
+      D2D1::RectF(panel.left + 16, action_top, panel.right - 16,
+                  action_top + action_h);
+  g.hit_files_action = action;
+  fill_round(g.target, action, 8,
+             enabled ? g.theme->accent_strong
+                     : D2D1::ColorF(g.theme->panel.r, g.theme->panel.g,
+                                    g.theme->panel.b, 0.85f));
+  if (enabled && inside(action, g.hover_x, g.hover_y)) {
+    stroke_round(g.target, action, 8, g.theme->accent, 1.0f);
   }
-}
+  text(g.target, g.label12,
+       remote ? files_text::kReceiveFrom : files_text::kSendTo, action,
+       enabled ? D2D1::ColorF(0xffffff) : g.theme->muted);
+  const wchar_t* reason_text = block_reason_text(block, !remote);
+  text(g.target, g.tiny, reason_text,
+       D2D1::RectF(panel.left + 16, reason_top, panel.right - 16,
+                   reason_top + 16),
+       block == molink::files::transfer_block::busy ||
+               block == molink::files::transfer_block::no_target ||
+               block == molink::files::transfer_block::no_source
+           ? danger
+           : g.theme->muted);
+  note_tip(1920 + (remote ? 0 : 1), reason_text, action,
+           inside(action, g.hover_x, g.hover_y));
 
-/// Joins a host path and a listing entry (the host accepts both slashes).
-std::wstring join_host_path(const std::wstring& base,
-                            const std::wstring& name) {
-  if (base.empty()) return name;
-  const wchar_t last = base.back();
-  if (last == L'/' || last == L'\\') return base + name;
-  return base + L"/" + name;
+  // ------------------------------------------------------- roots dropdown
+  if (roots_open) {
+    const int count = 1 + static_cast<int>(roots.size());
+    const float menu_h = count * 24.0f + 8.0f;
+    float menu_y = g.hit_files_roots.bottom + 4;
+    if (menu_y + menu_h > panel.bottom - 8) {
+      menu_y = panel.bottom - 8 - menu_h;
+    }
+    const D2D1_RECT_F menu =
+        D2D1::RectF(g.hit_files_roots.left, menu_y,
+                    g.hit_files_roots.left + 220, menu_y + menu_h);
+    shadow(g.target, *g.theme, menu, 10);
+    fill_round(g.target, menu, 8, g.theme->surface);
+    stroke_round(g.target, menu, 8, g.theme->line, 1.0f);
+    for (int i = 0; i < count && i < 16; ++i) {
+      const D2D1_RECT_F item = D2D1::RectF(
+          menu.left + 4, menu.top + 4 + i * 24, menu.right - 4,
+          menu.top + 4 + (i + 1) * 24);
+      g.hit_files_roots_item[i] = item;
+      if (inside(item, g.hover_x, g.hover_y)) {
+        fill_round(g.target, item, 5, g.theme->panel);
+      }
+      const std::wstring label =
+          i == 0 ? files_text::kRoots : root_label(roots[i - 1]);
+      text(g.target, g.small_left, label,
+           D2D1::RectF(item.left + 6, item.top, item.right, item.bottom),
+           i == 0 ? (path.empty() ? g.theme->accent : g.theme->ink)
+                  : g.theme->ink);
+    }
+  } else {
+    for (int i = 0; i < 16; ++i) {
+      g.hit_files_roots_item[i] = D2D1::RectF(0, 0, 0, 0);
+    }
+  }
 }
 
 void files_click(float x, float y, HWND window) {
@@ -8120,66 +9017,225 @@ void files_click(float x, float y, HWND window) {
     g.files_open = false;
     return;
   }
+  bool& roots_open = g.files_tab == 1 ? g.files_roots_open : g.local_roots_open;
+  if (roots_open) {
+    for (int i = 0; i < 16; ++i) {
+      if (!inside(g.hit_files_roots_item[i], x, y)) continue;
+      roots_open = false;
+      const std::vector<molink::net::file_listing_root>& roots =
+          g.files_tab == 1 ? g.files_roots : g.local_roots;
+      if (i == 0) {
+        if (g.files_tab == 1) request_files_browse_path(std::wstring());
+        else local_browse(std::wstring());
+      } else if (static_cast<size_t>(i - 1) < roots.size()) {
+        const std::wstring target = roots[static_cast<size_t>(i - 1)].path;
+        if (g.files_tab == 1) request_files_browse_path(target);
+        else local_browse(target);
+      }
+      return;
+    }
+    roots_open = false;
+  }
+
+  // Task row buttons: detail / cancel. The groups mirror the draw code.
   if (g.session != nullptr) {
     const std::vector<molink::net::file_transfer_state> transfers =
         g.session->file_transfers();
-    const int shown =
-        (std::min)(3, static_cast<int>(transfers.size()));
-    const int start = static_cast<int>(transfers.size()) - shown;
-    for (int k = 0; k < 3; ++k) {
-      if (!inside(g.hit_files_cancel[k], x, y)) continue;
-      const int index = start + k;
-      if (index >= 0 && index < static_cast<int>(transfers.size())) {
-        g.session->file_cancel(transfers[index].id);
+    struct task_group {
+      uint32_t id = 0;
+      std::vector<molink::net::file_transfer_state> rows;
+    };
+    std::vector<task_group> tasks;
+    for (size_t i = 0; i < transfers.size(); ++i) {
+      const molink::net::file_transfer_state& row = transfers[i];
+      const uint32_t id = row.task != 0
+                              ? row.task
+                              : (0x80000000u | static_cast<uint32_t>(i));
+      auto it = std::find_if(tasks.begin(), tasks.end(),
+                             [id](const task_group& task) {
+                               return task.id == id;
+                             });
+      if (it == tasks.end()) {
+        tasks.push_back(task_group{});
+        it = tasks.end() - 1;
+        it->id = id;
       }
-      return;
+      it->rows.push_back(row);
+    }
+    for (int slot = 0; slot < 4; ++slot) {
+      if (inside(g.hit_files_task_detail[slot], x, y)) {
+        const int index = g.files_task_scroll + slot;
+        if (index >= 0 && index < static_cast<int>(tasks.size())) {
+          toggle_task_expanded(tasks[static_cast<size_t>(index)].id);
+        }
+        return;
+      }
+      if (inside(g.hit_files_task_cancel[slot], x, y)) {
+        const int index = g.files_task_scroll + slot;
+        if (index >= 0 && index < static_cast<int>(tasks.size())) {
+          for (const molink::net::file_transfer_state& row :
+               tasks[static_cast<size_t>(index)].rows) {
+            if (row.state == 0 || row.state == 1) {
+              g.session->file_cancel(row.id);
+            }
+          }
+        }
+        return;
+      }
     }
   }
+
   for (int i = 0; i < 2; ++i) {
-    if (inside(g.hit_files_tab[i], x, y)) {
-      g.files_tab = i;
-      if (i == 1 && g.session != nullptr && g.session->live()) {
-        request_files_browse();
-      }
-      return;
+    if (!inside(g.hit_files_tab[i], x, y)) continue;
+    g.files_tab = i;
+    g.files_roots_open = false;
+    g.local_roots_open = false;
+    g.focus_field = 0;
+    if (i == 1) {
+      if (g.session != nullptr && g.session->live()) request_files_browse();
+    } else if (g.local_path.empty() && g.local_entries.empty()) {
+      local_browse(home_directory());
     }
+    return;
   }
-  if (g.files_tab == 0) {
-    if (inside(g.hit_files_pick, x, y)) {
-      pick_files(window);
+
+  const bool remote = g.files_tab == 1;
+  const size_t row_count =
+      remote ? g.files_entries.size() : g.local_entries.size();
+  molink::files::selection_model& selection =
+      remote ? g.files_selection : g.local_selection;
+  const bool busy = remote ? downloads_busy() : uploads_busy();
+  const bool has_source = !g.local_path.empty() || !g.local_entries.empty();
+  const bool has_target =
+      !g.files_path.empty() && g.files_error.empty() && can_send_files();
+  const molink::files::transfer_block block =
+      remote ? molink::files::download_block_reason(selection.size(), busy)
+             : molink::files::upload_block_reason(selection.size(), has_source,
+                                                  has_target, busy);
+
+  if (inside(g.hit_files_action, x, y)) {
+    if (block != molink::files::transfer_block::none) return;
+    if (remote) {
+      receive_remote_selection();
+    } else {
+      send_local_selection();
+    }
+    return;
+  }
+  if (inside(g.hit_files_roots, x, y)) {
+    roots_open = !roots_open;
+    return;
+  }
+  if (inside(g.hit_files_up, x, y)) {
+    if (remote) {
+      if (g.files_path.empty()) return;
+      // parent == "" is the volume list, not the host home (Web remoteUp).
+      request_files_browse_path(g.files_parent);
+    } else {
+      if (g.local_path.empty()) return;
+      const std::string parent =
+          molink::files::parent_path(utf8_of(g.local_path));
+      local_browse(local_native_path(parent));
+    }
+    return;
+  }
+  if (inside(g.hit_files_home, x, y)) {
+    if (remote) {
+      request_files_browse_path(g.files_root);
+    } else {
+      local_browse(home_directory());
     }
     return;
   }
   if (inside(g.hit_files_refresh, x, y)) {
-    request_files_browse();
-    return;
-  }
-  if (inside(g.hit_files_up, x, y)) {
-    if (!g.files_path.empty()) {
-      const size_t slash = g.files_path.find_last_of(L"/\\");
-      if (slash == std::wstring::npos) {
-        g.files_path.clear();
-      } else {
-        g.files_path = g.files_path.substr(0, slash);
-        if (g.files_path.empty()) g.files_path = L"/";
-      }
-    }
-    request_files_browse();
-    return;
-  }
-  if (g.session == nullptr || !g.session->live()) return;
-  for (int k = 0; k < 12; ++k) {
-    if (!inside(g.hit_files_entry[k], x, y)) continue;
-    const int index = g.files_scroll + k;
-    if (index < 0 || index >= static_cast<int>(g.files_entries.size())) return;
-    const molink::net::file_listing_entry& entry = g.files_entries[index];
-    if (entry.dir) {
-      g.files_path = join_host_path(g.files_path, entry.name);
+    if (remote) {
       request_files_browse();
     } else {
-      g.session->file_request(join_host_path(g.files_path, entry.name));
-      show_toast(L"正在请求 " + entry.name);
+      local_browse(g.local_path);
     }
+    return;
+  }
+  const D2D1_RECT_F& input_hit =
+      remote ? g.hit_files_input : g.hit_local_input;
+  const D2D1_RECT_F& browse_hit =
+      remote ? g.hit_files_browse : g.hit_local_browse;
+  if (inside(input_hit, x, y)) {
+    g.focus_field = remote ? 30 : 31;
+    size_t* caret = focus_caret(g.focus_field);
+    if (caret != nullptr) *caret = caret_for_field(g.focus_field, x);
+    g.sel_anchor = caret != nullptr ? *caret : 0;
+    clear_text_selection();
+    g.text_selecting = true;
+    if (g.window != nullptr) SetCapture(g.window);
+    return;
+  }
+  if (inside(browse_hit, x, y)) {
+    if (remote) {
+      remote_open_input();
+    } else {
+      local_open_input();
+    }
+    return;
+  }
+  for (int i = 0; i < 8; ++i) {
+    if (!inside(g.hit_files_crumb[i], x, y)) continue;
+    const std::wstring& base = remote ? g.files_path : g.local_path;
+    const std::vector<molink::files::path_crumb> crumbs =
+        molink::files::path_crumbs(utf8_of(base));
+    // The hit slots are filled in order, so slot i is crumb i.
+    if (static_cast<size_t>(i) >= crumbs.size()) return;
+    const std::wstring target = wide_of(crumbs[static_cast<size_t>(i)].path);
+    if (remote) {
+      request_files_browse_path(target);
+    } else {
+      local_browse(local_native_path(utf8_of(target)));
+    }
+    return;
+  }
+  if (inside(g.hit_files_select_all, x, y)) {
+    if (row_count == 0) return;
+    if (selection.all_selected(row_count)) {
+      selection.clear();
+    } else {
+      selection.select_all(row_count);
+    }
+    return;
+  }
+  if (remote && (g.session == nullptr || !g.session->live())) return;
+  const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+  const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+  for (int k = 0; k < 12; ++k) {
+    if (!inside(g.hit_files_entry[k], x, y)) continue;
+    const int index = (remote ? g.files_scroll : g.local_scroll) + k;
+    if (index < 0 || index >= static_cast<int>(row_count)) return;
+    // The checkbox occupies the left 32 px of the row (draw: +18..+30 of a
+    // row starting at +10). A click there toggles independently of Ctrl/Shift.
+    const D2D1_RECT_F& row = g.hit_files_entry[k];
+    const bool on_box =
+        x >= row.left + 6 && x <= row.left + 22;
+    const bool is_dir = remote
+                            ? g.files_entries[static_cast<size_t>(index)].dir
+                            : g.local_entries[static_cast<size_t>(index)].dir;
+    if (on_box) {
+      selection.toggle(static_cast<size_t>(index));
+      return;
+    }
+    if (is_dir) {
+      if (remote) {
+        const molink::net::file_listing_entry& entry =
+            g.files_entries[static_cast<size_t>(index)];
+        request_files_browse_path(entry.path.empty()
+                                      ? host_child_path(g.files_path, entry.name)
+                                      : entry.path);
+      } else {
+        const app_state::local_entry& entry =
+            g.local_entries[static_cast<size_t>(index)];
+        local_browse(entry.path.empty() ? local_join(g.local_path, entry.name)
+                                        : entry.path);
+      }
+      return;
+    }
+    selection.click(static_cast<size_t>(index), ctrl, shift, row_count);
     return;
   }
 }
@@ -8336,6 +9392,8 @@ std::wstring* focus_text(int field) {
     case 10: return &g.stun_server;
     case 11: return &g.retry_code;
     case 20: return &g.rename_text;
+    case 30: return &g.files_input;
+    case 31: return &g.local_input;
     default: return nullptr;
   }
 }
@@ -8354,6 +9412,8 @@ size_t* focus_caret(int field) {
     case 10: return &g.set_caret_stun;
     case 11: return &g.retry_caret;
     case 20: return &g.rename_caret;
+    case 30: return &g.files_caret;
+    case 31: return &g.local_caret;
     default: return nullptr;
   }
 }
@@ -8392,6 +9452,14 @@ size_t caret_for_field(int field, float x) {
   } else if (field == 11) {
     text = g.retry_code;
     x0 = g.hit_retry_input.left + 10;
+  } else if (field == 30) {
+    text = g.files_input;
+    format = g.mono_small;
+    x0 = g.hit_files_input.left + 7;
+  } else if (field == 31) {
+    text = g.local_input;
+    format = g.mono_small;
+    x0 = g.hit_local_input.left + 7;
   } else {
     return 0;
   }
@@ -8460,6 +9528,14 @@ bool selection_contains_point(int field, float x) {
   } else if (field == 11) {
     shown = g.retry_code;
     x0 = g.hit_retry_input.left + 10;
+  } else if (field == 30) {
+    shown = g.files_input;
+    format = g.mono_small;
+    x0 = g.hit_files_input.left + 7;
+  } else if (field == 31) {
+    shown = g.local_input;
+    format = g.mono_small;
+    x0 = g.hit_local_input.left + 7;
   } else {
     return false;
   }
@@ -8493,7 +9569,10 @@ void ctx_paste() {
     *caret = first;
     clear_text_selection();
   }
-  const size_t limit = g.ctx_field == 3 ? 500 : 64;
+  const size_t limit = g.ctx_field == 3
+                           ? 500
+                           : ((g.ctx_field == 30 || g.ctx_field == 31) ? 260
+                                                                       : 64);
   if (!OpenClipboard(g.window)) return;
   HANDLE data = GetClipboardData(CF_UNICODETEXT);
   if (data != nullptr) {
@@ -8876,6 +9955,11 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
             field = 3;
           } else if (inside(g.hit_retry_input, x, y)) {
             field = 11;
+          } else if (g.files_open &&
+                     inside(g.files_tab == 1 ? g.hit_files_input
+                                             : g.hit_local_input,
+                            x, y)) {
+            field = g.files_tab == 1 ? 30 : 31;
           }
         }
         if (field != 0) {
@@ -8936,14 +10020,21 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
         close_ctx_menu();
         InvalidateRect(window, nullptr, FALSE);
       }
-      if (g.files_open && g.files_tab == 1) {
+      if (g.files_open) {
         POINT screen{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
         ScreenToClient(window, &screen);
         const float x = static_cast<float>(screen.x) * 96.0f / g_dpi;
         const float y = static_cast<float>(screen.y) * 96.0f / g_dpi;
         if (inside(g.hit_files_panel, x, y)) {
           const int delta = GET_WHEEL_DELTA_WPARAM(wparam) / 120;
-          g.files_scroll = (std::max)(0, g.files_scroll - delta * 3);
+          if (inside(g.hit_files_task_area, x, y)) {
+            g.files_task_scroll =
+                (std::max)(0, g.files_task_scroll - delta);
+          } else if (g.files_tab == 1) {
+            g.files_scroll = (std::max)(0, g.files_scroll - delta * 3);
+          } else {
+            g.local_scroll = (std::max)(0, g.local_scroll - delta * 3);
+          }
           InvalidateRect(window, nullptr, FALSE);
           return 0;
         }
@@ -9328,8 +10419,9 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
         track.hwndTrack = window;
         if (TrackMouseEvent(&track)) g.tracking_leave = true;
       }
-      if (g.text_selecting && (g.focus_field == 1 || g.focus_field == 2 ||
-                               g.focus_field == 3)) {
+      if (g.text_selecting &&
+          (g.focus_field == 1 || g.focus_field == 2 || g.focus_field == 3 ||
+           g.focus_field == 30 || g.focus_field == 31)) {
         size_t* caret = focus_caret(g.focus_field);
         const size_t index = caret_for_field(g.focus_field, x);
         if (caret != nullptr) *caret = index;
@@ -9797,8 +10889,9 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
         std::wstring* target = focus_text(g.focus_field);
         size_t* caret = focus_caret(g.focus_field);
         const bool numeric = g.focus_field == 5 || g.focus_field == 6;
+        const bool path_field = g.focus_field == 30 || g.focus_field == 31;
         const size_t limit =
-            numeric ? 5 : (g.focus_field == 8 ? 200 : 64);
+            numeric ? 5 : (g.focus_field == 8 ? 200 : (path_field ? 260 : 64));
         if (target != nullptr && caret != nullptr &&
             (!numeric || (ch >= L'0' && ch <= L'9'))) {
           if (g.sel_field == g.focus_field && g.sel_start != g.sel_end) {
@@ -9863,6 +10956,16 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
         retry_session_connect();
         return 0;
       }
+      if (g.focus_field == 30 && wparam == VK_RETURN) {
+        remote_open_input();
+        InvalidateRect(window, nullptr, FALSE);
+        return 0;
+      }
+      if (g.focus_field == 31 && wparam == VK_RETURN) {
+        local_open_input();
+        InvalidateRect(window, nullptr, FALSE);
+        return 0;
+      }
       if (remote_input_active() && wparam != VK_F11) {
         send_remote_key(wparam, lparam, true);
         return 0;
@@ -9882,7 +10985,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
         } else if (g.immersive) {
           g.immersive = false;
         } else if (g.focus_field != 0) {
-          g.focus_field = 0;
+          blur_text_field();
         }
         InvalidateRect(window, nullptr, FALSE);
         return 0;
@@ -9964,8 +11067,9 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
         std::wstring& target = *target_ptr;
         size_t& caret = *caret_ptr;
         const bool numeric = g.focus_field == 5 || g.focus_field == 6;
+        const bool path_field = g.focus_field == 30 || g.focus_field == 31;
         const size_t limit =
-            numeric ? 5 : (g.focus_field == 8 ? 200 : 64);
+            numeric ? 5 : (g.focus_field == 8 ? 200 : (path_field ? 260 : 64));
         const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
         const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
         size_t sel_a = 0;
@@ -10030,8 +11134,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
             clear_text_selection();
           }
         } else if (wparam == VK_ESCAPE) {
-          g.focus_field = 0;
-          clear_text_selection();
+          blur_text_field();
         } else if (ctrl && (wparam == 'A' || wparam == 'a')) {
           g.sel_field = g.focus_field;
           g.sel_anchor = 0;
@@ -10204,11 +11307,13 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
     case WM_DROPFILES: {
       HDROP drop = reinterpret_cast<HDROP>(wparam);
       const UINT count = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
+      std::vector<std::wstring> paths;
       for (UINT i = 0; i < count; ++i) {
         wchar_t path[1024] = {};
-        if (DragQueryFileW(drop, i, path, 1024) > 0) add_transfer(path);
+        if (DragQueryFileW(drop, i, path, 1024) > 0) paths.emplace_back(path);
       }
       DragFinish(drop);
+      add_transfer_batch(paths);
       g.files_open = true;
       g.files_tab = 0;
       g.chat_open = false;

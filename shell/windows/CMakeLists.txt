@@ -58,6 +58,7 @@ add_executable(moLink-native WIN32
   ui_kit.cpp
   ws_client.cpp
   session_client.cpp
+  file_panel_logic.cpp
   preset_message.cpp
   clipboard_sync.cpp
   input_state.cpp
