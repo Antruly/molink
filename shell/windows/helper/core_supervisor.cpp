@@ -554,7 +554,9 @@ class core_supervisor_backend final : public backend {
     for (int64_t slept = 0; slept < ms; slept += step) {
       if (stopping()) return;
       const int64_t remaining = ms - slept;
-      Sleep(static_cast<DWORD>(std::min(step, remaining)));
+      // Parenthesised: windows.h defines min/max as macros, and `std::min(`
+      // then parses as `std::(` under MSVC (C2589).
+      Sleep(static_cast<DWORD>((std::min)(step, remaining)));
     }
   }
 
