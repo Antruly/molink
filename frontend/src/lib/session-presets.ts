@@ -34,6 +34,13 @@ export type PresetQualityMode =
 export type PresetChroma = '420' | '444' | 'gray' | '565' | 'auto'
 export type PresetRateMode = 'auto' | 'cq' | 'cbr'
 export type PresetFormat = 'preset' | 'gray8' | 'rgb565' | 'rgb24' | 'bgra'
+export type SessionPresetCodec =
+  | 'auto'
+  | 'av1'
+  | 'vp9'
+  | 'vp8'
+  | 'h264'
+  | 'tiles'
 
 export interface SessionPresetPlan {
   id: SessionPresetId
@@ -183,6 +190,284 @@ export function isFixedPreset(id: SessionPresetId): boolean {
   return id !== 'auto'
 }
 
+/// The advanced panel's own parameters. Unlike the six fixed tiers these are
+/// not derived from a plan on every send: the viewer owns them per host:port
+/// and the host only reports what it applied.
+export interface AdvancedQualityParams {
+  /// 5..60 capture rate.
+  fps: number
+  /// QP 0..63; the panel labels 63 as the low-quality end (0 follows the
+  /// quality profile).
+  quality: number
+  /// Stream bitrate ceiling in kbit/s, 0 = no ceiling.
+  bitrateKbps: number
+  rateMode: PresetRateMode
+  format: PresetFormat
+  /// 420 / 444 / gray / 565. `auto` is a preset-only value.
+  chroma: PresetChroma
+  codec: SessionPresetCodec
+}
+
+export const ADVANCED_STORAGE_PREFIX = 'molink.advanced.'
+export const ADVANCED_QUALITY_KEY = 'molink.advancedQuality'
+export const ADVANCED_FPS_MIN = 5
+export const ADVANCED_FPS_MAX = 60
+export const ADVANCED_QUALITY_MAX = 63
+export const ADVANCED_BITRATE_MAX = 50000
+/// The toolbar debounces every advanced change for this long before sending
+/// `session-preset`; dragging a slider must not rebuild the encoder per pixel.
+export const ADVANCED_DEBOUNCE_MS = 300
+
+export const ADVANCED_CODECS: readonly SessionPresetCodec[] = [
+  'auto',
+  'av1',
+  'vp9',
+  'vp8',
+  'h264',
+  'tiles',
+] as const
+
+export const ADVANCED_CHROMAS: readonly PresetChroma[] = [
+  '420',
+  '444',
+  'gray',
+  '565',
+] as const
+
+const RATE_MODES: readonly PresetRateMode[] = ['auto', 'cq', 'cbr']
+const FORMATS: readonly PresetFormat[] = [
+  'preset',
+  'gray8',
+  'rgb565',
+  'rgb24',
+  'bgra',
+]
+
+/// The value the advanced panel starts from when this device has no saved
+/// custom choice: the currently selected preset tier, exactly.
+export function defaultAdvancedParams(
+  preset: SessionPresetId = DEFAULT_SESSION_PRESET,
+): AdvancedQualityParams {
+  const plan = presetPlan(preset)
+  return {
+    fps: plan.fps,
+    quality: plan.qp,
+    bitrateKbps: plan.bitrateKbps,
+    rateMode: plan.rateMode,
+    format: plan.format,
+    chroma: plan.chroma,
+    codec: 'auto',
+  }
+}
+
+function clampInt(value: unknown, min: number, max: number, fallback: number) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback
+  return Math.max(min, Math.min(max, Math.round(value)))
+}
+
+function oneOf<T extends string>(
+  value: unknown,
+  allowed: readonly T[],
+  fallback: T,
+): T {
+  return typeof value === 'string' && (allowed as readonly string[]).includes(value)
+    ? (value as T)
+    : fallback
+}
+
+/// A stored value is untrusted (hand-edited localStorage, an older ui.json).
+/// Numbers are clamped and enums fall back one field at a time, so one bad
+/// value never throws the rest away.
+export function normalizeAdvancedParams(
+  value: unknown,
+  fallback: AdvancedQualityParams = defaultAdvancedParams(),
+): AdvancedQualityParams {
+  const parsed =
+    value && typeof value === 'object'
+      ? (value as Partial<AdvancedQualityParams>)
+      : {}
+  return {
+    fps: clampInt(
+      parsed.fps,
+      ADVANCED_FPS_MIN,
+      ADVANCED_FPS_MAX,
+      fallback.fps,
+    ),
+    quality: clampInt(
+      parsed.quality,
+      0,
+      ADVANCED_QUALITY_MAX,
+      fallback.quality,
+    ),
+    bitrateKbps: clampInt(
+      parsed.bitrateKbps,
+      0,
+      ADVANCED_BITRATE_MAX,
+      fallback.bitrateKbps,
+    ),
+    rateMode: oneOf(parsed.rateMode, RATE_MODES, fallback.rateMode),
+    format: oneOf(parsed.format, FORMATS, fallback.format),
+    chroma: oneOf(parsed.chroma, ADVANCED_CHROMAS, fallback.chroma),
+    codec: oneOf(parsed.codec, ADVANCED_CODECS, fallback.codec),
+  }
+}
+
+export function advancedStorageKey(host: string, port: number): string {
+  return `${ADVANCED_STORAGE_PREFIX}${host.trim()}:${port}`
+}
+
+export function parseStoredAdvanced(
+  raw: string | null,
+  fallback: AdvancedQualityParams = defaultAdvancedParams(),
+): AdvancedQualityParams | null {
+  if (!raw) return null
+  try {
+    return normalizeAdvancedParams(JSON.parse(raw), fallback)
+  } catch {
+    return null
+  }
+}
+
+export function readStoredAdvanced(
+  host: string,
+  port: number,
+): AdvancedQualityParams | null {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return null
+    return parseStoredAdvanced(
+      window.localStorage.getItem(advancedStorageKey(host, port)),
+    )
+  } catch {
+    return null
+  }
+}
+
+export function writeStoredAdvanced(
+  host: string,
+  port: number,
+  value: AdvancedQualityParams,
+): void {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return
+    window.localStorage.setItem(
+      advancedStorageKey(host, port),
+      JSON.stringify(normalizeAdvancedParams(value)),
+    )
+  } catch {
+    // Ignore blocked storage; the in-memory store still works.
+  }
+}
+
+/// A tile format that matches the requested chroma. The panel has no format
+/// picker: 4:4:4 means the pixel-exact BGRA path, grayscale means Gray8 and
+/// 16-bit means RGB565; 4:2:0 leaves the format to the profile.
+export function advancedFormatForChroma(
+  chroma: PresetChroma,
+  current: PresetFormat = 'preset',
+): PresetFormat {
+  switch (chroma) {
+    case '444':
+      return current === 'rgb24' ? 'rgb24' : 'bgra'
+    case 'gray':
+      return 'gray8'
+    case '565':
+      return 'rgb565'
+    case '420':
+      return current === 'bgra' ||
+        current === 'rgb24' ||
+        current === 'gray8' ||
+        current === 'rgb565'
+        ? 'preset'
+        : current
+    default:
+      return current
+  }
+}
+
+/// The exact `session-preset` payload for the advanced panel. An explicit
+/// stream encoder is 4:2:0, so a 4:4:4 request is sent as 4:2:0 (the backend
+/// enforces the same rule); an explicit `tiles` codec keeps the chroma.
+export function advancedPresetMessage(
+  params: AdvancedQualityParams,
+): SessionPresetMessage {
+  const codec = params.codec
+  const forced420 = params.chroma === '444' && isExplicitStreamCodec(codec)
+  const chroma: PresetChroma = forced420 ? '420' : params.chroma
+  return {
+    type: 'session-preset',
+    preset: 'custom',
+    fps: clampInt(params.fps, ADVANCED_FPS_MIN, ADVANCED_FPS_MAX, 30),
+    quality: clampInt(params.quality, 0, ADVANCED_QUALITY_MAX, 0),
+    bitrate_kbps: clampInt(
+      params.bitrateKbps,
+      0,
+      ADVANCED_BITRATE_MAX,
+      0,
+    ),
+    rate_mode: params.rateMode,
+    format: advancedFormatForChroma(chroma, params.format),
+    chroma,
+    codec,
+  }
+}
+
+/// What the panel must warn about after a change: `forced420` when the chosen
+/// encoder cannot carry 4:4:4, `tiles` when the combination leaves the video
+/// stream for the tile path.
+export function advancedQualityHint(
+  params: AdvancedQualityParams,
+): 'tiles' | 'forced420' | null {
+  if (params.chroma === '444' && isExplicitStreamCodec(params.codec)) {
+    return 'forced420'
+  }
+  if (params.codec === 'tiles' || params.chroma === '444') return 'tiles'
+  return null
+}
+
+export interface AdvancedPresetPump {
+  /// Coalesces rapid changes: only the last message is sent, after `delay`.
+  update(message: SessionPresetMessage): void
+  cancel(): void
+}
+
+export interface AdvancedPresetTimers {
+  set: (callback: () => void, ms: number) => unknown
+  clear: (handle: unknown) => void
+}
+
+/// The debounce used by the toolbar. Kept outside React so the acceptance
+/// test can drive it with a fake clock; the effect only calls update()/cancel().
+export function createAdvancedPresetPump(
+  send: (message: SessionPresetMessage) => void,
+  delay: number = ADVANCED_DEBOUNCE_MS,
+  timers: AdvancedPresetTimers = {
+    set: (callback, ms) => globalThis.setTimeout(callback, ms),
+    clear: (handle) =>
+      globalThis.clearTimeout(handle as ReturnType<typeof setTimeout>),
+  },
+): AdvancedPresetPump {
+  let handle: unknown = null
+  let pending: SessionPresetMessage | null = null
+  const cancel = () => {
+    if (handle !== null) timers.clear(handle)
+    handle = null
+    pending = null
+  }
+  return {
+    update(message) {
+      cancel()
+      pending = message
+      handle = timers.set(() => {
+        handle = null
+        const next = pending
+        pending = null
+        if (next) send(next)
+      }, delay)
+    },
+    cancel,
+  }
+}
+
 /// A stored per-host selection. `fps` keeps the user's last rate for auto;
 /// the fixed presets always resolve their rate from the plan.
 export interface StoredSessionPreset {
@@ -255,14 +540,16 @@ export function writeStoredPreset(
 /// The message the viewer sends after the welcome and on every change.
 export interface SessionPresetMessage {
   type: 'session-preset'
-  preset: SessionPresetId
+  /// `custom` means every field below is the viewer's own value; the six
+  /// named tiers keep resolving their fields from the plan.
+  preset: SessionPresetId | 'custom'
   fps: number
   quality: number
   bitrate_kbps: number
   rate_mode: PresetRateMode
   format: PresetFormat
   chroma: PresetChroma
-  codec: 'auto'
+  codec: SessionPresetCodec
 }
 
 /// Resolves the selected preset into the exact wire payload. `fps` is the

@@ -46,12 +46,21 @@ import type { ClipboardOfferPrompt } from '../lib/remote-clipboard'
 import type { Frame } from '../lib/protocol'
 import { forgetSessionScreenBuffer } from '../lib/screen-buffer'
 import {
+  ADVANCED_QUALITY_KEY,
+  ADVANCED_STORAGE_PREFIX,
   DEFAULT_SESSION_PRESET,
   PRESET_STORAGE_PREFIX,
+  advancedStorageKey,
+  defaultAdvancedParams,
+  normalizeAdvancedParams,
   normalizePresetId,
+  parseStoredAdvanced,
   parseStoredPreset,
   presetStorageKey,
+  readStoredAdvanced,
+  writeStoredAdvanced,
   writeStoredPreset,
+  type AdvancedQualityParams,
   type SessionPresetId,
   type StoredSessionPreset,
   type PresetApplied,
@@ -135,6 +144,9 @@ export interface SessionTab {
   /// Viewer-owned picture preset for this host:port. Never written back to
   /// the host's settings.
   preset: SessionPresetId
+  /// The advanced panel's per-device parameters. Carried even while advanced
+  /// mode is off, so reopening it restores the last custom picture.
+  advanced?: AdvancedQualityParams
   /// What the host reported it actually applied (fps/codec/chroma).
   appliedPreset?: PresetApplied
   notice: string | null
@@ -220,6 +232,14 @@ interface AppState {
   /// Viewer-owned presets keyed by `molink.preset.<host>:<port>`, mirrored to
   /// ui.json so the native shell survives its changing origin.
   presets: Record<string, StoredSessionPreset>
+  /// Advanced画质 mode: the toolbar replaces the six preset buttons with the
+  /// per-device fps/quality/bitrate/chroma/codec panel. Global to this viewer.
+  advancedQuality: boolean
+  /// Advanced parameters keyed by `molink.advanced.<host>:<port>`.
+  advanced: Record<string, AdvancedQualityParams>
+  /// A toolbar popover (the quality panel) is open. The keyboard stays local
+  /// while it is, the same rule as the settings dialog.
+  qualityPanelOpen: boolean
   settingsOpen: boolean
   /// The native shell window is fullscreen but the app chrome stays visible.
   /// This is the title bar's fullscreen control, not session immersive mode.
@@ -275,6 +295,12 @@ interface AppState {
   setDefaultPreset: (preset: SessionPresetId) => void
   /// Changes one tab's preset and remembers it for that host:port.
   setTabPreset: (id: string, preset: SessionPresetId) => void
+  /// Turns advanced mode on/off. "回到预设" calls this with false; the tab's
+  /// last preset tier is still selected underneath.
+  setAdvancedQuality: (enabled: boolean) => void
+  /// Merges one advanced parameter into a tab and remembers it per device.
+  setTabAdvanced: (id: string, patch: Partial<AdvancedQualityParams>) => void
+  setQualityPanelOpen: (open: boolean) => void
   setSettingsOpen: (open: boolean) => void
   setWindowFullscreen: (value: boolean) => void
   setImmersive: (value: boolean) => void
@@ -472,6 +498,24 @@ function initialPresets(): Record<string, StoredSessionPreset> {
   return presets
 }
 
+/// Same mirror as initialPresets(): localStorage is the fast copy, ui.json is
+/// what survives the native shell's changing origin.
+function initialAdvanced(): Record<string, AdvancedQualityParams> {
+  const advanced: Record<string, AdvancedQualityParams> = {}
+  try {
+    const storage = window.localStorage
+    for (let index = 0; index < storage.length; index += 1) {
+      const key = storage.key(index)
+      if (!key || !key.startsWith(ADVANCED_STORAGE_PREFIX)) continue
+      const parsed = parseStoredAdvanced(storage.getItem(key))
+      if (parsed) advanced[key] = parsed
+    }
+  } catch {
+    // Blocked storage just means no remembered advanced parameters.
+  }
+  return advanced
+}
+
 function initialHistoryView(): HistoryView {
   return readStorage(HISTORY_VIEW_KEY) === 'list' ? 'list' : 'cards'
 }
@@ -632,6 +676,8 @@ export const useAppStore = create<AppState>((set, get) => {
     comboForwardAsked: get().comboForwardAsked ?? undefined,
     defaultPreset: get().defaultPreset,
     presets: get().presets,
+    advancedQuality: get().advancedQuality,
+    advanced: get().advanced,
     sessions: sessionStore.persistedRecords(),
   })
 
@@ -741,6 +787,9 @@ export const useAppStore = create<AppState>((set, get) => {
     })(),
     defaultPreset: initialDefaultPreset(),
     presets: initialPresets(),
+    advancedQuality: readStorage(ADVANCED_QUALITY_KEY) === '1',
+    advanced: initialAdvanced(),
+    qualityPanelOpen: false,
     settingsOpen: false,
     windowFullscreen: false,
     immersive: false,
@@ -881,6 +930,30 @@ export const useAppStore = create<AppState>((set, get) => {
       schedulePersist()
     },
 
+    setAdvancedQuality: (enabled) => {
+      writeStorage(ADVANCED_QUALITY_KEY, enabled ? '1' : '0')
+      set({ advancedQuality: enabled })
+      schedulePersist()
+    },
+
+    setTabAdvanced: (id, patch) => {
+      const tab = get().tabs.find((item) => item.id === id)
+      if (!tab) return
+      const current = tab.advanced ?? defaultAdvancedParams(tab.preset)
+      const next = normalizeAdvancedParams({ ...current, ...patch }, current)
+      const key = advancedStorageKey(tab.host, tab.port)
+      writeStoredAdvanced(tab.host, tab.port, next)
+      set((state) => ({
+        advanced: { ...state.advanced, [key]: next },
+        tabs: state.tabs.map((item) =>
+          item.id === id ? { ...item, advanced: next } : item,
+        ),
+      }))
+      schedulePersist()
+    },
+
+    setQualityPanelOpen: (open) => set({ qualityPanelOpen: open }),
+
     setSettingsOpen: (open) => set({ settingsOpen: open }),
 
     setWindowFullscreen: (value) => {
@@ -1000,9 +1073,32 @@ export const useAppStore = create<AppState>((set, get) => {
         if (Object.keys(storedPresets).length > 0) {
           next.presets = { ...get().presets, ...storedPresets }
         }
+        // The advanced panel's per-device parameters use the same ui.json
+        // mirror, keyed by `molink.advanced.<host>:<port>`.
+        const storedAdvanced: Record<string, AdvancedQualityParams> = {}
+        if (prefs.advanced && typeof prefs.advanced === 'object') {
+          for (const [key, value] of Object.entries(prefs.advanced)) {
+            if (!key.startsWith(ADVANCED_STORAGE_PREFIX)) continue
+            const parsed = parseStoredAdvanced(JSON.stringify(value))
+            if (!parsed) continue
+            storedAdvanced[key] = parsed
+            try {
+              window.localStorage.setItem(key, JSON.stringify(parsed))
+            } catch {
+              // Blocked storage; the in-memory map still applies.
+            }
+          }
+        }
+        if (Object.keys(storedAdvanced).length > 0) {
+          next.advanced = { ...get().advanced, ...storedAdvanced }
+        }
         if (typeof prefs.defaultPreset === 'string') {
           next.defaultPreset = normalizePresetId(prefs.defaultPreset)
           writeStorage(DEFAULT_PRESET_KEY, next.defaultPreset)
+        }
+        if (typeof prefs.advancedQuality === 'boolean') {
+          next.advancedQuality = prefs.advancedQuality
+          writeStorage(ADVANCED_QUALITY_KEY, prefs.advancedQuality ? '1' : '0')
         }
         // A remembered combo-forwarding answer survives the shell's changing
         // origin through ui.json. An absent value leaves the local copy alone
@@ -1469,6 +1565,11 @@ export const useAppStore = create<AppState>((set, get) => {
       const presetKey = presetStorageKey(trimmedHost, port)
       const preset =
         get().presets[presetKey]?.preset ?? get().defaultPreset
+      const advancedKey = advancedStorageKey(trimmedHost, port)
+      const advanced =
+        get().advanced[advancedKey] ??
+        readStoredAdvanced(trimmedHost, port) ??
+        defaultAdvancedParams(preset)
       const tab: SessionTab = {
         id,
         label: label?.trim() || host,
@@ -1477,6 +1578,7 @@ export const useAppStore = create<AppState>((set, get) => {
         token: trimmedToken,
         deviceId,
         preset,
+        advanced,
         phase: 'connecting',
         welcome: null,
         frame: null,

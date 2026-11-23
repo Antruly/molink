@@ -158,6 +158,21 @@ export interface UiPreferences {
   /// the native shell through ui.json so a restarted viewer keeps each
   /// device's tier even though the core's origin changes every launch.
   presets?: Record<string, { preset: string; fps?: number; updatedAt?: number }>
+  /// Advanced画质 mode switch (viewer-global).
+  advancedQuality?: boolean
+  /// Advanced parameters keyed by `molink.advanced.<host>:<port>`.
+  advanced?: Record<
+    string,
+    {
+      fps: number
+      quality: number
+      bitrateKbps: number
+      rateMode: string
+      format: string
+      chroma: string
+      codec: string
+    }
+  >
   /// Host session tokens keyed by `molink.session.<host>:<port>`. Written by
   /// the native shell through ui.json so a restarted client can reconnect
   /// without spending another verification code.

@@ -2639,12 +2639,71 @@ void session_controller::on_text(const std::string& text) {
       send_error(transport.get(), "bad_preset", error);
       return;
     }
+    // A `custom` request may name the encoder itself. The host runs one
+    // encoder at a time, so honouring it is the same operation as the
+    // toolbar's `stream-codec` message: pin the host preference and apply it
+    // to the capture immediately. `auto` leaves the existing preference
+    // alone (the advanced panel did not choose an encoder).
+    std::string preference =
+        options_.auth ? options_.auth->settings().stream_codec : "auto";
+    bool codec_changed = false;
+    if (resolved.preset == "custom" && resolved.codec != "auto") {
+      bool ok = resolved.codec == "tiles";
+      if (!ok) {
+        for (const video_encoder_backend& backend : video_encoder_backends()) {
+          if (!backend.available) continue;
+          if ((resolved.codec == "av1" && backend.av1_stream) ||
+              (resolved.codec == "h264" && backend.h264_stream) ||
+              (resolved.codec == "vp9" && backend.vp9_stream) ||
+              (resolved.codec == "vp8" && backend.vp8_stream)) {
+            ok = true;
+            break;
+          }
+        }
+      }
+      if (!ok) {
+        // The rest of the request (rate, QP, bitrate) is still valid. Keep it
+        // and report the encoder that is actually running instead of
+        // rejecting the whole picture change: the panel shows the real value
+        // in its "applied" line, and a later change can pick another codec.
+        diag().log(diag_level::warn, "quality.preset.codec_unavailable",
+                   std::string(),
+                   {{"peer", peer_ip}, {"codec", resolved.codec}});
+      } else {
+        if (options_.auth) options_.auth->set_stream_codec(resolved.codec);
+        preference = resolved.codec;
+        codec_changed = true;
+        if (options_.capture) {
+          const std::string mode =
+              options_.auth ? options_.auth->settings().video_mode : "auto";
+          options_.capture->set_stream_always(
+              stream_always_for(mode, resolved.codec));
+          options_.capture->set_stream_locked(
+              stream_locked_for(resolved.codec));
+          options_.capture->set_av1_stream_allowed(resolved.codec == "av1");
+          options_.capture->set_h264_stream_allowed(resolved.codec == "h264");
+          options_.capture->set_vp9_stream_allowed(resolved.codec == "vp9");
+          options_.capture->set_vp8_stream_allowed(resolved.codec == "vp8");
+          if (resolved.codec != "tiles") {
+            options_.capture->request_stream(15000);
+          }
+        }
+        // The encoder is host-global; every tab's codec selector has to show
+        // the value the advanced request just pinned.
+        uvcpp_json shared;
+        shared["type"] = "stream-codec";
+        shared["value"] = resolved.codec;
+        shared["scope"] = "global";
+        for (const session_info& peer : registry_->snapshot()) {
+          if (!peer.authenticated || !peer.transport) continue;
+          send_json(peer.transport.get(), shared);
+        }
+      }
+    }
     // An explicitly pinned encoder is 4:2:0. The truecolour tier asks for
     // 4:4:4 and the tile path, but the user asked for VP9 (or another
     // encoder) by name: keep the stream and reduce the colour depth. The
     // viewer's UI states this instead of the stream silently staying off.
-    const std::string preference =
-        options_.auth ? options_.auth->settings().stream_codec : "auto";
     const bool explicit_codec = is_explicit_stream_codec(preference);
     if (explicit_codec) {
       resolved.chroma = "420";
@@ -2662,7 +2721,7 @@ void session_controller::on_text(const std::string& text) {
     // capture's format override is re-checked against it.
     const session_preset_actual actual =
         apply_session_preset(*options_.capture, *session, resolved);
-    if (first || reinit) options_.capture->request_keyframe();
+    if (first || reinit || codec_changed) options_.capture->request_keyframe();
     // A preset that may use the video stream nudges it on for a window, just
     // like the join window. Without the nudge a static screen kept the
     // capture on tiles, so switching back from truecolor to auto reported

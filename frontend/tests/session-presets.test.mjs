@@ -22,19 +22,34 @@ globalThis.window = {
 }
 
 const {
+  ADVANCED_BITRATE_MAX,
+  ADVANCED_DEBOUNCE_MS,
+  ADVANCED_FPS_MAX,
+  ADVANCED_FPS_MIN,
+  ADVANCED_QUALITY_MAX,
   DEFAULT_SESSION_PRESET,
   PRESET_PLANS,
   SESSION_PRESETS,
+  advancedFormatForChroma,
+  advancedPresetMessage,
+  advancedQualityHint,
+  advancedStorageKey,
   codecExitsTruecolor,
+  createAdvancedPresetPump,
+  defaultAdvancedParams,
   effectivePresetChroma,
   isExplicitStreamCodec,
+  normalizeAdvancedParams,
   normalizePresetId,
+  parseStoredAdvanced,
   parseStoredPreset,
   presetMessage,
   presetPlan,
   presetStorageKey,
+  readStoredAdvanced,
   readStoredPreset,
   viewerPresetAfterReply,
+  writeStoredAdvanced,
   writeStoredPreset,
 } = await import('../src/lib/session-presets.ts')
 
@@ -162,4 +177,174 @@ test('an explicit encoder locks the stream and forces 4:2:0', () => {
   assert.equal(effectivePresetChroma('420', 'auto'), '420')
   assert.equal(codecExitsTruecolor('truecolor', 'auto'), false)
   assert.equal(codecExitsTruecolor('balanced', 'vp9'), false)
+})
+
+test('advanced defaults come from the selected preset tier', () => {
+  const hd = defaultAdvancedParams('hd')
+  assert.deepEqual(hd, {
+    fps: 45,
+    quality: 0,
+    bitrateKbps: 0,
+    rateMode: 'auto',
+    format: 'preset',
+    chroma: '420',
+    codec: 'auto',
+  })
+  const truecolor = defaultAdvancedParams('truecolor')
+  assert.equal(truecolor.fps, 18)
+  assert.equal(truecolor.format, 'bgra')
+  assert.equal(truecolor.chroma, '444')
+  assert.equal(truecolor.rateMode, 'cq')
+  // The advanced range is the documented 5..60, 0..63 and 0..50000.
+  assert.equal(ADVANCED_FPS_MIN, 5)
+  assert.equal(ADVANCED_FPS_MAX, 60)
+  assert.equal(ADVANCED_QUALITY_MAX, 63)
+  assert.equal(ADVANCED_BITRATE_MAX, 50000)
+})
+
+test('advanced parameters round-trip per device and bad values fall back', () => {
+  const host = '192.168.2.20'
+  const port = 28418
+  const params = {
+    fps: 20,
+    quality: 40,
+    bitrateKbps: 8000,
+    rateMode: 'cbr',
+    format: 'preset',
+    chroma: '420',
+    codec: 'vp9',
+  }
+  writeStoredAdvanced(host, port, params)
+  assert.deepEqual(readStoredAdvanced(host, port), params)
+  assert.equal(
+    advancedStorageKey(' 192.168.2.20 ', 28418),
+    'molink.advanced.192.168.2.20:28418',
+  )
+  // A hand-edited file must not break the panel: numbers clamp, enums fall
+  // back one field at a time.
+  const repaired = parseStoredAdvanced(
+    '{"fps":999,"quality":-3,"bitrateKbps":99999,"rateMode":"vbr","chroma":"422","codec":"hevc"}',
+  )
+  assert.equal(repaired.fps, ADVANCED_FPS_MAX)
+  assert.equal(repaired.quality, 0)
+  assert.equal(repaired.bitrateKbps, ADVANCED_BITRATE_MAX)
+  assert.equal(repaired.rateMode, 'auto')
+  assert.equal(repaired.chroma, '420')
+  assert.equal(repaired.codec, 'auto')
+  assert.equal(parseStoredAdvanced('not json'), null)
+  assert.equal(normalizeAdvancedParams({ fps: 1 }).fps, ADVANCED_FPS_MIN)
+})
+
+test('the custom message carries the panel values and resolves chroma', () => {
+  const message = advancedPresetMessage({
+    fps: 20,
+    quality: 40,
+    bitrateKbps: 8000,
+    rateMode: 'cbr',
+    format: 'preset',
+    chroma: '420',
+    codec: 'vp9',
+  })
+  assert.deepEqual(message, {
+    type: 'session-preset',
+    preset: 'custom',
+    fps: 20,
+    quality: 40,
+    bitrate_kbps: 8000,
+    rate_mode: 'cbr',
+    format: 'preset',
+    chroma: '420',
+    codec: 'vp9',
+  })
+
+  // 4:4:4 means the pixel-exact BGRA tile path.
+  const base = {
+    fps: 20,
+    quality: 40,
+    bitrateKbps: 8000,
+    rateMode: 'cbr',
+    format: 'preset',
+    chroma: '420',
+    codec: 'auto',
+  }
+  const four = advancedPresetMessage({ ...base, chroma: '444' })
+  assert.equal(four.preset, 'custom')
+  assert.equal(four.chroma, '444')
+  assert.equal(four.format, 'bgra')
+  assert.equal(
+    advancedQualityHint({ ...base, format: 'bgra', chroma: '444' }),
+    'tiles',
+  )
+
+  // A pinned stream encoder is 4:2:0: the UI says so and the request is sent
+  // as 4:2:0 rather than asking for an impossible 4:4:4 stream.
+  const pinned = { ...base, chroma: '444', codec: 'vp9' }
+  assert.equal(advancedPresetMessage(pinned).chroma, '420')
+  assert.equal(advancedPresetMessage(pinned).format, 'preset')
+  assert.equal(advancedQualityHint(pinned), 'forced420')
+
+  // Choosing tiles explicitly warns even at 4:2:0.
+  const tiles = { ...base, chroma: '420', codec: 'tiles' }
+  assert.equal(advancedPresetMessage(tiles).codec, 'tiles')
+  assert.equal(advancedQualityHint(tiles), 'tiles')
+  assert.equal(advancedQualityHint({ ...base, codec: 'av1' }), null)
+
+  assert.equal(advancedFormatForChroma('gray'), 'gray8')
+  assert.equal(advancedFormatForChroma('565'), 'rgb565')
+  assert.equal(advancedFormatForChroma('420', 'bgra'), 'preset')
+})
+
+test('returning to a preset rebuilds every field (custom cannot leak)', () => {
+  const custom = advancedPresetMessage({
+    ...defaultAdvancedParams('truecolor'),
+    chroma: '444',
+    format: 'bgra',
+    codec: 'auto',
+  })
+  const hd = presetMessage('hd', 45)
+  assert.equal(custom.preset, 'custom')
+  assert.equal(custom.chroma, '444')
+  assert.equal(hd.preset, 'hd')
+  assert.equal(hd.chroma, '420')
+  assert.equal(hd.format, 'preset')
+  assert.equal(hd.rate_mode, 'auto')
+  assert.equal(hd.bitrate_kbps, 0)
+})
+
+test('the advanced panel debounces rapid slider changes for 300ms', () => {
+  const scheduled = []
+  const sent = []
+  let nextHandle = 1
+  const timers = {
+    set(callback, ms) {
+      const handle = nextHandle++
+      scheduled.push({ handle, callback, ms, cancelled: false })
+      return handle
+    },
+    clear(handle) {
+      const entry = scheduled.find((item) => item.handle === handle)
+      if (entry) entry.cancelled = true
+    },
+  }
+  const pump = createAdvancedPresetPump(
+    (message) => sent.push(message.fps),
+    ADVANCED_DEBOUNCE_MS,
+    timers,
+  )
+  const message = (fps) => ({ ...advancedPresetMessage(defaultAdvancedParams()), fps })
+  pump.update(message(12))
+  pump.update(message(33))
+  pump.update(message(45))
+  assert.equal(scheduled.length, 3)
+  assert.equal(scheduled[0].cancelled, true)
+  assert.equal(scheduled[1].cancelled, true)
+  assert.equal(scheduled[2].ms, 300)
+  scheduled[2].callback()
+  assert.deepEqual(sent, [45])
+
+  pump.update(message(20))
+  pump.cancel()
+  assert.equal(scheduled[3].cancelled, true)
+  scheduled[3].callback()
+  assert.deepEqual(sent, [45], 'a cancelled drag sends nothing')
 })
