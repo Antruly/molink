@@ -216,6 +216,148 @@ void test_apply_rebuilds_and_needs_one_keyframe() {
          "an fps-only change needs no keyframe");
 }
 
+void test_custom_fills_omitted_fields_from_balanced() {
+  session_preset_request out;
+  std::string error;
+  const session_preset_request empty = request_for("custom");
+  expect(normalize_session_preset(empty, out, error),
+         "a bare custom request normalises");
+  expect(out.fps == 30 && out.quality == 0 && out.bitrate_kbps == 0 &&
+             out.rate_mode == "auto" && out.format.empty() &&
+             out.chroma == "420" && out.codec == "auto" &&
+             !out.no_subsampling,
+         "custom falls back to the balanced plan for omitted fields");
+
+  quality_mode mode = quality_mode::turbo;
+  expect(session_preset_quality_mode("custom", mode) &&
+             mode == quality_mode::balanced,
+         "custom uses the balanced quality profile");
+}
+
+void test_custom_validates_every_field() {
+  session_preset_request out;
+  std::string error;
+  const auto rejected = [&out, &error](session_preset_request request,
+                                       const char* description) {
+    expect(!normalize_session_preset(request, out, error), description);
+    expect(error.find("fps") != std::string::npos ||
+               error.find("quality") != std::string::npos ||
+               error.find("bitrate") != std::string::npos ||
+               error.find("rate_mode") != std::string::npos ||
+               error.find("chroma") != std::string::npos ||
+               error.find("format") != std::string::npos ||
+               error.find("codec") != std::string::npos,
+           "the error names the rejected field");
+  };
+
+  session_preset_request fps_low = request_for("custom");
+  fps_low.fps = 4;
+  rejected(fps_low, "custom rejects fps below 5");
+  session_preset_request fps_high = request_for("custom");
+  fps_high.fps = 61;
+  rejected(fps_high, "custom rejects fps above 60");
+
+  session_preset_request qp = request_for("custom");
+  qp.quality = 64;
+  rejected(qp, "custom rejects quality above 63");
+
+  session_preset_request bitrate = request_for("custom");
+  bitrate.bitrate_kbps = 50001;
+  rejected(bitrate, "custom rejects bitrate above 50000");
+
+  session_preset_request rate = request_for("custom");
+  rate.rate_mode = "vbr";
+  rejected(rate, "custom rejects an unknown rate mode");
+
+  session_preset_request chroma = request_for("custom");
+  chroma.chroma = "422";
+  rejected(chroma, "custom rejects an unknown chroma");
+
+  session_preset_request format = request_for("custom");
+  format.format = "rgba";
+  rejected(format, "custom rejects an unknown format");
+
+  session_preset_request codec = request_for("custom");
+  codec.codec = "hevc";
+  rejected(codec, "custom rejects an unknown codec");
+}
+
+void test_custom_keeps_explicit_values_and_resolves_chroma() {
+  session_preset_request out;
+  std::string error;
+  session_preset_request request = request_for("custom");
+  request.fps = 20;
+  request.quality = 40;
+  request.bitrate_kbps = 8000;
+  request.rate_mode = "cbr";
+  request.format = "preset";
+  request.chroma = "420";
+  request.codec = "vp9";
+  expect(normalize_session_preset(request, out, error) && out.fps == 20 &&
+             out.quality == 40 && out.bitrate_kbps == 8000 &&
+             out.rate_mode == "cbr" && out.chroma == "420" &&
+             out.codec == "vp9" && !out.no_subsampling,
+         "custom keeps every explicit field");
+
+  // 4:4:4 + BGRA is the pixel-exact tile path (the advanced panel's 444).
+  session_preset_request four = request_for("custom");
+  four.chroma = "444";
+  four.format = "bgra";
+  four.fps = 20;
+  expect(normalize_session_preset(four, out, error) && out.chroma == "444" &&
+             out.format == "bgra" && out.no_subsampling,
+         "custom 444 + BGRA stays on the tile path");
+
+  // 4:4:4 without a tile format and without a 4:4:4 encoder resolves to
+  // 4:2:0 so the stream is not silently lost.
+  session_preset_request four_stream = request_for("custom");
+  four_stream.chroma = "444";
+  four_stream.format = "preset";
+  expect(normalize_session_preset(four_stream, out, error) &&
+             out.chroma == "420" && !out.no_subsampling,
+         "custom 444 without an encoder falls back to 4:2:0");
+
+  // An explicit `tiles` codec keeps 4:4:4 and suppresses the stream.
+  session_preset_request tiles = request_for("custom");
+  tiles.chroma = "444";
+  tiles.codec = "tiles";
+  expect(normalize_session_preset(tiles, out, error) && out.chroma == "444" &&
+             out.codec == "tiles" && out.no_subsampling,
+         "custom tiles accepts 4:4:4 and keeps the stream off");
+}
+
+void test_custom_then_preset_resets_the_stream_gate() {
+  fake_capture capture;
+  session_preset_state session;
+  session_preset_request resolved;
+  std::string error;
+
+  expect(normalize_session_preset(
+             [] {
+               session_preset_request request = request_for("custom");
+               request.chroma = "444";
+               request.format = "bgra";
+               return request;
+             }(),
+             resolved, error),
+         "the custom 4:4:4 request normalises");
+  apply_session_preset(capture, session, resolved);
+  expect(session.no_subsampling, "custom 4:4:4 suppresses the stream");
+  expect(capture.stream_format_override() ==
+             static_cast<int>(tile_format::bgra),
+         "custom installs the BGRA override");
+
+  // Switching to a preset must not inherit custom's chroma or format.
+  expect(normalize_session_preset(request_for("auto"), resolved, error),
+         "the auto request normalises");
+  apply_session_preset(capture, session, resolved);
+  expect(!session.no_subsampling, "auto clears custom's no_subsampling");
+  expect(capture.stream_format_override() == -1,
+         "auto drops custom's BGRA override");
+  expect(session.encoding_preset == "auto",
+         "auto owns the session preset again");
+}
+
 void test_truecolor_then_auto_resets_the_stream_gate() {
   fake_capture capture;
   session_preset_state session;
@@ -254,6 +396,10 @@ int main() {
   test_unknown_and_out_of_range_are_rejected();
   test_preset_plans_map_to_host_quality_modes();
   test_explicit_overrides_win();
+  test_custom_fills_omitted_fields_from_balanced();
+  test_custom_validates_every_field();
+  test_custom_keeps_explicit_values_and_resolves_chroma();
+  test_custom_then_preset_resets_the_stream_gate();
   test_apply_rebuilds_and_needs_one_keyframe();
   test_truecolor_then_auto_resets_the_stream_gate();
   std::printf("%d checks, %d failures\n", checks, failures);

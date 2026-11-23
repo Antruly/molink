@@ -29,6 +29,10 @@ constexpr preset_plan kPlans[] = {
     // subsampling, no video stream.
     {"truecolor", quality_mode::lossless, 18, 0, 0, "cq", "bgra", "444"},
     {"auto", quality_mode::automatic, 30, 0, 0, "auto", "", "auto"},
+    // `custom` is not a tier of its own: it means "use exactly the fields the
+    // viewer sent". Anything it omits takes this row, which mirrors balanced,
+    // so a half-filled or older request still produces a usable picture.
+    {"custom", quality_mode::balanced, 30, 0, 0, "auto", "", "420"},
 };
 
 const preset_plan* find_plan(const std::string& name) {
@@ -81,10 +85,19 @@ bool normalize_session_preset(
     const session_preset_capabilities& caps) {
   const preset_plan* plan = find_plan(in.preset);
   if (plan == nullptr) {
-    error = "preset must be turbo, smooth, balanced, hd, truecolor or auto";
+    error =
+        "preset must be turbo, smooth, balanced, hd, truecolor, auto or custom";
     return false;
   }
-  if (in.fps < 0 || in.fps > 60) {
+  const bool custom = in.preset == "custom";
+  // `custom` uses the wider, explicit ranges the advanced panel offers. The
+  // fixed tiers keep their historical bounds (0 = "take the plan").
+  if (custom) {
+    if (in.fps != 0 && (in.fps < 5 || in.fps > 60)) {
+      error = "fps must be 5..60 for a custom preset";
+      return false;
+    }
+  } else if (in.fps < 0 || in.fps > 60) {
     error = "fps must be 1..60";
     return false;
   }
@@ -97,8 +110,10 @@ bool normalize_session_preset(
     error = "quality must be 0..63";
     return false;
   }
-  if (in.bitrate_kbps < 0 || in.bitrate_kbps > 60000) {
-    error = "bitrate_kbps must be 0..60000";
+  const int bitrate_max = custom ? 50000 : 60000;
+  if (in.bitrate_kbps < 0 || in.bitrate_kbps > bitrate_max) {
+    error = custom ? "bitrate_kbps must be 0..50000 for a custom preset"
+                   : "bitrate_kbps must be 0..60000";
     return false;
   }
   if (!in.rate_mode.empty() && !valid_rate_mode(in.rate_mode)) {
@@ -110,7 +125,7 @@ bool normalize_session_preset(
     return false;
   }
   if (!in.chroma.empty() && !valid_chroma(in.chroma)) {
-    error = "chroma must be 420 or 444";
+    error = "chroma must be 420, 444, gray, 565 or auto";
     return false;
   }
   if (!in.codec.empty() && in.codec != "auto" && in.codec != "av1" &&
@@ -122,14 +137,15 @@ bool normalize_session_preset(
 
   out = in;
   out.fps = fps;
-  // Fill the omitted fields from the plan.
+  // Fill the omitted fields from the plan. For `custom` the plan row above is
+  // balanced, which is exactly the documented fallback.
   if (out.quality == 0) out.quality = plan->quality;
   if (out.bitrate_kbps == 0) out.bitrate_kbps = plan->bitrate_kbps;
   if (out.rate_mode.empty()) out.rate_mode = plan->rate_mode;
   if (out.format.empty()) out.format = plan->format;
   if (out.chroma.empty()) out.chroma = plan->chroma;
   if (out.codec.empty()) out.codec = "auto";
-  // Every tier starts from a clean slate. `no_subsampling` is derived from
+  // Every request starts from a clean slate. `no_subsampling` is derived from
   // this request alone; it is never carried over from the previous preset
   // (switching truecolor -> auto used to stay on the tile path because the
   // flag was not reset).
@@ -141,6 +157,10 @@ bool normalize_session_preset(
         out.format == "bgra" || out.format == "rgb24";
     if (explicit_tile_format) {
       out.no_subsampling = true;
+    } else if (out.codec == "tiles") {
+      // The tile path carries 4:4:4 without an encoder, so an explicit
+      // `tiles` request keeps the chroma the viewer asked for.
+      out.no_subsampling = true;
     } else if (!caps.stream_444) {
       // No encoder here carries 4:4:4. Dropping to tiles would silently cost
       // the video stream, so resolve to 4:2:0 instead: the tier keeps its QP,
@@ -148,6 +168,10 @@ bool normalize_session_preset(
       out.chroma = "420";
     }
   }
+  // `tiles` is the viewer explicitly asking for the pixel-exact path. Keep
+  // the 4:2:0 stream off even when the chroma field alone would have allowed
+  // it; the supervisor uses this per-session flag.
+  if (out.codec == "tiles") out.no_subsampling = true;
   return true;
 }
 

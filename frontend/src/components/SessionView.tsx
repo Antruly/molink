@@ -49,10 +49,16 @@ import {
 import { useTranslation } from 'react-i18next'
 import { MIN_FPS, fpsPlan } from '../lib/frame-rate'
 import {
+  ADVANCED_FPS_MAX,
+  ADVANCED_FPS_MIN,
+  advancedPresetMessage,
   codecExitsTruecolor,
+  createAdvancedPresetPump,
+  defaultAdvancedParams,
   presetMessage,
   presetPlan,
   viewerPresetAfterReply,
+  type AdvancedQualityParams,
   type SessionPresetId,
 } from '../lib/session-presets'
 import {
@@ -453,6 +459,13 @@ export function SessionView({
   const toggleTheme = useAppStore((state) => state.toggleTheme)
   const setSettingsOpen = useAppStore((state) => state.setSettingsOpen)
   const settingsOpen = useAppStore((state) => state.settingsOpen)
+  const advancedQuality = useAppStore((state) => state.advancedQuality)
+  const setAdvancedQuality = useAppStore((state) => state.setAdvancedQuality)
+  const setTabAdvanced = useAppStore((state) => state.setTabAdvanced)
+  const qualityPanelOpen = useAppStore((state) => state.qualityPanelOpen)
+  const setQualityPanelOpen = useAppStore(
+    (state) => state.setQualityPanelOpen,
+  )
   const keyboardGrab = useAppStore((state) => state.keyboardGrab)
   const comboForwardAsked = useAppStore((state) => state.comboForwardAsked)
   const comboForwardAnswered = useAppStore(
@@ -481,7 +494,8 @@ export function SessionView({
     tab.phase === 'live' &&
     tab.controlEnabled &&
     inputAvailable &&
-    !settingsOpen
+    !settingsOpen &&
+    !qualityPanelOpen
   const [surfaceFocused, setSurfaceFocused] = useState(false)
   const grabWanted = grabEligible && surfaceFocused
   const clipboardAvailable = welcome?.clipboard === true
@@ -647,6 +661,19 @@ export function SessionView({
   // page can decode them. Empty for hosts that do not advertise the list.
   const codecOptions = tab.codecOptions ?? []
   const codecPreference = tab.codecPreference ?? 'auto'
+  // The advanced panel's per-device values. Memoised so the 300 ms debounce
+  // effect does not restart on unrelated renders.
+  const advancedParams = useMemo<AdvancedQualityParams>(
+    () => tab.advanced ?? defaultAdvancedParams(presetId),
+    [tab.advanced, presetId],
+  )
+  // Advanced mode's rate is derived, not mirrored into state: the panel owns
+  // it, so there is no second copy that can drift (and no setState during an
+  // effect just to copy a prop).
+  const advancedFps = Math.max(
+    ADVANCED_FPS_MIN,
+    Math.min(ADVANCED_FPS_MAX, Math.round(advancedParams.fps)),
+  )
   // An explicit encoder the host cannot run (or this page cannot decode)
   // keeps the picture on tiles. Say which one instead of silently leaving the
   // stream off.
@@ -670,7 +697,11 @@ export function SessionView({
     bad: 0,
     lastChange: 0,
   })
-  const pullMs = Math.max(16, Math.round(1000 / Math.max(1, targetFps)))
+  const effectiveTargetFps = advancedQuality ? advancedFps : targetFps
+  const pullMs = Math.max(
+    16,
+    Math.round(1000 / Math.max(1, effectiveTargetFps)),
+  )
 
   const connection = useCallback(
     () => sessionConnection(tab.id),
@@ -1148,18 +1179,37 @@ export function SessionView({
   }, [tab.hostFps, tab.hostBuildMs])
 
   useEffect(() => {
-    targetFpsRef.current = targetFps
-  }, [targetFps])
+    targetFpsRef.current = effectiveTargetFps
+  }, [effectiveTargetFps])
 
   // Keep the plan and the adapted target in step. A new preset starts at its
   // own resting rate; an automatic tier change only clamps the current target
   // into the new window, so a downgrade does not immediately raise the rate.
   useEffect(() => {
-    const plan = presetFpsPlan(presetId, resolvedMode)
-    planRef.current = plan
     const userChoice = presetRef.current !== presetId
     presetRef.current = presetId
     resolvedModeRef.current = resolvedMode
+    if (advancedQuality) {
+      // The advanced slider is the user's explicit rate. Pin the whole plan
+      // window to it so the load controller cannot walk it back down (the
+      // host's encoder still reports honestly through `actual`). The rendered
+      // rate comes from `effectiveTargetFps`, so no state copy is needed.
+      planRef.current = {
+        min: advancedFps,
+        floor: advancedFps,
+        max: advancedFps,
+        start: advancedFps,
+      }
+      fpsState.current = {
+        target: advancedFps,
+        good: 0,
+        bad: 0,
+        lastChange: performance.now(),
+      }
+      return
+    }
+    const plan = presetFpsPlan(presetId, resolvedMode)
+    planRef.current = plan
     let next: number
     if (userChoice) {
       next = plan.start
@@ -1176,16 +1226,52 @@ export function SessionView({
       fpsState.current.bad = 0
     }
     setTargetFps((current) => (current === next ? current : next))
-  }, [presetId, resolvedMode])
+  }, [presetId, resolvedMode, advancedQuality, advancedFps])
 
   // Send the viewer-owned preset. SessionConnection holds the first one until
   // the welcome, so the host starts on this tier before the first frame; later
   // changes are coalesced there. A host reply is never fed back in here, which
   // is what stopped the selector from snapping back.
   const lastSentPreset = useRef<string | null>(null)
+  // The advanced panel changes on every slider pixel, so it debounces before
+  // touching the encoder. Kept out of React so the acceptance test can drive
+  // the same helper with a fake clock.
+  const advancedPump =
+    useRef<ReturnType<typeof createAdvancedPresetPump> | null>(null)
+  // Created in an effect (not during render) so the send callback may read
+  // the last-sent ref and the live store without React ref rules.
+  useEffect(() => {
+    advancedPump.current = createAdvancedPresetPump((message) => {
+      lastSentPreset.current = JSON.stringify(message)
+      const conn = sessionConnection(tab.id)
+      if (!conn) return
+      conn.setSessionPreset(message)
+      const live = useAppStore
+        .getState()
+        .tabs.some((item) => item.id === tab.id && item.phase === 'live')
+      if (live) conn.requestKeyframe()
+    })
+    return () => {
+      advancedPump.current?.cancel()
+      advancedPump.current = null
+    }
+  }, [tab.id])
   useEffect(() => {
     const conn = connection()
     if (!conn) return
+    if (advancedQuality) {
+      const message = advancedPresetMessage(advancedParams)
+      const wire = JSON.stringify(message)
+      if (lastSentPreset.current === wire) {
+        // The drag returned to the value that is already on the host; drop a
+        // timer left over from the intermediate value.
+        advancedPump.current?.cancel()
+        return
+      }
+      advancedPump.current?.update(message)
+      return
+    }
+    advancedPump.current?.cancel()
     const message = presetMessage(presetId, targetFps)
     const wire = JSON.stringify(message)
     if (lastSentPreset.current === wire) return
@@ -1194,15 +1280,25 @@ export function SessionView({
     // A preset change can also change the tile format (turbo is gray8), so a
     // full picture is needed; the host forces its own keyframe as well.
     if (tab.phase === 'live') conn.requestKeyframe()
-  }, [tab.phase, tab.id, connection, presetId, targetFps])
+  }, [
+    tab.phase,
+    tab.id,
+    connection,
+    presetId,
+    targetFps,
+    advancedQuality,
+    advancedParams,
+    advancedPump,
+  ])
 
   // Auto quality: only the explicit "auto" preset may adapt. The link picks
   // the image tier; the frame rate has its own controller below. A tier is
   // lowered only once the rate is already at the tier's floor, and raised
   // when the link is healthy with headroom.
   useEffect(() => {
-    if (tab.phase !== 'live' || presetId !== 'auto') {
-      // Remember the preset we left so re-entering auto starts fresh.
+    if (tab.phase !== 'live' || presetId !== 'auto' || advancedQuality) {
+      // Remember the preset we left so re-entering auto starts fresh. The
+      // advanced panel is explicit: it never lets the auto ladder move it.
       autoModeRef.current = presetId
       return
     }
@@ -1279,7 +1375,7 @@ export function SessionView({
       }
     }, 1000)
     return () => window.clearInterval(timer)
-  }, [tab.phase, tab.id, presetId, resolvedMode])
+  }, [tab.phase, tab.id, presetId, resolvedMode, advancedQuality])
 
   // Average frame rate. The configured rate is the goal; the controller only
   // leaves it when the host cannot encode fast enough (its reported build
@@ -1287,7 +1383,9 @@ export function SessionView({
   // Reduction is quick and recovery is slow, so a burst cannot make the rate
   // oscillate.
   useEffect(() => {
-    if (tab.phase !== 'live') return
+    // Advanced mode has an explicit fps slider. Do not let the load controller
+    // fight the user's setting; the host still reports its real build time.
+    if (tab.phase !== 'live' || advancedQuality) return
     const timer = window.setInterval(() => {
       if (document.visibilityState === 'hidden') return
       const plan = planRef.current
@@ -1358,7 +1456,7 @@ export function SessionView({
       }
     }, 1000)
     return () => window.clearInterval(timer)
-  }, [tab.phase, tab.id])
+  }, [tab.phase, tab.id, advancedQuality])
 
   // The remote cursor shape becomes the local pointer over the picture, so a
   // resize handle, a text caret, a link hand or the busy spinner looks the
@@ -2051,6 +2149,7 @@ export function SessionView({
       controlEnabled: tab.controlEnabled,
       localTarget: isLocalInputTarget(target),
       settingsOpen: useAppStore.getState().settingsOpen,
+      localPanelOpen: useAppStore.getState().qualityPanelOpen,
     })
     const down = (event: KeyboardEvent) => {
       if (event.repeat || event.isComposing) return
@@ -2869,6 +2968,26 @@ export function SessionView({
                 preset={presetId}
                 applied={tab.appliedPreset}
                 codecPreference={codecPreference}
+                advanced={advancedQuality}
+                advancedParams={advancedParams}
+                codecOptions={codecOptions}
+                onAdvancedChange={(patch) => setTabAdvanced(tab.id, patch)}
+                onBackToPreset={() => {
+                  // Return to the tier that was selected before advanced mode
+                  // and restart at its own resting rate, not the custom one.
+                  const tier =
+                    presetId === 'auto' ? autoTier : presetPlan(presetId).mode
+                  const plan = presetFpsPlan(presetId, tier)
+                  fpsState.current = {
+                    target: plan.start,
+                    good: 0,
+                    bad: 0,
+                    lastChange: performance.now(),
+                  }
+                  setTargetFps(plan.start)
+                  setAdvancedQuality(false)
+                }}
+                onOpenChange={setQualityPanelOpen}
                 onPreset={(next) => {
                   setTabPreset(tab.id, next)
                   // A new tier starts at its own resting rate instead of

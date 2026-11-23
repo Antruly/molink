@@ -10,10 +10,11 @@ namespace molink {
 /// One viewer-owned picture preset, as it arrives in `session-preset`.
 ///
 /// The preset name is the viewer's fixed tier (turbo/smooth/balanced/hd/
-/// truecolor/auto). The remaining fields are the resolved values the viewer
-/// wants; an empty/zero field means "take the plan's default". Filling them
-/// on the viewer keeps older cores working: a core that only knows the
-/// preset name can still resolve it itself.
+/// truecolor/auto) or `custom`, which means "use exactly these fields" (an
+/// omitted field falls back to balanced). The remaining fields are the
+/// resolved values the viewer wants; an empty/zero field means "take the
+/// plan's default". Filling them on the viewer keeps older cores working: a
+/// core that only knows the preset name can still resolve it itself.
 struct session_preset_request {
   std::string preset;
   /// 1..60, 0 = the preset plan's rate.

@@ -600,6 +600,10 @@ export function PreferencesControls({
   const localMode = useAppStore((state) => state.localMode)
   const defaultPreset = useAppStore((state) => state.defaultPreset)
   const setDefaultPreset = useAppStore((state) => state.setDefaultPreset)
+  const advancedQuality = useAppStore((state) => state.advancedQuality)
+  const setAdvancedQuality = useAppStore(
+    (state) => state.setAdvancedQuality,
+  )
   const lockTimeout = useAppStore((state) => state.lockTimeout)
   const setLockTimeout = useAppStore((state) => state.setLockTimeout)
   const server = useAppStore((state) => state.server)
@@ -761,6 +765,23 @@ export function PreferencesControls({
               checked={watermarkFade}
               onChange={setWatermarkFade}
               label={t('settings.watermarkFade')}
+            />
+          </div>
+
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <div className="flex items-center gap-2 text-[12px] font-medium text-ink">
+                <Gauge size={14} className="text-accent" />
+                {t('settings.advancedQuality')}
+              </div>
+              <div className="mt-1 text-[11px] leading-relaxed text-muted">
+                {t('settings.advancedQualityHint')}
+              </div>
+            </div>
+            <Toggle
+              checked={advancedQuality}
+              onChange={setAdvancedQuality}
+              label={t('settings.advancedQuality')}
             />
           </div>
 
