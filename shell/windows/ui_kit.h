@@ -11,6 +11,13 @@
 #include <string>
 #include <vector>
 
+// MSVC's rpcndr.h (pulled in by windows.h via d2d1.h) defines `small` as
+// `char`. The UI uses `small` as a text-format parameter name, exactly like
+// the Web's `.text-small`, so drop the macro once the Windows headers are in.
+#ifdef small
+#undef small
+#endif
+
 namespace molink::ui {
 
 /// Palette mirroring frontend/src/index.css (:root and [data-theme=light]).

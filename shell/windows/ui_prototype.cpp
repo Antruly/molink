@@ -16,6 +16,11 @@
 #include <cstdio>
 #include <string>
 
+// rpcndr.h defines `small` as `char`; this file uses it as a format name.
+#ifdef small
+#undef small
+#endif
+
 namespace {
 
 // :root tokens from frontend/src/index.css
