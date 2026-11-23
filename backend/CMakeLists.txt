@@ -989,6 +989,19 @@ set_target_properties(molink-core-clipboard-sync-test PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 add_test(NAME clipboard_sync COMMAND molink-core-clipboard-sync-test)
 
+# Keyboard translation and the pressed-key state machine without Win32: the
+# keypad/NumLock mapping, duplicate key-down filtering, blur release and the
+# shortcut injection order are shared with the native shell and tested here.
+add_executable(molink-core-input-state-test
+  tests/input_state_test.cpp
+  "${CMAKE_CURRENT_SOURCE_DIR}/../shell/windows/input_state.cpp"
+)
+target_include_directories(molink-core-input-state-test PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../shell/windows")
+set_target_properties(molink-core-input-state-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME input_state COMMAND molink-core-input-state-test)
+
 # Service registration: the path staleness rule is pure and shared with the
 # status endpoint (Win32/systemd orchestration stays in the core).
 add_executable(molink-core-service-control-test
