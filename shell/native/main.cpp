@@ -16,6 +16,9 @@
 #include <cairo.h>
 #include <jsc/jsc.h>
 
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <netinet/in.h>
 #include <poll.h>
 #include <signal.h>
 #include <sys/socket.h>
@@ -25,6 +28,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <cctype>
 #include <cerrno>
 #include <cstdarg>
 
@@ -102,6 +106,25 @@ void shell_log_grab(const char* format, ...) {
   if (log == nullptr) return;
   std::fprintf(log, "[grab %.3f] ", g_get_real_time() / 1000000.0);
   va_list args;
+  va_start(args, format);
+  std::vfprintf(log, format, args);
+  va_end(args);
+  std::fputc('\n', log);
+  std::fclose(log);
+}
+
+/// Startup/core-discovery trace: the terminal is not always visible when the
+/// app is launched from a desktop menu, so mirror the lines into the same
+/// /tmp/molink-shell.log the rest of the shell writes.
+void shell_log(const char* format, ...) {
+  va_list args;
+  va_start(args, format);
+  std::vfprintf(stderr, format, args);
+  va_end(args);
+  std::fputc('\n', stderr);
+  std::FILE* log = std::fopen("/tmp/molink-shell.log", "a");
+  if (log == nullptr) return;
+  std::fprintf(log, "[shell %.3f] ", g_get_real_time() / 1000000.0);
   va_start(args, format);
   std::vfprintf(log, format, args);
   va_end(args);
@@ -530,6 +553,239 @@ bool json_string(const std::string& json, const char* key, std::string& out) {
   return true;
 }
 
+/// A core that is already listening and answered /api/device. The desktop
+/// shell reuses it instead of starting a second one: the moLinkSession
+/// service/helper keeps a core resident so the host stays reachable, and a
+/// second process cannot bind the same port.
+struct running_core {
+  int port = 0;
+  long pid = 0;
+  std::string token;
+  std::string client_token;
+  bool tls = false;
+};
+
+std::string shell_config_directory() {
+  const char* override_dir = std::getenv("MOLINK_CONFIG_DIR");
+  if (override_dir != nullptr && *override_dir != '\0') return override_dir;
+  const char* xdg = std::getenv("XDG_CONFIG_HOME");
+  if (xdg != nullptr && *xdg != '\0') return std::string(xdg) + "/molink";
+  const char* home = std::getenv("HOME");
+  return home != nullptr && *home != '\0'
+             ? std::string(home) + "/.config/molink"
+             : std::string();
+}
+
+/// The port the core persists (`--port` overrides it). Probing only 28418
+/// would miss a user who changed the setting in the UI.
+int persisted_core_port() {
+  const std::string dir = shell_config_directory();
+  if (dir.empty()) return 0;
+  std::FILE* file = std::fopen((dir + "/tcp_port").c_str(), "r");
+  if (file == nullptr) return 0;
+  char value[32] = {};
+  const size_t got = std::fread(value, 1, sizeof(value) - 1, file);
+  std::fclose(file);
+  if (got == 0) return 0;
+  const int port = std::atoi(value);
+  return port > 0 && port <= 65535 ? port : 0;
+}
+
+std::vector<int> core_probe_ports() {
+  std::vector<int> ports;
+  auto add = [&ports](int port) {
+    if (port <= 0 || port > 65535) return;
+    for (int existing : ports) {
+      if (existing == port) return;
+    }
+    ports.push_back(port);
+  };
+  const char* env_port = std::getenv("MOLINK_CORE_PORT");
+  if (env_port != nullptr) add(std::atoi(env_port));
+  add(persisted_core_port());
+  add(28418);
+  return ports;
+}
+
+bool decode_chunked_body(const std::string& encoded, std::string& out) {
+  std::size_t pos = 0;
+  while (pos < encoded.size()) {
+    const std::size_t line_end = encoded.find("\r\n", pos);
+    if (line_end == std::string::npos) return false;
+    std::string size_text = encoded.substr(pos, line_end - pos);
+    const std::size_t semi = size_text.find(';');
+    if (semi != std::string::npos) size_text.resize(semi);
+    const unsigned long size = std::strtoul(size_text.c_str(), nullptr, 16);
+    if (size == 0) return true;
+    pos = line_end + 2;
+    if (size > encoded.size() - pos) return false;
+    out.append(encoded, pos, size);
+    pos += size;
+    if (encoded.compare(pos, 2, "\r\n") != 0) return false;
+    pos += 2;
+  }
+  return true;
+}
+
+/// Minimal loopback HTTP/1.1 GET (Connection: close). The native shell links
+/// no HTTP client, and the probe must not depend on curl being installed.
+/// The whole exchange is bounded at 500 ms, matching the startup budget.
+bool core_http_get(int port, const std::string& path, std::string& body) {
+  body.clear();
+  const int fd = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  if (fd < 0) return false;
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_port = htons(static_cast<uint16_t>(port));
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  const int flags = ::fcntl(fd, F_GETFL, 0);
+  if (flags >= 0) ::fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+  const auto deadline = std::chrono::steady_clock::now() +
+                        std::chrono::milliseconds(500);
+  auto remaining_ms = [&deadline]() {
+    const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          deadline - std::chrono::steady_clock::now())
+                          .count();
+    return left > 0 ? static_cast<int>(left) : 0;
+  };
+
+  bool connected = false;
+  const int rc =
+      ::connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address));
+  if (rc == 0) {
+    connected = true;
+  } else if (errno == EINPROGRESS) {
+    pollfd descriptor{fd, POLLOUT, 0};
+    if (::poll(&descriptor, 1, remaining_ms()) > 0) {
+      int error = 0;
+      socklen_t length = sizeof(error);
+      connected = ::getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &length) == 0 &&
+                  error == 0;
+    }
+  }
+  if (!connected) {
+    ::close(fd);
+    return false;
+  }
+
+  const std::string request =
+      "GET " + path + " HTTP/1.1\r\nHost: 127.0.0.1:" +
+      std::to_string(port) +
+      "\r\nAccept: application/json\r\nConnection: close\r\n\r\n";
+  std::size_t sent = 0;
+  while (sent < request.size()) {
+    const ssize_t wrote =
+        ::send(fd, request.data() + sent, request.size() - sent, MSG_NOSIGNAL);
+    if (wrote > 0) {
+      sent += static_cast<std::size_t>(wrote);
+      continue;
+    }
+    if (wrote < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+      pollfd descriptor{fd, POLLOUT, 0};
+      if (::poll(&descriptor, 1, remaining_ms()) <= 0) break;
+      continue;
+    }
+    break;
+  }
+  std::string response;
+  while (remaining_ms() > 0) {
+    pollfd descriptor{fd, POLLIN, 0};
+    if (::poll(&descriptor, 1, remaining_ms()) <= 0) break;
+    char buffer[4096];
+    const ssize_t got = ::read(fd, buffer, sizeof(buffer));
+    if (got <= 0) break;
+    response.append(buffer, static_cast<std::size_t>(got));
+    if (response.size() > 512 * 1024) break;
+  }
+  ::close(fd);
+  if (sent != request.size()) return false;
+
+  const std::size_t header_end = response.find("\r\n\r\n");
+  if (header_end == std::string::npos) return false;
+  const std::string headers = response.substr(0, header_end);
+  if (headers.compare(0, 7, "HTTP/1.") != 0) return false;
+  const std::size_t space = headers.find(' ');
+  if (space == std::string::npos) return false;
+  if (std::atoi(headers.c_str() + space + 1) != 200) return false;
+  std::string lower = headers;
+  for (char& ch : lower) {
+    ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+  }
+  std::string payload = response.substr(header_end + 4);
+  if (lower.find("transfer-encoding: chunked") != std::string::npos) {
+    if (!decode_chunked_body(payload, body)) return false;
+  } else {
+    const std::size_t length_pos = lower.find("content-length:");
+    if (length_pos != std::string::npos) {
+      const long length =
+          std::atol(lower.c_str() + length_pos + std::string("content-length:").size());
+      if (length >= 0 && static_cast<std::size_t>(length) < payload.size()) {
+        payload.resize(static_cast<std::size_t>(length));
+      }
+    }
+    body = std::move(payload);
+  }
+  return !body.empty();
+}
+
+bool probe_core(int port, running_core& out) {
+  std::string body;
+  if (!core_http_get(port, "/api/device", body)) return false;
+  long parsed_port = 0;
+  std::string token;
+  std::string client_token;
+  if (!json_number(body, "port", parsed_port) || parsed_port <= 0 ||
+      !json_string(body, "token", token) ||
+      !json_string(body, "client_token", client_token) ||
+      client_token.empty()) {
+    return false;
+  }
+  out.port = static_cast<int>(parsed_port);
+  out.token = token;
+  out.client_token = client_token;
+  out.tls = body.find("\"tls\":true") != std::string::npos;
+  out.pid = 0;
+  json_number(body, "pid", out.pid);
+  return true;
+}
+
+bool find_running_core(running_core& out) {
+  for (int port : core_probe_ports()) {
+    running_core candidate;
+    if (probe_core(port, candidate)) {
+      out = candidate;
+      return true;
+    }
+  }
+  return false;
+}
+
+/// The last @p count non-empty lines of the core's stdout, for the error box.
+std::string tail_lines(const std::string& text, int count) {
+  std::vector<std::string> lines;
+  std::size_t start = 0;
+  while (start < text.size()) {
+    const std::size_t end = text.find('\n', start);
+    std::string line = text.substr(
+        start, end == std::string::npos ? std::string::npos : end - start);
+    while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) {
+      line.pop_back();
+    }
+    if (!line.empty()) lines.push_back(line);
+    if (lines.size() > static_cast<std::size_t>(count)) {
+      lines.erase(lines.begin());
+    }
+    if (end == std::string::npos) break;
+    start = end + 1;
+  }
+  std::string out;
+  for (const std::string& line : lines) {
+    if (!out.empty()) out += "\r\n";
+    out += line;
+  }
+  return out;
+}
+
 std::string url_host(const std::string& host) {
   if (host.empty()) return "127.0.0.1";
   if (host.front() == '[' && host.back() == ']') return host;
@@ -544,7 +800,10 @@ std::string ui_host() {
 
 bool start_core(const std::string& core, const std::string& web_root, int& port,
                 std::string& token, std::string& client_token, bool& tls,
-                std::string& surface_path, std::string& err) {
+                std::string& surface_path, std::string& err,
+                std::string& output_tail, bool& busy, int& busy_port) {
+  busy = false;
+  busy_port = 0;
   // The core owns the port: it uses the persisted setting or 28418.
   std::vector<std::string> args = {core, "--print-ready", "--parent-pid",
                                    std::to_string(getpid())};
@@ -592,6 +851,18 @@ bool start_core(const std::string& core, const std::string& web_root, int& port,
       complete = true;
       break;
     }
+    // The core lost the port to one that is already running. Stop waiting for
+    // a ready line that will never come; the caller probes and adopts it.
+    const size_t busy_marker = line.find("\"event\":\"busy\"");
+    if (busy_marker != std::string::npos &&
+        line.find('\n', busy_marker) != std::string::npos) {
+      busy = true;
+      long parsed_busy_port = 0;
+      if (json_number(line, "port", parsed_busy_port)) {
+        busy_port = static_cast<int>(parsed_busy_port);
+      }
+      break;
+    }
     struct pollfd descriptor;
     descriptor.fd = stdout_fd;
     descriptor.events = POLLIN;
@@ -605,6 +876,7 @@ bool start_core(const std::string& core, const std::string& web_root, int& port,
     if (line.size() > 256 * 1024) break;
   }
   if (stdout_fd >= 0) ::close(stdout_fd);
+  output_tail = tail_lines(line, 5);
   // Keep only the ready JSON. nlohmann sorts keys, so the line starts with
   // "capture", not "event"; take the object containing the marker.
   {
@@ -625,6 +897,12 @@ bool start_core(const std::string& core, const std::string& web_root, int& port,
   }
 
   long parsed_port = 0;
+  if (busy) {
+    err = "molink-core could not bind port " +
+          std::to_string(busy_port > 0 ? busy_port : 28418) +
+          ": another instance is already using it";
+    return false;
+  }
   if (!complete || line.empty() || line.front() != '{' ||
       !json_number(line, "port", parsed_port) ||
       !json_string(line, "token", token) ||
@@ -1698,6 +1976,20 @@ void on_download_started(WebKitWebContext*, WebKitDownload* download, gpointer) 
                    G_CALLBACK(on_download_decide_destination), nullptr);
 }
 
+/// A startup failure happens before there is a main window, so the dialog is
+/// its own GTK window. The secondary text carries the captured core output
+/// and the actionable hint; a one-line message was undiagnosable in the field.
+void show_startup_error(const std::string& primary,
+                        const std::string& detail) {
+  GtkWidget* dialog = gtk_message_dialog_new(
+      nullptr, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_CLOSE, "%s",
+      primary.c_str());
+  gtk_message_dialog_format_secondary_text(GTK_MESSAGE_DIALOG(dialog), "%s",
+                                           detail.c_str());
+  gtk_dialog_run(GTK_DIALOG(dialog));
+  gtk_widget_destroy(dialog);
+}
+
 int main(int argc, char** argv) {
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "--smoke-test") == 0) {
@@ -1738,32 +2030,85 @@ int main(int argc, char** argv) {
   if (g_url_mode) {
     url = g_url_override;
   } else {
-    const std::string core = find_core();
-    if (core.empty()) {
-      std::fprintf(stderr,
-                   "moLink shell: molink-core not found; set MOLINK_CORE or "
-                   "build backend/\n");
-      return 1;
-    }
-    const std::string web_root = find_web_root();
-    if (web_root.empty()) {
-      std::fprintf(stderr,
-                   "moLink shell: frontend/dist not found; run pnpm build in "
-                   "frontend/\n");
-      return 1;
-    }
-
     int port = 0;
     std::string token;
     std::string client_token;
     std::string surface_path;
     bool tls = false;
     std::string error;
-    if (!start_core(core, web_root, port, token, client_token, tls,
-                    surface_path, error)) {
-      std::fprintf(stderr, "moLink shell: %s\n", error.c_str());
-      stop_core();
-      return 1;
+    // Probe before spawning: the moLinkSession service (or its helper) keeps a
+    // core resident in the user session, and a second one cannot bind the
+    // same port. A reused core stays owned by its supervisor; stop_core()
+    // only ever sees the pid this shell spawned.
+    running_core running;
+    if (find_running_core(running)) {
+      port = running.port;
+      token = running.token;
+      client_token = running.client_token;
+      tls = running.tls;
+      shell_log("shell: reusing core port=%d pid=%ld (started outside this "
+                "shell)", port, running.pid);
+    } else {
+      const std::string core = find_core();
+      if (core.empty()) {
+        std::fprintf(stderr,
+                     "moLink shell: molink-core not found; set MOLINK_CORE or "
+                     "build backend/\n");
+        return 1;
+      }
+      const std::string web_root = find_web_root();
+      if (web_root.empty()) {
+        std::fprintf(stderr,
+                     "moLink shell: frontend/dist not found; run pnpm build in "
+                     "frontend/\n");
+        return 1;
+      }
+      std::string output_tail;
+      bool busy = false;
+      int busy_port = 0;
+      if (!start_core(core, web_root, port, token, client_token, tls,
+                      surface_path, error, output_tail, busy, busy_port)) {
+        if (busy) {
+          shell_log("shell: core start failed: %s (busy port %d)",
+                    error.c_str(), busy_port);
+        } else {
+          shell_log("shell: core start failed: %s", error.c_str());
+        }
+        // The service may have brought its core up while ours was starting.
+        stop_core();
+        if (find_running_core(running)) {
+          port = running.port;
+          token = running.token;
+          client_token = running.client_token;
+          tls = running.tls;
+          shell_log("shell: reusing core port=%d pid=%ld after a start "
+                    "failure", port, running.pid);
+        } else {
+          std::string detail = error;
+          if (!output_tail.empty()) {
+            detail += "\n\nLast output from molink-core:\n";
+            detail += output_tail;
+          }
+          detail +=
+              "\n\nAn existing moLink instance may be running but not "
+              "answering. Check the core logs under "
+              "~/.local/share/molink/logs, or stop the moLinkSession service "
+              "and try again.";
+          shell_log("shell: giving up: no reachable core");
+          if (g_smoke) {
+            // A modal dialog would hang an automated smoke run; report the
+            // failure on stdout like the other startup errors.
+            std::printf("SHELL_SMOKE_FAIL %s\n", error.c_str());
+            std::fflush(stdout);
+            return 1;
+          }
+          show_startup_error("moLink could not start its core", detail);
+          return 1;
+        }
+      } else {
+        shell_log("shell: spawned core port=%d pid=%d", port,
+                  static_cast<int>(g_core_pid));
+      }
     }
 
     g_core_tls = tls;

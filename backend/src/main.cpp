@@ -608,6 +608,19 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "molink tls: %s\n", tls.error.c_str());
   }
   bool tls_enabled = auth->settings().encrypt_lan && tls.ok();
+#if !UVCPP_OPENSSL_ENABLE
+  // The core may have its own OpenSSL (it generates the device certificate),
+  // but HTTPS is served by libuvcpp. A libuvcpp built without TLS has no
+  // enable_ssl at all, so the settings must report encryption as unavailable
+  // instead of failing to compile or silently serving plain HTTP. Decide this
+  // before the routes are registered: /api/device advertises the scheme.
+  if (tls_enabled) {
+    std::fprintf(stderr,
+                 "molink tls: libuvcpp was built without TLS; encryption is "
+                 "unavailable\n");
+    tls_enabled = false;
+  }
+#endif
   // Only the shell receives this token (through the ready line). It gates the
   // loopback web UI when allow_web_client is off.
   const std::string client_token = generate_token();
@@ -894,6 +907,7 @@ int main(int argc, char** argv) {
 
   api_deps deps;
   deps.bound_port = bound_port;
+  deps.tls_enabled = tls_enabled;
   deps.ui = ui_preferences;
   deps.discovery = discovery;
   deps.serve_web = !web_root.empty();
@@ -1104,18 +1118,6 @@ int main(int argc, char** argv) {
   std::signal(SIGINT, on_signal);
   std::signal(SIGTERM, on_signal);
 
-#if !UVCPP_OPENSSL_ENABLE
-  // The core may have its own OpenSSL (it generates the device certificate),
-  // but HTTPS is served by libuvcpp. A libuvcpp built without TLS has no
-  // enable_ssl at all, so the settings must report encryption as unavailable
-  // instead of failing to compile or silently serving plain HTTP.
-  if (tls_enabled) {
-    std::fprintf(stderr,
-                 "molink tls: libuvcpp was built without TLS; encryption is "
-                 "unavailable\n");
-    tls_enabled = false;
-  }
-#endif
 #if UVCPP_OPENSSL_ENABLE
   if (tls_enabled) {
     app.enable_ssl(tls.cert_path, tls.key_path);
@@ -1145,6 +1147,12 @@ int main(int argc, char** argv) {
     std::cerr << "molink-core: failed to listen on "
               << format_url_host(cfg.host) << ":"
               << cfg.port << " (libuv error " << rc << ")\n";
+    // Machine-readable for the shells: a core they spawned lost the port to
+    // one that is already running (the moLinkSession service/helper owns it).
+    // They probe /api/device and adopt that core instead of waiting for a
+    // ready line that will never come.
+    std::cout << "{\"event\":\"busy\",\"port\":" << cfg.port << "}"
+              << std::endl;
     note_exit_reason(exit_reason::listen_failed);
     log_app_exit("listen-failed", 1);
     return 1;
