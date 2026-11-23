@@ -602,7 +602,22 @@ if(MOLINK_BUILD_CORE)
     target_compile_definitions(molink-core PRIVATE MOLINK_HAVE_FUSE=1)
     target_include_directories(molink-core PRIVATE ${FUSE3_INCLUDE_DIRS})
     target_link_directories(molink-core PRIVATE ${FUSE3_LIBRARY_DIRS})
-    target_link_libraries(molink-core PRIVATE ${FUSE3_LIBRARIES})
+    # Link the static archive when the distribution ships one. The SONAME of
+    # the shared library is not stable across releases (3.14 exports
+    # libfuse3.so.3, 3.16 libfuse3.so.4), so a package built on a newer runner
+    # refuses to start on an older target with "libfuse3.so.4: cannot open
+    # shared object file". The archive removes the dependency entirely.
+    find_library(MOLINK_FUSE3_STATIC NAMES libfuse3.a fuse3
+      PATHS ${FUSE3_LIBRARY_DIRS} NO_DEFAULT_PATH)
+    if(MOLINK_FUSE3_STATIC AND MOLINK_FUSE3_STATIC MATCHES "\\.a$")
+      target_link_libraries(molink-core PRIVATE ${MOLINK_FUSE3_STATIC})
+      set(MOLINK_FUSE3_STATIC_LINKED TRUE)
+      message(STATUS "molink: FUSE linked statically (${MOLINK_FUSE3_STATIC})")
+    else()
+      target_link_libraries(molink-core PRIVATE ${FUSE3_LIBRARIES})
+      set(MOLINK_FUSE3_STATIC_LINKED FALSE)
+      message(STATUS "molink: FUSE linked against libfuse3 at runtime")
+    endif()
     message(STATUS "molink: FUSE virtual clipboard enabled")
   else()
     target_compile_definitions(molink-core PRIVATE MOLINK_HAVE_FUSE=0)
