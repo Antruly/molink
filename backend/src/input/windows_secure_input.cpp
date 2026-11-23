@@ -1,5 +1,5 @@
 #include "input/windows_secure_input.h"
-#include "input/key_alias.h"
+#include "input/keymap.h"
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -48,58 +48,15 @@ bool send_command(const std::string& command, std::string* reply = nullptr) {
   return false;
 }
 
-int vk_from_code(const std::string& raw_code) {
-  // The lock/UAC desktop goes through the same alias rules as the normal
-  // backend, so a combo sent by an older client works there too.
-  const std::string code = canonical_key_code(raw_code);
-  if (code.size() == 4 && code.compare(0, 3, "Key") == 0) {
-    return std::toupper(static_cast<unsigned char>(code[3]));
-  }
-  if (code.size() == 6 && code.compare(0, 5, "Digit") == 0) {
-    return code[5];
-  }
-  if (code.size() >= 2 && code[0] == 'F') {
-    const int number = std::atoi(code.c_str() + 1);
-    if (number >= 1 && number <= 12) return VK_F1 + number - 1;
-  }
-  static const struct {
-    const char* code;
-    int vk;
-  } keys[] = {
-      {"Space", VK_SPACE},          {"Enter", VK_RETURN},
-      {"Tab", VK_TAB},              {"Escape", VK_ESCAPE},
-      {"Backspace", VK_BACK},       {"Delete", VK_DELETE},
-      {"Insert", VK_INSERT},        {"Home", VK_HOME},
-      {"End", VK_END},              {"PageUp", VK_PRIOR},
-      {"PageDown", VK_NEXT},        {"ArrowLeft", VK_LEFT},
-      {"ArrowRight", VK_RIGHT},     {"ArrowUp", VK_UP},
-      {"ArrowDown", VK_DOWN},       {"ShiftLeft", VK_LSHIFT},
-      {"ShiftRight", VK_RSHIFT},    {"ControlLeft", VK_LCONTROL},
-      {"ControlRight", VK_RCONTROL},{"AltLeft", VK_LMENU},
-      {"AltRight", VK_RMENU},       {"MetaLeft", VK_LWIN},
-      {"MetaRight", VK_RWIN},       {"CapsLock", VK_CAPITAL},
-      {"Minus", VK_OEM_MINUS},      {"Equal", VK_OEM_PLUS},
-      {"BracketLeft", VK_OEM_4},    {"BracketRight", VK_OEM_6},
-      {"Backslash", VK_OEM_5},      {"Semicolon", VK_OEM_1},
-      {"Quote", VK_OEM_7},          {"Backquote", VK_OEM_3},
-      {"Comma", VK_OEM_COMMA},      {"Period", VK_OEM_PERIOD},
-      {"Slash", VK_OEM_2},          {"Numpad0", VK_NUMPAD0},
-      {"Numpad1", VK_NUMPAD1},      {"Numpad2", VK_NUMPAD2},
-      {"Numpad3", VK_NUMPAD3},      {"Numpad4", VK_NUMPAD4},
-      {"Numpad5", VK_NUMPAD5},      {"Numpad6", VK_NUMPAD6},
-      {"Numpad7", VK_NUMPAD7},      {"Numpad8", VK_NUMPAD8},
-      {"Numpad9", VK_NUMPAD9},      {"NumpadDecimal", VK_DECIMAL},
-      {"NumpadAdd", VK_ADD},        {"NumpadSubtract", VK_SUBTRACT},
-      {"NumpadMultiply", VK_MULTIPLY},
-      {"NumpadDivide", VK_DIVIDE},  {"NumpadComma", VK_SEPARATOR},
-      {"NumpadEqual", VK_OEM_NEC_EQUAL},
-      {"IntlBackslash", VK_OEM_102}, {"IntlRo", VK_OEM_102},
-      {"IntlYen", VK_OEM_5},
-  };
-  for (const auto& key : keys) {
-    if (code == key.code) return key.vk;
-  }
-  return 0;
+/// Resolve through the shared table so the lock/UAC desktop accepts the same
+/// keys as the normal backend. The pipe carries a VK plus the extended flag;
+/// scan-code-only keys (Power/WakeUp) cannot be expressed there.
+bool vk_from_code(const std::string& code, WORD& vk, bool& extended) {
+  const key_lookup mapping = lookup_key(keymap_platform::windows, code);
+  if (!mapping.found || mapping.unsupported || mapping.scan_code) return false;
+  vk = static_cast<WORD>(mapping.value);
+  extended = mapping.extended;
+  return true;
 }
 
 class secure_input final : public input_injector {
@@ -156,10 +113,12 @@ class secure_input final : public input_injector {
   }
 
   status key(const std::string& code, bool down) override {
-    const int vk = vk_from_code(code);
-    if (vk == 0) return status::rejected;
+    WORD vk = 0;
+    bool extended = false;
+    if (!vk_from_code(code, vk, extended)) return status::rejected;
+    // The fourth field is optional for an older helper, which ignores it.
     return send_command("key " + std::to_string(vk) + " " +
-                        (down ? "1" : "0"))
+                        (down ? "1" : "0") + " " + (extended ? "1" : "0"))
                ? status::ok
                : status::unavailable;
   }

@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <mutex>
 #include <set>
@@ -16,7 +17,7 @@
 #include <vector>
 
 #include "util.h"
-#include "input/key_alias.h"
+#include "input/keymap.h"
 
 namespace molink {
 namespace {
@@ -30,63 +31,10 @@ using XTestFakeKeyEventFn = int (*)(Display*, unsigned int, int,
                                     unsigned long);
 using XTestQueryExtensionFn = int (*)(Display*, int*, int*, int*, int*);
 
-bool starts_with(const std::string& s, const char* prefix) {
-  return s.rfind(prefix, 0) == 0;
-}
-
 /// Map a browser KeyboardEvent.code to an X keysym name. The browser sends the
 /// physical key, so the base (unshifted) symbol is correct: modifiers are
-/// injected as separate key events, and the X server applies them.
-std::string keysym_name(const std::string& raw_code) {
-  const std::string code = canonical_key_code(raw_code);
-  if (code.size() == 4 && starts_with(code, "Key")) {
-    return std::string(1, static_cast<char>(code[3] - 'A' + 'a'));
-  }
-  if (code.size() == 6 && starts_with(code, "Digit")) {
-    return std::string(1, code[5]);
-  }
-
-  struct Named {
-    const char* code;
-    const char* keysym;
-  };
-  static const Named kNamed[] = {
-      {"Enter", "Return"},        {"NumpadEnter", "KP_Enter"},
-      {"Backspace", "BackSpace"}, {"Tab", "Tab"},
-      {"Space", "space"},         {"Escape", "Escape"},
-      {"Delete", "Delete"},       {"Insert", "Insert"},
-      {"Home", "Home"},           {"End", "End"},
-      {"PageUp", "Prior"},        {"PageDown", "Next"},
-      {"ArrowLeft", "Left"},      {"ArrowRight", "Right"},
-      {"ArrowUp", "Up"},          {"ArrowDown", "Down"},
-      {"ShiftLeft", "Shift_L"},   {"ShiftRight", "Shift_R"},
-      {"ControlLeft", "Control_L"}, {"ControlRight", "Control_R"},
-      {"AltLeft", "Alt_L"},       {"AltRight", "Alt_R"},
-      {"MetaLeft", "Super_L"},    {"MetaRight", "Super_R"},
-      {"CapsLock", "Caps_Lock"},  {"NumLock", "Num_Lock"},
-      {"ScrollLock", "Scroll_Lock"}, {"PrintScreen", "Print"},
-      {"Pause", "Pause"},         {"ContextMenu", "Menu"},
-      {"Minus", "minus"},         {"Equal", "equal"},
-      {"BracketLeft", "bracketleft"}, {"BracketRight", "bracketright"},
-      {"Backslash", "backslash"}, {"Semicolon", "semicolon"},
-      {"Quote", "apostrophe"},    {"Backquote", "grave"},
-      {"Comma", "comma"},         {"Period", "period"},
-      {"Slash", "slash"},
-  };
-  for (const Named& n : kNamed) {
-    if (code == n.code) return n.keysym;
-  }
-  if (code.size() >= 2 && code[0] == 'F') {
-    // F1..F24
-    const std::string digits = code.substr(1);
-    if (!digits.empty() &&
-        std::all_of(digits.begin(), digits.end(),
-                    [](char c) { return c >= '0' && c <= '9'; })) {
-      return code;
-    }
-  }
-  return std::string();
-}
+/// injected as separate key events, and the X server applies them. The table
+/// lives in keymap.cpp so the same data is unit-tested on every platform.
 
 class x11_input final : public input_injector {
  public:
@@ -168,16 +116,49 @@ class x11_input final : public input_injector {
   status key(const std::string& code, bool down) override {
     std::lock_guard<std::mutex> lock(mutex_);
     if (display_ == nullptr) return status::unavailable;
-    const std::string name = keysym_name(code);
-    if (name.empty()) return status::rejected;
-    const KeySym symbol = XStringToKeysym(name.c_str());
+    const key_lookup mapping = lookup_key(keymap_platform::x11, code);
+    // Unknown and explicitly unsupported codes both reject, so the host can
+    // name the key in its `bad_input` reply instead of dropping it.
+    if (!mapping.found || mapping.unsupported || mapping.keysym.empty()) {
+      return status::rejected;
+    }
+    const KeySym symbol = XStringToKeysym(mapping.keysym.c_str());
     if (symbol == NoSymbol) return status::rejected;
     const KeyCode keycode = XKeysymToKeycode(display_, symbol);
     if (keycode == 0) return status::rejected;
+
+    const bool numlock_sensitive = key_depends_on_numlock(code);
+    // An explicit NumLock press owns the state from here on.
+    if (mapping.keysym == "Num_Lock") {
+      numlock_forced_ = false;
+      numlock_held_.clear();
+    }
+    if (down && numlock_sensitive && numlock_keycode_ != 0 && !numlock_on()) {
+      // With NumLock off the keypad keycode resolves to KP_End/KP_Down/... .
+      // Turn NumLock on for the press and restore the host state on release.
+      tap_numlock();
+      numlock_forced_ = true;
+      std::fprintf(stderr,
+                   "input: numlock was off; enabled it for %s (restored on "
+                   "release)\n",
+                   code.c_str());
+    }
+    if (numlock_sensitive) {
+      if (down) numlock_held_.insert(keycode);
+      else numlock_held_.erase(keycode);
+    }
+
     fake_key_(display_, keycode, down ? True : False, CurrentTime);
     XFlush(display_);
     if (down) held_keys_.insert(keycode);
     else held_keys_.erase(keycode);
+
+    if (!down && numlock_sensitive && numlock_held_.empty() && numlock_forced_) {
+      if (numlock_on()) tap_numlock();
+      numlock_forced_ = false;
+      std::fprintf(stderr,
+                   "input: numlock restored to off after keypad input\n");
+    }
     return status::ok;
   }
 
@@ -236,11 +217,44 @@ class x11_input final : public input_injector {
       fake_key_(display_, k, False, CurrentTime);
     }
     held_keys_.clear();
+    // Never strand the host with NumLock on because the client disconnected
+    // while a keypad key was held.
+    if (numlock_forced_) {
+      if (numlock_on()) tap_numlock();
+      numlock_forced_ = false;
+      std::fprintf(stderr,
+                   "input: numlock restored to off after input release\n");
+    }
+    numlock_held_.clear();
     XFlush(display_);
   }
 
  private:
   x11_input() = default;
+
+  /// NumLock is a server lock modifier. Find the modifier bit it occupies so
+  /// the state can be queried without assuming Mod2 (layouts differ).
+  bool numlock_on() {
+    if (numlock_mask_ == 0) return true;
+    Window root = None;
+    Window child = None;
+    int root_x = 0;
+    int root_y = 0;
+    int win_x = 0;
+    int win_y = 0;
+    unsigned int state = 0;
+    if (!XQueryPointer(display_, DefaultRootWindow(display_), &root, &child,
+                       &root_x, &root_y, &win_x, &win_y, &state)) {
+      return true;  // cannot tell; do not toggle the host state blindly
+    }
+    return (state & numlock_mask_) != 0;
+  }
+
+  void tap_numlock() {
+    fake_key_(display_, numlock_keycode_, True, CurrentTime);
+    fake_key_(display_, numlock_keycode_, False, CurrentTime);
+    XSync(display_, False);
+  }
 
   bool init(std::string& err) {
     lib_ = dlopen("libXtst.so.6", RTLD_NOW | RTLD_LOCAL);
@@ -270,6 +284,21 @@ class x11_input final : public input_injector {
     }
     screen_ = DefaultScreen(display_);
 
+    numlock_keycode_ = XKeysymToKeycode(display_, XK_Num_Lock);
+    if (numlock_keycode_ != 0) {
+      if (XModifierKeymap* map = XGetModifierMapping(display_)) {
+        for (int mod = 0; mod < 8; ++mod) {
+          for (int key = 0; key < map->max_keypermod; ++key) {
+            if (map->modifiermap[mod * map->max_keypermod + key] ==
+                numlock_keycode_) {
+              numlock_mask_ |= 1u << mod;
+            }
+          }
+        }
+        XFreeModifiermap(map);
+      }
+    }
+
     int event_base = 0;
     int error_base = 0;
     int major = 0;
@@ -294,6 +323,10 @@ class x11_input final : public input_injector {
   std::mutex mutex_;
   std::set<int> held_buttons_;
   std::set<unsigned> held_keys_;
+  KeyCode numlock_keycode_ = 0;
+  unsigned int numlock_mask_ = 0;
+  std::set<KeyCode> numlock_held_;
+  bool numlock_forced_ = false;
 };
 
 }  // namespace

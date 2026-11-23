@@ -1,5 +1,5 @@
 #include "input/input.h"
-#include "input/key_alias.h"
+#include "input/keymap.h"
 
 #if defined(_WIN32)
 
@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <set>
 #include <string>
 #include <vector>
@@ -22,100 +23,49 @@
 namespace molink {
 namespace {
 
-struct NamedKey {
-  const char* code;
-  WORD virtual_key;
+// The table lives in keymap.cpp so the same data can be unit-tested on every
+// platform (the Windows table is checked against the real VK_ constants when
+// compiled with windows.h).
+struct held_key {
+  unsigned int value;
+  bool scan_code;
   bool extended;
+  bool operator<(const held_key& other) const {
+    if (value != other.value) return value < other.value;
+    if (scan_code != other.scan_code) return scan_code < other.scan_code;
+    return extended < other.extended;
+  }
 };
 
-const NamedKey kNamedKeys[] = {
-    {"Enter", VK_RETURN, false},       {"NumpadEnter", VK_RETURN, true},
-    {"Backspace", VK_BACK, false},     {"Tab", VK_TAB, false},
-    {"Space", VK_SPACE, false},        {"Escape", VK_ESCAPE, false},
-    {"Delete", VK_DELETE, true},       {"Insert", VK_INSERT, true},
-    {"Home", VK_HOME, true},           {"End", VK_END, true},
-    {"PageUp", VK_PRIOR, true},        {"PageDown", VK_NEXT, true},
-    {"ArrowLeft", VK_LEFT, true},      {"ArrowRight", VK_RIGHT, true},
-    {"ArrowUp", VK_UP, true},          {"ArrowDown", VK_DOWN, true},
-    {"ShiftLeft", VK_LSHIFT, false},   {"ShiftRight", VK_RSHIFT, false},
-    {"ControlLeft", VK_LCONTROL, false}, {"ControlRight", VK_RCONTROL, false},
-    {"AltLeft", VK_LMENU, false},      {"AltRight", VK_RMENU, true},
-    {"MetaLeft", VK_LWIN, true},       {"MetaRight", VK_RWIN, true},
-    {"CapsLock", VK_CAPITAL, false},   {"NumLock", VK_NUMLOCK, true},
-    {"ScrollLock", VK_SCROLL, false},  {"PrintScreen", VK_SNAPSHOT, true},
-    {"Pause", VK_PAUSE, false},        {"ContextMenu", VK_APPS, true},
-    {"Minus", VK_OEM_MINUS, false},    {"Equal", VK_OEM_PLUS, false},
-    {"BracketLeft", VK_OEM_4, false},  {"BracketRight", VK_OEM_6, false},
-    {"Backslash", VK_OEM_5, false},    {"Semicolon", VK_OEM_1, false},
-    {"Quote", VK_OEM_7, false},        {"Backquote", VK_OEM_3, false},
-    {"Comma", VK_OEM_COMMA, false},    {"Period", VK_OEM_PERIOD, false},
-    {"Slash", VK_OEM_2, false},
-    // Common codes the first table missed. Numpad digits are not extended;
-    // NumpadDivide is (it sits in the navigation block).
-    {"Numpad0", VK_NUMPAD0, false},    {"Numpad1", VK_NUMPAD1, false},
-    {"Numpad2", VK_NUMPAD2, false},    {"Numpad3", VK_NUMPAD3, false},
-    {"Numpad4", VK_NUMPAD4, false},    {"Numpad5", VK_NUMPAD5, false},
-    {"Numpad6", VK_NUMPAD6, false},    {"Numpad7", VK_NUMPAD7, false},
-    {"Numpad8", VK_NUMPAD8, false},    {"Numpad9", VK_NUMPAD9, false},
-    {"NumpadDecimal", VK_DECIMAL, false},
-    {"NumpadAdd", VK_ADD, false},      {"NumpadSubtract", VK_SUBTRACT, false},
-    {"NumpadMultiply", VK_MULTIPLY, false},
-    {"NumpadDivide", VK_DIVIDE, true}, {"NumpadComma", VK_SEPARATOR, false},
-    {"NumpadEqual", VK_OEM_NEC_EQUAL, false},
-    {"IntlBackslash", VK_OEM_102, false},
-    {"IntlRo", VK_OEM_102, false},      {"IntlYen", VK_OEM_5, false},
-    // ISO-level 3 key; Windows reports AltGraph as a modifier.
-    {"AltGraph", VK_RMENU, true},
-    {"AudioVolumeMute", VK_VOLUME_MUTE, false},
-    {"AudioVolumeDown", VK_VOLUME_DOWN, false},
-    {"AudioVolumeUp", VK_VOLUME_UP, false},
-    {"MediaTrackNext", VK_MEDIA_NEXT_TRACK, false},
-    {"MediaTrackPrevious", VK_MEDIA_PREV_TRACK, false},
-    {"MediaStop", VK_MEDIA_STOP, false},
-    {"MediaPlayPause", VK_MEDIA_PLAY_PAUSE, false},
-    {"BrowserBack", VK_BROWSER_BACK, false},
-    {"BrowserForward", VK_BROWSER_FORWARD, false},
-    {"BrowserRefresh", VK_BROWSER_REFRESH, false},
-    {"BrowserHome", VK_BROWSER_HOME, false},
-    {"Sleep", VK_SLEEP, false},         {"Help", VK_HELP, false},
-};
+INPUT key_input(unsigned int value, bool scan_code, bool extended, bool down) {
+  INPUT input{};
+  input.type = INPUT_KEYBOARD;
+  if (scan_code) {
+    // Power/WakeUp have no virtual key; their E0 scan code is the only way to
+    // send them. KEYEVENTF_EXTENDEDKEY writes the E0 prefix.
+    input.ki.wVk = 0;
+    input.ki.wScan = static_cast<WORD>(value);
+    input.ki.dwFlags |= KEYEVENTF_SCANCODE;
+  } else {
+    input.ki.wVk = static_cast<WORD>(value);
+    input.ki.wScan = static_cast<WORD>(
+        MapVirtualKeyW(static_cast<UINT>(value), MAPVK_VK_TO_VSC));
+  }
+  if (extended) input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+  if (!down) input.ki.dwFlags |= KEYEVENTF_KEYUP;
+  return input;
+}
 
-bool resolve_key(const std::string& raw_code, WORD& virtual_key, bool& extended) {
-  // Also accept OSLeft/OSRight, Win/Super/超 and bare letters/digits from
-  // older browsers and virtual keyboards.
-  const std::string code = canonical_key_code(raw_code);
-  if (code.size() == 4 && code.rfind("Key", 0) == 0) {
-    virtual_key = static_cast<WORD>(code[3]);  // 'A'..'Z'
-    extended = false;
-    return true;
-  }
-  if (code.size() == 6 && code.rfind("Digit", 0) == 0) {
-    virtual_key = static_cast<WORD>(code[5]);  // '0'..'9'
-    extended = false;
-    return true;
-  }
-  if (code.size() >= 2 && code[0] == 'F') {
-    const std::string digits = code.substr(1);
-    const bool numeric = !digits.empty() &&
-                         std::all_of(digits.begin(), digits.end(),
-                                     [](char c) { return c >= '0' && c <= '9'; });
-    if (numeric) {
-      const int index = std::stoi(digits);
-      if (index >= 1 && index <= 24) {
-        virtual_key = static_cast<WORD>(VK_F1 + index - 1);
-        extended = false;
-        return true;
-      }
-    }
-  }
-  for (const NamedKey& named : kNamedKeys) {
-    if (code == named.code) {
-      virtual_key = named.virtual_key;
-      extended = named.extended;
-      return true;
-    }
-  }
-  return false;
+/// NumLock toggle of the console session.
+///
+/// GetKeyState reports the state as of the last message this thread removed
+/// from its queue. The core's I/O thread never pumps messages, so that value
+/// can be frozen at thread start; GetAsyncKeyState reads the live toggle. Use
+/// it first and fall back to GetKeyState when it has nothing to say.
+bool read_numlock_raw() {
+  const SHORT async_state = GetAsyncKeyState(VK_NUMLOCK);
+  if (async_state != 0) return (async_state & 0x0001) != 0;
+  return (GetKeyState(VK_NUMLOCK) & 0x0001) != 0;
 }
 
 class windows_input final : public input_injector {
@@ -221,21 +171,65 @@ class windows_input final : public input_injector {
   }
 
   status key(const std::string& code, bool down) override {
-    WORD virtual_key = 0;
-    bool extended = false;
-    if (!resolve_key(code, virtual_key, extended)) return status::rejected;
+    const key_lookup mapping = lookup_key(keymap_platform::windows, code);
+    // Unsupported codes (Again/Undo/Cut/Copy/Paste/Find) and unknown codes
+    // both reject: the host names the key in `bad_input`, it never drops it.
+    if (!mapping.found || mapping.unsupported) return status::rejected;
 
-    INPUT input{};
-    input.type = INPUT_KEYBOARD;
-    input.ki.wVk = virtual_key;
-    input.ki.wScan = static_cast<WORD>(MapVirtualKeyW(virtual_key, MAPVK_VK_TO_VSC));
-    input.ki.dwFlags = 0;
-    if (!down) input.ki.dwFlags |= KEYEVENTF_KEYUP;
-    if (extended) input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+    const held_key id{mapping.value, mapping.scan_code, mapping.extended};
+    const bool numlock_sensitive =
+        !mapping.scan_code && key_depends_on_numlock(code);
+    const bool numlock_event = !mapping.scan_code && mapping.value == VK_NUMLOCK;
+    // Read before the key-down: an explicit NumLock press toggles whatever the
+    // state was. The key-up does not toggle again.
+    const bool numlock_before =
+        (numlock_event && down) ? numlock_state() : false;
 
+    // An explicit NumLock press hands control back to the client: do not undo
+    // the user's toggle when the keypad key is released.
+    if (numlock_event) {
+      numlock_forced_ = false;
+      numlock_held_.clear();
+    }
+
+    if (down && numlock_sensitive && !numlock_state()) {
+      // A Windows keypad digit with NumLock off arrives as End/Down/... .
+      // Turn NumLock on for the key press and restore the host state when the
+      // last keypad key is released.
+      if (tap_numlock(true)) {
+        numlock_forced_ = true;
+        std::fprintf(stderr,
+                     "input: numlock was off; enabled it for %s (restored on "
+                     "release)\n",
+                     code.c_str());
+      }
+    }
+    if (numlock_sensitive) {
+      if (down) numlock_held_.insert(static_cast<WORD>(mapping.value));
+      else numlock_held_.erase(static_cast<WORD>(mapping.value));
+    }
+
+    INPUT input =
+        key_input(mapping.value, mapping.scan_code, mapping.extended, down);
     if (SendInput(1, &input, sizeof(input)) != 1) return status::unavailable;
-    if (down) held_keys_.insert(virtual_key);
-    else held_keys_.erase(virtual_key);
+    if (down) held_keys_.insert(id);
+    else held_keys_.erase(id);
+    if (numlock_event && down) {
+      // The injected key-down toggled the host state; remember the expected
+      // result instead of trusting an async read that may not have caught up.
+      numlock_shadow_ = !numlock_before;
+      numlock_shadow_valid_ = true;
+      numlock_changed_at_ = GetTickCount64();
+    }
+
+    if (!down && numlock_sensitive && numlock_held_.empty() && numlock_forced_) {
+      // Only restore if the compensation really took effect; tapping a
+      // NumLock that is already off would turn it on.
+      if (numlock_state()) tap_numlock(false);
+      numlock_forced_ = false;
+      std::fprintf(stderr,
+                   "input: numlock restored to off after keypad input\n");
+    }
     return status::ok;
   }
 
@@ -285,19 +279,60 @@ class windows_input final : public input_injector {
       SendInput(1, &input, sizeof(input));
     }
     held_buttons_.clear();
-    for (const WORD key : held_keys_) {
-      INPUT input{};
-      input.type = INPUT_KEYBOARD;
-      input.ki.wVk = key;
-      input.ki.dwFlags = KEYEVENTF_KEYUP;
+    for (const held_key& key : held_keys_) {
+      INPUT input = key_input(key.value, key.scan_code, key.extended, false);
       SendInput(1, &input, sizeof(input));
     }
     held_keys_.clear();
+    // Never strand the host with NumLock on because a client disconnected
+    // while a keypad key was held.
+    if (numlock_forced_) {
+      if (numlock_state()) tap_numlock(false);
+      numlock_forced_ = false;
+      std::fprintf(stderr,
+                   "input: numlock restored to off after input release\n");
+    }
+    numlock_held_.clear();
   }
 
  private:
+  /// The toggle as this injector last saw or set it.
+  ///
+  /// GetAsyncKeyState can lag a SendInput toggle by a few milliseconds. A
+  /// burst of keypad keys then reads the old value and skips the
+  /// compensation for every other key. Trust our own writes for a short
+  /// window, and re-read the OS state afterwards so a physical NumLock press
+  /// is still noticed.
+  bool numlock_state() {
+    const ULONGLONG now = GetTickCount64();
+    if (numlock_shadow_valid_ && now - numlock_changed_at_ < 1000) {
+      return numlock_shadow_;
+    }
+    numlock_shadow_ = read_numlock_raw();
+    numlock_shadow_valid_ = true;
+    return numlock_shadow_;
+  }
+
+  /// Tap NumLock so the host ends in @p target_on, then remember that result.
+  bool tap_numlock(bool target_on) {
+    INPUT inputs[2] = {key_input(VK_NUMLOCK, false, true, true),
+                       key_input(VK_NUMLOCK, false, true, false)};
+    if (SendInput(2, inputs, sizeof(INPUT)) != 2) return false;
+    numlock_shadow_ = target_on;
+    numlock_shadow_valid_ = true;
+    numlock_changed_at_ = GetTickCount64();
+    // Let the input thread apply the toggle before the keypad key follows.
+    Sleep(1);
+    return true;
+  }
+
   std::set<int> held_buttons_;
-  std::set<WORD> held_keys_;
+  std::set<held_key> held_keys_;
+  std::set<WORD> numlock_held_;
+  bool numlock_forced_ = false;
+  bool numlock_shadow_ = false;
+  bool numlock_shadow_valid_ = false;
+  ULONGLONG numlock_changed_at_ = 0;
   RECT display_{};
   bool has_display_ = false;
 };
