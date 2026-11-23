@@ -29,7 +29,18 @@
 #  define NIL ((unsigned char *)0)      /* for no output option */
 #endif
 
+/* C linkage: puff.c is C, but the native shell's release command also
+   compiles it as C++ (g++ treats .c as C++). The declaration and definition
+   must agree in both cases. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 int puff(unsigned char *dest,           /* pointer to destination pointer */
          unsigned long *destlen,        /* amount of output space */
          const unsigned char *source,   /* pointer to source data pointer */
          unsigned long *sourcelen);     /* amount of input available */
+
+#ifdef __cplusplus
+}
+#endif

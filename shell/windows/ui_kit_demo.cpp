@@ -36,6 +36,7 @@
 #include <vector>
 
 #include "avatar_image.h"
+#include "preset_message.h"
 #include "session_client.h"
 #include "ui_kit.h"
 
@@ -110,7 +111,9 @@ struct app_state {
   bool files_open = false;
   float audio_volume = 0.8f;
   int display_mode = 0;               // 0 fit, 1 actual, 2 fill
-  int fps_index = 2;                  // 自动 / 15 / 30 / 60
+  // -1 = show the tier's own rate (smooth starts at 24 fps); 0/1/2/3 are the
+  // legacy 自动/15/30/60 choices.
+  int fps_index = -1;
   int codec_index = 0;                // 自动 / H.264 / VP9 / VP8 / AV1
   int res_index = 0;
   int open_menu = -1;  // -1 none, 0 fps, 1 codec, 2 resolution, 3 format
@@ -122,11 +125,15 @@ struct app_state {
   bool quality_open = false;
   int rate_mode = 0;        // 0 auto, 1 cq, 2 cbr
   int qp = 0;               // 0 = follow the preset
-  int bitrate_kbps = 0;     // 0 = follow the preset
-  int fps_value = 30;
+  int bitrate_kbps = 6000;  // smooth's plan value until a tier is chosen
+  int fps_value = 24;       // smooth's plan rate (Web default tier)
   int format_index = 0;     // preset / gray8 / rgb565 / bgra
+  std::string chroma = "420";  // plan chroma; advanced fields derive from it
+  /// True after the user moves a knob. Selecting a tier clears it, so the
+  /// fixed plans are sent with their own fields rather than a custom mix.
+  bool custom_active = false;
   int dragging_slider = -1; // 0 qp, 1 bitrate, 2 fps
-  D2D1_RECT_F qp_panel{}, qp_close{}, qp_preset[7]{}, qp_rate[3]{},
+  D2D1_RECT_F qp_panel{}, qp_close{}, qp_preset[6]{}, qp_rate[3]{},
       qp_slider[3]{}, qp_format{}, qp_reset{};
 
   D2D1_RECT_F stage{};
@@ -183,7 +190,7 @@ struct app_state {
   size_t address_caret = 14, code_caret = 0;
   bool caret_on = true;
   ULONGLONG caret_tick = 0;
-  int preset = 2;
+  int preset = 1;  // smooth, the Web's DEFAULT_SESSION_PRESET
   float hover_x = -1, hover_y = -1;
 
   D2D1_RECT_F hit_theme[3]{}, hit_tab[3]{}, hit_settings{}, hit_modal_close{},
@@ -235,7 +242,7 @@ struct app_state {
   /// 0 stream, 1 tiles. There is no adaptive middle mode.
   int video_mode = 1;
   D2D1_RECT_F hit_seg_video[2]{};
-  int settings_quality = 0;
+  int settings_quality = 1;  // smooth
   std::wstring set_device_name = L"INTERNET-REMOTE";
   std::wstring set_tcp = L"28418";
   std::wstring set_udp = L"28422";
@@ -462,11 +469,12 @@ size_t caret_for_field(int field, float x);
 void clear_text_selection();
 void request_files_browse();
 
-const wchar_t* kPresets[] = {L"极速", L"流畅", L"平衡", L"清晰",
-                             L"超清", L"无损", L"自适应"};
-/// Quality preset names as the core expects them (QualityPanel PRESETS).
-const char* kPresetModes[] = {"turbo", "smooth", "balanced", "quality",
-                              "ultra", "lossless", "auto"};
+/// Web `SESSION_PRESETS` order, with the same zh-CN labels. The wire ids live
+/// in `molink::preset` so the JSON and the table have one source.
+const wchar_t* kPresets[] = {L"极速", L"流畅", L"标准",
+                             L"高清", L"真彩色", L"自动"};
+constexpr int kPresetCount =
+    static_cast<int>(molink::preset::plan_count);
 const wchar_t* kFpsChoices[] = {L"自动", L"15 fps", L"30 fps", L"60 fps"};
 // The native client decodes tiles only; the stream entries stay visible but
 // disabled so the menu matches the web's list without offering codecs that
@@ -849,19 +857,99 @@ bool menu_disabled(int which, int index) {
   return false;
 }
 
-/// Knob values are "follow the preset" until the user moves them.
-bool quality_custom() {
-  return g.qp != 0 || g.bitrate_kbps != 0 || g.rate_mode != 0 ||
-         g.format_index != 0;
-}
+/// True only after the user changes a knob. A tier selection clears it even
+/// when the plan's own values (truecolor's cq/bgra) are non-zero: the fixed
+/// payload must come from the plan, not from a custom mix.
+bool quality_custom() { return g.custom_active; }
 
 const char* rate_mode_name(int mode) {
   return mode == 0 ? "auto" : (mode == 1 ? "cq" : "cbr");
 }
 
+int rate_mode_index(const char* name) {
+  if (name == nullptr) return 0;
+  if (std::strcmp(name, "cq") == 0) return 1;
+  if (std::strcmp(name, "cbr") == 0) return 2;
+  return 0;
+}
+
 const char* format_name(int index) {
   return index == 0 ? "preset"
                     : (index == 1 ? "gray8" : (index == 2 ? "rgb565" : "bgra"));
+}
+
+int format_index_of(const char* name) {
+  if (name == nullptr) return 0;
+  if (std::strcmp(name, "gray8") == 0) return 1;
+  if (std::strcmp(name, "rgb565") == 0) return 2;
+  if (std::strcmp(name, "bgra") == 0 || std::strcmp(name, "rgb24") == 0) {
+    return 3;
+  }
+  return 0;
+}
+
+molink::preset::preset_id preset_id_at(int index) {
+  if (index < 0 || index >= kPresetCount) index = 1;  // smooth
+  return molink::preset::plans()[index].id;
+}
+
+/// Mirrors the Web's `advancedFormatForChroma` inverse for the one format
+/// control the native panel has. Choosing "跟随档位" restores the tier's own
+/// chroma (turbo stays gray, truecolor stays 4:4:4).
+const char* chroma_for_format(int format_index, int preset_index) {
+  switch (format_index) {
+    case 1:
+      return "gray";
+    case 2:
+      return "565";
+    case 3:
+      return "444";
+    default: {
+      const int index =
+          preset_index < 0 || preset_index >= kPresetCount ? 1 : preset_index;
+      return molink::preset::plans()[index].chroma;
+    }
+  }
+}
+
+/// Resolves the selected tier into the panel's fields, exactly like the Web's
+/// `defaultAdvancedParams()`: the knobs keep the plan's values so touching one
+/// produces a custom message that starts from this tier.
+void load_preset_plan(int index) {
+  if (index < 0 || index >= kPresetCount) index = 1;
+  const molink::preset::preset_plan& plan = molink::preset::plans()[index];
+  g.preset = index;
+  g.settings_quality = index;
+  g.custom_active = false;
+  g.qp = plan.qp;
+  g.bitrate_kbps = plan.bitrate_kbps;
+  g.rate_mode = rate_mode_index(plan.rate_mode);
+  g.format_index = format_index_of(plan.format);
+  g.chroma = plan.chroma;
+  g.fps_value = plan.fps;
+  g.fps_index = -1;
+}
+
+molink::preset::advanced_params advanced_params_now() {
+  molink::preset::advanced_params params;
+  params.fps = g.fps_value;
+  params.quality = g.qp;
+  params.bitrate_kbps = g.bitrate_kbps;
+  params.rate_mode = rate_mode_name(g.rate_mode);
+  params.format = format_name(g.format_index);
+  params.chroma = g.chroma;
+  // The native panel has no advanced codec selector yet; keep the host's
+  // current encoder rather than pinning one from a slider change.
+  params.codec = "auto";
+  return params;
+}
+
+std::string current_preset_json() {
+  if (g.custom_active) {
+    return molink::preset::advanced_preset_message_json(advanced_params_now());
+  }
+  return molink::preset::preset_message_json(preset_id_at(g.preset),
+                                             g.fps_value);
 }
 
 std::wstring wide_of(const std::string& text) {
@@ -1803,9 +1891,14 @@ void start_connect(const std::wstring& target, const std::wstring& code) {
   // it (never dial the host directly) so the surface gets the picture.
   const bool surface_mode =
       !g.surface_path.empty() && std::getenv("MOLINK_CORE_TOKEN") != nullptr;
+  // Resolve the viewer's current tier on the UI thread; the worker installs
+  // it before connecting so `welcome` sends the Web's session-preset payload
+  // before the first frame.
+  const std::string startup_preset = current_preset_json();
   std::thread([host, port, token, proxy, target_is_id, target_utf8,
-               generation, surface_mode, resume] {
+               generation, surface_mode, resume, startup_preset] {
     auto* client = new molink::net::session_client();
+    client->set_startup_preset(startup_preset);
     client->set_resume_token(resume);
     molink::net::session_endpoint endpoint;
     endpoint.host = host;
@@ -1924,6 +2017,7 @@ void start_connect(const std::wstring& target, const std::wstring& code) {
           // the tab instead of being swallowed by the core's relay switch.
           delete client;
           client = new molink::net::session_client();
+          client->set_startup_preset(startup_preset);
           client->set_resume_token(resume);
           result->client = client;
           client->set_stream_decoding(false);
@@ -1978,6 +2072,7 @@ void start_connect(const std::wstring& target, const std::wstring& code) {
         } else {
           delete client;
           client = new molink::net::session_client();
+          client->set_startup_preset(startup_preset);
           client->set_resume_token(resume);
           result->client = client;
           // The core decodes the stream and publishes the shared surface, so
@@ -2491,9 +2586,9 @@ void show_toast(const std::wstring& text) {
 
 void send_quality() {
   if (g.session == nullptr) return;
-  g.session->send_quality(kPresetModes[g.preset], g.fps_value, g.qp,
-                          g.bitrate_kbps, rate_mode_name(g.rate_mode),
-                          format_name(g.format_index));
+  // Fixed tiers are rebuilt from the plan on every send; custom values go
+  // through the advanced rules. Both are the Web's exact payloads.
+  g.session->send_session_preset(current_preset_json());
 }
 
 void menu_apply(int which, int index) {
@@ -2535,6 +2630,8 @@ void menu_apply(int which, int index) {
   }
   if (which == 3) {
     g.format_index = index;
+    g.chroma = chroma_for_format(index, g.preset);
+    g.custom_active = true;
     send_quality();
     return;
   }
@@ -3275,12 +3372,27 @@ void range_track(ID2D1RenderTarget* t, const palette& th,
   fill_round(t, D2D1::RectF(knob - 4, cy - 4, knob + 4, cy + 4), 4, th.ink);
 }
 
+/// The Web's "actual" line: what the host says it applied. It is an
+/// observation and never moves the selector; until the reply arrives the
+/// panel says it is waiting.
+std::wstring applied_preset_line() {
+  if (g.session == nullptr) return L"等待主机确认…";
+  const molink::preset::applied_reply reply = g.session->applied_preset();
+  if (!reply.applied) return L"等待主机确认…";
+  const std::wstring codec =
+      reply.actual.codec.empty()
+          ? std::wstring(L"—")
+          : wide_of(molink::preset::codec_label(reply.actual.codec));
+  return L"实际 " + std::to_wstring(reply.actual.fps) + L" 帧 · " + codec +
+         L" · " + wide_of(molink::preset::chroma_label(reply.actual.chroma));
+}
+
 /// Web QualityPanel as a fixed popover: 316 px wide, preset grid, rate-mode
-/// switch, three sliders, image format and reset.
+/// switch, three sliders, image format, actual values and reset.
 void draw_quality_panel(float window_w, float window_h) {
   if (!g.quality_open) return;
   const float width = 316;
-  const float height = 282;
+  const float height = 336;
   const float left =
       clampf(g.hit_quality.left, 8, (std::max)(8.0f, window_w - width - 8));
   float top = g.hit_quality.bottom + 6;
@@ -3295,19 +3407,21 @@ void draw_quality_panel(float window_w, float window_h) {
   const float inner = width - 20;
   float y = panel.top + 10;
 
-  // Header: 画质 + close.
-  text(g.target, g.small_bold, L"画质",
+  // Header: Web `session.presetTitle` + close.
+  text(g.target, g.small_bold, L"画质挡位",
        D2D1::RectF(x, y, x + 120, y + 24), g.theme->ink);
   g.qp_close = D2D1::RectF(panel.right - 34, y, panel.right - 10, y + 24);
   quiet_icon_button(g.target, *g.theme, g.qp_close, hv_qp_close, icon::close,
                     false, inside(g.qp_close, g.hover_x, g.hover_y));
   y += 24 + 8;
 
-  // Presets: 4-column grid, quiet buttons, the current one accent text.
+  // Presets: the Web's 3-column grid; 自动 sits alone on the last row,
+  // deliberately apart from the five fixed tiers.
   const float gap = 4;
-  const float cell = (inner - gap * 3) / 4;
-  for (int i = 0; i < 7; ++i) {
-    const int col = i % 4, row = i / 4;
+  const float cell = (inner - gap * 2) / 3;
+  for (int i = 0; i < kPresetCount; ++i) {
+    const int col = i == kPresetCount - 1 ? 0 : i % 3;
+    const int row = i == kPresetCount - 1 ? 2 : i / 3;
     const D2D1_RECT_F r =
         D2D1::RectF(x + col * (cell + gap), y + row * (24 + gap),
                     x + col * (cell + gap) + cell, y + row * (24 + gap) + 24);
@@ -3322,7 +3436,7 @@ void draw_quality_panel(float window_w, float window_h) {
                 : mix_color(g.theme->ink, g.theme->ink, h));
     g.qp_preset[i] = r;
   }
-  y += 24 + gap + 24 + 8;
+  y += 3 * 24 + 2 * gap + 8;
 
   // Rate mode: 自动 / 恒定质量 / 恒定码率.
   text(g.target, g.small_left, L"码率模式",
@@ -3382,6 +3496,20 @@ void draw_quality_panel(float window_w, float window_h) {
               g.open_menu == 3, 6);
   y += 24 + 8;
 
+  // Actual values reported by the host (Web `session.presetActual`). It stays
+  // on the host's values until a newer reply arrives; moving a knob changes
+  // only the controls, never this line.
+  const D2D1_RECT_F actual_box = D2D1::RectF(x, y, panel.right - 10, y + 20);
+  fill_round(g.target, actual_box, 6,
+             D2D1::ColorF(g.theme->panel.r, g.theme->panel.g,
+                          g.theme->panel.b, 0.60f));
+  stroke_round(g.target, actual_box, 6, g.theme->line_soft);
+  text(g.target, g.tiny, applied_preset_line(),
+       D2D1::RectF(actual_box.left + 6, actual_box.top,
+                   actual_box.right - 6, actual_box.bottom),
+       g.theme->muted);
+  y += 20 + 8;
+
   // Reset knobs (the web's RotateCcw button).
   g.qp_reset = D2D1::RectF(x, y, panel.right - 10, y + 24);
   const float reset_h = hover_lerp(hv_qp_reset,
@@ -3416,20 +3544,15 @@ bool quality_panel_click(float x, float y) {
     return true;
   }
   if (inside(g.qp_reset, x, y)) {
-    g.qp = 0;
-    g.bitrate_kbps = 0;
-    g.rate_mode = 0;
-    g.format_index = 0;
+    // Back to the selected tier's own values, exactly like selecting it
+    // again: the reset must not leave the panel in a custom mix.
+    load_preset_plan(g.preset);
     send_quality();
     return true;
   }
-  for (int i = 0; i < 7; ++i) {
+  for (int i = 0; i < kPresetCount; ++i) {
     if (inside(g.qp_preset[i], x, y)) {
-      g.preset = i;
-      g.qp = 0;
-      g.bitrate_kbps = 0;
-      g.rate_mode = 0;
-      g.format_index = 0;
+      load_preset_plan(i);
       send_quality();
       return true;
     }
@@ -3437,6 +3560,7 @@ bool quality_panel_click(float x, float y) {
   for (int i = 0; i < 3; ++i) {
     if (inside(g.qp_rate[i], x, y)) {
       g.rate_mode = i;
+      g.custom_active = true;
       send_quality();
       return true;
     }
@@ -3444,6 +3568,7 @@ bool quality_panel_click(float x, float y) {
   for (int i = 0; i < 3; ++i) {
     if (inside(g.qp_slider[i], x, y)) {
       g.dragging_slider = i;
+      g.custom_active = true;
       if (g.window != nullptr) SetCapture(g.window);
       // Set the value immediately, then drag from here.
       const float fraction = clampf(
@@ -5939,7 +6064,15 @@ bool create_resources(HWND window) {
   if (FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &g.factory))) {
     return false;
   }
-  if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, IID_IDWriteFactory,
+  // The Windows SDK declares IDWriteFactory with DWRITE_DECLARE_INTERFACE
+  // (a __declspec(uuid)) and publishes no `IID_IDWriteFactory` symbol, so
+  // MSVC must use __uuidof. MinGW's dwrite.h has the DEFINE_GUID instead.
+#ifdef _MSC_VER
+  const IID& dwrite_iid = __uuidof(IDWriteFactory);
+#else
+  const IID& dwrite_iid = IID_IDWriteFactory;
+#endif
+  if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, dwrite_iid,
                                  reinterpret_cast<IUnknown**>(&g.write)))) {
     return false;
   }
@@ -6716,9 +6849,9 @@ void draw_settings_modal(float w, float h) {
     y = settings_hint(
             x, y, cw,
             L"主机和链路跟得上时按这个帧率推送画面；CPU 编码不过来或网络"
-            L"传不过来时会自动降帧，恢复后逐步回到设定值。自适应跟随画质"
-            L"档位：极速 5-25  流畅/平衡 10-25  清晰/超清/无损 15  "
-            L"游戏 30-60。") +
+            L"传不过来时会自动降帧，恢复后逐步回到设定值。跟随画质档位："
+            L"极速 5-15  流畅 8-30  标准 10-30  高清 15-60  真彩色 "
+            L"10-20。") +
         6;
     static const wchar_t* fps_labels[4] = {
         L"自适应（按画质档位和负载）", L"15 帧", L"30 帧", L"60 帧"};
@@ -6734,19 +6867,18 @@ void draw_settings_modal(float w, float h) {
             L"选择会话默认使用的压缩档位；自适应会结合延迟与链路自动切换"
             L"档位。帧率由上面的平均帧率设置控制。") +
         6;
-    static const wchar_t* quality_titles[8] = {
-        L"自适应", L"极速", L"流畅", L"平衡",
-        L"清晰", L"超清", L"无损", L"游戏"};
-    static const wchar_t* quality_desc[8] = {
-        L"推荐。根据延迟，带宽和画面变化自动选择画质档位。",
-        L"黑白画面，最低带宽，适合弱网和远程运维。",
-        L"16 位色 + 快速压缩，低带宽下更流畅。",
-        L"无损色块 + 自适应压缩，日常桌面最稳妥。",
-        L"优先画质，加大压缩力度，占用更多 CPU。",
-        L"超清：原始像素不做压缩，适合高速局域网。",
-        L"无损：原始像素不做压缩，画质最好但带宽最高。",
-        L"游戏：16 位色 + 快速压缩，优先画面更新。"};
-    for (int i = 0; i < 8; ++i) {
+    // Web `SESSION_PRESETS` order and zh-CN labels/descriptions.
+    static const wchar_t* quality_titles[6] = {
+        L"极速", L"流畅", L"标准", L"高清", L"真彩色", L"自动"};
+    static const wchar_t* quality_desc[6] = {
+        L"弱网优先：低帧率、灰色画面、最低码率。",
+        L"默认：24 帧、16 位色、快速压缩，低带宽下也流畅。",
+        L"30 帧、4:2:0 视频，压缩自适应，日常桌面最稳妥。",
+        L"画质优先：30–60 帧、高质量 4:2:0 视频，靠 QP 与码率提升画质。",
+        L"真彩色（不压缩色度，使用平铺）：4:4:4 不抽样、最高质量，"
+        L"总走平铺而不是视频流，帧率降到 18 以保画质。",
+        L"按延迟、带宽和画面变化自动选挡；只有选中它才允许自适应。"};
+    for (int i = 0; i < kPresetCount; ++i) {
       const D2D1_RECT_F card =
           D2D1::RectF(x, y, x + cw, y + 58);
       settings_quality_card(card, quality_titles[i], quality_desc[i],
@@ -6944,15 +7076,10 @@ void draw_settings_modal(float w, float h) {
 }
 
 void apply_settings_quality(int index) {
-  g.settings_quality = index;
-  static const char* modes[8] = {"auto",   "turbo", "smooth", "balanced",
-                                 "quality", "ultra", "lossless", "game"};
-  if (g.session != nullptr) {
-    g.session->send_quality(modes[index], g.fps_value, 0, 0, "auto", "preset");
-  }
-  // Keep the toolbar preset in step for the seven presets it exposes.
-  static const int preset_of[8] = {6, 0, 1, 2, 3, 4, 5, 2};
-  g.preset = preset_of[index];
+  // The settings card selects the same six viewer-owned tiers as the panel;
+  // no legacy mode ids are sent any more.
+  load_preset_plan(index);
+  send_quality();
 }
 
 void settings_click(float x, float y) {
@@ -7132,7 +7259,7 @@ void settings_click(float x, float y) {
         g.menu_field = g.hit_fps_field;
         return;
       }
-      for (int i = 0; i < 8; ++i) {
+      for (int i = 0; i < kPresetCount; ++i) {
         if (inside(g.hit_quality_card[i], x, y)) {
           apply_settings_quality(i);
           return;
@@ -8815,6 +8942,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
         return 0;
       }
       if (g.dragging_slider >= 0) {
+        g.custom_active = true;
         const D2D1_RECT_F track = g.qp_slider[g.dragging_slider];
         const float fraction = clampf(
             (x - track.left) / (track.right - track.left), 0.0f, 1.0f);

@@ -11,6 +11,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "preset_message.h"
 #include "ui_kit.h"
 #include "ws_client.h"
 
@@ -152,9 +153,21 @@ class session_client {
   std::vector<file_event> take_file_events();
   /// Current uploads and downloads, newest last.
   std::vector<file_transfer_state> file_transfers();
-  /// Forwards a quality change (mode/preset plus the slider values).
-  void send_quality(const std::string& mode, int fps, int qp, int bitrate_kbps,
-                    const std::string& rate_mode, const std::string& format);
+  /// Sends a viewer-owned `session-preset` message (the JSON is built by
+  /// `molink::preset`) and asks for a keyframe afterwards, like the Web's
+  /// `requestKeyframe()` after a tier change. Returns false when the socket
+  /// is closed.
+  bool send_session_preset(const std::string& json);
+  /// The preset sent on `welcome`, before the first frame. The shell resolves
+  /// the selected tier (or custom values) with `molink::preset` and installs
+  /// it before connecting; the default is the Web's smooth tier.
+  void set_startup_preset(const std::string& json) {
+    startup_preset_json_ = json;
+  }
+  /// Last `session-preset` reply (or the retired `quality` acknowledgement
+  /// as a fallback). `applied` stays false until the host confirms; the
+  /// panel shows this without moving the user's selector.
+  preset::applied_reply applied_preset() const;
   /// Raw JSON to the session (stream-codec, display-mode, audio, input...).
   bool send_json(const std::string& text);
   /// Tile requests after hello. Disable when connecting through a local core
@@ -302,6 +315,15 @@ class session_client {
   std::wstring close_detail_;
   std::wstring path_label_;
   std::wstring protocol_label_;
+  /// The viewer's selected picture preset, sent once on `welcome` (Web sends
+  /// it before the first frame) and again on every change. Defaults to the
+  /// Web's smooth tier; the shell installs the real selection before start().
+  std::string startup_preset_json_ =
+      preset::preset_message_json(preset::default_preset(), 0);
+  bool startup_preset_sent_ = false;
+  /// Reader thread writes; the UI thread reads a copy.
+  mutable std::mutex applied_mutex_;
+  preset::applied_reply applied_;
 };
 
 }  // namespace molink::net

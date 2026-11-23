@@ -16,6 +16,11 @@
 #include <cstdio>
 #include <string>
 
+// rpcndr.h defines `small` as `char`; this file uses it as a format name.
+#ifdef small
+#undef small
+#endif
+
 namespace {
 
 // :root tokens from frontend/src/index.css
@@ -102,7 +107,7 @@ void text(ID2D1RenderTarget* t, IDWriteTextFormat* f, const std::wstring& s,
           const D2D1_RECT_F& r, const D2D1_COLOR_F& color) {
   ID2D1SolidColorBrush* b = nullptr;
   if (FAILED(t->CreateSolidColorBrush(color, &b)) || b == nullptr) return;
-  t->DrawTextW(s.c_str(), static_cast<UINT32>(s.size()), f, r, b,
+  t->DrawText(s.c_str(), static_cast<UINT32>(s.size()), f, r, b,
                D2D1_DRAW_TEXT_OPTIONS_CLIP);
   b->Release();
 }

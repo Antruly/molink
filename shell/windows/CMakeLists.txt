@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(moLinkWindows LANGUAGES CXX RC)
+project(moLinkWindows LANGUAGES C CXX RC)
 
 set(MOLINK_CXX_STANDARD 20 CACHE STRING
   "C++ standard for the Windows shell (17 for Win7 x86 / GCC 8)")
@@ -45,3 +45,38 @@ add_custom_command(TARGET moLink POST_BUILD
     "$<TARGET_FILE_DIR:moLink>/WebView2Loader.dll")
 
 install(TARGETS moLink RUNTIME DESTINATION .)
+
+# The native Direct2D client (no WebView2). CI builds this too so the
+# session/preset sources, which the WebView2 shell does not compile, cannot
+# change without a Windows compiler checking them.
+add_executable(moLink-native WIN32
+  ui_kit_demo.cpp
+  ui_kit.cpp
+  ws_client.cpp
+  session_client.cpp
+  preset_message.cpp
+  puff.c
+  ui_kit_demo.rc
+)
+target_include_directories(moLink-native PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}"
+  # ui_kit_demo.rc names the icon as shell/assets/icons/icon.ico.
+  "${CMAKE_CURRENT_SOURCE_DIR}/../.."
+)
+# NOMINMAX: windows.h defines min/max as macros, which turns every
+# std::min/std::max in the shared UI headers into a syntax error under MSVC
+# (C2589). The native shell had only ever been built with MinGW, so the first
+# MSVC build stopped here.
+target_compile_definitions(moLink-native PRIVATE _WIN32_WINNT=0x0601 NOMINMAX)
+if(MSVC)
+  # preset_message.h carries the zh-CN labels as UTF-8 source text.
+  target_compile_options(moLink-native PRIVATE /utf-8)
+elseif(MINGW)
+  target_link_options(moLink-native PRIVATE -municode)
+endif()
+target_link_libraries(moLink-native PRIVATE
+  d2d1 dwrite ole32 oleaut32 user32 gdi32 advapi32
+  windowscodecs comdlg32 ws2_32 winhttp shell32 uuid
+)
+
+install(TARGETS moLink-native RUNTIME DESTINATION .)
