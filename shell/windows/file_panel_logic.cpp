@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <set>
 
 namespace molink::files {
 namespace {
@@ -53,6 +54,42 @@ bool drive_prefix(const std::string& path, std::string* drive,
   drive->clear();
   *rest_at = 0;
   return false;
+}
+
+/// Windows reserved device names, with or without an extension. The host
+/// rejects these too (`file_transfer::is_reserved_name`).
+bool is_reserved_name(const std::string& segment) {
+  std::string name = segment;
+  while (!name.empty() && (name.back() == ' ' || name.back() == '.')) {
+    name.pop_back();
+  }
+  if (name.empty()) return false;
+  const std::size_t dot = name.find('.');
+  if (dot != std::string::npos) name.resize(dot);
+  std::string upper;
+  upper.reserve(name.size());
+  for (unsigned char c : name) {
+    upper.push_back(static_cast<char>(std::toupper(c)));
+  }
+  if (upper == "CON" || upper == "PRN" || upper == "AUX" || upper == "NUL") {
+    return true;
+  }
+  return upper.size() == 4 &&
+         (upper.compare(0, 3, "COM") == 0 || upper.compare(0, 3, "LPT") == 0) &&
+         upper[3] >= '1' && upper[3] <= '9';
+}
+
+bool is_plain_segment(const std::string& name) {
+  if (name.empty() || name == "." || name == "..") return false;
+  if (name.find('/') != std::string::npos ||
+      name.find('\\') != std::string::npos) {
+    return false;
+  }
+  if (is_reserved_name(name)) return false;
+  for (unsigned char c : name) {
+    if (c < 32 || c == 0x7f) return false;
+  }
+  return true;
 }
 
 }  // namespace
@@ -128,6 +165,200 @@ bool is_absolute_path(const std::string& path) {
   if (path.size() >= 2 && path[0] == '\\' && path[1] == '\\') return true;
   return path.size() >= 3 && is_drive_letter(path[0]) && path[1] == ':' &&
          is_separator(path[2]);
+}
+
+// ---------------------------------------------------------------------------
+// Folder recursion (Web `buildUploadPlan` / `walkFs`)
+// ---------------------------------------------------------------------------
+
+bool is_safe_relative_path(const std::string& raw) {
+  const std::string text = normalize_relative_path(raw);
+  if (text.empty()) return false;
+  if (text[0] == '/') return false;
+  if (text.size() >= 2 && is_drive_letter(text[0]) && text[1] == ':') {
+    return false;
+  }
+  std::size_t count = 0;
+  std::size_t start = 0;
+  while (start <= text.size()) {
+    const std::size_t slash = text.find('/', start);
+    const std::string segment =
+        text.substr(start, slash == std::string::npos ? std::string::npos
+                                                       : slash - start);
+    if (!is_plain_segment(segment)) return false;
+    if (++count > 64) return false;
+    if (slash == std::string::npos) break;
+    start = slash + 1;
+  }
+  return true;
+}
+
+std::string relative_within(const std::string& root, const std::string& path) {
+  std::string base = normalize_remote_path(root);
+  std::string full = normalize_remote_path(path);
+  while (!base.empty() && base.back() == '/') base.pop_back();
+  while (!full.empty() && full.back() == '/') full.pop_back();
+  if (base.empty() || full.size() <= base.size()) return std::string();
+  if (full.compare(0, base.size(), base) != 0) return std::string();
+  if (full[base.size()] != '/') return std::string();
+  return full.substr(base.size() + 1);
+}
+
+std::string to_native_path(const std::string& relative, char separator) {
+  std::string out;
+  out.reserve(relative.size());
+  for (char c : relative) out.push_back(c == '/' ? separator : c);
+  return out;
+}
+
+std::vector<std::string> safe_target_segments(const std::string& raw,
+                                              const std::string& fallback) {
+  std::vector<std::string> out;
+  std::string text = raw;
+  for (char& c : text) {
+    if (c == '\\') c = '/';
+  }
+  std::size_t start = 0;
+  while (start <= text.size()) {
+    const std::size_t slash = text.find('/', start);
+    std::string part =
+        text.substr(start, slash == std::string::npos ? std::string::npos
+                                                       : slash - start);
+    if (!part.empty() && part != "." && part != "..") {
+      std::string clean;
+      clean.reserve(part.size());
+      for (unsigned char c : part) {
+        if (c < 32 || c == 0x7f || c == '\\' || c == '/' || c == ':' ||
+            c == '*' || c == '?' || c == '"' || c == '<' || c == '>' ||
+            c == '|') {
+          clean.push_back('_');
+        } else {
+          clean.push_back(static_cast<char>(c));
+        }
+      }
+      while (!clean.empty() && (clean.back() == ' ' || clean.back() == '.')) {
+        clean.pop_back();
+      }
+      while (!clean.empty() && clean.front() == ' ') {
+        clean.erase(clean.begin());
+      }
+      if (!clean.empty() && clean != "." && clean != "..") {
+        if (is_reserved_name(clean)) clean = "_" + clean;
+        out.push_back(std::move(clean));
+      }
+    }
+    if (slash == std::string::npos) break;
+    start = slash + 1;
+  }
+  if (out.empty()) {
+    out.push_back(fallback.empty() ? std::string("file") : fallback);
+  }
+  return out;
+}
+
+walk_result walk_tree(const std::vector<walk_root>& roots,
+                      const walk_lister& list,
+                      const walk_limits& limits) {
+  walk_result out;
+  std::set<std::string> seen_dirs;
+  std::set<std::string> seen_files;
+  std::set<std::string> failed_dirs;
+  std::size_t entries = 0;
+
+  struct pending_dir {
+    walk_root root;
+    int depth = 0;
+  };
+  std::vector<pending_dir> stack;
+
+  for (const walk_root& root : roots) {
+    const std::string rel = normalize_relative_path(root.rel);
+    if (!is_safe_relative_path(rel)) {
+      ++out.skipped;
+      continue;
+    }
+    if (!root.dir) {
+      if (seen_files.insert(rel).second) {
+        out.files.push_back({root.path, rel, root.size});
+      }
+      continue;
+    }
+    if (seen_dirs.insert(rel).second) out.dirs.push_back(rel);
+    stack.push_back({root, 0});
+  }
+
+  while (!stack.empty()) {
+    if (entries >= limits.max_entries) {
+      out.truncated = true;
+      break;
+    }
+    pending_dir item = std::move(stack.back());
+    stack.pop_back();
+    const std::string dir_rel = normalize_relative_path(item.root.rel);
+    if (item.depth > limits.max_depth) {
+      out.truncated = true;
+      continue;
+    }
+    std::vector<walk_entry> children;
+    std::string error;
+    if (!list(item.root.path, children, &error)) {
+      ++out.skipped;
+      failed_dirs.insert(dir_rel);
+      continue;
+    }
+    for (const walk_entry& child : children) {
+      if (entries >= limits.max_entries) {
+        out.truncated = true;
+        break;
+      }
+      ++entries;
+      if (!is_plain_segment(child.name)) {
+        ++out.skipped;
+        continue;
+      }
+      const std::string child_rel =
+          dir_rel.empty() ? child.name : dir_rel + "/" + child.name;
+      const std::string child_path = join_path(item.root.path, child.name);
+      if (child.dir) {
+        if (seen_dirs.insert(child_rel).second) out.dirs.push_back(child_rel);
+        // A symlink/junction is listed but never followed: a directory loop
+        // would otherwise walk until the entry budget ran out.
+        if (!child.link) {
+          stack.push_back({walk_root{child_path, child_rel, true, 0},
+                           item.depth + 1});
+        }
+      } else if (seen_files.insert(child_rel).second) {
+        out.files.push_back({child_path, child_rel, child.size});
+      }
+    }
+  }
+
+  for (const std::string& failed : failed_dirs) {
+    out.dirs.erase(std::remove(out.dirs.begin(), out.dirs.end(), failed),
+                   out.dirs.end());
+  }
+  std::sort(out.files.begin(), out.files.end(),
+            [](const walk_file& a, const walk_file& b) {
+              return a.rel < b.rel;
+            });
+  std::sort(out.dirs.begin(), out.dirs.end());
+
+  // A folder is empty unless some file lives underneath it. Walking each
+  // file's ancestors is O(path length) and avoids comparing every pair.
+  std::set<std::string> nonempty;
+  for (const walk_file& file : out.files) {
+    std::string rel = file.rel;
+    std::size_t slash = rel.rfind('/');
+    while (slash != std::string::npos) {
+      rel.resize(slash);
+      nonempty.insert(rel);
+      slash = rel.rfind('/');
+    }
+  }
+  for (const std::string& dir : out.dirs) {
+    if (nonempty.find(dir) == nonempty.end()) out.empty_dirs.push_back(dir);
+  }
+  return out;
 }
 
 std::string resolve_remote_path(const std::string& text,

@@ -9,6 +9,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -54,6 +55,90 @@ std::vector<path_crumb> path_crumbs(const std::string& path);
 
 enum class path_flavor_kind { unknown, windows, posix };
 path_flavor_kind path_flavor(const std::string& path);
+
+/// The Web's folder-walk budget: `FileTransferPanel.tsx` stops at 20000
+/// entries and refuses to descend past 64 levels. Keeping the same numbers
+/// means a folder the page sends is exactly the folder the native shell sends.
+constexpr std::size_t kMaxWalkEntries = 20000;
+constexpr int kMaxWalkDepth = 64;
+
+/// One directory child as returned by a source lister. `name` is one segment.
+struct walk_entry {
+  std::string name;
+  uint64_t size = 0;
+  bool dir = false;
+  /// Reparse point / symlink: list it as a folder, but never descend (a loop
+  /// would recurse forever). The Web's `walkFs` does the same.
+  bool link = false;
+};
+
+/// Lists one directory. Returns false and may fill `error` when it cannot be
+/// read; the walk counts that folder as skipped instead of aborting.
+using walk_lister = std::function<bool(const std::string& path,
+                                       std::vector<walk_entry>& children,
+                                       std::string* error)>;
+
+/// One selection root: the source path handed to the lister plus the relative
+/// path it owns at the destination.
+struct walk_root {
+  std::string path;
+  std::string rel;
+  bool dir = true;
+  uint64_t size = 0;
+};
+
+struct walk_file {
+  std::string path;
+  std::string rel;
+  uint64_t size = 0;
+};
+
+struct walk_result {
+  std::vector<walk_file> files;
+  /// Every folder, including empty ones. Sorted parents-first.
+  std::vector<std::string> dirs;
+  /// Folders with no file anywhere beneath them: the only ones an upload has
+  /// to create explicitly (an `offer` creates the parents of its own path).
+  std::vector<std::string> empty_dirs;
+  /// Unsafe names and unreadable folders.
+  int skipped = 0;
+  /// The entry/depth budget cut the walk short.
+  bool truncated = false;
+};
+
+struct walk_limits {
+  std::size_t max_entries = kMaxWalkEntries;
+  int max_depth = kMaxWalkDepth;
+};
+
+/// Expands selection roots into files plus directories without touching the
+/// filesystem itself. The caller supplies the lister (FindFirstFileW for an
+/// upload, a fake tree in the tests), so the recursion, deduplication, empty
+/// folder detection and limits are identical on both sides.
+walk_result walk_tree(const std::vector<walk_root>& roots,
+                      const walk_lister& list,
+                      const walk_limits& limits = walk_limits());
+
+/// Web `relativeUnder`: the slash-separated path below `root`, or "" when
+/// `path` is not strictly inside it.
+std::string relative_within(const std::string& root, const std::string& path);
+
+/// Converts a slash-separated relative path to `separator` (`photos/a.jpg` ->
+/// `photos\a.jpg` on Windows). No normalisation is applied.
+std::string to_native_path(const std::string& relative, char separator);
+
+/// True when `raw` can be sent to the host as an upload name: non-empty,
+/// relative, at most 64 segments, no drive/UNC/absolute prefix, no `.`/`..`
+/// and no Windows reserved device name segment.
+bool is_safe_relative_path(const std::string& raw);
+
+/// Sanitises a peer-supplied relative path for a local write. `..`, `.` and
+/// empty segments are dropped so the result can never climb out of the
+/// download root; Windows-illegal characters become `_`, trailing spaces and
+/// dots are trimmed, and reserved names are prefixed. An empty result becomes
+/// `{fallback}`.
+std::vector<std::string> safe_target_segments(const std::string& raw,
+                                              const std::string& fallback);
 
 // ---------------------------------------------------------------------------
 // Multi-selection (Ctrl / Shift / select-all)

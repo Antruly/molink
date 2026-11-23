@@ -6,7 +6,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <set>
 
+#include "file_panel_logic.h"
 #include "puff.h"
 
 namespace molink::net {
@@ -471,6 +473,14 @@ bool session_client::start(const std::string& core_host, int core_port,
   }
   downloads_.clear();
   uploads_.clear();
+  upload_slots_.clear();
+  next_offer_key_ = next_upload_key_;
+  pending_downloads_.clear();
+  request_queue_.clear();
+  active_requests_ = 0;
+  pending_browses_.clear();
+  download_walks_.clear();
+  next_walk_id_ = 1;
   active_offer_key_ = 0;
   shell_file_events_.clear();
   {
@@ -857,6 +867,8 @@ void session_client::handle_file_json(const std::string& text) {
       if (json_string_field(item, "kind", 0, &value)) {
         entry.kind = wide_of(value);
       }
+      bool link = false;
+      if (json_bool_field(item, "link", 0, &link)) entry.link = link;
       if (!entry.name.empty()) event.entries.push_back(std::move(entry));
     }
   }
@@ -904,28 +916,203 @@ bool session_client::file_offer(const std::wstring& name,
     return false;
   }
   if ((info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) return false;
+  const uint64_t size = (static_cast<uint64_t>(info.nFileSizeHigh) << 32) |
+                        static_cast<uint64_t>(info.nFileSizeLow);
+  if (size > molink::files::kMaxFileBytes) return false;
+  const std::wstring offer_name = name.empty() ? local_path : name;
+  // A folder walk can overlap a separately selected child, and two clicks can
+  // race the same row. Keep one queued/active row per destination name.
+  if (!upload_slots_.insert(destination + L'\x1f' + offer_name).second) {
+    return false;
+  }
   upload_state upload;
   upload.key = next_upload_key_++;
   upload.task = task;
-  upload.name = name.empty() ? local_path : name;
+  upload.name = offer_name;
   upload.path = local_path;
   upload.dest = destination;
-  upload.size = (static_cast<uint64_t>(info.nFileSizeHigh) << 32) |
-                static_cast<uint64_t>(info.nFileSizeLow);
+  upload.size = size;
+  upload.state = 0;
+  uploads_.emplace(upload.key, std::move(upload));
+  return true;
+}
+
+bool session_client::file_mkdir(const std::wstring& relative,
+                                const std::wstring& destination,
+                                uint32_t task) {
+  if (!ws_.is_open() || relative.empty()) return false;
+  if (!upload_slots_.insert(destination + L'\x1f' + relative).second) {
+    return false;
+  }
+  upload_state upload;
+  upload.key = next_upload_key_++;
+  upload.task = task;
+  upload.name = relative;
+  upload.dest = destination;
+  upload.mkdir = true;
   upload.state = 0;
   uploads_.emplace(upload.key, std::move(upload));
   return true;
 }
 
 void session_client::file_browse(const std::wstring& path) {
+  pending_browses_.push_back(pending_browse{path, false, 0});
   send_file_action("browse", 0,
                    ",\"path\":\"" + json_escape(utf8_of(path)) + "\"");
 }
 
 void session_client::file_request(const std::wstring& path, uint32_t task) {
-  pending_downloads_.push_back({path, task});
-  send_file_action("request", 0,
-                   ",\"path\":\"" + json_escape(utf8_of(path)) + "\"");
+  queue_download_request(path, std::wstring(), task);
+}
+
+bool session_client::file_request_relative(const std::wstring& path,
+                                           const std::wstring& relative,
+                                           uint32_t task) {
+  return queue_download_request(path, relative, task);
+}
+
+bool session_client::queue_download_request(const std::wstring& path,
+                                            const std::wstring& relative,
+                                            uint32_t task) {
+  if (!ws_.is_open() || path.empty()) return false;
+  // One row per remote file: an overlapping selection (a folder plus a file
+  // inside it) must not request the same bytes twice.
+  for (const pending_download& pending : pending_downloads_) {
+    if (pending.path == path) return false;
+  }
+  for (const pending_download& pending : request_queue_) {
+    if (pending.path == path) return false;
+  }
+  for (const auto& [id, download] : downloads_) {
+    if (download.state == 1 && download.remote_path == path) return false;
+  }
+  request_queue_.push_back({path, relative, task});
+  pump_download_requests();
+  return true;
+}
+
+void session_client::pump_download_requests() {
+  // The host keeps eight downloads open; asking for a ninth answers with
+  // `too many active downloads`, so the queue is what makes a folder with
+  // more than eight files work. Web's download queue does the same.
+  while (active_requests_ < static_cast<int>(
+                                 molink::files::kMaxActiveTransfers) &&
+         !request_queue_.empty()) {
+    pending_download request = std::move(request_queue_.front());
+    request_queue_.pop_front();
+    ++active_requests_;
+    pending_downloads_.push_back(std::move(request));
+    const pending_download& sent = pending_downloads_.back();
+    send_file_action("request", 0,
+                     ",\"path\":\"" + json_escape(utf8_of(sent.path)) +
+                         "\"");
+  }
+}
+
+bool session_client::file_download_tree(const std::wstring& path,
+                                        const std::wstring& relative,
+                                        uint32_t task) {
+  if (!ws_.is_open() || path.empty() || !ensure_download_root()) return false;
+  const std::string rel_utf8 = molink::files::normalize_relative_path(
+      utf8_of(relative));
+  if (!molink::files::is_safe_relative_path(rel_utf8)) return false;
+  const uint32_t id = next_walk_id_++;
+  download_walk walk;
+  walk.task = task;
+  walk.pending.push_back({path, wide_of(rel_utf8)});
+  download_walks_.emplace(id, std::move(walk));
+  advance_download_walk(id);
+  return true;
+}
+
+session_client::pending_browse session_client::take_pending_browse() {
+  pending_browse result;
+  if (pending_browses_.empty()) return result;
+  result = pending_browses_.front();
+  pending_browses_.pop_front();
+  return result;
+}
+
+void session_client::advance_download_walk(uint32_t walk_id) {
+  auto it = download_walks_.find(walk_id);
+  if (it == download_walks_.end()) return;
+  download_walk& walk = it->second;
+  if (walk.next >= walk.pending.size()) {
+    file_event done;
+    done.action = L"walk-done";
+    done.task = walk.task;
+    done.walk_files = walk.files;
+    done.walk_dirs = walk.dirs;
+    done.walk_skipped = walk.skipped;
+    done.truncated = walk.truncated;
+    shell_file_events_.push_back(std::move(done));
+    download_walks_.erase(it);
+    return;
+  }
+  const download_walk::folder& folder = walk.pending[walk.next];
+  ensure_local_directory(folder.rel);
+  pending_browses_.push_back(pending_browse{folder.path, true, walk_id});
+  send_file_action("browse", 0,
+                   ",\"path\":\"" + json_escape(utf8_of(folder.path)) + "\"");
+}
+
+void session_client::handle_walk_listing(const file_event& event,
+                                         uint32_t walk_id) {
+  auto it = download_walks_.find(walk_id);
+  if (it == download_walks_.end()) return;
+  download_walk& walk = it->second;
+  if (walk.next < walk.pending.size()) {
+    const std::wstring rel = walk.pending[walk.next].rel;
+    ensure_local_directory(rel);
+  }
+  if (!event.ok) {
+    ++walk.skipped;
+  } else {
+    if (event.truncated) walk.truncated = true;
+    const std::wstring listed_path =
+        event.listing_path.empty() && walk.next < walk.pending.size()
+            ? walk.pending[walk.next].path
+            : event.listing_path;
+    const std::wstring base_rel =
+        walk.next < walk.pending.size() ? walk.pending[walk.next].rel
+                                        : std::wstring();
+    for (const file_listing_entry& entry : event.entries) {
+      if (walk.entries >= molink::files::kMaxWalkEntries) {
+        walk.truncated = true;
+        break;
+      }
+      ++walk.entries;
+      const std::string name_utf8 = utf8_of(entry.name);
+      // The host's answer is untrusted: one ordinary segment or nothing.
+      if (!molink::files::is_safe_relative_path(name_utf8) ||
+          name_utf8.find('/') != std::string::npos ||
+          name_utf8.find('\\') != std::string::npos) {
+        ++walk.skipped;
+        continue;
+      }
+      const std::wstring child_rel =
+          base_rel.empty() ? entry.name : base_rel + L"/" + entry.name;
+      const std::wstring child_path = wide_of(molink::files::join_path(
+          utf8_of(listed_path), name_utf8));
+      if (entry.dir) {
+        ++walk.dirs;
+        ensure_local_directory(child_rel);
+        if (entry.link) continue;
+        const int depth = static_cast<int>(
+            std::count(child_rel.begin(), child_rel.end(), L'/')) + 1;
+        if (depth > molink::files::kMaxWalkDepth) {
+          walk.truncated = true;
+          continue;
+        }
+        walk.pending.push_back({child_path, child_rel});
+      } else {
+        ++walk.files;
+        queue_download_request(child_path, child_rel, walk.task);
+      }
+    }
+  }
+  ++walk.next;
+  advance_download_walk(walk_id);
 }
 
 void session_client::file_cancel(uint32_t id) {
@@ -936,6 +1123,7 @@ void session_client::file_cancel(uint32_t id) {
           send_file_action("cancel", upload.host_id, "");
         }
         upload.in.close();
+        release_upload_slot(upload);
         upload.state = 3;
         upload.cancelled = true;
         upload.message = L"已取消";
@@ -949,6 +1137,7 @@ void session_client::file_cancel(uint32_t id) {
     if (upload.host_id == id && upload.state != 2) {
       send_file_action("cancel", id, "");
       upload.in.close();
+      release_upload_slot(upload);
       upload.state = 3;
       upload.cancelled = true;
       upload.message = L"已取消";
@@ -961,6 +1150,7 @@ void session_client::file_cancel(uint32_t id) {
     send_file_action("cancel", id, "");
     it->second.out.close();
     if (!it->second.path.empty()) DeleteFileW(it->second.path.c_str());
+    if (it->second.state == 1 && active_requests_ > 0) --active_requests_;
     it->second.state = 3;
     it->second.cancelled = true;
     it->second.message = L"已取消";
@@ -1001,6 +1191,62 @@ std::wstring unique_download_path(const std::wstring& dir,
 
 }  // namespace
 
+void session_client::release_upload_slot(const upload_state& upload) {
+  upload_slots_.erase(upload.dest + L'\x1f' + upload.name);
+}
+
+bool session_client::ensure_download_root() {
+  if (download_dir_.empty()) {
+    wchar_t profile[MAX_PATH] = {};
+    if (GetEnvironmentVariableW(L"USERPROFILE", profile, MAX_PATH) > 0) {
+      download_dir_ = std::wstring(profile) + L"\\Downloads\\moLink";
+    }
+  }
+  if (download_dir_.empty()) return false;
+  CreateDirectoryW(download_dir_.c_str(), nullptr);
+  return true;
+}
+
+bool session_client::ensure_local_directory(const std::wstring& relative) {
+  if (!ensure_download_root()) return false;
+  const std::string rel = molink::files::normalize_relative_path(
+      utf8_of(relative));
+  if (rel.empty()) return true;
+  // `safe_target_segments` drops `..`: a hostile peer name can never escape
+  // the download root even when it is used as a folder.
+  const std::vector<std::string> segments =
+      molink::files::safe_target_segments(rel, "folder");
+  std::wstring path = download_dir_;
+  for (const std::string& segment : segments) {
+    path += L"\\";
+    path += wide_of(segment);
+    CreateDirectoryW(path.c_str(), nullptr);
+  }
+  return true;
+}
+
+std::wstring session_client::local_download_path(const std::wstring& relative,
+                                                 std::wstring* display_name) {
+  const std::string rel = molink::files::normalize_relative_path(
+      utf8_of(relative));
+  if (rel.empty()) return std::wstring();
+  if (!ensure_download_root()) return std::wstring();
+  const std::vector<std::string> segments =
+      molink::files::safe_target_segments(rel, "file");
+  if (segments.empty()) return std::wstring();
+  std::wstring path = download_dir_;
+  std::wstring shown;
+  for (std::size_t i = 0; i < segments.size(); ++i) {
+    path += L"\\";
+    path += wide_of(segments[i]);
+    if (!shown.empty()) shown.push_back(L'/');
+    shown += wide_of(segments[i]);
+    if (i + 1 < segments.size()) CreateDirectoryW(path.c_str(), nullptr);
+  }
+  if (display_name != nullptr) *display_name = shown;
+  return path;
+}
+
 void session_client::finish_download(uint32_t id) {
   auto it = downloads_.find(id);
   if (it == downloads_.end()) return;
@@ -1011,6 +1257,7 @@ void session_client::finish_download(uint32_t id) {
   }
   download.out.close();
   download.state = 2;
+  if (active_requests_ > 0) --active_requests_;
   file_event done;
   done.action = L"downloaded";
   done.id = download.id;
@@ -1021,18 +1268,42 @@ void session_client::finish_download(uint32_t id) {
 }
 
 void session_client::pump_files() {
-  // 1. Offer the next queued file when nothing is in flight.
+  // 0. Keep the host's eight download slots full (a recursive download can
+  // queue thousands of files long before their answers arrive).
+  pump_download_requests();
+  // 1. Offer the next queued file/folder when nothing is in flight. Keys are
+  // allocated in order and complete in order, so a cursor walks the queue in
+  // O(1) per item instead of rescanning a 20000-entry map.
   if (active_offer_key_ == 0) {
-    for (auto& [key, upload] : uploads_) {
-      if (upload.state == 0 && !upload.offer_sent) {
-        upload.offer_sent = true;
-        active_offer_key_ = key;
+    while (next_offer_key_ < next_upload_key_) {
+      const auto it = uploads_.find(next_offer_key_);
+      if (it == uploads_.end() ||
+          it->second.state == 2 || it->second.state == 3) {
+        ++next_offer_key_;
+        continue;
+      }
+      break;
+    }
+    auto next = uploads_.find(next_offer_key_);
+    if (next != uploads_.end() && next->second.state == 0 &&
+        !next->second.offer_sent) {
+      upload_state& upload = next->second;
+      upload.offer_sent = true;
+      upload.sent_at = GetTickCount64();
+      active_offer_key_ = next_offer_key_;
+      next_offer_key_ = next->first + 1;
+      if (upload.mkdir) {
+        upload.state = 1;
+        send_file_action("mkdir", 0,
+                         ",\"path\":\"" + json_escape(utf8_of(upload.name)) +
+                             "\",\"dest\":\"" +
+                             json_escape(utf8_of(upload.dest)) + "\"");
+      } else {
         send_file_action(
             "offer", 0,
             ",\"name\":\"" + json_escape(utf8_of(upload.name)) +
                 "\",\"size\":" + std::to_string(upload.size) +
                 ",\"dest\":\"" + json_escape(utf8_of(upload.dest)) + "\"");
-        break;
       }
     }
   }
@@ -1065,6 +1336,36 @@ void session_client::pump_files() {
   };
   for (file_event& event : incoming) {
     const std::wstring& action = event.action;
+    if (action == L"listing") {
+      // `browse` answers arrive in request order, so the FIFO tells a
+      // recursive download's listing apart from a panel navigation.
+      const pending_browse pending = take_pending_browse();
+      if (pending.walk) {
+        handle_walk_listing(event, pending.walk_id);
+        continue;
+      }
+    }
+    if (action == L"mkdir") {
+      auto it = uploads_.find(active_offer_key_);
+      if (it != uploads_.end() && it->second.mkdir) {
+        upload_state& upload = it->second;
+        upload.state = event.ok ? 2 : 3;
+        if (!event.ok) {
+          upload.message = event.message.empty() ? L"无法创建远程文件夹"
+                                                 : event.message;
+        }
+        event.task = upload.task;
+        event.name = upload.name;
+        if (event.ok) {
+          if (event.path.empty()) event.path = upload.name;
+        } else {
+          event.message = upload.message;
+        }
+        active_offer_key_ = 0;
+        shell_file_events_.push_back(std::move(event));
+        continue;
+      }
+    }
     if (action == L"chunk") {
       auto it = downloads_.find(event.id);
       if (std::getenv("MOLINK_WS_LOG") != nullptr) {
@@ -1090,6 +1391,7 @@ void session_client::pump_files() {
         if (!download.path.empty()) DeleteFileW(download.path.c_str());
         download.state = 3;
         download.message = L"文件接收不完整";
+        if (active_requests_ > 0) --active_requests_;
         continue;
       }
       download.out.write(
@@ -1102,6 +1404,7 @@ void session_client::pump_files() {
         DeleteFileW(download.path.c_str());
         download.state = 3;
         download.message = L"无法写入本地文件";
+        if (active_requests_ > 0) --active_requests_;
         continue;
       }
       if (download.received < download.size && !download.eof_seen) {
@@ -1121,6 +1424,7 @@ void session_client::pump_files() {
         upload.in.open(upload.path.c_str(), std::ios::binary);
         if (!upload.in) {
           send_file_action("cancel", upload.host_id, "");
+          release_upload_slot(upload);
           upload.state = 3;
           upload.message = L"无法读取本地文件";
           event.task = upload.task;
@@ -1151,6 +1455,7 @@ void session_client::pump_files() {
       }
       if (target != nullptr) {
         target->in.close();
+        release_upload_slot(*target);
         if (event.name.empty()) event.name = target->name;
         event.task = target->task;
         if (action == L"done" && event.ok) {
@@ -1188,8 +1493,12 @@ void session_client::pump_files() {
         download_state failed_state;
         failed_state.id = event.id;
         failed_state.task = pending.task;
+        failed_state.rel = pending.rel;
+        failed_state.remote_path = pending.path;
         failed_state.name =
-            event.name.empty() ? wbase_name(pending.path) : event.name;
+            !pending.rel.empty()
+                ? pending.rel
+                : (event.name.empty() ? wbase_name(pending.path) : event.name);
         if (failed_state.name.empty()) failed_state.name = L"file";
         failed_state.size = event.size;
         failed_state.state = 3;
@@ -1201,6 +1510,7 @@ void session_client::pump_files() {
             event.id != 0 ? event.id
                           : (0x80000000u | next_download_key_++);
         downloads_[key] = std::move(failed_state);
+        if (active_requests_ > 0) --active_requests_;
         event.task = pending.task;
         shell_file_events_.push_back(std::move(event));
         continue;
@@ -1208,23 +1518,50 @@ void session_client::pump_files() {
       download_state download;
       download.id = event.id;
       download.task = pending.task;
+      download.rel = pending.rel;
+      download.remote_path = pending.path;
       download.name = event.name.empty() ? L"file" : event.name;
       download.size = event.size;
       download.state = 1;
       download.last_progress_at = GetTickCount64();
-      if (download_dir_.empty()) {
-        wchar_t profile[MAX_PATH] = {};
-        if (GetEnvironmentVariableW(L"USERPROFILE", profile, MAX_PATH) > 0) {
-          download_dir_ = std::wstring(profile) + L"\\Downloads\\moLink";
+      const bool rooted = ensure_download_root();
+      if (!pending.rel.empty()) {
+        // Recursive download: recreate the remote tree under the download
+        // directory. `local_download_path` sanitises peer-supplied names.
+        std::wstring shown;
+        const std::wstring target =
+            rooted ? local_download_path(pending.rel, &shown) : std::wstring();
+        if (target.empty()) {
+          download.state = 3;
+          download.message = L"无法创建本地文件";
+        } else {
+          download.path = target;
+          download.name = shown;
         }
+      } else if (rooted) {
+        download.path = unique_download_path(download_dir_, download.name);
+      } else {
+        download.state = 3;
+        download.message = L"无法创建本地文件";
       }
-      CreateDirectoryW(download_dir_.c_str(), nullptr);
-      download.path = unique_download_path(download_dir_, download.name);
+      if (download.state != 1) {
+        if (active_requests_ > 0) --active_requests_;
+        file_event failed;
+        failed.action = L"error";
+        failed.id = download.id;
+        failed.task = download.task;
+        failed.name = download.name;
+        failed.message = download.message;
+        downloads_[download.id] = std::move(download);
+        shell_file_events_.push_back(std::move(failed));
+        continue;
+      }
       download.out.open(download.path.c_str(),
                         std::ios::binary | std::ios::trunc);
       if (!download.out) {
         download.state = 3;
         download.message = L"无法创建本地文件";
+        if (active_requests_ > 0) --active_requests_;
         file_event failed;
         failed.action = L"error";
         failed.id = download.id;
@@ -1261,6 +1598,7 @@ void session_client::pump_files() {
           download.state = 3;
           download.message =
               event.message.empty() ? L"文件接收失败" : event.message;
+          if (active_requests_ > 0) --active_requests_;
           event.action = L"error";
           event.name = download.name;
           event.task = download.task;
@@ -1279,6 +1617,10 @@ void session_client::pump_files() {
     shell_file_events_.push_back(std::move(event));
   }
 
+  // A finished download frees a host slot: start the next queued request
+  // before the timeout pass so a large folder keeps moving.
+  pump_download_requests();
+
   // A missing chunk or end marker must not leave the row spinning forever.
   const uint64_t now_ms = GetTickCount64();
   for (auto& [download_id, download] : downloads_) {
@@ -1292,6 +1634,7 @@ void session_client::pump_files() {
     DeleteFileW(download.path.c_str());
     download.state = 3;
     download.message = L"文件接收不完整";
+    if (active_requests_ > 0) --active_requests_;
     file_event failed;
     failed.action = L"error";
     failed.id = download.id;
@@ -1301,9 +1644,27 @@ void session_client::pump_files() {
     shell_file_events_.push_back(std::move(failed));
   }
 
+  // A lost `mkdir` answer must not hold the single active-upload slot.
+  for (auto& [key, upload] : uploads_) {
+    if (!upload.mkdir || upload.state != 1) continue;
+    if (now_ms - upload.sent_at <= 30000) continue;
+    upload.state = 3;
+    upload.message = L"创建远程文件夹超时";
+    if (active_offer_key_ == key) active_offer_key_ = 0;
+    file_event failed;
+    failed.action = L"error";
+    failed.task = upload.task;
+    failed.name = upload.name;
+    failed.message = upload.message;
+    shell_file_events_.push_back(std::move(failed));
+  }
+
   // 3. Send the active upload in bounded slices (UI thread, no worker).
   auto active = uploads_.find(active_offer_key_);
-  if (active == uploads_.end() || active->second.state != 1) return;
+  if (active == uploads_.end() || active->second.state != 1 ||
+      active->second.mkdir) {
+    return;
+  }
   upload_state& upload = active->second;
   // The local core proxy can deliver a small JSON `complete` ahead of the
   // last large binary frame. Send at most two chunks per tick and hold
@@ -1365,6 +1726,7 @@ std::vector<file_transfer_state> session_client::file_transfers() {
     row.size = upload.size;
     row.sent = upload.sent;
     row.download = false;
+    row.mkdir = upload.mkdir;
     row.state = upload.state;
     row.cancelled = upload.cancelled;
     row.message = upload.message;

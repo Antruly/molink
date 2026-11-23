@@ -3,6 +3,7 @@
 // the Direct2D client and the page make the same decisions without a display.
 
 #include <cstdio>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -154,8 +155,267 @@ void test_path_flavor() {
          "empty path has no flavor");
 }
 
-void test_selection() {
-  selection_model sel;
+void test_relative_within_and_native_separators() {
+  expect_eq(relative_within("D:\\backup", "D:\\backup\\photos\\a.jpg"),
+            "photos/a.jpg", "relativeWithin strips a Windows root");
+  expect_eq(relative_within("/srv/data/", "/srv/data/x/y.bin"), "x/y.bin",
+            "relativeWithin strips a POSIX root with trailing slash");
+  expect_eq(relative_within("/srv/data", "/srv/data"), "",
+            "relativeWithin of the root itself is empty");
+  expect_eq(relative_within("/srv/data", "/srv/database/x"), "",
+            "a sibling sharing a prefix is not inside the root");
+  expect_eq(relative_within("/srv/data", "/other/x"), "",
+            "an unrelated path is not inside the root");
+  expect_eq(to_native_path("photos/sub/a.jpg", '\\'),
+            "photos\\sub\\a.jpg", "relative path uses the Windows separator");
+  expect_eq(to_native_path("photos/sub/a.jpg", '/'), "photos/sub/a.jpg",
+            "relative path keeps the POSIX separator");
+}
+
+void test_safe_relative_path() {
+  expect(is_safe_relative_path("photos/a.jpg"), "a normal relative path is safe");
+  expect(is_safe_relative_path("a"), "a single name is safe");
+  expect(!is_safe_relative_path(""), "empty is unsafe");
+  expect(!is_safe_relative_path("../x"), ".. traversal is refused");
+  expect(!is_safe_relative_path("a/../../b"), "nested traversal is refused");
+  expect(!is_safe_relative_path("/etc/passwd"), "absolute POSIX is refused");
+  expect(!is_safe_relative_path("\\\\server\\share"),
+         "UNC path is refused");
+  expect(!is_safe_relative_path("C:\\Windows"), "drive letter is refused");
+  expect(is_safe_relative_path("a//b"),
+         "duplicate separators normalise to one segment");
+  expect(!is_safe_relative_path("photos/./a/../b"),
+         "a traversal segment is refused after normalisation");
+  expect(!is_safe_relative_path("photos/CON.txt"),
+         "a reserved device name is refused");
+  expect(!is_safe_relative_path("a\tb"), "a control character is refused");
+}
+
+void test_safe_target_segments() {
+  const std::vector<std::string> traversal =
+      safe_target_segments("../../etc/passwd", "file");
+  expect_int(static_cast<int>(traversal.size()), 2,
+             "traversal segments are dropped");
+  if (traversal.size() == 2) {
+    expect_eq(traversal[0], "etc", "traversal keeps the ordinary first name");
+    expect_eq(traversal[1], "passwd", "traversal keeps the file name");
+  }
+  const std::vector<std::string> absolute =
+      safe_target_segments("C:\\Windows\\System32", "file");
+  expect(!absolute.empty(), "an absolute Windows path still targets a file");
+  for (const std::string& segment : absolute) {
+    expect(segment.find(':') == std::string::npos,
+           "the drive colon is sanitised away");
+    expect(segment != ".." && segment != ".",
+           "an absolute path never yields a traversal segment");
+  }
+  const std::vector<std::string> only_dots =
+      safe_target_segments("..", "folder");
+  expect_int(static_cast<int>(only_dots.size()), 1,
+             "a traversal-only path falls back to one segment");
+  if (!only_dots.empty()) {
+    expect_eq(only_dots[0], "folder", "the fallback name is used");
+  }
+  const std::vector<std::string> illegal =
+      safe_target_segments("a:b*c?.txt", "file");
+  expect_int(static_cast<int>(illegal.size()), 1,
+             "illegal characters stay in one segment");
+  if (!illegal.empty()) {
+    expect_eq(illegal[0], "a_b_c_.txt",
+              "Windows-illegal characters become underscores");
+  }
+  const std::vector<std::string> reserved =
+      safe_target_segments("CON.txt", "file");
+  if (!reserved.empty()) {
+    expect_eq(reserved[0], "_CON.txt", "a reserved name is prefixed");
+  }
+}
+
+void test_walk_tree() {
+  expect_int(static_cast<int>(kMaxWalkEntries), 20000,
+             "the walk budget matches the Web's 20000 entries");
+  expect_int(kMaxWalkDepth, 64, "the walk depth matches the Web's 64");
+
+  const std::map<std::string, std::vector<walk_entry>> tree = {
+      {"/src/photos",
+       {{"a.jpg", 10, false, false},
+        {"sub", 0, true, false},
+        {"empty", 0, true, false}}},
+      {"/src/photos/sub", {{"b.bin", 20, false, false}}},
+      {"/src/photos/empty", {}},
+  };
+  const walk_lister lister = [&tree](const std::string& path,
+                                     std::vector<walk_entry>& children,
+                                     std::string* error) {
+    const auto it = tree.find(path);
+    if (it == tree.end()) {
+      if (error != nullptr) *error = "missing";
+      return false;
+    }
+    children = it->second;
+    return true;
+  };
+
+  std::vector<walk_root> roots;
+  roots.push_back({"/src/photos", "photos", true, 0});
+  roots.push_back({"/src/loose.txt", "loose.txt", false, 7});
+  const walk_result plan = walk_tree(roots, lister);
+  expect_int(static_cast<int>(plan.files.size()), 3,
+             "walk expands a folder into its files");
+  if (plan.files.size() == 3) {
+    expect_eq(plan.files[0].rel, "loose.txt", "files sort by relative path");
+    expect_eq(plan.files[1].rel, "photos/a.jpg",
+              "a nested file keeps its folder prefix");
+    expect_eq(plan.files[1].path, "/src/photos/a.jpg",
+              "the source path is the root plus the name");
+    expect_int(static_cast<int>(plan.files[1].size), 10,
+               "the file size comes from the listing");
+    expect_eq(plan.files[2].rel, "photos/sub/b.bin",
+              "recursion reaches a subfolder");
+  }
+  expect_int(static_cast<int>(plan.dirs.size()), 3,
+             "every folder is reported");
+  if (plan.dirs.size() == 3) {
+    expect_eq(plan.dirs[0], "photos", "directories sort parents-first");
+    expect_eq(plan.dirs[1], "photos/empty", "the empty folder is listed");
+    expect_eq(plan.dirs[2], "photos/sub", "the nested folder is listed");
+  }
+  expect_int(static_cast<int>(plan.empty_dirs.size()), 1,
+             "only a folder with no file is empty");
+  if (!plan.empty_dirs.empty()) {
+    expect_eq(plan.empty_dirs[0], "photos/empty",
+              "the empty subfolder needs an explicit mkdir");
+  }
+  expect_int(plan.skipped, 0, "a clean tree skips nothing");
+  expect(!plan.truncated, "a small tree is not truncated");
+
+  // Selecting a folder and a file inside it must not queue that file twice.
+  std::vector<walk_root> overlapping;
+  overlapping.push_back({"/src/photos", "photos", true, 0});
+  overlapping.push_back({"/src/photos/a.jpg", "photos/a.jpg", false, 10});
+  const walk_result deduped = walk_tree(overlapping, lister);
+  expect_int(static_cast<int>(deduped.files.size()), 2,
+             "an overlapping selection is deduplicated");
+  if (deduped.files.size() == 2) {
+    expect_eq(deduped.files[0].rel, "photos/a.jpg",
+              "the nested file appears once");
+  }
+
+  // A folder that only holds empty folders: both need mkdir.
+  const std::map<std::string, std::vector<walk_entry>> empty_tree = {
+      {"/e", {{"inner", 0, true, false}}},
+      {"/e/inner", {}},
+  };
+  const walk_lister empty_lister = [&empty_tree](
+                                       const std::string& path,
+                                       std::vector<walk_entry>& children,
+                                       std::string* error) {
+    const auto it = empty_tree.find(path);
+    if (it == empty_tree.end()) return false;
+    children = it->second;
+    return true;
+  };
+  std::vector<walk_root> empty_roots;
+  empty_roots.push_back({"/e", "e", true, 0});
+  const walk_result empty_plan = walk_tree(empty_roots, empty_lister);
+  expect_int(static_cast<int>(empty_plan.files.size()), 0,
+             "an empty tree has no files");
+  expect_int(static_cast<int>(empty_plan.empty_dirs.size()), 2,
+             "a parent of only empty folders is empty too");
+  if (empty_plan.empty_dirs.size() == 2) {
+    expect_eq(empty_plan.empty_dirs[0], "e",
+              "the mkdir order creates the parent first");
+    expect_eq(empty_plan.empty_dirs[1], "e/inner",
+              "the nested empty folder follows");
+  }
+}
+
+void test_walk_limits_and_safety() {
+  const std::map<std::string, std::vector<walk_entry>> tree = {
+      {"/src",
+       {{"one", 1, false, false},
+        {"two", 2, false, false},
+        {"three", 3, false, false},
+        {"four", 4, false, false}}},
+  };
+  const walk_lister lister = [&tree](const std::string& path,
+                                     std::vector<walk_entry>& children,
+                                     std::string*) {
+    const auto it = tree.find(path);
+    if (it == tree.end()) return false;
+    children = it->second;
+    return true;
+  };
+  std::vector<walk_root> roots;
+  roots.push_back({"/src", "src", true, 0});
+  walk_limits limits;
+  limits.max_entries = 3;
+  const walk_result limited = walk_tree(roots, lister, limits);
+  expect_int(static_cast<int>(limited.files.size()), 3,
+             "the entry budget stops the walk");
+  expect(limited.truncated, "hitting the budget reports truncation");
+
+  // A name read from the other side is never trusted as a path segment.
+  const std::map<std::string, std::vector<walk_entry>> hostile = {
+      {"/h",
+       {{"..", 1, false, false},
+        {"..\\evil", 1, false, false},
+        {"ok.txt", 1, false, false}}},
+  };
+  const walk_lister hostile_lister = [&hostile](
+                                         const std::string& path,
+                                         std::vector<walk_entry>& children,
+                                         std::string*) {
+    const auto it = hostile.find(path);
+    if (it == hostile.end()) return false;
+    children = it->second;
+    return true;
+  };
+  std::vector<walk_root> hostile_roots;
+  hostile_roots.push_back({"/h", "h", true, 0});
+  const walk_result hostile_plan = walk_tree(hostile_roots, hostile_lister);
+  expect_int(static_cast<int>(hostile_plan.files.size()), 1,
+             "traversal names are refused, the ordinary file survives");
+  expect_int(hostile_plan.skipped, 2, "each refused name is counted");
+  if (!hostile_plan.files.empty()) {
+    expect_eq(hostile_plan.files[0].rel, "h/ok.txt",
+              "the safe name is kept");
+  }
+
+  // An unsafe root is refused before the lister is called.
+  std::vector<walk_root> unsafe_roots;
+  unsafe_roots.push_back({"/x", "../escape", true, 0});
+  const walk_result unsafe_plan = walk_tree(unsafe_roots, lister);
+  expect_int(unsafe_plan.skipped, 1, "an unsafe root is skipped");
+  expect(unsafe_plan.files.empty(), "an unsafe root yields no files");
+
+  // Symlink/junction folders are listed but not descended.
+  int listings = 0;
+  const std::map<std::string, std::vector<walk_entry>> links = {
+      {"/l", {{"link", 0, true, true}, {"real", 0, true, false}}},
+      {"/l/real", {{"f", 1, false, false}}},
+  };
+  const walk_lister link_lister = [&links, &listings](
+                                      const std::string& path,
+                                      std::vector<walk_entry>& children,
+                                      std::string*) {
+    ++listings;
+    const auto it = links.find(path);
+    if (it == links.end()) return false;
+    children = it->second;
+    return true;
+  };
+  std::vector<walk_root> link_roots;
+  link_roots.push_back({"/l", "l", true, 0});
+  const walk_result link_plan = walk_tree(link_roots, link_lister);
+  expect_int(listings, 2, "a linked folder is not listed");
+  expect_int(static_cast<int>(link_plan.files.size()), 1,
+             "the real subtree is still walked");
+  expect_int(static_cast<int>(link_plan.dirs.size()), 3,
+             "both the link and the real folder are listed");
+}
+
+void test_selection() {  selection_model sel;
   sel.click(2, false, false, 6);
   expect_int(static_cast<int>(sel.size()), 1, "plain click selects one");
   expect(sel.contains(2), "plain click selects the row");
@@ -285,6 +545,11 @@ int main() {
   test_join_and_parent();
   test_path_crumbs();
   test_path_flavor();
+  test_relative_within_and_native_separators();
+  test_safe_relative_path();
+  test_safe_target_segments();
+  test_walk_tree();
+  test_walk_limits_and_safety();
   test_selection();
   test_task_summary();
   test_block_reasons();

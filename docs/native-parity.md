@@ -51,11 +51,11 @@
 | F2 | 文件面板 | 本地绝对路径/盘符/根目录 | ok | 本地栏有路径框、盘符/主目录下拉、面包屑与 `FindFirstFileW` 列表 | `ui_kit_demo.cpp:6793` |
 | F3 | 文件面板 | 远程绝对路径/盘符枚举/面包屑 | ok | 解析 `parent/roots/truncated`，路径框、roots 下拉、可点面包屑、非法路径内联报错 | `session_client.cpp:790` |
 | F4 | 文件面板 | 多选与全选 | ok | 本地/远程列表都有勾选、Ctrl/Shift 多选与全选，动作按钮由选择集合驱动 | `ui_kit_demo.cpp:8972` |
-| F5 | 文件面板 | 上传目录递归、空目录、自定义 dest | gap | 选择上传已带当前远程目录作 `dest`，但仍一文件一 offer，无递归/空目录/mkdir | `session_client.cpp:897` |
-| F6 | 文件面板 | 下载目录递归与树形落盘 | gap | 原生只请求单个文件，平铺写入下载目录 | `ui_kit_demo.cpp:7617` |
+| F5 | 文件面板 | 上传目录递归、空目录、自定义 dest | ok | `walk_tree` 递归展开（不跟随 symlink/junction），相对路径 offer、空目录 `mkdir`、`dest` 带当前远程目录；20000 项/64 层上限与 Web 一致 | `shell/windows/file_panel_logic.cpp`、`shell/windows/session_client.cpp` |
+| F6 | 文件面板 | 下载目录递归与树形落盘 | ok | 远端目录逐个 `browse` 递归，文件按相对路径落盘（`safe_target_segments` 拒绝 `..`/绝对拼接），空目录与父目录都创建；请求按宿主 8 槽排队 | `shell/windows/session_client.cpp`、`shell/windows/ui_kit_demo.cpp` |
 | F7 | 文件面板 | 每任务进度/汇总/失败原因 | ok | 任务卡按批次聚合进度/字节/成功-失败-取消-跳过，失败可展开看原因 | `ui_kit_demo.cpp:8379` |
 | F8 | 文件面板 | 并发/大小上限/超时策略 | ok | 8 GiB 上传预检、宿主 8 槽 reject/超时都有中文原因；按钮按 busy/无选择/无目标禁用 | `session_client.cpp:1280` |
-| F9 | 文件面板 | 拖入/拖出 | partial | 有 WM_DROPFILES 拖入；文件夹不展开，不能拖出到系统 | `ui_kit_demo.cpp:9633` |
+| F9 | 文件面板 | 拖入/拖出 | partial | 拖入的文件与文件夹都走同一条递归计划，多条目共用一个任务；仍无拖出到系统（可先用“传回来”） | `shell/windows/ui_kit_demo.cpp` |
 | F10 | 文件面板 | 剪贴板文件卡片（接收全部） | gap | 原生没有剪贴板文件列表 | `ui_kit_demo.cpp:7341` |
 | D1 | 输入 | 完整键码映射 | partial | 缺媒体/浏览器/IME/ContextMenu/NumpadEnter 等 | `ui_kit_demo.cpp:4095` |
 | D2 | 输入 | 小键盘与 NumLock 补偿 | partial | NumLock 关时小键盘键被映射成 Delete/End 等 | `ui_kit_demo.cpp:4103` |

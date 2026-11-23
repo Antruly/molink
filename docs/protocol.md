@@ -444,6 +444,11 @@ X11 的屏幕抓取**不包含鼠标光标**，服务端单独发送形状与位
   `{"type":"file","action":"accept","id":N,"chunk":262144,"dir":"..."}`；随后用包类型
   `0x12` 按 offset 顺序发送数据，最后 `{"action":"complete","id":N}` →
   `{"action":"done","id":N,"path":"..."}`。文件保存在远程主机 `~/Downloads/moLink`。
+- 目录结构：`offer` 的 `name` 可以是 `/` 分隔的相对路径（`photos/a.jpg`），可选的
+  `dest` 指定目标目录（缺省 = 主机的 `~/moLink`）；宿主在目标目录下创建相对父目录。
+  空目录单独发送 `{"type":"file","action":"mkdir","path":"photos/empty","dest":"..."}`
+  → `{"type":"file","action":"mkdir","ok":true,"path":"photos/empty"}`。
+  `name`/`path` 都必须是相对路径：绝对路径、盘符、`..` 与 Windows 保留设备名会被拒绝。
 - 浏览：`{"action":"browse","path":""}` → `{"action":"listing","path":"...","root":"...","entries":[{"name":"a","dir":false,"size":1,"mtime":0}]}`；
   空路径表示主目录，路径被限制在主目录内（含符号链接解析）。
 - 下载：`{"action":"request","path":"..."}` → `{"action":"sending","id":N,"name":"a","size":123}`；
