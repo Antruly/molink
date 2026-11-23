@@ -168,6 +168,14 @@ jobs:
             -DZLIB_LIBRARY="$(cygpath -m "$RUNNER_TEMP/zlib/prefix/lib/zlibstatic.lib")"
           cmake --build backend/build --config Release --parallel
 
+      # The keymap table is pure data, so this needs no display, libuvcpp DLLs
+      # or NVENC. It re-checks every KeyboardEvent.code against the real MSVC
+      # VK constants (keymap.cpp has matching static_asserts) and the whole
+      # table for all three host platforms.
+      - name: Keymap coverage test
+        shell: bash
+        run: ctest --test-dir backend/build -C Release -R "^keymap$" --output-on-failure
+
   macos-core:
     if: github.event_name != 'pull_request' && vars.UVCPP_REPO != ''
     runs-on: macos-latest

@@ -42,3 +42,46 @@ test('a whole combo keeps every physical code', () => {
   const combo = ['MetaLeft', 'KeyR'].map(normalizeKeyCode)
   assert.deepEqual(combo, ['MetaLeft', 'KeyR'])
 })
+
+test('the keypad fallback keeps Numpad codes', () => {
+  // DOM_KEY_LOCATION_NUMPAD === 3. The keypad reports the same printable
+  // event.key as the main row, so location is what tells them apart.
+  assert.equal(keyToCode('0', 3), 'Numpad0')
+  assert.equal(keyToCode('1', 3), 'Numpad1')
+  assert.equal(keyToCode('9', 3), 'Numpad9')
+  assert.equal(keyToCode('+', 3), 'NumpadAdd')
+  assert.equal(keyToCode('-', 3), 'NumpadSubtract')
+  assert.equal(keyToCode('*', 3), 'NumpadMultiply')
+  assert.equal(keyToCode('/', 3), 'NumpadDivide')
+  assert.equal(keyToCode('.', 3), 'NumpadDecimal')
+  assert.equal(keyToCode(',', 3), 'NumpadComma')
+  assert.equal(keyToCode('=', 3), 'NumpadEqual')
+  assert.equal(keyToCode('Enter', 3), 'NumpadEnter')
+  // A keypad Clear (NumLock off) stays Clear, not Numpad5.
+  assert.equal(keyToCode('Clear', 3), 'Clear')
+  // Without the keypad location the same key is the main row.
+  assert.equal(keyToCode('1'), 'Digit1')
+  assert.equal(keyToCode('-'), 'Minus')
+  assert.equal(keyToCode('Enter'), 'Enter')
+})
+
+test('function, media, browser and IME names survive the fallback', () => {
+  for (const name of [
+    'F13',
+    'F24',
+    'Insert',
+    'PrintScreen',
+    'AudioVolumeUp',
+    'MediaPlayPause',
+    'BrowserBack',
+    'LaunchApp1',
+    'Again',
+    'Power',
+    'Lang1',
+    'HangulMode',
+  ]) {
+    assert.equal(keyToCode(name), name, name)
+  }
+  // F25 is outside the DOM set.
+  assert.equal(keyToCode('F25'), '')
+})

@@ -242,6 +242,7 @@ set(MOLINK_CORE_SOURCES
   src/input/macos_input.cpp
   src/input/input_event.cpp
   src/input/key_alias.cpp
+  src/input/keymap.cpp
   src/config.cpp
   src/identity.cpp
   src/tls_identity.cpp
@@ -747,6 +748,7 @@ add_executable(molink-core-input-event-test
   tests/input_event_test.cpp
   src/input/input_event.cpp
   src/input/key_alias.cpp
+  src/input/keymap.cpp
 )
 target_include_directories(molink-core-input-event-test PRIVATE src)
 set_target_properties(molink-core-input-event-test PROPERTIES
@@ -757,6 +759,25 @@ foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
     "RUNTIME_OUTPUT_DIRECTORY_${uvp_config_upper}" "${CMAKE_BINARY_DIR}")
 endforeach()
 add_test(NAME input_event COMMAND molink-core-input-event-test)
+
+# Every KeyboardEvent.code the host understands, resolved for all three
+# platforms. Pure data: the Windows table is checked against the real VK_
+# constants on Windows, and the same table is exercised on Linux so a missing
+# entry fails CI before it reaches a user's keypad.
+add_executable(molink-core-keymap-test
+  tests/keymap_test.cpp
+  src/input/keymap.cpp
+  src/input/key_alias.cpp
+)
+target_include_directories(molink-core-keymap-test PRIVATE src)
+set_target_properties(molink-core-keymap-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
+  string(TOUPPER "${uvp_config}" uvp_config_upper)
+  set_target_properties(molink-core-keymap-test PROPERTIES
+    "RUNTIME_OUTPUT_DIRECTORY_${uvp_config_upper}" "${CMAKE_BINARY_DIR}")
+endforeach()
+add_test(NAME keymap COMMAND molink-core-keymap-test)
 
 # Box averaging for large tile strips: pure pixel arithmetic.
 # Clipboard staging for "remote file -> local clipboard": file naming, offset
