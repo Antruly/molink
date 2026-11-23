@@ -25,6 +25,7 @@ import {
   forgetSessionScreenBuffer,
 } from './screen-buffer'
 import { forgetSessionFrames, noteSessionFrame } from './session-repaint'
+import type { SessionToast, ToastTone } from './session-alerts'
 import type {
   PresetApplied,
   SessionPresetMessage,
@@ -87,6 +88,8 @@ export interface TabPatch {
   clipboardEnabled?: boolean
   /// Remote clipboard selection behind the "取出" banner, or its progress.
   clipboardOffer?: ClipboardOfferPrompt | null
+  /// Transient corner message for a feature-level failure.
+  toast?: SessionToast | null
   label?: string
   displayIndex?: number
 }
@@ -94,6 +97,9 @@ export interface TabPatch {
 export interface SessionSink {
   onPatch: (patch: TabPatch) => void
   onClipboard: (text: string) => void
+  /// A failure reported by the connection. The store routes it either to the
+  /// session banner or to the tab's toast; the connection does not decide.
+  onFailure: (message: string, code?: string | null, tone?: ToastTone) => void
 }
 
 const emptyStats = (): Stats => ({
@@ -404,11 +410,11 @@ export class SessionConnection {
           target: this.target || undefined,
           code: code ?? undefined,
         })
-        this.sink.onPatch({
-          error: message,
-          errorCode: code ?? null,
-          notice: null,
-        })
+        // The store decides whether this is one feature's failure (clipboard,
+        // an input event, a file action) or the session's. A clipboard error
+        // used to land in `tab.error`, which offered "reconnect" while the
+        // link was perfectly healthy.
+        this.sink.onFailure(message, code ?? null)
       },
       onTransport: (mode, path, protocol) => {
         logDiag('info', 'session.transport', undefined, {
@@ -610,7 +616,7 @@ export class SessionConnection {
         logDiag('warn', 'clipboard.file', message, {
           target: this.target || undefined,
         })
-        this.sink.onPatch({ error: message, errorCode: null })
+        this.sink.onFailure(message, message)
       },
       {
         capability: () => this.clipboardLazy,
@@ -654,7 +660,7 @@ export class SessionConnection {
         logDiag('warn', 'clipboard.remote', message, {
           target: this.target || undefined,
         })
-        this.sink.onPatch({ error: message, errorCode: null })
+        this.sink.onFailure(message, message)
       },
       (count) => {
         logDiag('info', 'clipboard.remote', `applied ${count} file(s)`, {
@@ -716,7 +722,7 @@ export class SessionConnection {
           logDiag('warn', 'clipboard.file', message, {
             target: this.target || undefined,
           })
-          this.sink.onPatch({ error: message, errorCode: null })
+          this.sink.onFailure(message, message)
         },
         {
           capability: () => this.clipboardLazy,

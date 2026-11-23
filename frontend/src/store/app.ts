@@ -62,6 +62,14 @@ import {
   type TabPatch,
 } from '../lib/session-connection'
 import {
+  TOAST_TTL_MS,
+  applyFailure,
+  toastExpired,
+  toastFor,
+  type SessionToast,
+  type ToastTone,
+} from '../lib/session-alerts'
+import {
   setWindowFullscreen as setNativeFullscreen,
   shellInfo,
 } from '../lib/shell'
@@ -105,6 +113,9 @@ export interface SessionTab {
   /// A remote clipboard selection waiting behind the explicit "取出" button,
   /// or its download progress.
   clipboardOffer?: ClipboardOfferPrompt | null
+  /// Transient corner message for a feature-level failure (clipboard, input,
+  /// one file action). Cleared automatically; never blocks the session.
+  toast?: SessionToast | null
   /// "relay" or "p2p" for a device-ID session (legacy live mode).
   transport?: string
   /// Data path reported live by the local core: direct | p2p | relay.
@@ -264,6 +275,10 @@ interface AppState {
     id: string,
     prompt: ClipboardOfferPrompt | null,
   ) => void
+  /// Replaces the tab's toast directly (null dismisses it).
+  setTabToast: (id: string, toast: SessionToast | null) => void
+  /// Raises a transient message; a repeat of the same text refreshes it.
+  pushToast: (id: string, message: string, tone?: ToastTone) => void
   setRememberDevice: (enabled: boolean) => void
   setKeyboardGrab: (enabled: boolean) => void
   /// Stores the remembered first-use answer (`null` clears it).
@@ -595,6 +610,88 @@ export const useAppStore = create<AppState>((set, get) => {
     if (patch.phase !== undefined) get().syncUiState()
   }
 
+  // One toast per tab. `nextToastId` makes clear timers safe: a timer armed
+  // for an old message cannot dismiss a newer one.
+  let nextToastId = 1
+  const toastTimers = new Map<string, number>()
+
+  const clearToastTimer = (tabId: string): void => {
+    const timer = toastTimers.get(tabId)
+    if (timer === undefined) return
+    window.clearTimeout(timer)
+    toastTimers.delete(tabId)
+  }
+
+  const scheduleToastClear = (tabId: string, toastId: number): void => {
+    clearToastTimer(tabId)
+    const timer = window.setTimeout(() => {
+      const current = get().tabs.find((tab) => tab.id === tabId)?.toast
+      if (current === null || current === undefined || current.id !== toastId) {
+        // Cleared or replaced by a newer toast, whose own timer is armed.
+        toastTimers.delete(tabId)
+        return
+      }
+      if (!toastExpired(current, Date.now())) {
+        // Woke early (a clock step): re-arm instead of leaving it up forever.
+        scheduleToastClear(tabId, toastId)
+        return
+      }
+      toastTimers.delete(tabId)
+      patchTab(tabId, { toast: null })
+    }, TOAST_TTL_MS)
+    toastTimers.set(tabId, timer)
+  }
+
+  /// Raises a transient corner message. The same text refreshes the existing
+  /// toast instead of stacking a second box.
+  const pushToast = (
+    id: string,
+    message: string,
+    tone: ToastTone = 'error',
+  ): void => {
+    const tab = get().tabs.find((item) => item.id === id)
+    if (!tab) return
+    const toast = toastFor(tab.toast, message, tone, nextToastId++, Date.now())
+    patchTab(id, { toast })
+    scheduleToastClear(id, toast.id)
+  }
+
+  /// Single entry point for failures reported by a connection. Feature-level
+  /// failures (clipboard, one input event, a file action) become a toast and
+  /// leave the session banner alone; only session-level failures reach
+  /// `tab.error`, and only some of those offer a reconnect.
+  const reportFailure = (
+    id: string,
+    message: string,
+    code: string | null = null,
+    tone?: ToastTone,
+  ): void => {
+    const tab = get().tabs.find((item) => item.id === id)
+    if (!tab) return
+    const result = applyFailure(
+      {
+        error: tab.error,
+        errorCode: tab.errorCode ?? null,
+        toast: tab.toast ?? null,
+      },
+      message,
+      code,
+      nextToastId++,
+      Date.now(),
+      tone,
+    )
+    patchTab(id, {
+      error: result.error,
+      errorCode: result.errorCode,
+      toast: result.toast,
+      // A session-level failure supersedes the approval countdown.
+      ...(result.surface === 'banner' ? { notice: null } : {}),
+    })
+    if (result.surface === 'toast' && result.toast !== null) {
+      scheduleToastClear(id, result.toast.id)
+    }
+  }
+
   let persistTimer: number | null = null
 
   /// The complete ui.json document. Every save rewrites it, so the session
@@ -814,6 +911,13 @@ export const useAppStore = create<AppState>((set, get) => {
     setClipboardOffer: (id, prompt) => {
       patchTab(id, { clipboardOffer: prompt })
     },
+
+    setTabToast: (id, toast) => {
+      if (toast === null) clearToastTimer(id)
+      patchTab(id, { toast })
+    },
+
+    pushToast,
 
     setRememberDevice: (enabled) => {
       writeStorage(REMEMBER_DEVICE_KEY, enabled ? '1' : '0')
@@ -1485,6 +1589,7 @@ export const useAppStore = create<AppState>((set, get) => {
         stats: EMPTY_STATS,
         error: null,
         notice: null,
+        toast: null,
         approvalDeadline: null,
         retryAt: null,
         controlEnabled: mode === 'control' && intent === 'desktop',
@@ -1517,12 +1622,17 @@ export const useAppStore = create<AppState>((set, get) => {
         },
         onClipboard: (text) => {
           if (!navigator.clipboard?.writeText) {
-            patchTab(id, { error: 'clipboard_unavailable' })
+            // A local clipboard failure is not a session failure: the link is
+            // healthy, so show a transient toast instead of the red banner.
+            pushToast(id, 'clipboard_unavailable', 'warn')
             return
           }
           // A rejected write (unfocused or permissionless browser) is not
           // actionable; do not cover the session with an error banner.
           navigator.clipboard.writeText(text).catch(() => undefined)
+        },
+        onFailure: (message, code, tone) => {
+          reportFailure(id, message, code ?? null, tone)
         },
       }, id)
       runtimes.set(id, connection)
@@ -1593,6 +1703,7 @@ export const useAppStore = create<AppState>((set, get) => {
       const connection = runtimes.get(id)
       connection?.disconnect()
       runtimes.delete(id)
+      clearToastTimer(id)
       forgetSessionScreenBuffer(id)
       set((state) => {
         const index = state.tabs.findIndex((tab) => tab.id === id)
