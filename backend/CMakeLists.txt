@@ -743,6 +743,10 @@ add_executable(molink-core-ip-allowlist-test
   src/net/ip_allowlist.cpp
 )
 target_include_directories(molink-core-ip-allowlist-test PRIVATE src)
+if(WIN32)
+  # inet_pton lives in Winsock.
+  target_link_libraries(molink-core-ip-allowlist-test PRIVATE ws2_32)
+endif()
 set_target_properties(molink-core-ip-allowlist-test PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
