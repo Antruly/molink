@@ -735,6 +735,51 @@ class nvenc_stream_encoder final : public av1_stream_encoder {
     return true;
   }
 
+  bool set_bitrate(uint32_t kbps) override {
+    const int wanted = static_cast<int>(kbps);
+    config_.max_bitrate_kbps = wanted;
+    if (session_ == nullptr) {
+      // No session yet; the next init picks the budget up.
+      bitrate_kbps_ = wanted;
+      return true;
+    }
+    if (wanted == bitrate_kbps_) return true;
+    if (saved_init_.version == 0 ||
+        api_.fn.nvEncReconfigureEncoder == nullptr) {
+      // Too old a driver, or nothing to reconfigure: the caller rebuilds.
+      return false;
+    }
+    NV_ENC_CONFIG config = saved_config_;
+    const stream_rate_mode rate_mode = config_.rate_mode;
+    if (wanted > 0 && rate_mode != stream_rate_mode::constant_quality) {
+      const bool constant_bitrate =
+          rate_mode == stream_rate_mode::constant_bitrate;
+      config.rcParams.rateControlMode =
+          constant_bitrate ? NV_ENC_PARAMS_RC_CBR : NV_ENC_PARAMS_RC_VBR;
+      config.rcParams.averageBitRate = static_cast<uint32_t>(wanted) * 1000u;
+      config.rcParams.maxBitRate =
+          static_cast<uint32_t>(wanted) * 1000u * 4u / 3u;
+      config.rcParams.vbvBufferSize = config.rcParams.maxBitRate / 2u;
+      config.rcParams.vbvInitialDelay = config.rcParams.vbvBufferSize;
+    } else {
+      config.rcParams.rateControlMode = NV_ENC_PARAMS_RC_CONSTQP;
+      config.rcParams.constQP.qpIntra = static_cast<uint32_t>(qp_);
+      config.rcParams.constQP.qpInterP = static_cast<uint32_t>(qp_);
+      config.rcParams.constQP.qpInterB = static_cast<uint32_t>(qp_);
+    }
+    saved_config_ = config;
+
+    NV_ENC_RECONFIGURE_PARAMS reconfigure{};
+    reconfigure.version = NV_ENC_RECONFIGURE_PARAMS_VER;
+    reconfigure.reInitEncodeParams = saved_init_;
+    reconfigure.reInitEncodeParams.encodeConfig = &saved_config_;
+    const NVENCSTATUS status =
+        api_.fn.nvEncReconfigureEncoder(session_, &reconfigure);
+    if (status != NV_ENC_SUCCESS) return false;
+    bitrate_kbps_ = wanted;
+    return true;
+  }
+
  private:
   bool open(std::string& error) {
     if (session_ != nullptr) return true;
@@ -882,6 +927,11 @@ class nvenc_stream_encoder final : public av1_stream_encoder {
               nvenc_status_name(status) + ")";
       return false;
     }
+    // Kept for in-place rate changes: nvEncReconfigureEncoder needs the same
+    // initialize parameters and a complete encode configuration.
+    saved_config_ = config;
+    saved_init_ = init;
+    saved_init_.encodeConfig = &saved_config_;
 
     NV_ENC_CREATE_INPUT_BUFFER input{};
     input.version = NV_ENC_CREATE_INPUT_BUFFER_VER;
@@ -951,6 +1001,10 @@ class nvenc_stream_encoder final : public av1_stream_encoder {
   int qp_ = 0;
   int bitrate_kbps_ = 0;
   uint64_t frame_index_ = 0;
+  /// Last successful init, kept so a budget change can reconfigure the
+  /// session instead of rebuilding it (and inserting a keyframe).
+  NV_ENC_CONFIG saved_config_{};
+  NV_ENC_INITIALIZE_PARAMS saved_init_{};
 };
 
 }  // namespace

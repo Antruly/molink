@@ -42,6 +42,7 @@ class relay_ladder final : public relay_session {
   bool is_open() const override;
   bool send_text(const std::string& text) override;
   bool send_binary(const uint8_t* data, std::size_t len) override;
+  uint64_t take_video_drops() override;
   void close(int code, const std::string& reason) override;
   void set_handlers(text_handler on_text, binary_handler on_binary,
                     close_handler on_close) override;

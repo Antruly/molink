@@ -81,6 +81,19 @@ class av1_stream_encoder : public video_encoder {
                      int height, int qp, bool keyframe,
                      std::vector<uint8_t>& out, bool& out_keyframe,
                      std::string& error) override = 0;
+
+  /// Changes the stream's bitrate budget without disposing the object.
+  ///
+  /// Returns true when the new budget is applied and the reference chain
+  /// survives (the next P frame still decodes). A backend that cannot
+  /// reconfigure its rate control in place returns false, and the caller
+  /// rebuilds it with the usual make-before-break and keyframe. Backends that
+  /// must re-create their codec internally still return true and emit a
+  /// keyframe themselves on the next picture.
+  virtual bool set_bitrate(uint32_t kbps) {
+    (void)kbps;
+    return false;
+  }
 };
 
 /// Null (with `error` filled) when this build has no encoder for the stream in

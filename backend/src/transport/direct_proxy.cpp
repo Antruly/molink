@@ -43,12 +43,15 @@
 #endif
 
 #include "capture/av1_frame.h"
+#include "capture/pipeline_stats.h"
+#include "diag_log.h"
 #include "surface/frame_surface.h"
 #include "compression.h"
 #include "protocol/frame_packet.h"
 #include "transport/h2_ws_transport.h"
 #include "transport/peer_transports.h"
 #include "transport/relay_transport.h"
+#include "transport/tcp_backlog_policy.h"
 #include "transport/tls_pin.h"
 #include "transport/stream_transport.h"
 #include "util.h"
@@ -73,7 +76,39 @@ struct tcp_link_state {
   std::size_t queued = 0;
   bool writing = false;
   bool closed = false;
+  /// One keyframe request a second while video is being dropped, so a stalled
+  /// queue asks the host for a fresh baseline instead of only throwing frames
+  /// away. The host applies its own one-per-second budget as well.
+  std::chrono::steady_clock::time_point last_keyframe_request{};
 };
+
+void tcp_link_pump(const std::shared_ptr<tcp_link_state>& state);
+
+/// Queues a `request-keyframe` control packet on the upstream link, but only
+/// when the small message actually fits the backlog. The drop path calls this
+/// after a video frame was refused; if there is no room yet the next drop will
+/// try again once a write completed.
+void tcp_request_keyframe(const std::shared_ptr<tcp_link_state>& state) {
+  if (state->closed || state->client == nullptr) return;
+  const auto now = std::chrono::steady_clock::now();
+  if (state->last_keyframe_request.time_since_epoch().count() != 0 &&
+      now - state->last_keyframe_request < std::chrono::seconds(1)) {
+    return;
+  }
+  protocol::packet packet;
+  packet.type = static_cast<uint8_t>(protocol::packet_type::control);
+  const std::string text = "{\"type\":\"request-keyframe\"}";
+  packet.payload.assign(text.begin(), text.end());
+  std::vector<uint8_t> bytes;
+  std::string error;
+  if (!protocol::encode_packet(packet, bytes, error)) return;
+  if (state->queued + bytes.size() > kMaxTcpBacklogBytes) return;
+  state->last_keyframe_request = now;
+  state->queue.emplace_back(reinterpret_cast<const char*>(bytes.data()),
+                            bytes.size());
+  state->queued += bytes.size();
+  tcp_link_pump(state);
+}
 
 void tcp_link_fail(const std::shared_ptr<tcp_link_state>& state,
                    const std::string& reason) {
@@ -305,12 +340,25 @@ class direct_proxy final : public std::enable_shared_from_this<direct_proxy> {
       return;
     }
     std::shared_ptr<tcp_link_state> state = tcp_state_;
+    std::weak_ptr<direct_proxy> weak = weak_from_this();
     auto link = std::make_shared<stream_transport>(
-        [state](const uint8_t* data, std::size_t len) {
+        [state, weak](transport_channel channel, const uint8_t* data,
+                      std::size_t len) {
           if (state->closed || state->client == nullptr) return false;
-          if (state->queued + len > kMaxTcpBacklogBytes) {
-            tcp_link_fail(state, "TCP send backlog exceeded");
-            return false;
+          switch (tcp_backlog_admit(channel, state->queued, len,
+                                    kMaxTcpBacklogBytes)) {
+            case tcp_backlog_action::accept:
+              break;
+            case tcp_backlog_action::drop_video:
+              // The frame is obsolete by the time the backlog drains. Keep the
+              // link and ask for a fresh baseline instead of tearing the
+              // session down; control and file messages are still reliable.
+              if (auto self = weak.lock()) self->note_video_drop();
+              tcp_request_keyframe(state);
+              return false;
+            case tcp_backlog_action::fail_link:
+              tcp_link_fail(state, "TCP send backlog exceeded");
+              return false;
           }
           state->queue.emplace_back(reinterpret_cast<const char*>(data), len);
           state->queued += len;
@@ -748,6 +796,24 @@ class direct_proxy final : public std::enable_shared_from_this<direct_proxy> {
     if (tcp_client_) tcp_client_->close();
   }
 
+  /// One video frame was dropped because the upstream TCP queue is full. The
+  /// count feeds the pipeline's `dropped` summary; the log line is throttled
+  /// so a sustained backlog writes one per two seconds, not one per frame.
+  void note_video_drop() {
+    video_pipeline().note_dropped(1);
+    ++pending_video_drops_;
+    const auto now = std::chrono::steady_clock::now();
+    if (last_video_drop_log_.time_since_epoch().count() != 0 &&
+        now - last_video_drop_log_ < std::chrono::seconds(2)) {
+      return;
+    }
+    last_video_drop_log_ = now;
+    const std::size_t frames = pending_video_drops_;
+    pending_video_drops_ = 0;
+    diag().log(diag_level::warn, "video.drop", std::string(),
+               {{"reason", "backlog"}, {"frames", std::to_string(frames)}});
+  }
+
   /// The page pushes the quality preset through this proxy; stream frames
   /// follow it (a sharp preset gets a sharper JPEG).
   void note_quality(const std::string& text) {
@@ -1107,6 +1173,9 @@ class direct_proxy final : public std::enable_shared_from_this<direct_proxy> {
   std::map<uint8_t, int> frame_codec_counts_;
   int frame_count_ = 0;
   std::chrono::steady_clock::time_point last_frame_log_{};
+  /// Egress drops on the bounded TCP link (see note_video_drop).
+  std::size_t pending_video_drops_ = 0;
+  std::chrono::steady_clock::time_point last_video_drop_log_{};
 };
 
 }  // namespace

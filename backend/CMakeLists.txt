@@ -821,6 +821,15 @@ set_target_properties(molink-core-frame-budget-test PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 add_test(NAME frame_budget COMMAND molink-core-frame-budget-test)
 
+# Absolute-deadline capture pacing: no drift by encode time, no catch-up burst.
+add_executable(molink-core-frame-schedule-test
+  tests/frame_schedule_test.cpp
+)
+target_include_directories(molink-core-frame-schedule-test PRIVATE src)
+set_target_properties(molink-core-frame-schedule-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME frame_schedule COMMAND molink-core-frame-schedule-test)
+
 # The media pipeline window: injected clock, fake samples, and the exact
 # percentiles/counters the video.pipeline line reports.
 add_executable(molink-core-pipeline-stats-test
@@ -1408,6 +1417,15 @@ target_include_directories(molink-core-channel-scheduler-test PRIVATE src)
 set_target_properties(molink-core-channel-scheduler-test PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 add_test(NAME channel_scheduler COMMAND molink-core-channel-scheduler-test)
+
+# A bounded TCP queue may drop video but must never drop reliable traffic.
+add_executable(molink-core-tcp-backlog-test
+  tests/tcp_backlog_test.cpp
+)
+target_include_directories(molink-core-tcp-backlog-test PRIVATE src)
+set_target_properties(molink-core-tcp-backlog-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME tcp_backlog COMMAND molink-core-tcp-backlog-test)
 
 # The relay/ICE split is pure routing: no libuvcpp and no sockets.
 add_executable(molink-core-switchable-test

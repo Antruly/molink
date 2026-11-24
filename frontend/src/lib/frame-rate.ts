@@ -60,6 +60,24 @@ export function clampFps(value: number): number {
   return Math.max(MIN_FPS, Math.min(MAX_FPS, Math.round(value)))
 }
 
+/**
+ * One recovery step for the load controller.
+ *
+ * Recovery is proportional, not a fixed jump: 5 fps climbs to 6, 20 fps to 23.
+ * The old `+5` / `+10` step made auto oscillate between 5 and 10, because the
+ * jump overshot what the link had just proven it could carry and the next bad
+ * window immediately undid it. `cpuCeiling` is the rate the host's measured
+ * encode time can sustain; recovering past it would only repeat the failure.
+ */
+export function nextFpsUp(
+  target: number,
+  plan: FpsPlan,
+  cpuCeiling: number = Number.POSITIVE_INFINITY,
+): number {
+  const stepped = Math.max(target + 1, Math.round(target * 1.15))
+  return Math.min(plan.max, stepped, cpuCeiling)
+}
+
 export function fpsPlan(setting: FpsSetting, tier: QualityTier): FpsPlan {
   if (setting === 'auto') return AUTO_PLANS[tier] ?? AUTO_PLANS.balanced
   const value = clampFps(setting)

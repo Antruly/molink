@@ -102,19 +102,38 @@ bool relay_transport::send_binary(transport_channel channel,
       channel == transport_channel::video &&
       protocol::packet_is_keyframe(data, len);
   std::string copy(reinterpret_cast<const char*>(data), len);
-  return enqueue(channel, false, std::move(copy), keyframe);
+  // The scheduler now keeps the newest frame and discards older deltas. That
+  // frees the latency but breaks the decoder's reference chain, so the frame
+  // that displaced them is reported exactly like a refused one: the session
+  // layer asks the capture for a fresh keyframe through the existing path.
+  bool chain_broken = false;
+  const bool accepted =
+      enqueue(channel, false, std::move(copy), keyframe, &chain_broken);
+  return accepted && !chain_broken;
 }
 
 bool relay_transport::enqueue(transport_channel channel, bool text,
-                              std::string data, bool keyframe) {
+                              std::string data, bool keyframe,
+                              bool* chain_broken) {
+  if (chain_broken != nullptr) *chain_broken = false;
   if (!ready_.load() || closed_.load()) return false;
   std::lock_guard<std::mutex> lock(send_mutex_);
   if (text) {
     return channel == transport_channel::control && sends_.enqueue_text(data);
   }
-  return sends_.enqueue(channel,
-                        reinterpret_cast<const uint8_t*>(data.data()),
-                        data.size(), keyframe);
+  const std::size_t dropped_before = sends_.dropped_video_frames();
+  const bool accepted = sends_.enqueue(
+      channel, reinterpret_cast<const uint8_t*>(data.data()), data.size(),
+      keyframe);
+  if (chain_broken != nullptr) {
+    *chain_broken = sends_.dropped_video_frames() != dropped_before;
+  }
+  return accepted;
+}
+
+uint64_t relay_transport::take_video_drops() {
+  std::lock_guard<std::mutex> lock(send_mutex_);
+  return sends_.take_dropped_video_frames();
 }
 
 void relay_transport::deliver_close(int code, const std::string& reason) {

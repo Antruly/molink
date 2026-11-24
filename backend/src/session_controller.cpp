@@ -4611,6 +4611,28 @@ void session_supervisor::run() {
         if (!peer.vp9_stream) all_vp9_stream = false;
         if (!peer.vp8_stream) all_vp8_stream = false;
       }
+      // Video frames the transports discarded locally (the relay's egress
+      // budget or a bounded TCP backlog). They are part of the same
+      // captured-but-never-decoded story as the frames a slow session skips,
+      // so they feed the pipeline's `dropped` summary. The log is throttled:
+      // a sustained backlog is one line per two seconds, not one per frame.
+      {
+        uint64_t video_drops = 0;
+        for (const session_info& peer : registry_->snapshot()) {
+          if (!peer.authenticated || !peer.transport) continue;
+          video_drops += peer.transport->take_video_drops();
+        }
+        if (video_drops > 0) {
+          video_pipeline().note_dropped(video_drops);
+          if (last_video_drop_log_ms_ == 0 ||
+              seen_now - last_video_drop_log_ms_ >= 2000) {
+            last_video_drop_log_ms_ = seen_now;
+            diag().log(diag_level::info, "video.drop", std::string(),
+                       {{"reason", "budget"},
+                        {"frames", std::to_string(video_drops)}});
+          }
+        }
+      }
       // Weight-based QoS: the slowest live viewer decides. Its painted frame
       // rate, dropped frames and measured RTT move the encoder around the
       // toolbar's anchors; a still screen (no viewers producing frames) never
@@ -4638,11 +4660,36 @@ void session_supervisor::run() {
         qin.target_fps = options_.capture->target_fps();
         qin.dropped = worst_dropped;
         qin.rtt_ms = worst_rtt;
+        // Queueing delay is the primary pressure signal: the time a picture
+        // already waits in the host between capture and send. The pipeline
+        // window is not reset here (take() owns the 2 s summary), so peek is
+        // the cheapest source and stays consistent with `video.pipeline`.
+        const pipeline_snapshot pipeline = video_pipeline().peek();
+        if (pipeline.sent > 0) {
+          qin.queue_delay_ms =
+              static_cast<double>(pipeline.age_p95_us) / 1000.0;
+        }
         qin.demand = viewers > 0;
         if (qos_.note(qin, seen_now)) {
           const stream_qos::output q = qos_.state();
           options_.capture->set_stream_qos(q.bitrate_scale, q.qp_offset,
                                            q.force_cbr);
+          // One line per move, with the dwell it honoured: this is what makes
+          // a 5↔10 fps sawtooth visible instead of guessed at.
+          const stream_qos::change move = qos_.last_change();
+          if (move != stream_qos::change::none) {
+            char scale[32] = {};
+            std::snprintf(scale, sizeof(scale), "%.3f", q.bitrate_scale);
+            std::vector<diag_field> fields;
+            fields.push_back({"action", move == stream_qos::change::down
+                                           ? "down"
+                                           : "up"});
+            fields.push_back({"scale", scale});
+            fields.push_back({"reason", qos_.last_reason()});
+            fields.push_back(
+                {"dwell_ms", std::to_string(qos_.last_dwell_ms())});
+            diag().log(diag_level::info, "quality.qos", std::string(), fields);
+          }
         }
       }
       // The host settings page can switch AV1 off entirely; it still only

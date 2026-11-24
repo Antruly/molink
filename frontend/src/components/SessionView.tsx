@@ -47,7 +47,7 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from 'react'
 import { useTranslation } from 'react-i18next'
-import { MIN_FPS, fpsPlan } from '../lib/frame-rate'
+import { MIN_FPS, fpsPlan, nextFpsUp } from '../lib/frame-rate'
 import {
   ADVANCED_FPS_MAX,
   ADVANCED_FPS_MIN,
@@ -1446,12 +1446,10 @@ export function SessionView({
         ) {
           return
         }
-        // Never recover past what the encoder can actually sustain.
-        const next = Math.min(
-          plan.max,
-          target + (target < 20 ? 5 : 10),
-          cpuCeiling,
-        )
+        // Never recover past what the encoder can actually sustain, and climb
+        // proportionally: a fixed +5/+10 step overshot the link's proven rate
+        // and made auto oscillate between 5 and 10 fps.
+        const next = nextFpsUp(target, plan, cpuCeiling)
         if (next <= target) return
         state.target = next
         state.good = 0

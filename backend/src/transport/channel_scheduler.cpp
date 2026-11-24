@@ -97,12 +97,29 @@ bool channel_scheduler::evict_video_for(std::size_t required,
   // deltas, which could not be decoded before it anyway.
   if (video_.messages.empty()) return true;
 
-  // Refuse the incoming delta instead of silently deleting an accepted one.
-  // Both stream and tile deltas may depend on every preceding frame. A false
-  // result reaches the capture replay path, which requests a fresh baseline.
-  const std::size_t available =
-      video_.bytes >= video_.limit ? 0 : video_.limit - video_.bytes;
-  return required <= available;
+  // Newest frame first: an old frame still queued is latency the viewer pays
+  // on every later picture. Discard the oldest deltas until the incoming frame
+  // fits. A keyframe is kept: it is the reference point for every delta behind
+  // it, so dropping one would not free the chain, it would only break it. If
+  // the queue holds nothing but that keyframe, the new delta is accepted over
+  // budget -- refusing it would pin the queue behind a frame the link cannot
+  // carry and the delay would never come back down.
+  while (video_.bytes + required > video_.limit) {
+    const auto oldest_delta = std::find_if(
+        video_.messages.begin(), video_.messages.end(),
+        [](const message& queued) { return !queued.keyframe; });
+    if (oldest_delta == video_.messages.end()) break;
+    video_.bytes -= oldest_delta->data.size();
+    video_.messages.erase(oldest_delta);
+    ++dropped_video_;
+  }
+  return true;
+}
+
+std::size_t channel_scheduler::take_dropped_video_frames() {
+  const std::size_t dropped = dropped_video_;
+  dropped_video_ = 0;
+  return dropped;
 }
 
 bool channel_scheduler::enqueue(transport_channel channel, const uint8_t* data,
