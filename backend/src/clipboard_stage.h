@@ -46,6 +46,11 @@ struct staged_clipboard_entry {
 class clipboard_stage {
  public:
   using files_applier = std::function<bool(const std::vector<std::string>&)>;
+  /// Receives the complete bytes of one staged PNG. Used by the image
+  /// clipboard path, where the bytes become CF_DIB/image/png rather than a
+  /// file on disk.
+  using bytes_applier =
+      std::function<bool(const std::vector<uint8_t>&)>;
   using clock_fn = std::function<uint64_t()>;
 
   /// Largest single file the explicit "取出" path may download. The automatic
@@ -86,6 +91,12 @@ class clipboard_stage {
   /// success the entries are removed; the files stay because the clipboard
   /// references them.
   stage_error apply(const std::vector<std::string>& ids, std::size_t& count);
+
+  /// Complete one staged entry and hand its bytes to @p applier. On success
+  /// the temporary file and the entry are removed: the clipboard owns the
+  /// decoded image, not a path. Unlike `apply`, the staging name is never
+  /// promoted to a final path.
+  stage_error apply_image(const std::string& id, bytes_applier applier);
 
   /// Discards an unfinished entry and deletes its temp file. Called when the
   /// clipboard changes mid-download, so a half file does not linger until the

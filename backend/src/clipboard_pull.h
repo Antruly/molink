@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -15,6 +16,11 @@ struct clipboard_offer_entry {
   uint32_t id = 0;
   std::string name;
   uint64_t size = 0;
+  /// Non-null for a clipboard image announced with `clipboard-sync.image`.
+  /// The PNG snapshot is served by the pull path without asking the platform
+  /// clipboard again (which may already have changed). Shared between every
+  /// viewer that received the same announcement.
+  std::shared_ptr<const std::vector<uint8_t>> image;
 };
 
 /// Wire status of a `clipboard_file` (0x18) range reply.

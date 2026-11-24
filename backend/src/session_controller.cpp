@@ -13,6 +13,8 @@
 #include <cstdint>
 #include <cstring>
 #include <deque>
+#include <filesystem>
+#include <fstream>
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
@@ -551,6 +553,105 @@ void publish_clipboard_files(
                                   clipboard_echo_direction::delivered, now);
       send_clipboard_files_to(registry, *peer, files, nested_rdp);
     }
+  };
+  if (post) {
+    post(std::move(deliver));
+  } else {
+    deliver();
+  }
+}
+
+/// Publish one host clipboard image to the viewers that can pull it.
+///
+/// The image is a virtual file: `clipboard-sync.files` names it, `image` says
+/// which entry it is, and the PNG bytes are served by `clipboard-pull` from
+/// the snapshot kept with the offer. A word processor copy also carries text,
+/// and the same message then contains both formats so the receiver can write
+/// them together instead of the later one clearing the earlier one.
+void publish_clipboard_image(
+    const std::shared_ptr<session_registry>& registry,
+    const std::function<void(std::function<void()>)>& post,
+    std::shared_ptr<const std::vector<uint8_t>> png, std::string text,
+    const std::string& chain,
+    const std::shared_ptr<auth_state>& auth, bool nested_rdp) {
+  if (!registry || !png || png->empty()) return;
+  if (png->size() > kClipboardImageMaxBytes) {
+    diag().log(diag_level::warn, "clipboard.image", std::string(),
+               {{"too_large", "1"},
+                {"bytes", std::to_string(png->size())}});
+    return;
+  }
+  if (text.size() > 192 * 1024) text.resize(192 * 1024);
+  const std::string image_hash = clipboard_image_hash(*png);
+  std::string text_hash;
+  std::string text_key;
+  if (!text.empty()) {
+    text_hash = clipboard_hash(text);
+    text_key = clipboard_text_key(text_hash, text.size());
+    // The image message carries the text too; stop the text watcher's own
+    // copy of the same value from being announced as a text-only follow-up,
+    // which would clear the image at the receiver.
+    clipboard_note_last_text(text_key);
+  }
+  const uint64_t size = png->size();
+
+  auto deliver = [registry, png = std::move(png), text = std::move(text),
+                  text_hash = std::move(text_hash), image_hash, chain,
+                  nested_rdp, auth, size] {
+    const clipboard_route route =
+        clipboard_active_route(registry, clipboard_allow_broadcast(auth));
+    log_clipboard_route(route, "local", "kind", "image");
+    std::size_t sent = 0;
+    for (uint32_t id : route.targets) {
+      const std::shared_ptr<session_info> peer = registry->find(id);
+      if (!peer || !peer->authenticated || !peer->transport) continue;
+      // The bytes travel through the id-based pull channel; a client that
+      // cannot pull must not receive a files-only message it would mistake
+      // for a file list.
+      if (!peer->clipboard_pull) continue;
+
+      clipboard_offer_entry offer;
+      offer.id = 1;
+      offer.name = kClipboardImageName;
+      offer.size = size;
+      offer.image = png;
+      std::vector<clipboard_offer_entry> offers;
+      offers.push_back(offer);
+      registry->set_clipboard_offer(id, std::move(offers), nested_rdp);
+
+      uvcpp_json item;
+      item["id"] = static_cast<uint64_t>(1);
+      item["name"] = kClipboardImageName;
+      item["size"] = size;
+      uvcpp_json files = uvcpp_json::array();
+      files.push_back(std::move(item));
+
+      uvcpp_json image;
+      image["id"] = static_cast<uint64_t>(1);
+      image["name"] = kClipboardImageName;
+      image["size"] = size;
+      image["hash"] = image_hash;
+
+      uvcpp_json out;
+      out["type"] = "clipboard-sync";
+      out["files"] = files;
+      out["image"] = image;
+      if (!text.empty()) {
+        out["text"] = text;
+        out["hash"] = text_hash;
+        out["chain"] = chain;
+      }
+      if (nested_rdp) out["nested_rdp"] = true;
+      send_json(peer->transport.get(), out);
+      ++sent;
+    }
+    diag().log(diag_level::info, "clipboard.image", std::string(),
+               {{"direction", "out"},
+                {"bytes", std::to_string(size)},
+                {"viewers", std::to_string(sent)},
+                {"text", text.empty() ? "0" : "1"},
+                {"active", std::to_string(route.active)},
+                {"reason", clipboard_route_reason_name(route.reason)}});
   };
   if (post) {
     post(std::move(deliver));
@@ -4013,6 +4114,36 @@ void session_controller::on_text(const std::string& text) {
         diag().log(diag_level::info, "clipboard.pull.start", std::string(),
                    fields);
       }
+      // An image announcement is a snapshot kept with the offer. Serve the
+      // bytes directly instead of re-reading the platform clipboard, which
+      // may already hold something else by the time the viewer pastes.
+      {
+        const std::vector<clipboard_offer_entry> offered =
+            registry_->clipboard_offer(session->id);
+        for (const clipboard_offer_entry& entry : offered) {
+          if (entry.id != file_id || entry.image == nullptr) continue;
+          const std::vector<uint8_t>& bytes = *entry.image;
+          if (offset > bytes.size()) {
+            send_clipboard_file_reply(
+                file_id, static_cast<uint32_t>(clipboard_pull_status::gone),
+                offset, nullptr, 0);
+            return;
+          }
+          const uint64_t take = (std::min)(length, bytes.size() - offset);
+          std::vector<diag_field> fields;
+          fields.push_back({"id", std::to_string(file_id)});
+          fields.push_back({"offset", std::to_string(offset)});
+          fields.push_back({"bytes", std::to_string(take)});
+          fields.push_back({"ms", std::to_string(now_ms() - pull_started_ms)});
+          fields.push_back({"mode", "image"});
+          diag().log(diag_level::info, "clipboard.pull.done", std::string(),
+                     fields);
+          send_clipboard_file_reply(
+              file_id, static_cast<uint32_t>(clipboard_pull_status::ok),
+              offset, take == 0 ? nullptr : bytes.data() + offset, take);
+          return;
+        }
+      }
       if (!options_.clipboard || !options_.clipboard->available()) {
         send_clipboard_file_reply(
             file_id, static_cast<uint32_t>(clipboard_pull_status::gone),
@@ -4414,7 +4545,8 @@ void session_controller::on_text(const std::string& text) {
       update_file_retry_timer();
     } else if (action == "clipboard-set") {
       // RDP-style paste: put the referenced remote files on the host's
-      // clipboard so Explorer can paste them.
+      // clipboard so Explorer can paste them. `image` marks the upload as a
+      // PNG that belongs on the image clipboard instead of CF_HDROP.
       std::vector<std::string> requested;
       if (const auto it = j.find("paths");
           it != j.end() && it->is_array()) {
@@ -4422,18 +4554,71 @@ void session_controller::on_text(const std::string& text) {
           if (item.is_string()) requested.push_back(item.get<std::string>());
         }
       }
+      const bool image = bool_field(j, "image", false);
       const std::vector<std::string> resolved = files_->resolve_files(requested);
-      // These files came from this viewer. Mark them before touching the
-      // clipboard so the watcher cannot announce our own reply back to it.
-      clipboard_mark_files_written(session->id, resolved);
-      const bool applied =
-          options_.clipboard && options_.clipboard->available() &&
-          !resolved.empty() && options_.clipboard->set_files(resolved);
+      bool applied = false;
+      std::string failure;
+      if (image) {
+        // The bytes were uploaded as an ordinary file (the existing chunked
+        // channel); read them once and let the native backend publish
+        // CF_DIB+PNG / image/png / NSPasteboardTypePNG. The transport file is
+        // deleted afterwards: it is a clipboard artifact, not a saved file.
+        std::vector<uint8_t> png;
+        if (resolved.empty()) {
+          failure = "the uploaded image was not found";
+        } else {
+          std::error_code ec;
+          const auto size = std::filesystem::file_size(
+              path_from_utf8(resolved.front()), ec);
+          if (ec || size == 0 || size > kClipboardImageMaxBytes) {
+            failure = "the image is empty or over 8 MiB";
+          } else {
+            std::ifstream in(path_from_utf8(resolved.front()),
+                             std::ios::binary);
+            if (in) {
+              png.resize(static_cast<std::size_t>(size));
+              in.read(reinterpret_cast<char*>(png.data()),
+                      static_cast<std::streamsize>(png.size()));
+              if (!in) png.clear();
+            }
+            if (png.empty()) {
+              failure = "the image could not be read";
+            } else {
+              std::string text = string_field(j, "text");
+              if (text.size() > 192 * 1024) text.resize(192 * 1024);
+              applied = options_.clipboard &&
+                        options_.clipboard->available() &&
+                        options_.clipboard->set_image(std::move(png),
+                                                      std::move(text));
+              if (!applied) {
+                failure = "the host clipboard does not support images";
+              }
+            }
+          }
+          if (options_.clipboard && options_.clipboard->available()) {
+            std::error_code remove_ec;
+            std::filesystem::remove(path_from_utf8(resolved.front()),
+                                    remove_ec);
+          }
+        }
+      } else {
+        // These files came from this viewer. Mark them before touching the
+        // clipboard so the watcher cannot announce our own reply back to it.
+        clipboard_mark_files_written(session->id, resolved);
+        applied = options_.clipboard && options_.clipboard->available() &&
+                  !resolved.empty() && options_.clipboard->set_files(resolved);
+        if (!applied) {
+          failure = options_.clipboard && options_.clipboard->available()
+                        ? "no valid files to copy"
+                        : "the host clipboard does not support file lists";
+        }
+      }
       diag().log(applied ? diag_level::info : diag_level::warn,
                  "file.clipboard-set", std::string(),
                  {{"peer", peer_ip},
                   {"session_id", session->public_id},
                   {"ok", applied ? "1" : "0"},
+                  {"kind", image ? "image" : "files"},
                   {"requested", std::to_string(requested.size())},
                   {"resolved", std::to_string(resolved.size())}});
       uvcpp_json out;
@@ -4441,12 +4626,7 @@ void session_controller::on_text(const std::string& text) {
       out["action"] = "clipboard";
       out["ok"] = applied;
       out["count"] = applied ? static_cast<int>(resolved.size()) : 0;
-      if (!applied) {
-        out["message"] =
-            options_.clipboard && options_.clipboard->available()
-                ? "no valid files to copy"
-                : "the host clipboard does not support file lists";
-      }
+      if (!applied) out["message"] = failure;
       send_json(transport.get(), out);
     } else {
       send_error(transport.get(), "bad_file_action",
@@ -4939,6 +5119,38 @@ void session_supervisor::start() {
           publish_clipboard_files(registry, post, std::move(files),
                                   clipboard && clipboard->nested_rdp(),
                                   clipboard_allow_broadcast(auth));
+        });
+    // Images copied on the host (a screenshot, or a picture in a document)
+    // travel as one virtual file over the existing pull channel. The same
+    // copy's text is carried in the message when it has one, so the viewer can
+    // write both formats instead of the later one clearing the earlier one.
+    options_.clipboard->watch_images(
+        [registry, post, clipboard, auth,
+         device](clipboard_image image, clipboard_owner owner) {
+          log_clipboard_owner(owner, "in");
+          switch (clipboard_image_disposition_for(owner, image)) {
+            case clipboard_image_disposition::drop_self:
+            case clipboard_image_disposition::drop_empty:
+              return;
+            case clipboard_image_disposition::drop_too_large:
+              diag().log(diag_level::warn, "clipboard.image", std::string(),
+                         {{"too_large", "1"},
+                          {"bytes", std::to_string(image.source_bytes)}});
+              return;
+            case clipboard_image_disposition::announce:
+              break;
+          }
+          std::string text;
+          if (clipboard) {
+            clipboard->request_text(
+                [&text](std::string value) { text = std::move(value); });
+          }
+          if (text.size() > 192 * 1024) text.clear();
+          auto png = std::make_shared<const std::vector<uint8_t>>(
+              std::move(image.png));
+          publish_clipboard_image(registry, post, std::move(png),
+                                  std::move(text), device, auth,
+                                  clipboard && clipboard->nested_rdp());
         });
   }
   thread_ = std::thread([this] { run(); });

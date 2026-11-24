@@ -224,6 +224,18 @@ export interface ClipboardPullFile {
   path?: string
 }
 
+/// The `clipboard-sync.image` hint: one entry of `files` is a PNG image, not
+/// a real file. `id` points at that entry; `hash` lets the receiver skip an
+/// unchanged image; `text` is the text copied with it (Word and similar), so
+/// both formats can be applied together.
+export interface ClipboardSyncImage {
+  id: number
+  name: string
+  size: number
+  hash?: string
+  text?: string
+}
+
 export interface FileMessage {
   action: string
   ok?: boolean
@@ -288,6 +300,9 @@ export type SessionEvent =
       kind: 'clipboard-pull-files'
       files: ClipboardPullFile[]
       omitted?: number
+      /// Set when one of `files` is a clipboard image; its bytes are pulled
+      /// and written to the image clipboard instead of the file clipboard.
+      image?: ClipboardSyncImage
     }
   /// One range reply for a clipboard-pull (packet type 0x18).
   | {
@@ -1994,6 +2009,39 @@ export class MolinkClient {
                 typeof file.size === 'number',
             )
           : []
+        // `image` names one of the files as a PNG painting. An older client
+        // ignores the field and handles the list as ordinary files.
+        let image: ClipboardSyncImage | undefined
+        const rawImage = (message as { image?: unknown }).image
+        if (
+          typeof rawImage === 'object' && rawImage !== null &&
+          typeof (rawImage as { id?: unknown }).id === 'number' &&
+          typeof (rawImage as { name?: unknown }).name === 'string' &&
+          typeof (rawImage as { size?: unknown }).size === 'number'
+        ) {
+          const hint = rawImage as {
+            id: number
+            name: string
+            size: number
+            hash?: unknown
+          }
+          const entry = files.find(
+            (file) =>
+              file.id === hint.id && file.size === hint.size &&
+              file.name === hint.name,
+          )
+          // Only a hint that names an announced file is usable: it is a
+          // pointer into `files`, not an independent payload.
+          if (entry) {
+            image = {
+              id: entry.id,
+              name: entry.name,
+              size: entry.size,
+              hash: typeof hint.hash === 'string' ? hint.hash : undefined,
+              text: text !== '' ? text : undefined,
+            }
+          }
+        }
         if (files.length > 0 || (message.omitted ?? 0) > 0) {
           this.handlers.onSessionEvent?.({
             kind: 'clipboard-pull-files',
@@ -2002,6 +2050,7 @@ export class MolinkClient {
               typeof message.omitted === 'number' && message.omitted > 0
                 ? message.omitted
                 : undefined,
+            image,
           })
         }
         break

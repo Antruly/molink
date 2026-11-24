@@ -1,6 +1,8 @@
 #include "clipboard_stage.h"
 
 #include <chrono>
+
+#include "clipboard/clipboard_image.h"
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -327,6 +329,35 @@ stage_error clipboard_stage::apply(const std::vector<std::string>& ids,
   if (!applier_ || !applier_(finals)) return stage_error::apply_failed;
   for (const std::string& id : ids) entries_.erase(id);
   count = finals.size();
+  return stage_error::none;
+}
+
+stage_error clipboard_stage::apply_image(const std::string& id,
+                                         bytes_applier applier) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  const uint64_t now = now_ms();
+  sweep_locked(now);
+  if (directory_.empty()) return stage_error::unavailable;
+  const auto it = entries_.find(id);
+  if (it == entries_.end()) return stage_error::not_found;
+  staged_clipboard_entry& entry = it->second;
+  if (entry.received != entry.size) return stage_error::conflict;
+  if (entry.size > kClipboardImageMaxBytes) return stage_error::too_large;
+  if (!applier) return stage_error::apply_failed;
+
+  std::vector<uint8_t> bytes(static_cast<std::size_t>(entry.size));
+  if (!bytes.empty()) {
+    std::ifstream in(path_from_utf8(entry.temp_path), std::ios::binary);
+    if (!in) return stage_error::io_error;
+    in.read(reinterpret_cast<char*>(bytes.data()),
+            static_cast<std::streamsize>(bytes.size()));
+    if (!in) return stage_error::io_error;
+  }
+  if (!applier(bytes)) return stage_error::apply_failed;
+
+  std::error_code ec;
+  fs::remove(path_from_utf8(entry.temp_path), ec);
+  entries_.erase(it);
   return stage_error::none;
 }
 

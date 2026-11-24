@@ -1,4 +1,10 @@
-import { ApiError, fetchClipboardFile, fetchClipboardFiles } from './api'
+import {
+  ApiError,
+  fetchClipboardFile,
+  fetchClipboardFiles,
+  fetchClipboardImage,
+  fetchClipboardImageInfo,
+} from './api'
 import { ClipboardEcho } from './clipboard-echo'
 import {
   LAZY_DEST,
@@ -20,6 +26,9 @@ interface QueuedFile {
   /// capped); dropped files stay as Blobs and are sliced while uploading.
   data?: ArrayBuffer
   file?: File
+  /// The bytes are a PNG clipboard image; the host applies them to its image
+  /// clipboard instead of turning the upload into a file.
+  image?: boolean
 }
 
 const RETRY_DELAY_MS = 3000
@@ -56,6 +65,13 @@ export class ClipboardFileSync {
   /// Which transfer the shared queue/active state belongs to.
   private mode: 'direct' | 'fetch' | null = null
   private fallbackNotified = false
+
+  // Local image -> remote. The image travels as one virtual file, marked so
+  // the host writes it to the image clipboard.
+  private imageLastKey = ''
+  private imageLastAttempt = 0
+  private imageMode = false
+  private imageText = ''
 
   // Delayed clipboard state.
   private lazyFiles: QueuedFile[] = []
@@ -99,6 +115,11 @@ export class ClipboardFileSync {
     this.processing = true
     try {
       const result = await fetchClipboardFiles(token)
+      // The clipboard may hold an image instead of files (a screenshot). Both
+      // polls stay cheap; the image bytes are only read once it changed.
+      const imageInfo = await fetchClipboardImageInfo(token).catch(
+        () => null,
+      )
       // `echo` marks a file the local core just staged from the remote; the
       // reverse sync must not offer its own files back.
       const files = result.files.filter(
@@ -107,6 +128,7 @@ export class ClipboardFileSync {
       if (files.length === 0) {
         // Let the same files sync again after the clipboard was cleared.
         this.lastKey = ''
+        if (imageInfo !== null) await this.offerImage(token, imageInfo)
         return
       }
       const key = files
@@ -163,6 +185,8 @@ export class ClipboardFileSync {
       this.queue = queue
       this.paths = []
       this.mode = 'direct'
+      this.imageMode = false
+      this.imageText = ''
       this.busy = true
       this.sendNext()
     } catch (error) {
@@ -182,6 +206,72 @@ export class ClipboardFileSync {
       // clipboard; nothing else would wake the queue.
       if (this.fetchQueue.length > 0) void this.pumpFetch()
     }
+  }
+
+  /// Mirror a local clipboard image to the remote host.
+  ///
+  /// The PNG rides the ordinary file channel (`offer`/chunks/`clipboard-set`)
+  /// with `image: true`, so the host can apply it to its native image
+  /// clipboard. `echo` is set when the local core just wrote an image it
+  /// received from the remote; that copy must not travel back.
+  private async offerImage(
+    token: string,
+    info: { hash?: string; size: number; echo?: boolean; too_large?: boolean },
+  ): Promise<void> {
+    if (info.echo === true) {
+      this.imageLastKey = info.hash ?? ''
+      return
+    }
+    if (info.size <= 0 || typeof info.hash !== 'string' || info.hash === '') {
+      // Cleared clipboard: a later copy of the same picture is fresh.
+      this.imageLastKey = ''
+      return
+    }
+    // The host caps the compressed image at 8 MiB; the local snapshot is
+    // already clamped, so `too_large` only means "no image payload".
+    if (info.too_large === true || info.size > 8 * 1024 * 1024) {
+      this.imageLastKey = info.hash
+      return
+    }
+    if (info.hash === this.imageLastKey) return
+    if (Date.now() - this.imageLastAttempt < RETRY_DELAY_MS) return
+    this.imageLastAttempt = Date.now()
+    let data: ArrayBuffer
+    try {
+      data = await fetchClipboardImage(token)
+    } catch {
+      return
+    }
+    if (data.byteLength !== info.size) {
+      // The clipboard changed between the two loopback reads; retry next poll.
+      this.imageLastKey = ''
+      return
+    }
+    this.imageLastKey = info.hash
+    // Best-effort: the text copied with a picture (Word and similar) must
+    // stay pasteable on the host, which writes both formats at once.
+    let text = ''
+    try {
+      if (navigator.clipboard?.readText) {
+        text = await navigator.clipboard.readText()
+      }
+    } catch {
+      // No focus/permission; the image still syncs.
+    }
+    this.dropLazyOffer()
+    this.lastKey = ''
+    this.queue = [{
+      name: 'clipboard.png',
+      size: data.byteLength,
+      data,
+      image: true,
+    }]
+    this.paths = []
+    this.mode = 'direct'
+    this.imageMode = true
+    this.imageText = text
+    this.busy = true
+    this.sendNext()
   }
 
   /// Upload the files the user dropped on the remote screen, put them on the
@@ -208,6 +298,8 @@ export class ClipboardFileSync {
       }))
       this.paths = []
       this.mode = 'direct'
+      this.imageMode = false
+      this.imageText = ''
       this.pasteAfterDrop = pasteAfterUpload
       this.busy = true
       this.sendNext()
@@ -577,9 +669,12 @@ export class ClipboardFileSync {
         this.finish('clipboard_files_failed')
         return
       }
-      this.connection()?.sendFileAction('clipboard-set', {
-        paths: this.paths,
-      })
+      const set: Record<string, unknown> = { paths: this.paths }
+      if (this.imageMode) {
+        set.image = true
+        if (this.imageText !== '') set.text = this.imageText
+      }
+      this.connection()?.sendFileAction('clipboard-set', set)
       this.armWatchdog()
       return
     }
@@ -589,6 +684,7 @@ export class ClipboardFileSync {
       name: next.name,
       size: next.size,
     }
+    if (next.image === true) extra.image = true
     if (this.mode === 'fetch') {
       extra.dest = this.lazyDest
       extra.clipboard_tag = this.lazyTag
@@ -668,6 +764,8 @@ export class ClipboardFileSync {
     this.queue = []
     this.paths = []
     this.pasteAfterDrop = false
+    this.imageMode = false
+    this.imageText = ''
     this.fetchActive = null
     this.mode = null
     if (this.fetchQueue.length > 0) void this.pumpFetch()
@@ -678,5 +776,6 @@ export class ClipboardFileSync {
     this.finish(null)
     this.dropLazyOffer()
     this.lastKey = ''
+    this.imageLastKey = ''
   }
 }
