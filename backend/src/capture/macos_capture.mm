@@ -112,6 +112,7 @@ class macos_capture final : public capture_base {
     const int fps = target_fps();
     auto next_allowed = std::chrono::steady_clock::now();
     auto last_full = std::chrono::steady_clock::now();
+    last_publish_ = next_allowed - kInputCaptureGap;
     std::vector<uint8_t> pixels;
 
     while (running_.load()) {
@@ -130,13 +131,22 @@ class macos_capture final : public capture_base {
       }
 
       std::string grab_error;
+      const bool input_ready = input_capture_ready(last_publish_);
+      const uint64_t loop_start_us = epoch_us();
+      capture_start_us_ = loop_start_us;
+      trigger_us_ = input_ready ? pending_input_us() : loop_start_us;
+      trigger_ = input_ready ? capture_trigger::input
+                             : capture_trigger::timer;
       if (grab(pixels, grab_error)) {
+        capture_done_us_ = epoch_us();
         const bool key = keyframe_requested_.exchange(false) || !have_previous_;
+        if (key) trigger_ = capture_trigger::keyframe;
         const int interval_ms =
             periodic_keyframe_ms() > 0 ? periodic_keyframe_ms() : 120000;
         const bool refresh_due =
             std::chrono::steady_clock::now() - last_full >
             std::chrono::milliseconds(interval_ms);
+        if (refresh_due) trigger_ = capture_trigger::keyframe;
         publish_frame(pixels, key || refresh_due);
         if (key || refresh_due) last_full = std::chrono::steady_clock::now();
       } else if (!grab_error.empty()) {
@@ -145,9 +155,19 @@ class macos_capture final : public capture_base {
       }
 
       next_allowed += std::chrono::milliseconds(1000 / fps);
-      const auto now = std::chrono::steady_clock::now();
-      if (next_allowed > now) std::this_thread::sleep_until(next_allowed);
-      else next_allowed = now;
+      auto now = std::chrono::steady_clock::now();
+      if (next_allowed < now) next_allowed = now;
+      auto deadline = next_allowed;
+      if (input_priority_pending()) {
+        const auto input_deadline = last_publish_ + kInputCaptureGap;
+        if (input_deadline > now && input_deadline < deadline) {
+          deadline = input_deadline;
+        }
+      }
+      while (std::chrono::steady_clock::now() < deadline) {
+        wait_until(deadline);
+        if (input_capture_ready(last_publish_)) break;
+      }
     }
   }
 
@@ -284,6 +304,7 @@ class macos_capture final : public capture_base {
     header.tile_h = tile;
 
     const auto build_start = std::chrono::steady_clock::now();
+    const uint64_t encode_start_us = epoch_us();
     std::vector<protocol::tile_blob> tiles;
     build_changed_tiles(pixels.data(), stride, width_, height_, tile,
                         previous_.data(), keyframe, nullptr,
@@ -317,6 +338,7 @@ class macos_capture final : public capture_base {
                            &av1_payload, err, &av1_only)) {
       return;
     }
+    const uint64_t encode_end_us = epoch_us();
     note_build_time(static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - build_start)
@@ -325,6 +347,12 @@ class macos_capture final : public capture_base {
     auto frame = std::make_shared<captured_frame>();
     frame->seq = seq_++;
     frame->ts_us = epoch_us();
+    frame->capture_start_us = capture_start_us_;
+    frame->capture_done_us = capture_done_us_;
+    frame->encode_start_us = encode_start_us;
+    frame->encode_end_us = encode_end_us;
+    frame->trigger = trigger_;
+    frame->trigger_us = trigger_us_;
     frame->keyframe = keyframe;
     frame->width = width_;
     frame->height = height_;
@@ -334,11 +362,17 @@ class macos_capture final : public capture_base {
     frame->payload = std::move(payload);
     frame->av1_payload = std::move(av1_payload);
     frame->av1_only = av1_only;
+    last_publish_ = std::chrono::steady_clock::now();
     publish(std::move(frame));
     have_previous_ = true;
   }
 
   capture_options options_;
+  uint64_t capture_start_us_ = 0;
+  uint64_t capture_done_us_ = 0;
+  uint64_t trigger_us_ = 0;
+  capture_trigger trigger_ = capture_trigger::timer;
+  std::chrono::steady_clock::time_point last_publish_{};
   uint16_t width_ = 0;
   uint16_t height_ = 0;
   CGDirectDisplayID display_id_ = CGMainDisplayID();

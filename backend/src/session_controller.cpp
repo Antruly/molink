@@ -623,6 +623,23 @@ bool send_frame_with_av1(session_transport* transport,
                          const std::shared_ptr<session_info>& session,
                          const captured_frame& frame,
                          const session_options* opt = nullptr) {
+  // The pipeline diagnostic measures from capture completion (when the pixels
+  // were in hand), not from publish time. Older sources leave it zero; fall
+  // back to the wire timestamp so the line still has an age.
+  const uint64_t capture_done_us =
+      frame.capture_done_us != 0 ? frame.capture_done_us : frame.ts_us;
+  const auto note_sent = [&frame, capture_done_us, &session](uint64_t bytes) {
+    video_pipeline().note_sent(capture_done_us, bytes);
+    if (!diag().would_log(diag_level::debug)) return;
+    const uint64_t now = pipeline_now_us();
+    diag().log(diag_level::debug, "video.send", std::string(),
+               {{"viewer", std::to_string(session->id)},
+                {"seq", std::to_string(frame.seq)},
+                {"age_ms", std::to_string(now > capture_done_us
+                                              ? (now - capture_done_us) / 1000
+                                              : 0)},
+                {"bytes", std::to_string(bytes)}});
+  };
   if (frame.av1_only) {
     if (!can_decode_stream(session, frame.av1_payload)) return false;
 #if MOLINK_HAVE_WEBRTC
@@ -641,24 +658,33 @@ bool send_frame_with_av1(session_transport* transport,
         const protocol::tile_view& view = parsed.tiles.front();
         if (session->rtc->send_video(view.data, view.size, frame.ts_us)) {
           ++session->frames_sent;
+          note_sent(view.size);
           return true;
         }
       }
     }
 #endif
-    return send_frame_payload(
+    const bool sent = send_frame_payload(
         transport, session,
         frame.keyframe ? protocol::kPacketFlagKeyframe : 0, frame.ts_us,
         frame.av1_payload, opt);
+    if (sent) note_sent(frame.av1_payload.size() +
+                        protocol::kPacketHeaderSize);
+    return sent;
   }
   if (!send_frame_payload(transport, session,
                           frame.keyframe ? protocol::kPacketFlagKeyframe : 0,
                           frame.ts_us, frame.payload, opt)) {
     return false;
   }
+  note_sent(frame.payload.size() + protocol::kPacketHeaderSize);
   if (session->av1 && !frame.av1_payload.empty()) {
-    send_frame_payload(transport, session, protocol::kPacketFlagTileRefresh,
-                       frame.ts_us, frame.av1_payload, opt);
+    if (send_frame_payload(transport, session,
+                           protocol::kPacketFlagTileRefresh, frame.ts_us,
+                           frame.av1_payload, opt)) {
+      video_pipeline().note_sent_bytes(frame.av1_payload.size() +
+                                       protocol::kPacketHeaderSize);
+    }
   }
   return true;
 }
@@ -921,6 +947,7 @@ void send_capture_frame(session_transport* transport,
           std::string refresh_error;
           if (send_tile_refresh(transport, session, opt, full,
                                 refresh_error)) {
+            video_pipeline().note_dropped(latest->seq);
             session->last_capture_seq = static_cast<int64_t>(latest->seq);
             return;
           }
@@ -958,6 +985,14 @@ void send_capture_frame(session_transport* transport,
   }
 
   const int64_t last = session->last_capture_seq;
+  {
+    // Backlog this session still has to carry: the newest capture minus what
+    // it has already been handed. The summary reports the worst session in
+    // the window, which is the one a viewer would see as a stall.
+    const uint64_t sent_seq =
+        last >= 0 ? static_cast<uint64_t>(last) : latest->seq;
+    video_pipeline().note_send_state(sent_seq, latest->seq);
+  }
   if (std::getenv("MOLINK_STREAM_LOG") != nullptr) {
     static thread_local uint64_t last_idle_log = 0;
     const uint64_t idle_now = now_ms();
@@ -1006,6 +1041,7 @@ void send_capture_frame(session_transport* transport,
   const bool viewer_behind = session->viewer_dropped >= 3;
   if (tiles && session->has_image && first + 1 <= latest->seq &&
       (viewer_behind || latest->seq - first > 8)) {
+    video_pipeline().note_dropped(latest->seq - first);
     first = latest->seq;
   }
   const uint32_t missing = latest->seq - first + 1;
@@ -1038,6 +1074,7 @@ void send_capture_frame(session_transport* transport,
     // Do not make a slow viewer replay a queue of obsolete deltas. Advance it
     // to the current capture sequence; the periodic tile clock repairs any
     // regions that were skipped.
+    video_pipeline().note_dropped(latest->seq - first + 1);
     session->last_capture_seq = latest->seq;
     send_empty_frame(transport, session, latest->width, latest->height, false);
     return;
@@ -1060,6 +1097,7 @@ void send_capture_frame(session_transport* transport,
       // can skip to the latest capture and repair stale cells from tile_clock;
       // a new viewer still needs a keyframe to establish its base image.
       if (session->has_image) {
+        video_pipeline().note_dropped(latest->seq - seq + 1);
         session->last_capture_seq = latest->seq;
         send_empty_frame(transport, session, latest->width, latest->height,
                          false);
@@ -1104,6 +1142,7 @@ void send_capture_frame(session_transport* transport,
         std::string refresh_error;
         if (send_tile_refresh(transport, session, opt, rects,
                               refresh_error)) {
+          video_pipeline().note_dropped(latest->seq - first + 1);
           session->last_capture_seq = latest->seq;
           return;
         }
@@ -3869,6 +3908,10 @@ void session_controller::on_text(const std::string& text) {
   }
 
   if (type == "input") {
+    // Record the arrival for the pipeline diagnostic before doing any work:
+    // the gap from this instant to the next grab is what the viewer feels as
+    // "the picture waited for me". It is not (yet) a capture request.
+    if (options_.capture) options_.capture->note_input(epoch_us());
     if (std::getenv("MOLINK_STREAM_LOG") != nullptr) {
       const auto events = j.find("events");
       if (events != j.end() && events->is_array()) {
@@ -4259,11 +4302,24 @@ void session_supervisor::stop() {
 void session_supervisor::run_push_clock() {
   video_push_clock clock(options_.capture ? options_.capture->target_fps()
                                           : video_push_clock::kDefaultFps);
+  // Input priority: for this long after an input event the sender follows the
+  // capture cadence instead of the (possibly 5 fps) target. The capture has
+  // already skipped its own wait; holding the finished frame for the next slow
+  // tick would move the stall into the send queue.
+  constexpr uint64_t kInputActiveWindowUs = 500000;
   while (running_.load()) {
-    std::this_thread::sleep_for(
-        std::chrono::milliseconds(clock.interval_ms()));
+    // A short slice (never longer than 10 ms) lets a newly arrived input
+    // promote the next send without waiting out a 5 fps interval. Outside an
+    // interaction the clock still fires only on its own boundary below.
+    std::this_thread::sleep_for(std::chrono::milliseconds(
+        (std::min)(clock.interval_ms(), static_cast<uint64_t>(10))));
     if (!running_.load()) break;
     if (!registry_->has_authenticated() || !options_.capture) continue;
+    const uint64_t last_input = options_.capture->last_input_us();
+    const uint64_t active_now_us = epoch_us();
+    const bool input_active =
+        last_input != 0 && active_now_us > last_input &&
+        active_now_us - last_input < kInputActiveWindowUs;
     // The requested rate, for tiles and the stream alike: a viewer that
     // cannot keep up lowers it through note_viewer() below.
     clock.set_target_fps(options_.capture->target_fps());
@@ -4271,7 +4327,10 @@ void session_supervisor::run_push_clock() {
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch())
             .count());
-    if (!clock.due(now_ms)) continue;
+    // Always advance the clock, but a recent input may also send between
+    // ticks: the newest capture is already waiting in the history.
+    const bool due = clock.due(now_ms);
+    if (!due && !input_active) continue;
 
     // Read the viewer feedback here rather than inside the posted lambda: the
     // supervisor must not capture `this`, a post can outlive stop().
@@ -4718,6 +4777,49 @@ void session_supervisor::run() {
                                         bytes.size());
           }
         });
+      }
+    }
+
+    // The two-second media timeline. Step one is measurement: these numbers
+    // say whether a stall is a slow grab, a slow encode, a send backlog, or a
+    // viewer that had to skip frames. Per-frame detail stays behind
+    // MOLINK_DIAG_LEVEL=debug; the default file gets one line here.
+    if (options_.capture) {
+      if (!registry_->has_authenticated()) {
+        // No viewer: drop the window instead of writing a line of zeros.
+        if (video_pipeline().due()) video_pipeline().take();
+      } else if (video_pipeline().due()) {
+        const pipeline_snapshot stats = video_pipeline().take();
+        char kbps[32] = {};
+        std::snprintf(kbps, sizeof(kbps), "%.1f", stats.kbps);
+        std::vector<diag_field> fields;
+        fields.push_back({"frames_captured", std::to_string(stats.captured)});
+        fields.push_back({"frames_encoded", std::to_string(stats.encoded)});
+        fields.push_back({"frames_sent", std::to_string(stats.sent)});
+        fields.push_back({"dropped", std::to_string(stats.dropped)});
+        fields.push_back({"queue_depth", std::to_string(stats.queue_depth)});
+        fields.push_back(
+            {"age_p95_ms", std::to_string(stats.age_p95_us / 1000)});
+        fields.push_back({"encode_p95_us", std::to_string(stats.encode_p95_us)});
+        fields.push_back({"kbps", kbps});
+        fields.push_back(
+            {"trigger_delay_p95_ms",
+             std::to_string(stats.trigger_delay_p95_us / 1000)});
+        fields.push_back(
+            {"input_delay_p95_ms",
+             std::to_string(stats.input_delay_p95_us / 1000)});
+        for (std::size_t i = 0;
+             i < static_cast<std::size_t>(capture_trigger::count); ++i) {
+          fields.push_back(
+              {std::string("trig_") +
+                   capture_trigger_name(static_cast<capture_trigger>(i)),
+               std::to_string(stats.triggers[i])});
+        }
+        fields.push_back(
+            {"target_fps", std::to_string(options_.capture->target_fps())});
+        fields.push_back(
+            {"window_ms", std::to_string(stats.window_us / 1000)});
+        diag().log(diag_level::info, "video.pipeline", std::string(), fields);
       }
     }
 

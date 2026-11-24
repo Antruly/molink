@@ -224,6 +224,38 @@ void test_disabled_never_writes() {
   fs::remove_all(dir, ec);
 }
 
+void test_level_filter() {
+  const int64_t noon = today_noon_ms();
+  int64_t now = noon;
+  const fs::path dir = make_temp_dir("levels");
+  molink::diag_log log(dir.string(), true, 7, 1024 * 1024,
+                       [&now] { return now; }, 50, molink::diag_level::info);
+  log.log(molink::diag_level::debug, "per.frame", "hidden");
+  log.log(molink::diag_level::info, "summary", "shown");
+  expect(contains(log.tail(10), "summary"), "info is written at the default");
+  expect(!contains(log.tail(10), "per.frame"),
+         "debug is filtered at the default level");
+  expect(!log.would_log(molink::diag_level::debug),
+         "would_log agrees with the filter");
+  expect(log.would_log(molink::diag_level::warn),
+         "warn is above the minimum");
+
+  log.set_min_level(molink::diag_level::debug);
+  log.log(molink::diag_level::debug, "per.frame", "visible");
+  expect(contains(log.tail(10), "per.frame"), "debug is written when enabled");
+  expect(log.min_level() == molink::diag_level::debug,
+         "the level reports back");
+
+  molink::diag_level parsed = molink::diag_level::error;
+  expect(molink::diag_level_from_name("DEBUG", parsed) &&
+             parsed == molink::diag_level::debug,
+         "level names parse case-insensitively");
+  expect(!molink::diag_level_from_name("verbose", parsed),
+         "an unknown level name is rejected");
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
 void test_info() {
   const int64_t noon = today_noon_ms();
   int64_t now = noon;
@@ -249,6 +281,7 @@ int main() {
   test_tail_limits_and_truncation();
   test_redaction();
   test_disabled_never_writes();
+  test_level_filter();
   test_info();
   std::printf("%d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;

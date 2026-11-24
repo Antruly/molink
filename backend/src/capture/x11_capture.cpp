@@ -9,8 +9,11 @@
 #include <sys/ipc.h>
 #include <sys/shm.h>
 
+#include <cerrno>
 #include <dlfcn.h>
+#include <fcntl.h>
 #include <poll.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <chrono>
@@ -199,8 +202,37 @@ void union_rect(XRectangle& into, const XRectangle& r) {
 
 class x11_capture final : public capture_base {
  public:
-  explicit x11_capture(const capture_options& options) : capture_base(options.fps), options_(options) {}
-  ~x11_capture() override { stop(); }
+  explicit x11_capture(const capture_options& options) : capture_base(options.fps), options_(options) {
+    // A self-pipe wakes the capture thread out of poll() when a viewer sends
+    // input. Without it a key press that does not damage the screen waits out
+    // the 200 ms poll timeout -- exactly the "sudden action" stall.
+    if (::pipe(wake_fds_) == 0) {
+      for (int& fd : wake_fds_) {
+        const int flags = ::fcntl(fd, F_GETFL, 0);
+        if (flags >= 0) ::fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+        ::fcntl(fd, F_SETFD, FD_CLOEXEC);
+      }
+    } else {
+      wake_fds_[0] = -1;
+      wake_fds_[1] = -1;
+    }
+  }
+  ~x11_capture() override {
+    stop();
+    for (int& fd : wake_fds_) {
+      if (fd >= 0) ::close(fd);
+      fd = -1;
+    }
+  }
+
+  void note_input(uint64_t input_us) override {
+    capture_base::note_input(input_us);
+    if (wake_fds_[1] < 0) return;
+    const char byte = 1;
+    // A full pipe already means "wake pending"; the byte is not data.
+    const ssize_t ignored = ::write(wake_fds_[1], &byte, 1);
+    (void)ignored;
+  }
 
   bool start(std::string& err) override {
     if (running_.load()) return true;
@@ -287,6 +319,8 @@ class x11_capture final : public capture_base {
     // Publish one keyframe immediately: it gives the welcome message and
     // /api/info a real screen size before any client asks for pixels.
     keyframe_requested_.store(true);
+    trigger_ = capture_trigger::initial;
+    trigger_us_ = epoch_us();
     capture_full(true, last_error);
     next_allowed = std::chrono::steady_clock::now() +
                    std::chrono::milliseconds(1000 / std::max(1, target_fps()));
@@ -325,15 +359,33 @@ class x11_capture final : public capture_base {
       bool want_capture = false;
       update_cursor();
 
+      capture_trigger trigger = capture_trigger::timer;
+      uint64_t trigger_us = epoch_us();
       if (damage_mode) {
-        struct pollfd descriptor;
-        descriptor.fd = ConnectionNumber(display_);
-        descriptor.events = POLLIN;
-        descriptor.revents = 0;
+        struct pollfd descriptors[2];
+        descriptors[0].fd = ConnectionNumber(display_);
+        descriptors[0].events = POLLIN;
+        descriptors[0].revents = 0;
+        descriptors[1].fd = wake_fds_[0];
+        descriptors[1].events = POLLIN;
+        descriptors[1].revents = 0;
         // A static screen produces no damage event, and a 200 ms wait would
         // cap the AV1 stream at five frames a second. Poll briefly while the
         // stream is the active path so its cadence follows the frame rate.
-        ::poll(&descriptor, 1, stream_active() ? 5 : 200);
+        const int timeout =
+            (stream_active() || input_priority_pending()) ? 5 : 200;
+        ::poll(descriptors, 2, timeout);
+        if (descriptors[1].revents & POLLIN) {
+          // Input arrived: drain the byte(s) and let the checks below decide
+          // whether the 30 ms gap allows a frame right now.
+          char buffer[64];
+          while (::read(wake_fds_[0], buffer, sizeof(buffer)) > 0) {
+          }
+        }
+        // The event, if any, is observed now. Starting the trigger clock here
+        // (before the rate limiter below) is what makes a capture that waits
+        // for the next allowed slot look as slow as it feels.
+        trigger_us = epoch_us();
 
         if (drain_damage_events(dirty)) {
           if (!ever_damaged) {
@@ -342,24 +394,55 @@ class x11_capture final : public capture_base {
           }
           have_dirty = true;
           want_capture = true;
+          trigger = capture_trigger::change;
         }
-        if (keyframe_requested_.load()) want_capture = true;
+        if (keyframe_requested_.load()) {
+          want_capture = true;
+          if (trigger != capture_trigger::change) {
+            trigger = capture_trigger::keyframe;
+          }
+        }
         if (std::chrono::steady_clock::now() - last_capture >=
             safety_interval) {
           want_capture = true;
         }
         // The AV1 stream keeps a steady cadence; a static screen still has to
         // produce its (tiny) P frame every tick.
-        if (stream_active()) want_capture = true;
-        if (!want_capture) continue;
+        if (stream_active()) {
+          want_capture = true;
+          if (trigger == capture_trigger::timer) trigger = capture_trigger::stream;
+        }
       } else {
         want_capture = true;
       }
+      // Input may start a frame even when the desktop reported no damage (a
+      // key press that opens a menu, a click that only repaints later). The
+      // 30 ms gap keeps a continuous drag from ignoring the target rate
+      // entirely, and viewer/transport pressure vetoes it below.
+      const bool input_ready = input_capture_ready(last_capture);
+      if (input_ready) want_capture = true;
       if (!want_capture) continue;
 
-      if (next_allowed > std::chrono::steady_clock::now()) {
-        std::this_thread::sleep_until(next_allowed);
+      // Rate limit, but let a pending input shorten the wait to the minimum
+      // gap instead of the full target interval (200 ms at 5 fps).
+      if (!input_ready) {
+        auto deadline = next_allowed;
+        const auto input_deadline = last_capture + kInputCaptureGap;
+        if (pending_input_us() != 0 && input_deadline < deadline) {
+          deadline = input_deadline;
+        }
+        while (std::chrono::steady_clock::now() < deadline) {
+          wait_until(deadline);
+          if (input_capture_ready(last_capture)) break;
+        }
       }
+      // The grab is about to start; the gap from trigger_us is the scheduling
+      // delay this frame paid (rate limit, a blocked loop, a slow grab).
+      if (input_capture_ready(last_capture)) {
+        note_input_trigger(trigger_us, trigger);
+      }
+      trigger_ = trigger;
+      trigger_us_ = trigger_us;
 
       std::string grab_error;
       const bool key = keyframe_requested_.exchange(false) || !have_previous_;
@@ -838,6 +921,7 @@ class x11_capture final : public capture_base {
     std::lock_guard<std::recursive_mutex> pixels_lock(pixels_mutex_);
     if (!refresh_geometry(err)) return false;
 
+    capture_start_us_ = epoch_us();
     std::vector<uint8_t> pixels;
     if (!grab_full(pixels, err)) return false;
     if (pixels.size() != static_cast<std::size_t>(width_) * height_ * 4) {
@@ -847,6 +931,7 @@ class x11_capture final : public capture_base {
 
     const bool size_changed = frame_.size() != pixels.size();
     frame_ = std::move(pixels);
+    capture_done_us_ = epoch_us();
     note_grab(true, width_, height_);
     if (keyframe || size_changed || previous_.size() != frame_.size()) {
       previous_.assign(frame_.size(), 0);
@@ -878,6 +963,7 @@ class x11_capture final : public capture_base {
                            static_cast<unsigned short>(bottom - top)};
 
     std::vector<uint8_t> pixels;
+    capture_start_us_ = epoch_us();
     if (!grab_rect(local, pixels, err)) return false;
     note_grab(false, local.width, local.height);
 
@@ -891,6 +977,7 @@ class x11_capture final : public capture_base {
                                       local.width * 4,
                   static_cast<std::size_t>(local.width) * 4);
     }
+    capture_done_us_ = epoch_us();
     return publish_frame(false, &local, err);
   }
 
@@ -925,6 +1012,7 @@ class x11_capture final : public capture_base {
     }
 
     const auto build_start = std::chrono::steady_clock::now();
+    const uint64_t encode_start_us = epoch_us();
     std::vector<protocol::tile_blob> tiles;
     build_changed_tiles(frame_.data(), stride, width_, height_, tile,
                         previous_.data(), keyframe,
@@ -958,6 +1046,7 @@ class x11_capture final : public capture_base {
                            &av1_payload, err, &av1_only)) {
       return false;
     }
+    const uint64_t encode_end_us = epoch_us();
     note_build_time(static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - build_start)
@@ -966,6 +1055,12 @@ class x11_capture final : public capture_base {
     auto frame = std::make_shared<captured_frame>();
     frame->seq = frame_seq;
     frame->ts_us = epoch_us();
+    frame->capture_start_us = capture_start_us_;
+    frame->capture_done_us = capture_done_us_;
+    frame->encode_start_us = encode_start_us;
+    frame->encode_end_us = encode_end_us;
+    frame->trigger = trigger_;
+    frame->trigger_us = trigger_us_;
     frame->keyframe = keyframe;
     frame->width = width_;
     frame->height = height_;
@@ -982,6 +1077,12 @@ class x11_capture final : public capture_base {
   }
 
   capture_options options_;
+  /// Pipeline stamps for the frame currently being built on this thread.
+  uint64_t capture_start_us_ = 0;
+  uint64_t capture_done_us_ = 0;
+  uint64_t trigger_us_ = 0;
+  capture_trigger trigger_ = capture_trigger::timer;
+  int wake_fds_[2] = {-1, -1};
 
   Display* display_ = nullptr;
   int screen_ = 0;

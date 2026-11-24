@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <deque>
@@ -12,6 +14,7 @@
 
 #include "capture/av1_encoder.h"
 #include "capture/frame_budget.h"
+#include "capture/pipeline_stats.h"
 #include "capture/stream_policy.h"
 #include "capture/frame_encode.h"
 
@@ -86,7 +89,24 @@ uint32_t next_capture_seq();
 
 struct captured_frame {
   uint32_t seq = 0;
+  /// Capture completion, epoch microseconds. Kept as the wire timestamp
+  /// (protocol `ts_us`) and used by the replay history.
   uint64_t ts_us = 0;
+  /// Pipeline timestamps, epoch microseconds. Backends that can measure them
+  /// fill these in; the session and the `video.pipeline` summary consume them.
+  /// `capture_start_us` is just before the grab, `capture_done_us` when the
+  /// pixels are in hand and encoding begins.
+  uint64_t capture_start_us = 0;
+  uint64_t capture_done_us = 0;
+  uint64_t encode_start_us = 0;
+  uint64_t encode_end_us = 0;
+  /// When the reason for this frame was observed (damage event, timer expiry,
+  /// input arrival), and which reason it was.
+  uint64_t trigger_us = 0;
+  capture_trigger trigger = capture_trigger::timer;
+  /// Capture start minus the last input event, when that input is recent
+  /// (within a second). Diagnostic only; 0 means "no recent input".
+  uint64_t input_delay_us = 0;
   bool keyframe = false;
   uint16_t width = 0;
   uint16_t height = 0;
@@ -323,6 +343,16 @@ class capture_source {
     (void)moving;
     (void)now_ms;
   }
+  /// An input event arrived from a viewer, at epoch microseconds. The capture
+  /// keeps it for the pipeline diagnostic and for the input-priority path
+  /// that skips the target-fps wait. A future input-priority path can also use
+  /// it to wake the capture thread instead of waiting for the timer.
+  virtual void note_input(uint64_t input_us) { (void)input_us; }
+  /// Epoch microseconds of the newest input event, or 0 before the first one.
+  /// The push clock reads this to send at the capture cadence for a moment
+  /// after the user acts, instead of holding finished frames until the next
+  /// low target-fps tick.
+  virtual uint64_t last_input_us() const { return 0; }
   /// stream_epoch_id of the current capture mode; increments on every switch.
   virtual uint32_t stream_epoch() const { return 0; }
 
@@ -685,6 +715,17 @@ class capture_base : public capture_source {
       drag_until_ms_.store(now_ms + hold);
     }
   }
+  void note_input(uint64_t input_us) override {
+    // Only the first event of a burst is the trigger. Continuous motion would
+    // otherwise keep moving the anchor, and the metric would report "time
+    // since the last of 200 motion events" instead of "how long the user's
+    // action waited for a picture". The capture consumes it at publish time.
+    uint64_t expected = 0;
+    pending_input_us_.compare_exchange_strong(expected, input_us);
+    last_input_us_.store(input_us);
+    notify_wake();
+  }
+  uint64_t last_input_us() const override { return last_input_us_.load(); }
   uint32_t stream_epoch() const override { return stream_epoch_.load(); }
   void set_stream_always(bool always) override {
     stream_always_.store(always);
@@ -771,6 +812,31 @@ class capture_base : public capture_source {
  protected:
   static int clamp_fps(int fps) { return fps < 1 ? 1 : (fps > 60 ? 60 : fps); }
 
+  /// Minimum gap between an input-forced capture and the previous one. It is
+  /// a soft floor: input may skip the target-fps rate limiter, but never
+  /// produces more than ~33 frames a second, which is where the extra frames
+  /// stop buying responsiveness.
+  static constexpr std::chrono::milliseconds kInputCaptureGap{30};
+
+  /// Epoch microseconds of the first input event since the last published
+  /// frame, or 0 when none is pending.
+  uint64_t pending_input_us() const { return pending_input_us_.load(); }
+  /// True when an input event may start a capture now: one is pending, the
+  /// minimum gap has passed, and neither the transport nor the viewer has
+  /// told us to slow down.
+  bool input_capture_ready(
+      std::chrono::steady_clock::time_point last_capture) const;
+  /// An input is pending and not vetoed, but the 30 ms gap may not have
+  /// passed yet. Backends use this to poll briefly instead of sleeping out a
+  /// full target-fps interval.
+  bool input_priority_pending() const;
+  /// Sets the flag and wakes a backend sleeping in wait_until().
+  void notify_wake();
+  /// Sleeps until @p deadline, or earlier when input arrives.
+  void wait_until(std::chrono::steady_clock::time_point deadline);
+  /// Trigger reason and timestamp for an input-forced frame.
+  void note_input_trigger(uint64_t& trigger_us, capture_trigger& trigger) const;
+
   void publish(std::shared_ptr<captured_frame> frame);
   /// Records the CPU time spent building/encoding one frame (EMA, 1/8 weight).
   void note_build_time(uint64_t us);
@@ -835,6 +901,17 @@ class capture_base : public capture_source {
   std::atomic<bool> pointer_down_{false};
   std::atomic<uint64_t> drag_until_ms_{0};
   std::atomic<int> drag_hold_ms_{300};
+  /// The first input event since the last published frame, epoch
+  /// microseconds, for the input-to-capture delay and input-priority capture.
+  std::atomic<uint64_t> pending_input_us_{0};
+  /// Newest input, epoch microseconds. Unlike the pending value this is not
+  /// consumed, so the push clock can keep a short "user is active" window.
+  std::atomic<uint64_t> last_input_us_{0};
+  /// Backends sleep between frames on the target-fps clock; an input event
+  /// wakes that sleep so the next grab does not wait out a 5 fps interval.
+  std::mutex wake_mutex_;
+  std::condition_variable wake_cv_;
+  bool wake_pending_ = false;
   /// Env overrides for the hysteresis/timing are applied once per source.
   bool stream_config_loaded_ = false;
   std::shared_ptr<av1_stream_encoder> stream_encoder_;
