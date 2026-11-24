@@ -15,13 +15,35 @@ namespace molink {
 struct clipboard_offer_entry {
   uint32_t id = 0;
   std::string name;
+  /// Selection-relative path (`sub/dir/file`); empty means `name`.
+  std::string rel;
   uint64_t size = 0;
+  bool is_dir = false;
   /// Non-null for a clipboard image announced with `clipboard-sync.image`.
   /// The PNG snapshot is served by the pull path without asking the platform
   /// clipboard again (which may already have changed). Shared between every
   /// viewer that received the same announcement.
   std::shared_ptr<const std::vector<uint8_t>> image;
 };
+
+/// One `clipboard-sync.files` message carries at most this many descriptors.
+/// A larger selection is split into consecutive batches that share one
+/// selection id; the viewer accumulates them before downloading. 64 keeps one
+/// message small while still covering ordinary multi-file copies with a single
+/// round trip.
+constexpr std::size_t kClipboardPullMaxFiles = 64;
+
+/// Split @p count entries into consecutive [begin, end) batches of at most
+/// @p batch_size. Used by the host announcement; exposed so the wire batching
+/// is unit tested without a session.
+struct clipboard_offer_batch {
+  std::size_t begin = 0;
+  std::size_t end = 0;
+};
+
+std::vector<clipboard_offer_batch> clipboard_offer_batches(
+    std::size_t count,
+    std::size_t batch_size = kClipboardPullMaxFiles);
 
 /// Wire status of a `clipboard_file` (0x18) range reply.
 enum class clipboard_pull_status : uint32_t {

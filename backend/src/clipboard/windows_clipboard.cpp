@@ -41,6 +41,7 @@
 #include "clipboard/windows_data_object.h"
 #include "clipboard/windows_virtual_clipboard.h"
 #include "clipboard_lazy.h"
+#include "diag_log.h"
 
 namespace molink {
 namespace {
@@ -239,131 +240,6 @@ HGLOBAL make_hdrop(const std::vector<std::string>& paths) {
   return memory;
 }
 
-/// Attributes and size of one path named by CF_HDROP. A directory is reported
-/// with `FILE_ATTRIBUTE_DIRECTORY`; its `size` is meaningless.
-struct clipboard_path_attributes {
-  DWORD attributes = 0;
-  uint64_t size = 0;
-};
-
-/// Looks up one local path without reading any of its bytes.
-///
-/// `FindFirstFileW` answers the size from the directory entry, which is what
-/// makes a 200 MB Explorer copy cost nothing on the host. The handle fallback
-/// covers names the wildcard API refuses.
-bool query_clipboard_path(const std::wstring& path,
-                          clipboard_path_attributes& out) {
-  const DWORD attributes = GetFileAttributesW(path.c_str());
-  if (attributes == INVALID_FILE_ATTRIBUTES) return false;
-  out.attributes = attributes;
-  if ((attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
-    out.size = 0;
-    return true;
-  }
-  WIN32_FIND_DATAW data = {};
-  HANDLE find = FindFirstFileW(path.c_str(), &data);
-  if (find != INVALID_HANDLE_VALUE) {
-    FindClose(find);
-    out.attributes = data.dwFileAttributes;
-    out.size = (static_cast<uint64_t>(data.nFileSizeHigh) << 32) |
-               static_cast<uint64_t>(data.nFileSizeLow);
-    return true;
-  }
-  HANDLE file = CreateFileW(
-      path.c_str(), FILE_READ_ATTRIBUTES,
-      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
-      OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
-  if (file == INVALID_HANDLE_VALUE) return false;
-  BY_HANDLE_FILE_INFORMATION info = {};
-  const bool ok = GetFileInformationByHandle(file, &info) != 0;
-  CloseHandle(file);
-  if (!ok) return false;
-  out.attributes = info.dwFileAttributes;
-  out.size = (static_cast<uint64_t>(info.nFileSizeHigh) << 32) |
-             static_cast<uint64_t>(info.nFileSizeLow);
-  return true;
-}
-
-/// Result of walking a CF_HDROP list. `entries` names regular files only;
-/// directories are expanded in place, so a folder copied in Explorer reaches
-/// the viewer as its contents instead of vanishing.
-struct hdrop_scan_result {
-  std::vector<clipboard_path_entry> entries;
-  std::size_t directories = 0;
-  std::size_t unreadable = 0;
-  std::size_t empty_directories = 0;
-  bool truncated = false;
-};
-
-void scan_directory_tree(const std::filesystem::path& directory,
-                         unsigned depth, hdrop_scan_result& result);
-
-/// Adds one regular file, stopping at kClipboardPathScanMax.
-void add_scanned_file(const std::filesystem::path& path,
-                      hdrop_scan_result& result) {
-  if (result.entries.size() >= kClipboardPathScanMax) {
-    result.truncated = true;
-    return;
-  }
-  clipboard_path_attributes info;
-  if (!query_clipboard_path(path.wstring(), info)) {
-    ++result.unreadable;
-    return;
-  }
-  clipboard_path_entry entry;
-  entry.path = to_utf8(path.wstring().c_str());
-  entry.name = to_utf8(path.filename().wstring().c_str());
-  entry.size = info.size;
-  if (entry.path.empty() || entry.name.empty()) {
-    ++result.unreadable;
-    return;
-  }
-  result.entries.push_back(std::move(entry));
-}
-
-void scan_directory_tree(const std::filesystem::path& directory,
-                         unsigned depth, hdrop_scan_result& result) {
-  if (result.entries.size() >= kClipboardPathScanMax) {
-    result.truncated = true;
-    return;
-  }
-  // A junction loop must not turn one clipboard copy into an endless walk.
-  constexpr unsigned kMaxDepth = 8;
-  if (depth > kMaxDepth) {
-    result.truncated = true;
-    clipboard_log("CF_HDROP directory depth limit reached");
-    return;
-  }
-  std::error_code ec;
-  std::filesystem::directory_iterator it(directory, ec);
-  if (ec) {
-    ++result.unreadable;
-    clipboard_log("CF_HDROP cannot read directory %s",
-                  to_utf8(directory.wstring().c_str()).c_str());
-    return;
-  }
-  for (const std::filesystem::directory_entry& item : it) {
-    if (result.entries.size() >= kClipboardPathScanMax) {
-      result.truncated = true;
-      return;
-    }
-    std::error_code entry_ec;
-    const std::filesystem::file_status status =
-        item.symlink_status(entry_ec);
-    if (entry_ec) {
-      ++result.unreadable;
-      continue;
-    }
-    if (std::filesystem::is_symlink(status)) continue;
-    if (std::filesystem::is_directory(status)) {
-      ++result.directories;
-      scan_directory_tree(item.path(), depth + 1, result);
-    } else if (std::filesystem::is_regular_file(status)) {
-      add_scanned_file(item.path(), result);
-    }
-  }
-}
-
 /// Copies the paths out of a CF_HDROP block. The clipboard is released before
 /// the caller stats or walks anything: holding it open while enumerating a
 /// directory would stall the application that owns it.
@@ -421,42 +297,33 @@ bool read_hdrop_paths(IDataObject* object, std::vector<std::wstring>& paths) {
   return true;
 }
 
-/// Enumerates a plain file copy (Explorer / `SetFileDropList`), expanding
-/// directories recursively up to kClipboardPathScanMax. Returns false when
-/// the clipboard does not offer CF_HDROP at all.
-bool scan_hdrop(IDataObject* object, hdrop_scan_result& result) {
+/// Enumerates a plain file copy (Explorer / `SetFileDropList`), walking
+/// directories recursively. The walk keeps directory entries and each
+/// descendant's relative path, so a copied folder reaches the viewer as a tree
+/// (an empty directory is announced too). Returns false when the clipboard
+/// does not offer CF_HDROP at all.
+bool scan_hdrop(IDataObject* object, clipboard_scan_result& result) {
   std::vector<std::wstring> paths;
   if (!read_hdrop_paths(object, paths)) return false;
+  std::vector<std::string> roots;
+  roots.reserve(paths.size());
   for (const std::wstring& path_text : paths) {
-    if (result.entries.size() >= kClipboardPathScanMax) {
-      result.truncated = true;
-      break;
-    }
-    const std::filesystem::path path(path_text);
-    clipboard_path_attributes info;
-    if (!query_clipboard_path(path_text, info)) {
+    const std::string utf8 = to_utf8(path_text.c_str());
+    if (utf8.empty()) {
       ++result.unreadable;
-      clipboard_log("CF_HDROP path unavailable: %s",
-                    to_utf8(path_text.c_str()).c_str());
+      clipboard_log("CF_HDROP path unavailable");
       continue;
     }
-    if ((info.attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
-      ++result.directories;
-      const std::size_t before = result.entries.size();
-      scan_directory_tree(path, 1, result);
-      if (result.entries.size() == before) ++result.empty_directories;
-      continue;
-    }
-    clipboard_path_entry entry;
-    entry.path = to_utf8(path_text.c_str());
-    const std::wstring name = path.filename().wstring();
-    entry.name = to_utf8(name.c_str());
-    entry.size = info.size;
-    if (entry.path.empty() || entry.name.empty()) {
-      ++result.unreadable;
-      continue;
-    }
-    result.entries.push_back(std::move(entry));
+    roots.push_back(utf8);
+  }
+  result = scan_clipboard_paths(roots);
+  if (result.truncated) {
+    diag().log(diag_level::warn, "clipboard.files",
+               "clipboard file enumeration truncated",
+               {{"truncated", "1"},
+                {"omitted", std::to_string(result.omitted)},
+                {"max_files", std::to_string(kClipboardPathScanMax)},
+                {"directories", std::to_string(result.directories)}});
   }
   return true;
 }
@@ -1163,7 +1030,7 @@ class clipboard_object_reader final {
     // Explorer's ordinary Ctrl+C only offers CF_HDROP. Enumerate it here, on
     // the same worker, so `describe()` answers for both kinds of copy. The
     // paths are real local files; no FileContents stream is involved.
-    hdrop_scan_result scan;
+    clipboard_scan_result scan;
     const bool has_hdrop = scan_hdrop(object, scan);
     if (object != nullptr) object->Release();
     if (!has_hdrop) {
@@ -1178,9 +1045,10 @@ class clipboard_object_reader final {
     if (scan.unreadable > 0 || scan.empty_directories > 0 ||
         scan.truncated) {
       clipboard_log(
-          "CF_HDROP directories=%zu empty=%zu unreadable=%zu truncated=%d",
+          "CF_HDROP directories=%zu empty=%zu unreadable=%zu truncated=%d "
+          "omitted=%zu",
           scan.directories, scan.empty_directories, scan.unreadable,
-          scan.truncated ? 1 : 0);
+          scan.truncated ? 1 : 0, scan.omitted);
     }
     if (built.files.empty()) return false;
 
@@ -2026,14 +1894,16 @@ class windows_clipboard final : public clipboard_service {
     // The worker can be busy inside a blocked RDP stream, or wedged after one
     // timed out. Read CF_HDROP directly in that case rather than reporting an
     // empty clipboard.
-    hdrop_scan_result scan;
+    clipboard_scan_result scan;
     if (scan_hdrop(nullptr, scan)) {
       clipboard_path_build built = build_clipboard_files(scan.entries);
       files = std::move(built.files);
       if (built.invalid > 0 || scan.truncated || scan.unreadable > 0) {
         clipboard_log(
-            "request_files hdrop invalid=%zu unreadable=%zu truncated=%d",
-            built.invalid, scan.unreadable, scan.truncated ? 1 : 0);
+            "request_files hdrop invalid=%zu unreadable=%zu truncated=%d "
+            "omitted=%zu",
+            built.invalid, scan.unreadable, scan.truncated ? 1 : 0,
+            scan.omitted);
       }
     }
     clipboard_log("request_files source=%s count=%zu",

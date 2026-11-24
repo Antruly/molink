@@ -14,11 +14,13 @@ import {
   PULL_CONCURRENCY,
   checkPullChunk,
   clipboardBatchId,
+  mergeClipboardBatch,
   planExplicitPullFiles,
   planAutoPullFiles,
   planVirtualFiles,
   pullChunkLength,
   summarizePullFiles,
+  type ClipboardBatchState,
   type PullFile,
 } from './clipboard-pull'
 import type {
@@ -130,6 +132,10 @@ export class RemoteClipboardSync {
   private pullLastKey = ''
   private pullStarting = false
   private pullCancelled = false
+  /// Accumulates a selection the host split into `clipboard-sync.files`
+  /// batches. Null outside an in-flight batch.
+  private offerBatch: ClipboardBatchState | null = null
+  private offerBatchOmitted = 0
   private readonly usePull: () => boolean
 
   // Clipboard image path: the PNG is pulled like a file and then handed to
@@ -265,9 +271,36 @@ export class RemoteClipboardSync {
   handleOffer(
     rawFiles: unknown,
     hostOmitted = 0,
+    batch?: { token?: unknown; index?: unknown; count?: unknown },
     image?: ClipboardSyncImage,
   ): void {
-    if (!this.usePull()) return
+    if (!this.usePull()) return;
+    // The host splits a large selection into 64-entry messages. Accumulate
+    // them here: each piece alone is not the clipboard the user copied, and
+    // the existing "a new selection cancels the old transfer" rule must only
+    // run once the whole list is present. An image always arrives whole, so it
+    // is carried through to the merged call.
+    const merged = mergeClipboardBatch(
+      this.offerBatch,
+      batch ?? {},
+      Array.isArray(rawFiles) ? rawFiles : [],
+    );
+    this.offerBatchOmitted = hostOmitted;
+    if (!merged.ready) {
+      this.offerBatch = merged.state;
+      return;
+    }
+    this.offerBatch = null;
+    const omitted = this.offerBatchOmitted;
+    this.offerBatchOmitted = 0;
+    this.processOffer(merged.files, omitted, image);
+  }
+
+  private processOffer(
+    rawFiles: unknown,
+    hostOmitted: number,
+    image?: ClipboardSyncImage,
+  ): void {
     if (!this.enabled || this.paused || this.pendingCancel) return
     if (this.token() === '') return
     const plan = planVirtualFiles(rawFiles)
@@ -296,7 +329,7 @@ export class RemoteClipboardSync {
     )
     if (fresh.length === 0) return
     const key = fresh
-      .map((file) => `${file.id}:${file.name}:${file.size}`)
+      .map((file) => `${file.id}:${file.rel ?? file.name}:${file.size}:${file.isDir ? 1 : 0}`)
       .join('|')
     if (key === this.pullLastKey || key === this.virtualLastKey) return
     if (this.busy || this.pullActive.size > 0 || this.pullStarting ||
@@ -330,7 +363,7 @@ export class RemoteClipboardSync {
     hostOmitted: number,
   ): Promise<void> {
     const key = fresh
-      .map((file) => `${file.id}:${file.name}:${file.size}`)
+      .map((file) => `${file.id}:${file.rel ?? file.name}:${file.size}:${file.isDir ? 1 : 0}`)
       .join('|')
     if (key === this.virtualLastKey && this.virtualMount !== '') return
     const generation = ++this.virtualGeneration
@@ -339,7 +372,13 @@ export class RemoteClipboardSync {
     let mount = ''
     try {
       const result = await offerVirtualClipboard(
-        this.token(), fresh, this.sessionId,
+        this.token(), fresh.map((file) => ({
+          id: file.id,
+          name: file.name,
+          size: file.size,
+          rel: file.rel,
+          isDir: file.isDir,
+        })), this.sessionId,
       )
       mount = result.mount
       if (generation !== this.virtualGeneration) {
@@ -465,7 +504,7 @@ export class RemoteClipboardSync {
     image?: { text: string },
   ): void {
     const key = fresh
-      .map((file) => `${file.id}:${file.name}:${file.size}`)
+      .map((file) => `${file.id}:${file.rel ?? file.name}:${file.size}:${file.isDir ? 1 : 0}`)
       .join('|')
     if (key === this.pullLastKey) return
     this.pullLastKey = key
@@ -725,6 +764,8 @@ export class RemoteClipboardSync {
         item.file.name,
         item.file.size,
         this.pullBatch,
+        item.file.rel,
+        item.file.isDir === true,
       )
       if (this.pullCancelled) {
         // The batch was cancelled while the staging entry was being created.

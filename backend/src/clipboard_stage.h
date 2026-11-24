@@ -36,6 +36,11 @@ struct staged_clipboard_entry {
   uint64_t size = 0;
   uint64_t received = 0;
   uint64_t updated_ms = 0;
+  /// Selection-relative path (`sub/dir/file`); empty means `name`.
+  std::string rel;
+  /// A directory the viewer recreated. It has no bytes and is passed to the
+  /// clipboard as one of the selection's roots.
+  bool is_directory = false;
 };
 
 /// Sequential staging for "remote clipboard file -> this machine's clipboard".
@@ -69,16 +74,19 @@ class clipboard_stage {
 
   bool available() const { return !directory_.empty(); }
 
-  /// Declares one file. `path` is the final name it will have after apply;
-  /// the bytes go to a private temp file until then. Same names get a
-  /// `name (1).ext` suffix.
+  /// Declares one file or directory. `name` is always a leaf name; `rel`
+  /// carries the selection-relative path (`sub/dir/file`) when the remote
+  /// copied a folder, and empty means `name`. The bytes go to a private temp
+  /// file until apply; a directory is created immediately (including an empty
+  /// one) and needs no bytes.
   ///
   /// `batch` (optional) is a lowercase-hex id naming the subdirectory for one
   /// clipboard selection, e.g. `~/.cache/molink/clipboard/<sha1>/`. Isolating
   /// batches keeps a later copy of the same file from colliding with an
   /// earlier one and makes it obvious which files belong together.
   stage_error begin(const std::string& name, uint64_t size, std::string& id,
-                    std::string& path, const std::string& batch = {});
+                    std::string& path, const std::string& batch = {},
+                    const std::string& rel = {}, bool is_dir = false);
 
   /// Appends one contiguous chunk. `offset` must equal the bytes received so
   /// far (`conflict`) and the chunk may not cross the declared size

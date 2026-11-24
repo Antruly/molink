@@ -13,8 +13,13 @@ namespace molink {
 
 class lazy_clipboard;
 
-/// One entry of the clipboard's file list (CF_HDROP on Windows).
+/// One entry of the clipboard's file list (CF_HDROP on Windows, text/uri-list
+/// on X11). A copied folder keeps its directory entries and the relative path
+/// of every descendant, so the viewer can recreate the tree instead of
+/// flattening it.
 struct clipboard_file {
+  /// Display name. Always the last path component, never a relative path; the
+  /// older wire field keeps that meaning and old peers stay usable.
   std::string name;
   std::string path;
   uint64_t size = 0;
@@ -22,12 +27,31 @@ struct clipboard_file {
   /// on this machine (an inner RDP session's virtual file). `path` is empty in
   /// that case and `read_file_range` answers the ranges. Opaque to callers.
   uint64_t stream_id = 0;
+  /// A directory entry. It has no bytes; `size` is zero and the viewer creates
+  /// the directory (including an empty one) instead of pulling a file.
+  bool is_dir = false;
+  /// Path relative to the copied selection, `/`-separated: `sub/dir/file` for
+  /// a descendant, the base name for a top-level item. Empty means `name`.
+  std::string rel;
 };
 
 /// True when the entry can be read at all. A virtual entry has no path but a
-/// stream id; a real entry has a path.
+/// stream id; a real entry has a path. Directories are announced without
+/// bytes but are still valid clipboard entries.
+inline bool clipboard_file_is_announceable(const clipboard_file& file) {
+  return (!file.path.empty() || file.stream_id != 0 || file.is_dir) &&
+         !file.name.empty();
+}
+
+/// True when the entry names bytes that can be pulled.
 inline bool clipboard_file_has_bytes(const clipboard_file& file) {
-  return !file.path.empty() || file.stream_id != 0;
+  return !file.is_dir && (!file.path.empty() || file.stream_id != 0);
+}
+
+/// The relative path the wire should carry: `rel` when set, otherwise the
+/// display name.
+inline std::string clipboard_file_relative(const clipboard_file& file) {
+  return file.rel.empty() ? file.name : file.rel;
 }
 
 /// Text clipboard synchronization with the local display.

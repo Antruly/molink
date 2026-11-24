@@ -110,11 +110,18 @@ HGLOBAL make_file_descriptor(const std::vector<virtual_mount_file>& files) {
   for (std::size_t i = 0; i < files.size(); ++i) {
     FILEDESCRIPTORW& entry = descriptor->fgd[i];
     entry.dwFlags = FD_ATTRIBUTES | FD_FILESIZE;
-    entry.dwFileAttributes = FILE_ATTRIBUTE_NORMAL;
+    entry.dwFileAttributes = files[i].is_dir ? FILE_ATTRIBUTE_DIRECTORY
+                                             : FILE_ATTRIBUTE_NORMAL;
     entry.nFileSizeHigh =
         static_cast<DWORD>((files[i].size >> 32) & 0xffffffffull);
     entry.nFileSizeLow = static_cast<DWORD>(files[i].size & 0xffffffffull);
-    const std::wstring name = to_wide(files[i].name);
+    // A copied folder keeps its tree: cFileName may carry a relative path
+    // with backslashes. A flat selection is unchanged (the base name).
+    std::string relative = files[i].mount_path();
+    for (char& c : relative) {
+      if (c == '/') c = '\\';
+    }
+    const std::wstring name = to_wide(relative);
     const std::size_t copied =
         std::min<std::size_t>(name.size(), MAX_PATH - 1);
     std::memcpy(entry.cFileName, name.c_str(), copied * sizeof(wchar_t));
@@ -307,6 +314,9 @@ class virtual_file_data_object final : public IDataObject {
           static_cast<std::size_t>(index) >= source_->size()) {
         return DV_E_LINDEX;
       }
+      if (source_->files()[static_cast<std::size_t>(index)].is_dir) {
+        return DV_E_LINDEX;
+      }
       if ((format->tymed & TYMED_ISTREAM) == 0) {
         // Materialising a file as HGLOBAL before the user pastes is exactly
         // the eager behaviour this offer exists to avoid.
@@ -339,6 +349,9 @@ class virtual_file_data_object final : public IDataObject {
       if (index < 0 && source_->size() == 1) index = 0;
       if (index < 0 ||
           static_cast<std::size_t>(index) >= source_->size()) {
+        return DV_E_LINDEX;
+      }
+      if (source_->files()[static_cast<std::size_t>(index)].is_dir) {
         return DV_E_LINDEX;
       }
       return (format->tymed & TYMED_ISTREAM) != 0 ? S_OK : DV_E_TYMED;

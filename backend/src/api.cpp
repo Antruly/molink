@@ -1688,6 +1688,10 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
               item["id"] = clipboard_file_id(file);
               item["name"] = file.name;
               item["size"] = file.size;
+              if (file.is_dir) item["is_dir"] = true;
+              if (!file.rel.empty() && file.rel != file.name) {
+                item["rel"] = file.rel;
+              }
               // True when this core just staged the file from the remote; the
               // page skips it so the two clipboard directions cannot ping-pong.
               item["echo"] = clipboard_echo_path(file.path);
@@ -1917,11 +1921,19 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
              if (body.contains("batch") && body["batch"].is_string()) {
                batch = body["batch"].get<std::string>();
              }
+             std::string rel;
+             if (body.contains("rel") && body["rel"].is_string()) {
+               rel = body["rel"].get<std::string>();
+             }
+             bool is_dir = false;
+             if (body.contains("is_dir") && body["is_dir"].is_boolean()) {
+               is_dir = body["is_dir"].get<bool>();
+             }
              std::string id;
              std::string path;
              const stage_error error =
                  staging->begin(body["name"].get<std::string>(), size, id,
-                                path, batch);
+                                path, batch, rel, is_dir);
              if (error != stage_error::none) {
                send_stage_error(resp, error);
                return;
@@ -2024,7 +2036,7 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
                }
                ids.push_back(item.get<std::string>());
              }
-             if (ids.empty() || ids.size() > 256) {
+             if (ids.empty() || ids.size() > 2000) {
                resp.status(400).json_str(
                    R"({"code":"bad_stage_request"})");
                resp.end();
@@ -2181,8 +2193,20 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
                  return;
                }
                file.name = item["name"].get<std::string>();
+               if (item.contains("rel") && item["rel"].is_string()) {
+                 file.rel = item["rel"].get<std::string>();
+               }
+               if (item.contains("is_dir") && item["is_dir"].is_boolean()) {
+                 file.is_dir = item["is_dir"].get<bool>();
+               }
+               if (file.is_dir && file.size != 0) {
+                 resp.status(400).json_str(
+                     R"({"code":"bad_virtual_offer"})");
+                 resp.end();
+                 return;
+               }
                files.push_back(std::move(file));
-               if (files.size() > 64) break;
+               if (files.size() > 2000) break;
              }
              std::string session;
              if (body.contains("session") && body["session"].is_string()) {

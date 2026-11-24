@@ -605,7 +605,14 @@ export class SessionConnection {
         }
         if (event.kind === 'clipboard-pull-files') {
           this.remoteClipboard?.handleOffer(
-            event.files, event.omitted ?? 0, event.image,
+            event.files,
+            event.omitted ?? 0,
+            {
+              token: event.batch,
+              index: event.batchIndex,
+              count: event.batchCount,
+            },
+            event.image,
           )
           // The files panel still needs the path list, which the host sends
           // as the legacy `clipboard` message. Nothing to forward here.
