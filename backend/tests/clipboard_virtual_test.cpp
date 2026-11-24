@@ -473,6 +473,96 @@ void read_failure_paths() {
   fs::remove_all(root, ec);
 }
 
+/// The publisher noticed that another application replaced the clipboard.
+/// Every blocked read must wake now, and later reads must fail at once: a
+/// stale offer must never leave a paste waiting for the 15 s budget.
+void cancelled_reads() {
+  const fs::path root =
+      fs::temp_directory_path() / "molink-clipboard-virtual-cancel";
+  std::error_code ec;
+  fs::remove_all(root, ec);
+  fs::create_directories(root, ec);
+
+  auto factory = [](const std::string& mountpoint,
+                    const std::vector<virtual_mount_file>&,
+                    molink::virtual_file_reader*,
+                    std::string&) -> std::shared_ptr<virtual_mount> {
+    auto state = std::make_shared<mount_state>();
+    state->path = mountpoint;
+    return std::make_shared<fake_mount>(state);
+  };
+  auto clipboard = std::make_shared<virtual_clipboard>(
+      root.string(), factory,
+      [](const std::vector<std::string>&) { return true; }, [] {}, nullptr,
+      5000, 5000);
+
+  std::vector<virtual_offer_request_file> files;
+  virtual_offer_request_file file;
+  file.id = 7;
+  file.name = "seven.bin";
+  file.size = 1000;
+  files.push_back(file);
+  std::size_t omitted = 0;
+  std::string mount;
+  std::vector<std::string> paths;
+  std::string error;
+  expect(clipboard->offer("s", files, omitted, mount, paths, error) ==
+             virtual_offer_error::none,
+         "cancel fixture mounts");
+
+  fake_bridge bridge;
+  expect(clipboard->bridge_attach(mount,
+                                  [&bridge](const std::string& message) {
+                                    bridge.send(message);
+                                  }),
+         "cancel fixture bridge attaches");
+
+  std::vector<char> buffer(300, 0);
+  int read = 0;
+  std::thread reader([&] {
+    read = clipboard->read_file_range(7, 0, buffer.size(), buffer.data(),
+                                      buffer.size());
+  });
+  expect(!bridge.wait_message().empty(), "the read was dispatched");
+  clipboard->cancel_reads();
+  reader.join();
+  expect(read < 0, "cancel_reads fails the pending read");
+
+  read = clipboard->read_file_range(7, 500, 100, buffer.data(), 100);
+  expect(read < 0, "later reads fail immediately");
+  expect(bridge.wait_message(200).empty(),
+         "no further pull is sent after cancellation");
+
+  // A new generation is allowed to serve again.
+  std::vector<virtual_offer_request_file> second = files;
+  second[0].id = 8;
+  second[0].name = "eight.bin";
+  expect(clipboard->offer("s", second, omitted, mount, paths, error) ==
+             virtual_offer_error::none,
+         "a new generation mounts after cancellation");
+  expect(clipboard->bridge_attach(mount,
+                                  [&bridge](const std::string& message) {
+                                    bridge.send(message);
+                                  }),
+         "the new generation's bridge attaches");
+  std::thread again([&] {
+    read = clipboard->read_file_range(8, 0, 100, buffer.data(), 100);
+  });
+  const std::string message = bridge.wait_message();
+  expect(!message.empty(), "the new generation sends a pull");
+  if (!message.empty()) {
+    const uint32_t seq = parse_seq(message);
+    const std::vector<uint8_t> payload(100, 0x33);
+    const std::vector<uint8_t> reply = make_chunk(seq, 0, 0, payload);
+    clipboard->bridge_binary(reply.data(), reply.size());
+  }
+  again.join();
+  expect(read == 100, "the new generation serves bytes");
+
+  clipboard->clear("test");
+  fs::remove_all(root, ec);
+}
+
 }  // namespace
 
 // The test links no platform mount layer: the fake mount always detaches, so
@@ -486,6 +576,7 @@ int main() {
   mount_lifecycle();
   read_paths();
   read_failure_paths();
+  cancelled_reads();
   std::printf("%d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;
 }

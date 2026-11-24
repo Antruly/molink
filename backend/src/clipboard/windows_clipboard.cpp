@@ -37,6 +37,7 @@
 
 #include "clipboard/clipboard_files.h"
 #include "clipboard/windows_data_object.h"
+#include "clipboard/windows_virtual_clipboard.h"
 #include "clipboard_lazy.h"
 
 namespace molink {
@@ -1670,6 +1671,13 @@ class windows_clipboard final : public clipboard_service {
   }
 
   void request_files(files_callback callback) override {
+    // This process published a virtual offer for the remote clipboard. Its
+    // descriptors describe files that were just copied on the viewer, not a
+    // local selection; enumerating them would send them straight back.
+    if (windows_virtual_clipboard_owns_clipboard()) {
+      if (callback) callback({});
+      return;
+    }
     if (lazy_hiding_or_lost()) {
       std::vector<clipboard_file> files;
       const std::shared_ptr<const lazy_offer> offer = lazy_snapshot();

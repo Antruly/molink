@@ -127,8 +127,9 @@ export class RemoteClipboardSync {
   private pullCancelled = false
   private readonly usePull: () => boolean
 
-  // Virtual clipboard path (FUSE): the local core mounts the host's files and
-  // this class relays range reads. No bytes move on copy.
+  // Virtual clipboard path: the local core publishes the host's files (FUSE
+  // mount on Linux, an OLE data object on Windows) and this class relays the
+  // range reads. No bytes move on copy.
   private readonly useVirtual: () => boolean
   private readonly noteVirtualFallback: () => boolean
   private readonly onPrompt?: (prompt: ClipboardOfferPrompt | null) => void

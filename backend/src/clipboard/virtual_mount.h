@@ -28,6 +28,11 @@ class virtual_file_reader {
   virtual int read_file_range(uint32_t file_id, uint64_t offset,
                               uint64_t length, char* buffer,
                               std::size_t capacity) = 0;
+
+  /// The published offer can no longer serve bytes (the clipboard was
+  /// replaced). Wake every blocked range read and fail new ones; the reader
+  /// itself stays alive so a stream Explorer still holds can call safely.
+  virtual void cancel_reads() {}
 };
 
 /// A mounted virtual directory. `stop()` must be idempotent and must join every
