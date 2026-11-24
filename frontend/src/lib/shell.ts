@@ -124,6 +124,47 @@ export function setKeyboardGrab(on: boolean): void {
   postShellCommand(on ? 'grab-keyboard' : 'release-keyboard')
 }
 
+export interface ShellSurfaceRect {
+  /// Viewport-relative CSS pixels; the shell normalises them itself.
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+/// Publishes the remote picture rectangle. The Linux shell keeps the X11 grab
+/// only while the pointer is inside this rect and the window is active, so the
+/// pointer leaving the picture restores the desktop keyboard. The shell
+/// normalises by its own window size, which makes CSS pixels and X11 device
+/// pixels comparable on scaled displays. Other shells have no grab and ignore
+/// the command.
+export function setKeyboardGrabSurface(rect: ShellSurfaceRect): void {
+  if (!keyboardGrabApplicable()) return
+  const viewportWidth = window.innerWidth || 1
+  const viewportHeight = window.innerHeight || 1
+  const ratio = (value: number) => (value / viewportWidth).toFixed(5)
+  const ratioY = (value: number) => (value / viewportHeight).toFixed(5)
+  postShellCommand(
+    `grab-surface:${ratio(rect.x)},${ratioY(rect.y)},` +
+      `${ratio(rect.width)},${ratioY(rect.height)}`,
+  )
+}
+
+/// Fires when the shell dropped the grab for a reason the user should see
+/// (currently the Ctrl+Alt+Shift+Escape escape hatch).
+export function onKeyboardGrabReleased(
+  listener: (reason: string) => void,
+): () => void {
+  const handler = (event: Event) => {
+    const detail = (event as CustomEvent<unknown>).detail
+    if (typeof detail === 'string' && detail !== '') listener(detail)
+  }
+  window.addEventListener('molink-grab-released', handler as EventListener)
+  return () => {
+    window.removeEventListener('molink-grab-released', handler as EventListener)
+  }
+}
+
 /// Asks the native shell to open the local diagnostics directory. The shell
 /// resolves the path itself, so a remote host's path is never trusted here.
 /// Returns false in a plain browser, where there is nothing to open.

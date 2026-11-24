@@ -485,6 +485,7 @@
     "clipboard_read_failed": "无法读取本机剪贴板",
     "clipboard_write_failed": "无法写入本机剪贴板",
     "clipboard_unavailable": "当前浏览器环境不提供剪贴板",
+    "keyboard_grab_released": "已释放键盘抓取，本地快捷键恢复",
     "self_connect": "本机不能连接自己。",
     "core_unreachable": "无法连接本机后台。",
     "local_auth_failed": "本机验证失败。",

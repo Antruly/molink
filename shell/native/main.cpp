@@ -28,8 +28,10 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cctype>
 #include <cerrno>
+#include <cmath>
 #include <cstdarg>
 
 #include <chrono>
@@ -88,11 +90,19 @@ DragOutState* g_drag_out = nullptr;
 // The grab is a privileged state: a missed release locks the user out of their
 // own keyboard. Every exit path below is deliberate.
 constexpr gint64 kGrabDebounceUsec = 300 * 1000;
+/// How often the watchdog re-checks the two conditions that own the grab.
+/// The pointer itself is not grabbed, so this poll is what notices it leaving
+/// the remote picture; 100 ms is short enough to feel immediate.
+constexpr guint kGrabWatchdogIntervalMs = 100;
+/// Slack around the picture so the last pixel, or one pixel past it after
+/// rounding, still counts as inside.
+constexpr double kGrabEdgeTolerancePx = 4.0;
 
 bool g_keyboard_grabbed = false;
 /// XI2 device id of the active keyboard grab, -1 when no grab is held.
 int g_xi_device_id = -1;
-/// The page still wants the grab, even if a focus blip made us drop it.
+/// The page still wants the grab, even if the pointer or a focus blip made us
+/// drop it. The watchdog re-arms the grab as soon as both conditions hold.
 bool g_grab_requested = false;
 /// Swallow the Escape key release after the local escape combo fired.
 bool g_swallow_escape_release = false;
@@ -100,6 +110,24 @@ gint64 g_grab_started_us = 0;
 guint g_grab_release_source = 0;
 guint g_grab_watchdog_source = 0;
 bool g_grab_debounce_noted = false;
+/// Last "not yet" reason, so a 10 Hz watchdog does not repeat it every tick.
+std::string g_grab_defer_reason;
+/// Whether a page has already finished loading in this window. A later load is
+/// a reload/navigation whose previous page may have left a grab behind.
+bool g_page_loaded_once = false;
+
+/// The remote picture rectangle, normalised to the window (0..1). The page
+/// owns the layout (toolbar, letterboxing, scrolling), so it publishes this
+/// over the bridge; the shell only combines it with the live pointer. Until a
+/// page publishes one, the whole window counts as the picture.
+struct GrabSurfaceRect {
+  double x = 0.0;
+  double y = 0.0;
+  double width = 1.0;
+  double height = 1.0;
+};
+
+GrabSurfaceRect g_grab_surface;
 
 void shell_log_grab(const char* format, ...) {
   std::FILE* log = std::fopen("/tmp/molink-shell.log", "a");
@@ -182,16 +210,133 @@ void publish_grab_support() {
   shell_log_grab("support=%s", supported ? "x11" : "unsupported");
 }
 
+bool x_focus_is_ours(GtkWidget* window);
+
+void stop_grab_watchdog() {
+  if (g_grab_watchdog_source != 0) {
+    g_source_remove(g_grab_watchdog_source);
+    g_grab_watchdog_source = 0;
+  }
+}
+
+/// Records why a requested grab is not active yet. The watchdog runs often, so
+/// only a change of reason returns true (and is worth logging/reporting).
+bool note_grab_defer(const char* reason) {
+  if (g_grab_defer_reason == reason) return false;
+  g_grab_defer_reason = reason;
+  shell_log_grab("grab deferred: %s", reason);
+  return true;
+}
+
+bool grab_window_iconified(GtkWidget* window) {
+  GdkWindow* gdk_window = gtk_widget_get_window(window);
+  return gdk_window != nullptr &&
+         (gdk_window_get_state(gdk_window) & GDK_WINDOW_STATE_ICONIFIED) != 0;
+}
+
+/// Pointer position and window size in the same (device-pixel) coordinate
+/// system. Normalising by the window size keeps the page's CSS rectangle and
+/// this geometry comparable regardless of the display scale factor.
+bool query_pointer(GtkWidget* window, int& x, int& y, int& width, int& height) {
+#if defined(GDK_WINDOWING_X11) && defined(MOLINK_HAVE_XI2)
+  GdkWindow* gdk_window = gtk_widget_get_window(window);
+  if (gdk_window == nullptr) return false;
+  Display* display = GDK_DISPLAY_XDISPLAY(gtk_widget_get_display(window));
+  const Window xid = gdk_x11_window_get_xid(gdk_window);
+  Window root_return = None;
+  Window child_return = None;
+  int root_x = 0;
+  int root_y = 0;
+  unsigned int mask = 0;
+  if (XQueryPointer(display, xid, &root_return, &child_return, &root_x,
+                    &root_y, &x, &y, &mask) == False) {
+    return false;
+  }
+  width = gdk_window_get_width(gdk_window);
+  height = gdk_window_get_height(gdk_window);
+  return width > 0 && height > 0;
+#else
+  (void)window;
+  (void)x;
+  (void)y;
+  (void)width;
+  (void)height;
+  return false;
+#endif
+}
+
+/// Whether the pointer is inside the remote picture (plus a few pixels of
+/// slack). The picture is the page's rectangle; a pointer that left the window
+/// yields coordinates outside it.
+bool pointer_in_remote_picture(GtkWidget* window) {
+  int x = 0;
+  int y = 0;
+  int width = 0;
+  int height = 0;
+  if (!query_pointer(window, x, y, width, height)) return false;
+  const double nx = static_cast<double>(x) / static_cast<double>(width);
+  const double ny = static_cast<double>(y) / static_cast<double>(height);
+  if (g_grab_surface.width <= 0.0 || g_grab_surface.height <= 0.0) return false;
+  const double tolerance_x = kGrabEdgeTolerancePx / width;
+  const double tolerance_y = kGrabEdgeTolerancePx / height;
+  const double left = g_grab_surface.x;
+  const double top = g_grab_surface.y;
+  const double right = g_grab_surface.x + g_grab_surface.width;
+  const double bottom = g_grab_surface.y + g_grab_surface.height;
+  return nx >= left - tolerance_x && nx <= right + tolerance_x &&
+         ny >= top - tolerance_y && ny <= bottom + tolerance_y;
+}
+
+/// The page publishes the remote picture as four ratios of the viewport
+/// (`grab-surface:x,y,width,height`), so CSS pixels and X11 device pixels never
+/// have to agree. Ratios keep working across display scaling and window sizes.
+bool parse_surface_ratios(const std::string& payload, double (&values)[4]) {
+  const char* cursor = payload.c_str();
+  for (int index = 0; index < 4; ++index) {
+    char* end = nullptr;
+    const double value = std::strtod(cursor, &end);
+    if (end == cursor || !std::isfinite(value)) return false;
+    values[index] = value;
+    cursor = end;
+    if (index < 3) {
+      if (*cursor != ',') return false;
+      ++cursor;
+    }
+  }
+  return *cursor == '\0';
+}
+
+void apply_grab_surface(const std::string& payload) {
+  if (payload == "none") {
+    // The page hid its picture: nothing counts as inside until a new rect
+    // arrives, so a held grab is dropped on the next watchdog tick.
+    g_grab_surface = GrabSurfaceRect{};
+    g_grab_surface.width = 0.0;
+    g_grab_surface.height = 0.0;
+    return;
+  }
+  double values[4] = {0.0, 0.0, 1.0, 1.0};
+  if (!parse_surface_ratios(payload, values)) {
+    shell_log_grab("ignoring malformed grab surface: %s", payload.c_str());
+    return;
+  }
+  g_grab_surface.x = std::clamp(values[0], -8.0, 8.0);
+  g_grab_surface.y = std::clamp(values[1], -8.0, 8.0);
+  g_grab_surface.width = std::clamp(values[2], 0.0, 8.0);
+  g_grab_surface.height = std::clamp(values[3], 0.0, 8.0);
+}
+
 void release_keyboard_grab(const char* reason) {
   if (g_grab_release_source != 0) {
     g_source_remove(g_grab_release_source);
     g_grab_release_source = 0;
   }
-  if (g_grab_watchdog_source != 0) {
-    g_source_remove(g_grab_watchdog_source);
-    g_grab_watchdog_source = 0;
+  if (!g_keyboard_grabbed) {
+    // The page may still want the grab; leave the watchdog running so the next
+    // tick can re-arm it when the pointer/focus conditions hold again.
+    if (!g_grab_requested) stop_grab_watchdog();
+    return;
   }
-  if (!g_keyboard_grabbed) return;
 #if defined(GDK_WINDOWING_X11) && defined(MOLINK_HAVE_XI2)
   GdkDisplay* display = g_main_window != nullptr
                             ? gtk_widget_get_display(g_main_window)
@@ -207,18 +352,38 @@ void release_keyboard_grab(const char* reason) {
       (g_get_monotonic_time() - g_grab_started_us) / 1000;
   g_keyboard_grabbed = false;
   g_grab_started_us = 0;
-  shell_log_grab("release (%s) after %" G_GINT64_FORMAT " ms", reason,
-                 held_ms);
+  const char* state_reason =
+      std::strcmp(reason, "pointer_out") == 0 ? "pointer_out" : "focus_lost";
+  shell_log_grab("input.grab active=0 reason=%s detail=%s after "
+                 "%" G_GINT64_FORMAT " ms",
+                 state_reason, reason, held_ms);
+  if (!g_grab_requested) stop_grab_watchdog();
   // The grab may have swallowed part of a local shortcut (notably the escape
   // combo). Let the page release every key it already forwarded, so the
   // remote never keeps Ctrl/Alt/Shift held.
   shell_eval_js(
       "if(window.__molinkReleaseKeys)window.__molinkReleaseKeys()");
+  // Never touch the local clipboard/selection here. If this machine still owns
+  // the clipboard (remote text or staged files), releasing the keyboard grab
+  // must not clear it: the selection keeps being served to local apps.
   report_grab_status("off");
 }
 
 gboolean grab_watchdog(gpointer data);
+void attempt_keyboard_grab(GtkWidget* window);
 
+void ensure_grab_watchdog(GtkWidget* window) {
+  if (g_grab_watchdog_source != 0) return;
+  // One poller owns both directions: it releases as soon as a condition stops
+  // holding and re-arms the grab when they hold again. No other path creates
+  // a keyboard grab.
+  g_grab_watchdog_source =
+      g_timeout_add(kGrabWatchdogIntervalMs, grab_watchdog, window);
+}
+
+/// The page asked for the grab (its keyboard-mapping setting is on and the
+/// remote picture has focus). Remember the wish, then let the watchdog decide
+/// whether the pointer and window conditions allow it right now.
 void grab_keyboard(GtkWidget* window) {
   if (window == nullptr) return;
   if (g_keyboard_grabbed) {
@@ -227,25 +392,51 @@ void grab_keyboard(GtkWidget* window) {
     return;
   }
   g_grab_requested = true;
+  g_grab_defer_reason.clear();
+  ensure_grab_watchdog(window);
+  attempt_keyboard_grab(window);
+}
+
+/// Takes the XI2 grab only while the window is active and the pointer is over
+/// the remote picture. Called on the page's request and on every watchdog tick;
+/// a failure leaves the request pending so the next tick can retry.
+void attempt_keyboard_grab(GtkWidget* window) {
+  if (window == nullptr || !g_grab_requested || g_keyboard_grabbed) return;
   if (!keyboard_grab_supported(window)) {
     shell_log_grab("grab refused: %s",
                    session_is_wayland() ? "wayland" : "not x11");
+    g_grab_requested = false;
+    stop_grab_watchdog();
     report_grab_status("unsupported");
     return;
   }
 #if defined(GDK_WINDOWING_X11) && defined(MOLINK_HAVE_XI2)
-  // An inactive window must not grab: nothing would later deliver the
-  // focus-out that releases it.
+  if (!gtk_widget_get_realized(window)) gtk_widget_realize(window);
+  // Either condition failing is not an error: the watchdog retries. Log only
+  // when the reason changes, so a 10 Hz poll stays quiet.
   if (!gtk_window_is_active(GTK_WINDOW(window))) {
-    shell_log_grab("grab deferred: window is not active");
-    report_grab_status("off");
+    if (note_grab_defer("window is not active")) report_grab_status("off");
     return;
   }
-  if (!gtk_widget_get_realized(window)) gtk_widget_realize(window);
+  if (!x_focus_is_ours(window)) {
+    if (note_grab_defer("x focus is elsewhere")) report_grab_status("off");
+    return;
+  }
+  if (grab_window_iconified(window)) {
+    if (note_grab_defer("window is iconified")) report_grab_status("off");
+    return;
+  }
+  if (!pointer_in_remote_picture(window)) {
+    if (note_grab_defer("pointer is outside the picture")) {
+      report_grab_status("off");
+    }
+    return;
+  }
   GdkWindow* gdk_window = gtk_widget_get_window(window);
   if (gdk_window == nullptr) {
-    shell_log_grab("grab failed: window has no GdkWindow");
-    report_grab_status("failed");
+    if (note_grab_defer("window has no GdkWindow")) {
+      report_grab_status("failed");
+    }
     return;
   }
   GdkDisplay* display = gtk_widget_get_display(window);
@@ -271,8 +462,9 @@ void grab_keyboard(GtkWidget* window) {
     XIFreeDeviceInfo(devices);
   }
   if (device < 0) {
-    shell_log_grab("grab failed: no master keyboard");
-    report_grab_status("failed");
+    if (note_grab_defer("no master keyboard")) {
+      report_grab_status("failed");
+    }
     return;
   }
   unsigned char key_mask_bits[XIMaskLen(XI_LASTEVENT)] = {0};
@@ -294,18 +486,20 @@ void grab_keyboard(GtkWidget* window) {
       case GrabFrozen: name = "GrabFrozen"; break;
       default: break;
     }
-    shell_log_grab("grab failed: %s (%d)", name, status);
-    report_grab_status("failed");
+    const std::string detail = std::string("grab failed: ") + name;
+    if (g_grab_defer_reason != detail) {
+      g_grab_defer_reason = detail;
+      shell_log_grab("%s (%d)", detail.c_str(), status);
+      report_grab_status("failed");
+    }
     return;
   }
   g_xi_device_id = device;
   g_keyboard_grabbed = true;
+  g_grab_defer_reason.clear();
   g_grab_debounce_noted = false;
   g_grab_started_us = g_get_monotonic_time();
-  // FocusOut is not dependable while the XI2 grab is active; poll the X focus
-  // so a window switch can never leave the desktop keyboard captured.
-  g_grab_watchdog_source = g_timeout_add(200, grab_watchdog, window);
-  shell_log_grab("grab ok xid=0x%lx device=%d",
+  shell_log_grab("input.grab active=1 reason=pointer_in xid=0x%lx device=%d",
                  static_cast<unsigned long>(xid), device);
   report_grab_status("on");
 #else
@@ -347,30 +541,41 @@ bool x_focus_is_ours(GtkWidget* window) {
 }
 
 gboolean grab_watchdog(gpointer data) {
-  if (!g_keyboard_grabbed) {
+  GtkWidget* window = GTK_WIDGET(data);
+  if (window == nullptr || (!g_grab_requested && !g_keyboard_grabbed)) {
     g_grab_watchdog_source = 0;
     return G_SOURCE_REMOVE;
   }
-  GtkWidget* window = GTK_WIDGET(data);
-  // Same debounce as the focus handler: X11 can flicker focus for a moment
-  // right after a grab, and releasing there would undo the grab instantly.
-  if (g_get_monotonic_time() - g_grab_started_us < kGrabDebounceUsec) {
-    if (!g_grab_debounce_noted && !x_focus_is_ours(window)) {
-      g_grab_debounce_noted = true;
-      shell_log_grab("focus left during 300 ms debounce; holding grab");
-    }
+  if (!g_keyboard_grabbed) {
+    // The pointer came back, or the window regained focus: re-arm. The
+    // attempt checks both conditions itself.
+    attempt_keyboard_grab(window);
     return G_SOURCE_CONTINUE;
   }
-  GdkWindow* gdk_window = gtk_widget_get_window(window);
-  const bool iconified =
-      gdk_window != nullptr &&
-      (gdk_window_get_state(gdk_window) & GDK_WINDOW_STATE_ICONIFIED) != 0;
-  if (iconified || !gtk_window_is_active(GTK_WINDOW(window)) ||
-      !x_focus_is_ours(window)) {
-    g_grab_watchdog_source = 0;  // release() must not remove this source
-    release_keyboard_grab(iconified ? "watchdog: iconified"
-                                    : "watchdog: focus left the window");
-    return G_SOURCE_REMOVE;
+  // A minimized window must never keep the keyboard captured.
+  if (grab_window_iconified(window)) {
+    release_keyboard_grab("iconified");
+    return G_SOURCE_CONTINUE;
+  }
+  // The pointer leaving the remote picture is immediate: unlike X focus, the
+  // geometry does not flicker, so there is no debounce here. Releasing hands
+  // the keyboard back to the desktop and to local shortcuts.
+  if (!pointer_in_remote_picture(window)) {
+    release_keyboard_grab("pointer_out");
+    return G_SOURCE_CONTINUE;
+  }
+  // Same debounce as the focus handler: X11 can flicker focus for a moment
+  // right after a grab, and releasing there would undo the grab instantly.
+  if (!gtk_window_is_active(GTK_WINDOW(window)) || !x_focus_is_ours(window)) {
+    if (g_get_monotonic_time() - g_grab_started_us < kGrabDebounceUsec) {
+      if (!g_grab_debounce_noted) {
+        g_grab_debounce_noted = true;
+        shell_log_grab("focus left during 300 ms debounce; holding grab");
+      }
+      return G_SOURCE_CONTINUE;
+    }
+    release_keyboard_grab("focus_lost");
+    return G_SOURCE_CONTINUE;
   }
   return G_SOURCE_CONTINUE;
 }
@@ -463,7 +668,13 @@ gint on_grab_key_snooper(GtkWidget*, GdkEventKey* event, gpointer) {
   shell_log_grab("escape combo pressed; releasing local grab");
   g_swallow_escape_release = true;
   g_grab_requested = false;
+  g_grab_defer_reason.clear();
   release_keyboard_grab("escape combo");
+  // The page shows the matching local toast: the keyboard went back to the
+  // desktop, so the user is not left wondering where their keys are going.
+  shell_eval_js(
+      "window.dispatchEvent(new CustomEvent('molink-grab-released',"
+      "{detail:'escape'}))");
   return TRUE;  // The page must not forward half of a shortcut.
 }
 
@@ -954,11 +1165,13 @@ gboolean check_core(gpointer) {
 void on_destroy(GtkWidget*, gpointer) {
   // The view may be on its way out with the window; do not evaluate into it.
   g_web_view = nullptr;
+  g_grab_requested = false;
   release_keyboard_grab("window destroy");
   gtk_main_quit();
 }
 
 gboolean on_quit_signal(gpointer) {
+  g_grab_requested = false;
   release_keyboard_grab("quit signal");
   gtk_main_quit();
   return G_SOURCE_CONTINUE;
@@ -1049,8 +1262,17 @@ gboolean log_viewport(gpointer data) {
 void on_load_changed(WebKitWebView* view, WebKitLoadEvent event, gpointer) {
   if (event != WEBKIT_LOAD_FINISHED) return;
   g_web_view = view;
-  // A reload or navigation replaces the page object: tell the new one whether
-  // this shell can grab before it draws the settings switch.
+  // A reload or navigation replaces the page object, so any grab the old page
+  // asked for is stale. Drop it and let the new page request one itself. The
+  // first load needs no reset (and may race the page's own first request).
+  if (g_page_loaded_once) {
+    g_grab_requested = false;
+    g_grab_defer_reason.clear();
+    release_keyboard_grab("page reloaded");
+  }
+  g_page_loaded_once = true;
+  // Tell the new page whether this shell can grab before it draws the
+  // settings switch.
   publish_grab_support();
   // A window that the WM maximized before the page loaded can miss the
   // resize; reallocate once the page is up as well.
@@ -1844,7 +2066,10 @@ void on_script_message(WebKitUserContentManager*, WebKitJavascriptResult* result
     grab_keyboard(window);
   } else if (action == "release-keyboard") {
     g_grab_requested = false;
+    g_grab_defer_reason.clear();
     release_keyboard_grab("page request");
+  } else if (action.rfind("grab-surface:", 0) == 0) {
+    apply_grab_surface(action.substr(std::strlen("grab-surface:")));
   } else if (action == "pick-directory") {
     pick_directory(window);
   } else if (action == "minimize") {

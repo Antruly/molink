@@ -78,6 +78,11 @@ export interface KeyForwardState {
   /// the remote surface, so a focused slider would otherwise still send keys
   /// to the host.
   localPanelOpen?: boolean
+  /// Linux X11 keyboard-grab mode only: the shell keeps the grab while the
+  /// pointer is over the remote picture, and the page must mirror that so keys
+  /// do not keep going to the host after the pointer left it. `undefined` on
+  /// every other platform, which leaves their behaviour unchanged.
+  remotePictureHover?: boolean
 }
 
 /// Keys reach the host only while the remote picture is the active input
@@ -90,6 +95,7 @@ export function shouldForwardKeys(state: KeyForwardState): boolean {
     state.controlEnabled &&
     !state.localTarget &&
     !state.settingsOpen &&
-    !state.localPanelOpen
+    !state.localPanelOpen &&
+    state.remotePictureHover !== false
   )
 }
