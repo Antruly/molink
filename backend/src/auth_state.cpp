@@ -393,6 +393,12 @@ void auth_state::set_allow_access_requests(bool allow) {
   persist_locked();
 }
 
+void auth_state::set_allow_sync_between_sessions(bool allow) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  settings_.allow_sync_between_sessions = allow;
+  persist_locked();
+}
+
 void auth_state::set_transport_security(bool encrypt_remote,
                                         bool encrypt_lan) {
   std::lock_guard<std::mutex> lock(mutex_);

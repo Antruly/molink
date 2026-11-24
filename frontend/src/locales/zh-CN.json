@@ -213,6 +213,8 @@
     "uses": "次数",
     "allowAccessRequests": "允许免密远程请求",
     "allowAccessRequestsHint": "对方没有验证码时可以发出请求，每次仍需你手动同意。默认开启。",
+    "syncBetweenSessions": "在多个会话间同步剪贴板",
+    "syncBetweenSessionsHint": "没有明确的前台会话时，把主机的剪贴板变化发给所有在线观看端。默认关闭，避免多个会话互相串台。",
     "windowsSessions": "Windows 会话",
     "windowsSessionsHint": "实验性：通过 molink-service 枚举。切换控制台或踢 RDP 需要管理员权限。",
     "windowsServiceMissing": "molink-service 未运行，请以管理员身份安装（见 shell/windows/service/README.md）。",

@@ -11,12 +11,16 @@
 //   - empty text is never sent;
 //   - text over the host's 192 KiB limit is skipped (the host drops it too:
 //     `session_controller.cpp` silently ignores an oversized clipboard-sync);
-//   - text identical to the last value sent is not sent again;
 //   - text this client just wrote to the local clipboard because the host
 //     pushed it is not echoed back. The Web keeps that value in
 //     `lastClipboard`; the file path echo table gives it a two-minute TTL,
 //     which is the window used here so an intentional re-copy after two
 //     minutes syncs again.
+//
+// There is no "identical to the last value" rule: the caller runs this from
+// WM_CLIPBOARDUPDATE, which already proves a new copy happened. Copying the
+// same password twice must send it twice, not stay silent because the content
+// did not change.
 //
 // The payload is byte-for-byte what `Client.sendClipboardSync` builds:
 // `{"type":"clipboard-sync","text":...,"hash":<fnv-1a>,"chain":""}` with the
@@ -47,7 +51,6 @@ enum class skip_reason {
   disabled,   ///< the session's clipboard switch is off
   empty,      ///< nothing on the local clipboard, or no text format
   too_large,  ///< over `max_text_bytes`; the host would drop it silently
-  duplicate,  ///< identical to the last value sent
   echo,       ///< this client just wrote it from the host's clipboard
 };
 
@@ -88,9 +91,6 @@ class text_sync {
   /// Call before writing so the update the write generates is recognised.
   void on_remote_text(std::u16string_view text, std::uint64_t now_ms);
 
-  /// A send failed (socket closed): allow the same text to go out again.
-  void reset_last_sent() { last_sent_key_.clear(); }
-
   void clear_echo();
   std::size_t echo_count() const { return echoes_.size(); }
 
@@ -106,7 +106,6 @@ class text_sync {
   bool has_echo(const std::string& key);
 
   bool enabled_ = true;
-  std::string last_sent_key_;
   std::deque<echo_entry> echoes_;
 };
 

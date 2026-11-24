@@ -1625,12 +1625,14 @@ class windows_clipboard final : public clipboard_service {
         std::string text;
         request_text([&text](std::string value) { text = std::move(value); });
         if (!text.empty()) {
+          // GetClipboardSequenceNumber already proves a new SetClipboardData
+          // happened. The content is deliberately not compared with the
+          // previous value: copying the same password twice is two copies and
+          // the second one has to reach the viewer. Echo suppression is the
+          // caller's job (owner == self, or its own recent write).
           std::lock_guard<std::mutex> lock(watch_mutex_);
-          if (text != last_text_) {
-            last_text_ = text;
-            last_files_.clear();
-            if (watch_callback_) watch_callback_(text, owner);
-          }
+          last_files_.clear();
+          if (watch_callback_) watch_callback_(text, owner);
         }
 
         // A copy may carry files, text, or both. A text-only copy skips the
@@ -1662,7 +1664,6 @@ class windows_clipboard final : public clipboard_service {
         std::lock_guard<std::mutex> lock(watch_mutex_);
         if (signature == last_files_) continue;
         last_files_ = signature;
-        last_text_.clear();
         if (files_callback_) files_callback_(std::move(files), owner);
       }
     });
@@ -2071,7 +2072,6 @@ class windows_clipboard final : public clipboard_service {
   std::mutex watch_mutex_;
   text_watcher watch_callback_;
   files_watcher files_callback_;
-  std::string last_text_;
   std::string last_files_;
   DWORD sequence_ = 0;
   std::atomic<bool> running_{false};

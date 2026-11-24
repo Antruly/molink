@@ -2,6 +2,8 @@
 
 #include <algorithm>
 
+#include "util.h"
+
 namespace molink {
 namespace {
 
@@ -44,15 +46,40 @@ const char* clipboard_route_reason_name(clipboard_route_reason reason) {
       return "sole";
     case clipboard_route_reason::broadcast:
       return "broadcast";
+    case clipboard_route_reason::no_target:
+      return "no_target";
     case clipboard_route_reason::none:
       break;
   }
   return "none";
 }
 
+bool clipboard_foreground_active(uint64_t foreground_ms, uint64_t now_ms) {
+  if (foreground_ms == 0) return false;
+  // A clock that stepped backwards keeps the lease rather than expiring it.
+  return now_ms < foreground_ms ||
+         now_ms - foreground_ms < kClipboardForegroundTtlMs;
+}
+
+bool clipboard_foreground_active(const clipboard_route_session& session,
+                                 uint64_t now_ms) {
+  return clipboard_foreground_active(session.foreground_ms, now_ms);
+}
+
+bool clipboard_peer_may_see_paths(const std::string& peer_ip) {
+  return is_loopback_peer(peer_ip);
+}
+
+bool clipboard_watcher_should_report(bool new_change,
+                                     const std::string& content,
+                                     const std::string& last_content) {
+  if (content.empty()) return false;
+  return new_change || content != last_content;
+}
+
 clipboard_route select_clipboard_targets(
     const std::vector<clipboard_route_session>& sessions, uint64_t now_ms,
-    uint64_t input_window_ms) {
+    uint64_t input_window_ms, bool allow_broadcast) {
   clipboard_route route;
   std::vector<const clipboard_route_session*> live;
   live.reserve(sessions.size());
@@ -62,11 +89,12 @@ clipboard_route select_clipboard_targets(
   }
   if (live.empty()) return route;
 
-  // 1. The viewer named the visible tab. Two windows can both be "visible";
-  // the one that interacted most recently is the one the user is working in.
+  // 1. The viewer renewed the visible-tab lease. Two windows can both be
+  // visible; the one that interacted most recently is the one the user is
+  // working in. An expired lease is not a foreground signal.
   const clipboard_route_session* active = nullptr;
   for (const clipboard_route_session* session : live) {
-    if (!session->foreground) continue;
+    if (!clipboard_foreground_active(*session, now_ms)) continue;
     if (active == nullptr || more_recent(*session, *active)) active = session;
   }
   if (active != nullptr) {
@@ -100,7 +128,14 @@ clipboard_route select_clipboard_targets(
     return route;
   }
 
-  // 4. Compatibility fallback for clients that never report activity.
+  // 4. Nothing names one viewer. By default that means "deliver nowhere":
+  // broadcasting put every session's clipboard into every other session's OS
+  // clipboard, which is the cross-talk this route exists to prevent. A host
+  // that explicitly wants the old fan-out keeps it with allow_broadcast.
+  if (!allow_broadcast) {
+    route.reason = clipboard_route_reason::no_target;
+    return route;
+  }
   route.targets.reserve(live.size());
   for (const clipboard_route_session* session : live) {
     route.targets.push_back(session->id);

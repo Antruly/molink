@@ -5,6 +5,7 @@
 #include <X11/Xatom.h>
 #include <X11/Xlib.h>
 
+#include <dlfcn.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <unistd.h>
@@ -30,6 +31,31 @@ namespace {
 // X11 property writes are bounded by the server's maximum request size
 // (typically 256 KiB); keep well under it.
 constexpr std::size_t kMaxClipboardBytes = 192 * 1024;
+
+// XFixes selection tracking. The extension is in libXfixes at runtime on
+// every desktop that has a clipboard manager, but the development header is
+// not always installed, so the ABI is spelled out here and the library is
+// loaded the same way the X11 capture backend loads XDamage. Without it the
+// watcher falls back to "the selection owner changed", which misses a second
+// copy of the same text from the same application.
+struct xfixes_selection_notify_event {
+  int type;
+  unsigned long serial;
+  Bool send_event;
+  Display* display;
+  Window window;
+  int subtype;
+  Window owner;
+  Atom selection;
+  Time timestamp;
+  Time selection_timestamp;
+};
+constexpr int kXfixesSelectionNotify = 0;
+constexpr int kXfixesSetSelectionOwnerNotify = 0;
+constexpr unsigned long kXfixesSetSelectionOwnerMask = 1UL << 0;
+using xfixes_query_extension_fn = Bool (*)(Display*, int*, int*);
+using xfixes_select_selection_input_fn = void (*)(Display*, Window, Atom,
+                                                  unsigned long);
 
 std::string uri_decode(const std::string& value) {
   std::string out;
@@ -178,9 +204,19 @@ class x11_clipboard final : public clipboard_service {
   void start_watch_thread() {
     if (watch_running_.exchange(true)) return;
     watch_thread_ = std::thread([this] {
+      // A selection event delivered between watch() and this thread would
+      // otherwise look like a fresh copy on the first poll.
+      uint64_t last_serial = selection_serial_.load();
       while (watch_running_.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(800));
         if (!watch_running_.load()) break;
+        // XFixes reports every XSetSelectionOwner, so a second copy of the
+        // same text is a new event. Without XFixes the fallback is an owner
+        // change; either way the content is not compared to decide whether a
+        // copy happened.
+        const uint64_t serial = selection_serial_.load();
+        const bool new_selection = serial != last_serial;
+        last_serial = serial;
         auto text_promise = std::make_shared<std::promise<std::string>>();
         std::future<std::string> text_future = text_promise->get_future();
         request_text([text_promise](std::string value) {
@@ -195,7 +231,11 @@ class x11_clipboard final : public clipboard_service {
           std::string text = text_future.get();
           if (!text.empty()) {
             std::lock_guard<std::mutex> lock(watch_mutex_);
-            if (text != last_text_) {
+            // Report a new selection even when the value is identical; the
+            // content comparison is only the safety net for a backend without
+            // XFixes where the same application kept ownership.
+            if (clipboard_watcher_should_report(new_selection, text,
+                                                last_text_)) {
               last_text_ = text;
               last_files_.clear();
               if (watch_callback_) {
@@ -234,7 +274,9 @@ class x11_clipboard final : public clipboard_service {
           continue;
         }
         std::lock_guard<std::mutex> lock(watch_mutex_);
-        if (signature == last_files_) continue;
+        // A new selection means a new copy even if the list is unchanged; a
+        // different list is the fallback when no XFixes event was delivered.
+        if (!new_selection && signature == last_files_) continue;
         last_files_ = signature;
         last_text_.clear();
         if (files_callback_) {
@@ -259,6 +301,33 @@ class x11_clipboard final : public clipboard_service {
     }
   }
 
+  /// Load libXfixes and subscribe to CLIPBOARD ownership changes. Optional:
+  /// the watcher keeps the owner-change fallback when the library or the
+  /// extension is missing.
+  void init_xfixes() {
+    void* lib = dlopen("libXfixes.so.3", RTLD_NOW | RTLD_LOCAL);
+    if (lib == nullptr) lib = dlopen("libXfixes.so", RTLD_NOW | RTLD_LOCAL);
+    if (lib == nullptr) return;
+    auto query = reinterpret_cast<xfixes_query_extension_fn>(
+        dlsym(lib, "XFixesQueryExtension"));
+    auto select = reinterpret_cast<xfixes_select_selection_input_fn>(
+        dlsym(lib, "XFixesSelectSelectionInput"));
+    if (query == nullptr || select == nullptr) {
+      dlclose(lib);
+      return;
+    }
+    int event_base = 0;
+    int error_base = 0;
+    if (!query(display_, &event_base, &error_base)) {
+      dlclose(lib);
+      return;
+    }
+    select(display_, window_, clipboard_, kXfixesSetSelectionOwnerMask);
+    XFlush(display_);
+    xfixes_lib_ = lib;
+    xfixes_event_base_ = event_base;
+  }
+
   void update_owner_state() {
     const Window owner = XGetSelectionOwner(display_, clipboard_);
     int state = 0;
@@ -268,6 +337,13 @@ class x11_clipboard final : public clipboard_service {
       state = 2;
     }
     owner_state_.store(state, std::memory_order_relaxed);
+    // Without XFixes the only portable "a copy happened" signal is that the
+    // selection owner changed. It misses a second copy from the same
+    // application, which is why XFixes is preferred when present.
+    if (xfixes_event_base_ < 0 && owner != fallback_owner_) {
+      fallback_owner_ = owner;
+      selection_serial_.fetch_add(1, std::memory_order_relaxed);
+    }
   }
 
   bool set_files(const std::vector<std::string>& paths) override {
@@ -303,6 +379,7 @@ class x11_clipboard final : public clipboard_service {
     uri_list_ = XInternAtom(display_, "text/uri-list", False);
     gnome_copied_ =
         XInternAtom(display_, "x-special/gnome-copied-files", False);
+    init_xfixes();
 
     // Clipboard commands are queued from other threads. Without a wakeup the
     // service loop would only notice them when its 100 ms poll timed out,
@@ -342,6 +419,10 @@ class x11_clipboard final : public clipboard_service {
       XCloseDisplay(display_);
       display_ = nullptr;
     }
+    if (xfixes_lib_ != nullptr) {
+      dlclose(xfixes_lib_);
+      xfixes_lib_ = nullptr;
+    }
   }
 
   void run() {
@@ -367,6 +448,16 @@ class x11_clipboard final : public clipboard_service {
       while (XPending(display_) > 0) {
         XEvent event;
         XNextEvent(display_, &event);
+        if (xfixes_event_base_ >= 0 &&
+            event.type == xfixes_event_base_ + kXfixesSelectionNotify) {
+          const auto* selection =
+              reinterpret_cast<const xfixes_selection_notify_event*>(&event);
+          if (selection->selection == clipboard_ &&
+              selection->subtype == kXfixesSetSelectionOwnerNotify) {
+            selection_serial_.fetch_add(1, std::memory_order_relaxed);
+          }
+          continue;
+        }
         switch (event.type) {
           case SelectionRequest:
             handle_selection_request(event.xselectionrequest);
@@ -695,6 +786,15 @@ class x11_clipboard final : public clipboard_service {
   Atom prop_ = None;
   Atom uri_list_ = None;
   Atom gnome_copied_ = None;
+
+  /// XFixes (loaded at runtime): each XSetSelectionOwner is one event, which
+  /// is what makes "copy the same text again" visible. -1 when unavailable.
+  void* xfixes_lib_ = nullptr;
+  int xfixes_event_base_ = -1;
+  std::atomic<uint64_t> selection_serial_{0};
+  /// Fallback when XFixes is missing: the owner window changed. Only touched
+  /// on the service thread.
+  Window fallback_owner_ = None;
 
   std::thread thread_;
   /// Self-pipe used to interrupt the poll when another thread queues work.

@@ -1,5 +1,6 @@
 # Node / 前端
 node_modules/
+node_modules
 frontend/dist/
 .pnpm-store/
 

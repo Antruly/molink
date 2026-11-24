@@ -77,6 +77,9 @@ class auth_state {
   /// Toggle the no-code approval flow without touching the other access
   /// switches. Defaults to enabled.
   void set_allow_access_requests(bool allow);
+  /// Allow a host clipboard change to fan out to every viewer when no viewer
+  /// is the active one. Off by default.
+  void set_allow_sync_between_sessions(bool allow);
   /// Per-path transport encryption: directory/ID sessions and direct LAN
   /// sessions have separate defaults (remote on, LAN off).
   void set_transport_security(bool encrypt_remote, bool encrypt_lan);

@@ -27,8 +27,12 @@ struct clipboard_route_session {
   uint32_t id = 0;
   bool authenticated = false;
   bool connected = true;
-  /// The viewer said its tab/window is the one on screen (`video-push on`).
-  bool foreground = false;
+  /// When the viewer last renewed `video-push on` (monotonic ms). 0 means the
+  /// viewer has never named itself as the visible tab, or named another one
+  /// since. The hint is a lease: it expires after kClipboardForegroundTtlMs,
+  /// so a viewer that stops renewing (a crashed tab, a minimized shell that
+  /// forgot to say so) cannot stay the clipboard target forever.
+  uint64_t foreground_ms = 0;
   /// Last input message from this viewer (0 = never).
   uint64_t last_input_ms = 0;
   /// When the viewer authenticated; the tie-breaker when nobody has interacted.
@@ -36,11 +40,12 @@ struct clipboard_route_session {
 };
 
 enum class clipboard_route_reason {
-  none,       ///< no connected, authenticated session
-  foreground, ///< at least one viewer marked itself as the visible tab
-  input,      ///< the most recent viewer to send input is the active one
-  sole,       ///< only one viewer is connected
-  broadcast,  ///< several viewers and no activity signal (legacy clients)
+  none,      ///< no connected, authenticated session
+  foreground,///< at least one viewer renewed a fresh foreground hint
+  input,     ///< the most recent viewer to send input is the active one
+  sole,      ///< only one viewer is connected
+  broadcast, ///< several viewers; the host-wide opt-in allows fan-out
+  no_target, ///< several viewers and nothing names one; deliver nowhere
 };
 
 const char* clipboard_route_reason_name(clipboard_route_reason reason);
@@ -56,21 +61,48 @@ struct clipboard_route {
 /// How long a viewer's input keeps it "active" when no tab is foreground.
 inline constexpr uint64_t kClipboardInputActiveMs = 2 * 60 * 1000;
 
+/// How long a `video-push on` foreground hint stays valid. The viewer renews
+/// it while it is being watched; once the lease expires the hint is ignored
+/// even if that client is still connected (a minimized shell, a crashed tab).
+inline constexpr uint64_t kClipboardForegroundTtlMs = 15 * 1000;
+
 /// Pick the destination(s) for a host clipboard change.
 ///
 /// The rules in order:
-///  1. A viewer that set `video-push on` is the active tab. When several are
-///     visible at once (two windows), the one that interacted most recently
+///  1. A viewer with a fresh foreground lease is the active tab. When several
+///     leases are fresh (two windows), the one that interacted most recently
 ///     wins; this is still a single-session route.
 ///  2. Otherwise the viewer that sent input most recently, within the window.
 ///  3. Otherwise, a lone viewer is obviously the one being watched.
-///  4. Otherwise every authenticated viewer, which is the old broadcast
-///     behaviour. This is the compatibility path for clients that never send
-///     `video-push`; the diagnostic records `reason=broadcast` so the caller
-///     can tell an intentional fallback from a routed delivery.
+///  4. Otherwise, nothing is delivered (`reason=no_target`). Broadcasting to
+///     every viewer used to leak one clipboard into unrelated sessions, so a
+///     host must opt in with `allow_broadcast`; only then is every
+///     authenticated viewer a target (`reason=broadcast`).
 clipboard_route select_clipboard_targets(
     const std::vector<clipboard_route_session>& sessions, uint64_t now_ms,
-    uint64_t input_window_ms = kClipboardInputActiveMs);
+    uint64_t input_window_ms = kClipboardInputActiveMs,
+    bool allow_broadcast = false);
+
+/// True when a fresh foreground lease still names this viewer as on screen.
+bool clipboard_foreground_active(const clipboard_route_session& session,
+                                 uint64_t now_ms);
+bool clipboard_foreground_active(uint64_t foreground_ms, uint64_t now_ms);
+
+/// Absolute host paths are only safe to hand to a peer on this same machine
+/// (the local core's page and the native shell). A remote viewer gets ids and
+/// names, never `C:\Users\alice\...`.
+bool clipboard_peer_may_see_paths(const std::string& peer_ip);
+
+/// Decide whether a polling watcher reports a value to the host.
+///
+/// `new_change` comes from the platform's own counter (Windows sequence
+/// number, NSPasteboard changeCount, an XFixes selection event). A new change
+/// is always reported, even when the content is identical: the second copy of
+/// the same password is a real copy. Content equality is only the fallback
+/// for a platform with no counter, where a changed value is all we can see.
+bool clipboard_watcher_should_report(bool new_change,
+                                     const std::string& content,
+                                     const std::string& last_content);
 
 /// Echo-suppression key for text. The hash alone can collide, so the byte
 /// length is included. The nested-loop `chain` is deliberately not part of the

@@ -31,6 +31,10 @@ void expect_eq(const std::string& actual, const std::string& expected,
                description, expected.c_str(), actual.c_str());
 }
 
+/// The tests use "now = 10'000" almost everywhere. A foreground session gets
+/// a lease from five seconds before that, so it is fresh under the 15 s TTL.
+constexpr uint64_t kTestNow = 10'000;
+
 clipboard_route_session session(uint32_t id, bool authenticated = true,
                                 bool foreground = false,
                                 uint64_t input_ms = 0,
@@ -39,7 +43,7 @@ clipboard_route_session session(uint32_t id, bool authenticated = true,
   value.id = id;
   value.authenticated = authenticated;
   value.connected = true;
-  value.foreground = foreground;
+  value.foreground_ms = foreground ? kTestNow - 5'000 : 0;
   value.last_input_ms = input_ms;
   value.connected_ms = connected_ms;
   return value;
@@ -124,16 +128,29 @@ void test_input_fallback_uses_recent_input() {
          "the reason records input");
 }
 
-void test_stale_input_falls_back_to_broadcast() {
+void test_stale_input_has_no_target_by_default() {
   std::vector<clipboard_route_session> sessions;
   sessions.push_back(session(1, true, false, 1'000));
   sessions.push_back(session(2, true, false, 2'000));
   const clipboard_route route = select_clipboard_targets(
       sessions, 2'000 + kClipboardInputActiveMs + 1);
+  expect(route.targets.empty(),
+         "two viewers with no current activity must not be broadcast to");
+  expect(route.reason == clipboard_route_reason::no_target,
+         "the diagnostic records that nothing was a target");
+}
+
+void test_broadcast_requires_the_explicit_opt_in() {
+  std::vector<clipboard_route_session> sessions;
+  sessions.push_back(session(1, true, false, 1'000));
+  sessions.push_back(session(2, true, false, 2'000));
+  const uint64_t now = 2'000 + kClipboardInputActiveMs + 1;
+  const clipboard_route route = select_clipboard_targets(
+      sessions, now, kClipboardInputActiveMs, true);
   expect(route.targets.size() == 2,
-         "two legacy viewers with no current activity get the broadcast");
+         "the opt-in fans out to every authenticated viewer");
   expect(route.reason == clipboard_route_reason::broadcast,
-         "the fallback is explicit in the diagnostic");
+         "the opt-in fallback is explicit in the diagnostic");
 }
 
 void test_input_window_boundary() {
@@ -147,8 +164,68 @@ void test_input_window_boundary() {
 
   const clipboard_route past_edge = select_clipboard_targets(
       sessions, 2'000 + kClipboardInputActiveMs + 1);
-  expect(past_edge.reason == clipboard_route_reason::broadcast,
-         "one millisecond past the edge is stale");
+  expect(past_edge.reason == clipboard_route_reason::no_target,
+         "one millisecond past the edge is stale, so nothing is targeted");
+}
+
+void test_foreground_lease_expires() {
+  std::vector<clipboard_route_session> sessions;
+  clipboard_route_session fresh = session(1, true, true);
+  // The helper backdates the lease by 5 s; this test needs it to start now so
+  // the TTL edge is exactly at kTestNow + ttl.
+  fresh.foreground_ms = kTestNow;
+  fresh.last_input_ms = kTestNow;
+  sessions.push_back(fresh);
+  // A second viewer is connected so an expired lease cannot hide behind the
+  // lone-viewer rule.
+  sessions.push_back(session(2, true, false, 1'000));
+
+  const clipboard_route live =
+      select_clipboard_targets(sessions, kTestNow + kClipboardForegroundTtlMs);
+  expect(live.reason != clipboard_route_reason::foreground,
+         "a lease exactly at the TTL is no longer foreground");
+
+  const clipboard_route just_before = select_clipboard_targets(
+      sessions, kTestNow + kClipboardForegroundTtlMs - 1);
+  expect(just_before.reason == clipboard_route_reason::foreground,
+         "one millisecond before the TTL the lease is still valid");
+}
+
+void test_expired_foreground_does_not_win_over_sole_viewer() {
+  // Lease starts at kTestNow - 5 s; reading the route a full TTL later makes
+  // it stale.
+  const clipboard_route route = select_clipboard_targets(
+      {session(1, true, true)}, kTestNow + kClipboardForegroundTtlMs);
+  expect(route.reason == clipboard_route_reason::sole,
+         "an expired lease falls through to the sole-viewer rule");
+  expect(route.targets.size() == 1 && route.targets[0] == 1,
+         "the only viewer is still the target by the sole rule");
+}
+
+void test_new_change_reports_identical_content() {
+  // A platform counter advanced: this is a new SetClipboardData, so even the
+  // exact same bytes must be reported (the second copy of a password).
+  expect(clipboard_watcher_should_report(true, "same", "same"),
+         "a new change with identical content is still reported");
+  expect(clipboard_watcher_should_report(false, "same", "same") == false,
+         "without a new change, identical content is the fallback no-op");
+  expect(clipboard_watcher_should_report(false, "other", "same"),
+         "without a counter, changed content is reported");
+  expect(clipboard_watcher_should_report(true, "", "") == false,
+         "a new change with no text is not reported as text");
+}
+
+void test_paths_only_reach_loopback_peers() {
+  expect(clipboard_peer_may_see_paths("127.0.0.1"),
+         "the local page may see a host path");
+  expect(clipboard_peer_may_see_paths("::1"),
+         "IPv6 loopback may see a host path");
+  expect(clipboard_peer_may_see_paths("::ffff:127.0.0.1"),
+         "the IPv4-mapped loopback form may see a host path");
+  expect(!clipboard_peer_may_see_paths("192.168.2.10"),
+         "a LAN viewer never receives a host absolute path");
+  expect(!clipboard_peer_may_see_paths("203.0.113.7"),
+         "a remote viewer never receives a host absolute path");
 }
 
 void test_echo_is_per_session() {
@@ -217,6 +294,8 @@ void test_route_reason_names() {
             "sole", "sole spelling");
   expect_eq(clipboard_route_reason_name(clipboard_route_reason::broadcast),
             "broadcast", "broadcast spelling");
+  expect_eq(clipboard_route_reason_name(clipboard_route_reason::no_target),
+            "no_target", "no_target spelling");
 }
 
 }  // namespace
@@ -229,8 +308,13 @@ int main() {
   test_foreground_wins_over_input();
   test_two_foregrounds_pick_the_most_recent_input();
   test_input_fallback_uses_recent_input();
-  test_stale_input_falls_back_to_broadcast();
+  test_stale_input_has_no_target_by_default();
+  test_broadcast_requires_the_explicit_opt_in();
   test_input_window_boundary();
+  test_foreground_lease_expires();
+  test_expired_foreground_does_not_win_over_sole_viewer();
+  test_new_change_reports_identical_content();
+  test_paths_only_reach_loopback_peers();
   test_echo_is_per_session();
   test_echo_expires();
   test_echo_table_is_bounded_and_newest_last();

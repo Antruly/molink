@@ -89,8 +89,10 @@ class macos_clipboard final : public clipboard_service {
             if (text != nil) {
               std::lock_guard<std::mutex> lock(watch_mutex_);
               std::string value = utf8(text);
-              if (!value.empty() && value != last_text_) {
-                last_text_ = value;
+              // NSPasteboard.changeCount already proves this is a new copy.
+              // Do not compare the content: copying the same string twice is
+              // two copies, and the viewer must see the second one.
+              if (!value.empty()) {
                 last_files_.clear();
                 if (text_watcher_) text_watcher_(value, owner);
               }
@@ -111,7 +113,6 @@ class macos_clipboard final : public clipboard_service {
             std::lock_guard<std::mutex> lock(watch_mutex_);
             if (signature == last_files_) continue;
             last_files_ = signature;
-            last_text_.clear();
             if (files_callback_) {
               files_callback_(std::move(files), owner);
             }
@@ -185,7 +186,6 @@ class macos_clipboard final : public clipboard_service {
   std::mutex watch_mutex_;
   text_watcher text_watcher_;
   files_watcher files_callback_;
-  std::string last_text_;
   std::string last_files_;
   std::atomic<bool> running_{false};
   /// changeCount after this process last wrote the pasteboard; the watcher

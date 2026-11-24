@@ -968,6 +968,9 @@ if(MOLINK_HAVE_X11)
   add_executable(molink-core-x11-clipboard-files-test
     tests/x11_clipboard_files_test.cpp
     src/clipboard/x11_clipboard.cpp
+    src/clipboard/clipboard_route.cpp
+    src/diag_log.cpp
+    src/util.cpp
   )
   target_include_directories(molink-core-x11-clipboard-files-test PRIVATE src)
   target_compile_definitions(molink-core-x11-clipboard-files-test
@@ -1164,8 +1167,13 @@ add_test(NAME clipboard_sync COMMAND molink-core-clipboard-sync-test)
 add_executable(molink-core-clipboard-route-test
   tests/clipboard_route_test.cpp
   src/clipboard/clipboard_route.cpp
+  src/util.cpp
 )
 target_include_directories(molink-core-clipboard-route-test PRIVATE src)
+if(WIN32)
+  # util.cpp reaches Winsock/iphlpapi for local_ipv4_addresses.
+  target_link_libraries(molink-core-clipboard-route-test PRIVATE ws2_32 iphlpapi)
+endif()
 set_target_properties(molink-core-clipboard-route-test PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})

@@ -17,6 +17,11 @@ struct app_settings {
   /// Let a remote peer ask the local user for access when it has no code.
   /// The local user still has to approve every request.
   bool allow_access_requests = true;
+  /// Fan a host clipboard change out to every connected viewer when no
+  /// viewer is clearly the active one. Off by default: a silent fan-out let
+  /// one session's clipboard overwrite another's. The explicit opt-in exists
+  /// for the "one host, several screens" setup.
+  bool allow_sync_between_sessions = false;
   /// Encrypt sessions that arrive through the directory/ID server. On by
   /// default; the relay already uses WSS and the cores add an end-to-end layer.
   bool encrypt_remote = true;

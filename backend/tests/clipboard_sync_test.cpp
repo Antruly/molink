@@ -40,7 +40,7 @@ void test_empty_text_is_not_sent() {
   expect(empty.bytes == 0, "empty text has zero bytes");
 }
 
-void test_duplicate_text_is_not_sent_twice() {
+void test_identical_copy_is_sent_again() {
   text_sync sync;
   const decision first = sync.on_local_text(u"hello", 1000);
   expect(first.send && first.reason == skip_reason::none,
@@ -48,16 +48,17 @@ void test_duplicate_text_is_not_sent_twice() {
   expect_eq(first.text, "hello", "the payload text is the clipboard text");
   expect(first.bytes == 5, "the log byte count is the UTF-8 length");
 
+  // WM_CLIPBOARDUPDATE already proves a new copy happened. Copying the same
+  // password twice is two copies; the content comparison must not drop the
+  // second one.
   const decision again = sync.on_local_text(u"hello", 2000);
-  expect(!again.send, "the identical clipboard value is not sent again");
-  expect(again.reason == skip_reason::duplicate,
-         "the repeat is reported as duplicate");
+  expect(again.send, "a second copy of the same text is sent again");
+  expect(again.reason == skip_reason::none, "the repeat is not a skip");
 
   const decision changed = sync.on_local_text(u"world", 3000);
   expect(changed.send, "a different value is sent");
 
-  // Web compares against the last value only, so going back to an earlier
-  // value is a new selection, not a duplicate.
+  // Going back to an earlier value is another copy, not a duplicate.
   const decision back = sync.on_local_text(u"hello", 4000);
   expect(back.send, "returning to an earlier value sends again");
 }
@@ -170,10 +171,9 @@ void test_disabled_switch_stops_sends() {
 void test_send_failure_can_retry() {
   text_sync sync;
   expect(sync.on_local_text(u"retry me", 1000).send, "first attempt is sent");
-  expect(!sync.on_local_text(u"retry me", 2000).send,
-         "an unchanged value is a duplicate");
-  sync.reset_last_sent();
-  expect(sync.on_local_text(u"retry me", 3000).send,
+  // A failed send needs no reset: the next clipboard update for the same text
+  // is a new copy and goes out again.
+  expect(sync.on_local_text(u"retry me", 2000).send,
          "a failed send may retry the same text");
 }
 
@@ -230,7 +230,7 @@ void test_clear_echo() {
 
 int main() {
   test_empty_text_is_not_sent();
-  test_duplicate_text_is_not_sent_twice();
+  test_identical_copy_is_sent_again();
   test_oversize_text_is_skipped();
   test_size_limit_counts_utf8_bytes();
   test_host_echo_is_suppressed();

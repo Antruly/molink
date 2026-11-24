@@ -174,11 +174,9 @@ decision text_sync::on_local_text(std::u16string_view text,
     result.reason = skip_reason::echo;
     return result;
   }
-  if (key == last_sent_key_) {
-    result.reason = skip_reason::duplicate;
-    return result;
-  }
-  last_sent_key_ = key;
+  // A local clipboard update is already proof of a new copy. Identical
+  // content must still be sent: copying the same password twice is two
+  // copies, and the second one used to be dropped here.
   result.send = true;
   return result;
 }
