@@ -1,5 +1,6 @@
 #include <atomic>
 #include <chrono>
+#include <clocale>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -489,6 +490,12 @@ class adaptive_input final : public input_injector {
 }  // namespace
 
 int main(int argc, char** argv) {
+#if defined(_WIN32)
+  // The manifest already selects UTF-8 as the ANSI code page on Windows 10+;
+  // this also covers the C runtime's narrow functions where the OS honours it.
+  // Failure is harmless (older Windows keeps its code page).
+  std::setlocale(LC_ALL, ".UTF-8");
+#endif
   molink::init_frame_surface_from_env();
   using namespace molink;
 

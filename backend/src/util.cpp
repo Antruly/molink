@@ -225,4 +225,5 @@ std::vector<std::string> local_ipv4_addresses() {
                    });
   return out;
 }
+
 }  // namespace molink

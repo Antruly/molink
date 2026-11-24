@@ -8,6 +8,8 @@
 #include <system_error>
 #include <utility>
 
+#include "util.h"
+
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -141,7 +143,7 @@ win_attributes read_win_attributes(const fs::path& path) {
 
 entry read_entry(const fs::directory_entry& item) {
   entry out;
-  out.name = item.path().filename().string();
+  out.name = path_to_utf8(item.path().filename());
   if (out.name.empty() && item.path().has_root_path()) {
     out.name = native_path(item.path());
   }
@@ -389,7 +391,7 @@ std::optional<std::string> normalize_browse_path(const std::string& raw,
 }
 
 std::string native_path(const fs::path& path) {
-  std::string out = path.string();
+  std::string out = path_to_utf8(path);
 #if defined(_WIN32)
   std::replace(out.begin(), out.end(), '/', '\\');
 #endif
@@ -400,7 +402,7 @@ std::optional<listing> list_directory(const std::string& directory,
                                       std::string& error) {
   error.clear();
   std::error_code ec;
-  const fs::path dir(directory);
+  const fs::path dir = path_from_utf8(directory);
   const bool exists = fs::exists(dir, ec);
   if (ec) {
     error = describe_error(ec);
@@ -458,7 +460,7 @@ walk_result walk_directory(const std::string& directory,
                            std::size_t max_entries, std::size_t max_depth) {
   walk_result out;
   std::error_code ec;
-  const fs::path root(directory);
+  const fs::path root = path_from_utf8(directory);
   if (!fs::is_directory(root, ec)) return out;
 
   struct pending {
@@ -501,11 +503,11 @@ walk_result walk_directory(const std::string& directory,
 
 std::string unique_destination(const std::string& target) {
   std::error_code ec;
-  const fs::path wanted(target);
+  const fs::path wanted = path_from_utf8(target);
   if (!fs::exists(wanted, ec)) return native_path(wanted);
   const fs::path parent = wanted.parent_path();
-  const std::string stem = wanted.stem().string();
-  const std::string extension = wanted.extension().string();
+  const std::string stem = path_to_utf8(wanted.stem());
+  const std::string extension = path_to_utf8(wanted.extension());
   for (int index = 1; index < 10000; ++index) {
     const fs::path candidate =
         parent / (stem + " (" + std::to_string(index) + ")" + extension);
