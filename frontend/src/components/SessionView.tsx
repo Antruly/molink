@@ -68,6 +68,7 @@ import {
   type KeyCombo,
 } from '../lib/key-combos'
 import { keyToCode, normalizeKeyCode } from '../lib/key-code'
+import { splitImeText } from '../lib/ime-text'
 import { FADE_OPACITY_CLASS } from '../lib/proximity-fade'
 import { useProximityFade } from '../lib/use-proximity-fade'
 import { Codec, codecName } from '../lib/protocol'
@@ -116,6 +117,9 @@ function formatBandwidth(bytesPerSecond: number): string {
 function isLocalInputTarget(target: EventTarget | null): boolean {
   const element = target as HTMLElement | null
   if (element === null || typeof element.closest !== 'function') return false
+  // The hidden IME input is part of the remote picture: it is focused so the
+  // local IME can compose, but keys typed there still belong to the host.
+  if (element.hasAttribute?.('data-remote-ime')) return false
   const tag = element.tagName
   if (
     tag === 'INPUT' ||
@@ -469,6 +473,7 @@ export function SessionView({
     (state) => state.setQualityPanelOpen,
   )
   const keyboardGrab = useAppStore((state) => state.keyboardGrab)
+  const localIme = useAppStore((state) => state.localIme)
   const comboForwardAsked = useAppStore((state) => state.comboForwardAsked)
   const comboForwardAnswered = useAppStore(
     (state) => state.comboForwardAnswered,
@@ -526,6 +531,10 @@ export function SessionView({
   const [retryCode, setRetryCode] = useState('')
   const retryInputRef = useRef<HTMLInputElement>(null)
   const touchDevice = touchPrimary()
+  /// The hidden input is the composition target for a desktop IME. Touch
+  /// devices always keep it because their virtual keyboard types through
+  /// `text` events; the setting only governs desktop composition.
+  const textInputEnabled = touchDevice || localIme
   const [virtualMouse, setVirtualMouse] = useState(false)
   const [displayMode, setDisplayMode] = useState<DisplayMode>('fit')
   const [elementFullscreen, setElementFullscreen] = useState(
@@ -1616,9 +1625,50 @@ export function SessionView({
     setVirtualMouse((value) => !value)
   }
 
+  /// Give the keyboard to the remote picture. With IME mode the hidden input
+  /// takes the focus so the browser composes locally; otherwise the surface
+  /// itself is enough because keys are forwarded by position.
+  const focusRemoteKeyboard = () => {
+    if (textInputEnabled && keyboardRef.current) {
+      keyboardRef.current.focus({ preventScroll: true })
+      return
+    }
+    surfaceRef.current?.focus({ preventScroll: true })
+  }
+
   const openKeyboard = () => {
     if (!tab.controlEnabled) setControlEnabled(tab.id, true)
-    keyboardRef.current?.focus()
+    focusRemoteKeyboard()
+  }
+
+  /// Send committed IME text as one or more `{k:"text"}` events. The host
+  /// rejects a single event above 4096 UTF-8 bytes, so a long commit is
+  /// split rather than dropped. The hidden input belongs to the remote
+  /// picture, so it passes the same focus/visibility gates as physical keys.
+  const sendCommittedText = (text: string) => {
+    if (!text || !textInputEnabled || !inputAvailable) return
+    const conn = connection()
+    if (!conn) return
+    const state = useAppStore.getState()
+    if (
+      !shouldForwardKeys({
+        hasFocus: document.hasFocus(),
+        visible: document.visibilityState === 'visible',
+        controlEnabled: tab.controlEnabled,
+        localTarget: false,
+        settingsOpen: state.settingsOpen,
+        localPanelOpen: state.qualityPanelOpen,
+        remotePictureHover:
+          keyboardGrabApplicable() && state.keyboardGrab
+            ? pointerInSurface.current
+            : undefined,
+      })
+    ) {
+      return
+    }
+    for (const chunk of splitImeText(text)) {
+      conn.sendInput({ k: 'text', text: chunk })
+    }
   }
 
   const toggleAudio = () => {
@@ -2066,7 +2116,10 @@ export function SessionView({
     const point = normalize(event.clientX, event.clientY)
     if (!point) return
     event.preventDefault()
-    event.currentTarget.focus()
+    // The hidden IME input is a child of the surface, so focusing it keeps
+    // the picture's focus state (and the X11 grab) intact.
+    focusRemoteKeyboard()
+    setSurfaceFocused(true)
     pointerInSurface.current = true
     // focus() fires onFocus only when the surface was not already focused;
     // clicking after the local escape combo must re-arm the grab explicitly.
@@ -2150,6 +2203,11 @@ export function SessionView({
           ? event.code
           : keyToCode(event.key, event.location),
       )
+    // While the local IME owns the composition, key events are input to the
+    // IME, not remote keys. The legacy keyCode 229 and `Process` cover the
+    // first keystroke that starts a composition before `isComposing` flips.
+    const isImeEvent = (event: KeyboardEvent) =>
+      event.isComposing || event.keyCode === 229 || event.key === 'Process'
     // Only the window that owns the pointer/keyboard may drive the host: a
     // hidden tab or an unfocused window keeps every key local. Local form
     // fields and open dialogs keep the existing local behaviour.
@@ -2169,7 +2227,7 @@ export function SessionView({
           : undefined,
     })
     const down = (event: KeyboardEvent) => {
-      if (event.repeat || event.isComposing) return
+      if (event.repeat || isImeEvent(event)) return
       if (!shouldForwardKeys(forwardState(event.target))) return
       const code = codeFor(event)
       if (!code) return
@@ -2192,7 +2250,7 @@ export function SessionView({
       connection()?.sendInput({ k: 'key', code, down: true })
     }
     const up = (event: KeyboardEvent) => {
-      if (event.isComposing) return
+      if (isImeEvent(event)) return
       const code = codeFor(event)
       if (!code) return
       const held = keys.has(code)
@@ -2710,11 +2768,28 @@ export function SessionView({
         <div
           ref={surfaceRef}
           tabIndex={-1}
-          onFocus={() => {
+          onFocus={(event) => {
             setSurfaceFocused(true)
             if (grabEligible) setKeyboardGrab(true)
+            // The canvas itself is not editable; with IME mode hand the
+            // focus to the hidden input so the local IME can compose. A focus
+            // event that bubbled up from the input already has the right
+            // target and must not re-enter this branch.
+            if (textInputEnabled && event.target === event.currentTarget) {
+              keyboardRef.current?.focus({ preventScroll: true })
+            }
           }}
-          onBlur={() => {
+          onBlur={(event) => {
+            // Focus moving between the picture and its hidden IME input is
+            // still the picture; only leaving it releases the keyboard.
+            const next = event.relatedTarget as Node | null
+            if (
+              next !== null &&
+              typeof next.nodeType === 'number' &&
+              event.currentTarget.contains(next)
+            ) {
+              return
+            }
             setSurfaceFocused(false)
             setKeyboardGrab(false)
           }}
@@ -3809,9 +3884,10 @@ export function SessionView({
             )
           ) : null}
 
-          {touchDevice ? (
+          {textInputEnabled ? (
             <textarea
               ref={keyboardRef}
+              data-remote-ime="true"
               aria-hidden
               tabIndex={-1}
               className="pointer-events-none absolute left-0 top-0 h-px w-px resize-none opacity-0"
@@ -3825,17 +3901,15 @@ export function SessionView({
                 composingRef.current = false
                 const value = event.currentTarget.value
                 event.currentTarget.value = ''
-                if (value) {
-                  connection()?.sendInput({ k: 'text', text: value })
-                }
+                sendCommittedText(value)
               }}
               onInput={(event) => {
+                // Composition updates arrive as `input` events too; the
+                // commit is sent once, from compositionend.
                 if (composingRef.current) return
                 const value = event.currentTarget.value
                 event.currentTarget.value = ''
-                if (value) {
-                  connection()?.sendInput({ k: 'text', text: value })
-                }
+                sendCommittedText(value)
               }}
             />
           ) : null}

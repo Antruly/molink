@@ -15,6 +15,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 
 namespace molink {
@@ -49,12 +50,15 @@ bool send_command(const std::string& command, std::string* reply = nullptr) {
 }
 
 /// Resolve through the shared table so the lock/UAC desktop accepts the same
-/// keys as the normal backend. The pipe carries a VK plus the extended flag;
-/// scan-code-only keys (Power/WakeUp) cannot be expressed there.
-bool vk_from_code(const std::string& code, WORD& vk, bool& extended) {
+/// keys as the normal backend. The pipe carries the scan code (preferred), the
+/// virtual key (fallback and compatibility with an older helper) and the
+/// extended flag.
+bool key_from_code(const std::string& code, WORD& vk, WORD& scan,
+                   bool& extended) {
   const key_lookup mapping = lookup_key(keymap_platform::windows, code);
-  if (!mapping.found || mapping.unsupported || mapping.scan_code) return false;
+  if (!mapping.found || mapping.unsupported) return false;
   vk = static_cast<WORD>(mapping.value);
+  scan = static_cast<WORD>(mapping.scan);
   extended = mapping.extended;
   return true;
 }
@@ -114,11 +118,17 @@ class secure_input final : public input_injector {
 
   status key(const std::string& code, bool down) override {
     WORD vk = 0;
+    WORD scan = 0;
     bool extended = false;
-    if (!vk_from_code(code, vk, extended)) return status::rejected;
-    // The fourth field is optional for an older helper, which ignores it.
+    if (!key_from_code(code, vk, scan, extended)) return status::rejected;
+    // The compatibility switch keeps the old virtual-key behaviour.
+    const char* mode = std::getenv("MOLINK_KEYMAP");
+    if (mode != nullptr && std::strcmp(mode, "layout") == 0) scan = 0;
+    // The fifth field is optional for an older helper, which ignores it and
+    // injects the virtual key. A newer helper uses the scan code when present.
     return send_command("key " + std::to_string(vk) + " " +
-                        (down ? "1" : "0") + " " + (extended ? "1" : "0"))
+                        (down ? "1" : "0") + " " + (extended ? "1" : "0") +
+                        " " + std::to_string(scan))
                ? status::ok
                : status::unavailable;
   }

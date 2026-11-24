@@ -275,6 +275,8 @@
     "keyboardGrab": "Grab the keyboard (X11)",
     "keyboardGrabHint": "Send Win shortcuts straight to the remote: while the remote picture is focused the app takes the keyboard, so Win, Alt+Tab and other system shortcuts reach the remote and local shortcuts stop working. Leave the picture, switch windows, or press Ctrl+Alt+Shift+Esc to restore them.",
     "keyboardGrabUnsupported": "Unavailable in this desktop session (Wayland or no X11 keyboard grab). Use the toolbar shortcut menu instead.",
+    "localIme": "Type with the local IME",
+    "localImeHint": "While the remote picture is focused, the browser composes text locally and sends the committed characters to the remote. Needed for Chinese, Japanese and Korean input. Turn it off to forward key positions only; the touch keyboard keeps using text input.",
     "comboForwardRememberedOn": "Remembered: you enabled it at the first prompt. The switch above can turn it off at any time.",
     "comboForwardRememberedOff": "Remembered: you declined at the first prompt. The combo menu still sends ordinary key sequences, it just does not grab the keyboard; the switch above can turn it on at any time.",
     "codePolicy": "Verification codes",

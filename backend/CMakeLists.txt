@@ -248,6 +248,7 @@ set(MOLINK_CORE_SOURCES
   src/input/input_event.cpp
   src/input/key_alias.cpp
   src/input/keymap.cpp
+  src/input/text_encoding.cpp
   src/config.cpp
   src/identity.cpp
   src/tls_identity.cpp
@@ -867,6 +868,7 @@ add_executable(molink-core-keymap-test
   tests/keymap_test.cpp
   src/input/keymap.cpp
   src/input/key_alias.cpp
+  src/input/text_encoding.cpp
 )
 target_include_directories(molink-core-keymap-test PRIVATE src)
 set_target_properties(molink-core-keymap-test PROPERTIES

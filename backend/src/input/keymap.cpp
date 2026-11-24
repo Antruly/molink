@@ -18,41 +18,58 @@
 namespace molink {
 namespace {
 
+// Every key resolves to a physical identifier, not a character:
+//
+//   * Windows uses the set-1 scan code (with the E0 bit for extended keys).
+//   * X11 uses the X key code, which is the Linux evdev code plus eight.
+//   * macOS keeps its Carbon key code, which is already position-based.
+//
+// A layout (US, German, French, ...) only changes which character the host
+// produces for that position. It never changes these numbers, so the same
+// physical key on the client reaches the same physical key on the host.
 struct key_entry {
   const char* code;
-  unsigned int value;   // Windows VK / scan code, or macOS CGKeyCode
-  const char* keysym;   // X11 keysym name
+  unsigned int value;   // Windows VK, or macOS CGKeyCode
+  unsigned int scan;    // Windows set-1 scan code (0 = inject by VK)
+  unsigned int keycode; // X11 key code (0 = no physical key)
+  const char* keysym;   // X11 keysym name, for the layout compatibility path
   bool extended;        // Windows E0 prefix
   bool unsupported;     // known DOM code, no key on this platform
-  bool scan_code;       // Windows: value is a scan code, not a VK
 };
 
-constexpr key_entry win(const char* code, unsigned int vk,
+constexpr key_entry win(const char* code, unsigned int vk, unsigned int scan,
                         bool extended = false) {
-  return key_entry{code, vk, nullptr, extended, false, false};
+  return key_entry{code, vk, scan, 0, nullptr, extended, false};
 }
 
-constexpr key_entry win_scan(const char* code, unsigned int scan,
-                             bool extended) {
-  return key_entry{code, scan, nullptr, extended, false, true};
+/// A Windows key with no reliable set-1 scan code. The injector sends the
+/// virtual key instead; this is the compatibility path, not the norm.
+constexpr key_entry win_vk(const char* code, unsigned int vk,
+                           bool extended = false) {
+  return key_entry{code, vk, 0, 0, nullptr, extended, false};
 }
 
-constexpr key_entry x11(const char* code, const char* keysym) {
-  return key_entry{code, 0, keysym, false, false, false};
+constexpr key_entry x11(const char* code, const char* keysym,
+                        unsigned int keycode) {
+  // A zero key code means the host has no physical key for this DOM code.
+  return key_entry{code, 0, 0, keycode, keysym, false, keycode == 0};
 }
 
 constexpr key_entry mac(const char* code, unsigned int keycode) {
-  return key_entry{code, keycode, nullptr, false, false, false};
+  return key_entry{code, keycode, 0, 0, nullptr, false, false};
 }
 
 constexpr key_entry unsupported(const char* code) {
-  return key_entry{code, 0, nullptr, false, true, false};
+  return key_entry{code, 0, 0, 0, nullptr, false, true};
 }
 
 // Windows virtual-key values. Keeping them here (instead of including
 // <windows.h> in the table) lets the Linux CI build exercise the Windows
 // table too. On Windows every value is checked against the real VK_ constant
-// below, so a typo cannot survive the windows-core job.
+// below, so a typo cannot survive the windows-core job. Scan-code injection
+// derives its compatibility VK with MapVirtualKeyW; these values are only
+// used by the `MOLINK_KEYMAP=layout` compatibility path and by keys that have
+// no scan code.
 namespace vk {
 constexpr unsigned int Cancel = 0x03;
 constexpr unsigned int Back = 0x08;
@@ -132,10 +149,6 @@ constexpr unsigned int Oem5 = 0xDC;
 constexpr unsigned int Oem6 = 0xDD;
 constexpr unsigned int Oem7 = 0xDE;
 constexpr unsigned int Oem102 = 0xE2;
-// No VK_ constant exists for the ACPI Power and Wake Up keys; they are sent
-// as their E0 scan codes instead.
-constexpr unsigned int ScanPower = 0x5E;
-constexpr unsigned int ScanWakeUp = 0x63;
 }  // namespace vk
 
 #if defined(_WIN32)
@@ -226,6 +239,58 @@ static_assert(vk::Oem7 == VK_OEM_7, "VK_OEM_7 changed");
 static_assert(vk::Oem102 == VK_OEM_102, "VK_OEM_102 changed");
 #endif
 
+// Set-1 scan codes, indexed by DOM code. These are the positions printed on
+// every PC keyboard, so they are the same on US, German and French hosts.
+const unsigned int kScanLetters[26] = {
+    /*A*/ 0x1E, /*B*/ 0x30, /*C*/ 0x2E, /*D*/ 0x20, /*E*/ 0x12, /*F*/ 0x21,
+    /*G*/ 0x22, /*H*/ 0x23, /*I*/ 0x17, /*J*/ 0x24, /*K*/ 0x25, /*L*/ 0x26,
+    /*M*/ 0x32, /*N*/ 0x31, /*O*/ 0x18, /*P*/ 0x19, /*Q*/ 0x10, /*R*/ 0x13,
+    /*S*/ 0x1F, /*T*/ 0x14, /*U*/ 0x16, /*V*/ 0x2F, /*W*/ 0x11, /*X*/ 0x2D,
+    /*Y*/ 0x15, /*Z*/ 0x2C};
+
+const unsigned int kScanDigits[10] = {
+    /*0*/ 0x0B, /*1*/ 0x02, /*2*/ 0x03, /*3*/ 0x04, /*4*/ 0x05,
+    /*5*/ 0x06, /*6*/ 0x07, /*7*/ 0x08, /*8*/ 0x09, /*9*/ 0x0A};
+
+const unsigned int kScanNumpad[10] = {
+    /*0*/ 0x52, /*1*/ 0x4F, /*2*/ 0x50, /*3*/ 0x51, /*4*/ 0x4B,
+    /*5*/ 0x4C, /*6*/ 0x4D, /*7*/ 0x47, /*8*/ 0x48, /*9*/ 0x49};
+
+const unsigned int kScanFunction[24] = {
+    /*F1*/ 0x3B,  /*F2*/ 0x3C,  /*F3*/ 0x3D,  /*F4*/ 0x3E,
+    /*F5*/ 0x3F,  /*F6*/ 0x40,  /*F7*/ 0x41,  /*F8*/ 0x42,
+    /*F9*/ 0x43,  /*F10*/ 0x44, /*F11*/ 0x57, /*F12*/ 0x58,
+    /*F13*/ 0x64, /*F14*/ 0x65, /*F15*/ 0x66, /*F16*/ 0x67,
+    /*F17*/ 0x68, /*F18*/ 0x69, /*F19*/ 0x6A, /*F20*/ 0x6B,
+    /*F21*/ 0x6C, /*F22*/ 0x6D, /*F23*/ 0x6E, /*F24*/ 0x76};
+
+// Linux evdev key codes. X key codes are these plus eight. The X server's
+// evdev keymap assigns them by position, so no layout is involved.
+const unsigned int kEvdevLetters[26] = {
+    /*A*/ 30, /*B*/ 48, /*C*/ 46, /*D*/ 32, /*E*/ 18, /*F*/ 33,
+    /*G*/ 34, /*H*/ 35, /*I*/ 23, /*J*/ 36, /*K*/ 37, /*L*/ 38,
+    /*M*/ 50, /*N*/ 49, /*O*/ 24, /*P*/ 25, /*Q*/ 16, /*R*/ 19,
+    /*S*/ 31, /*T*/ 20, /*U*/ 22, /*V*/ 47, /*W*/ 17, /*X*/ 45,
+    /*Y*/ 21, /*Z*/ 44};
+
+const unsigned int kEvdevDigits[10] = {
+    /*0*/ 11, /*1*/ 2, /*2*/ 3, /*3*/ 4, /*4*/ 5,
+    /*5*/ 6,  /*6*/ 7, /*7*/ 8, /*8*/ 9, /*9*/ 10};
+
+const unsigned int kEvdevNumpad[10] = {
+    /*0*/ 82, /*1*/ 79, /*2*/ 80, /*3*/ 81, /*4*/ 75,
+    /*5*/ 76, /*6*/ 77, /*7*/ 71, /*8*/ 72, /*9*/ 73};
+
+const unsigned int kEvdevFunction[24] = {
+    /*F1*/ 59,  /*F2*/ 60,  /*F3*/ 61,  /*F4*/ 62,
+    /*F5*/ 63,  /*F6*/ 64,  /*F7*/ 65,  /*F8*/ 66,
+    /*F9*/ 67,  /*F10*/ 68, /*F11*/ 87, /*F12*/ 88,
+    /*F13*/ 183, /*F14*/ 184, /*F15*/ 185, /*F16*/ 186,
+    /*F17*/ 187, /*F18*/ 188, /*F19*/ 189, /*F20*/ 190,
+    /*F21*/ 191, /*F22*/ 192, /*F23*/ 193, /*F24*/ 194};
+
+constexpr unsigned int kX11KeycodeOffset = 8;
+
 // macOS ANSI CGKeyCodes (kVK_ANSI_A .. kVK_ANSI_Z), indexed A..Z.
 const unsigned int kMacLettersExplicit[26] = {
     /*A*/ 0,  /*B*/ 11, /*C*/ 8,  /*D*/ 2,  /*E*/ 14, /*F*/ 3,
@@ -252,134 +317,165 @@ const unsigned int kMacFunction[24] = {
     /*F21*/ 0,   /*F22*/ 0,   /*F23*/ 0,   /*F24*/ 0};
 
 const key_entry kWindowsKeys[] = {
-    win("Enter", vk::Return),
-    win("NumpadEnter", vk::Return, true),
-    win("Backspace", vk::Back), win("Tab", vk::Tab),
-    win("Space", vk::Space), win("Escape", vk::Escape),
-    win("Delete", vk::Delete, true), win("Insert", vk::Insert, true),
-    win("Home", vk::Home, true), win("End", vk::End, true),
-    win("PageUp", vk::Prior, true), win("PageDown", vk::Next, true),
-    win("ArrowLeft", vk::Left, true), win("ArrowRight", vk::Right, true),
-    win("ArrowUp", vk::Up, true), win("ArrowDown", vk::Down, true),
-    win("ShiftLeft", vk::LShift), win("ShiftRight", vk::RShift),
-    win("ControlLeft", vk::LControl), win("ControlRight", vk::RControl, true),
-    win("AltLeft", vk::LMenu), win("AltRight", vk::RMenu, true),
-    win("MetaLeft", vk::LWin, true), win("MetaRight", vk::RWin, true),
+    win("Enter", vk::Return, 0x1C),
+    win("NumpadEnter", vk::Return, 0x1C, true),
+    win("Backspace", vk::Back, 0x0E), win("Tab", vk::Tab, 0x0F),
+    win("Space", vk::Space, 0x39), win("Escape", vk::Escape, 0x01),
+    win("Delete", vk::Delete, 0x53, true),
+    win("Insert", vk::Insert, 0x52, true),
+    win("Home", vk::Home, 0x47, true), win("End", vk::End, 0x4F, true),
+    win("PageUp", vk::Prior, 0x49, true),
+    win("PageDown", vk::Next, 0x51, true),
+    win("ArrowLeft", vk::Left, 0x4B, true),
+    win("ArrowRight", vk::Right, 0x4D, true),
+    win("ArrowUp", vk::Up, 0x48, true),
+    win("ArrowDown", vk::Down, 0x50, true),
+    win("ShiftLeft", vk::LShift, 0x2A), win("ShiftRight", vk::RShift, 0x36),
+    win("ControlLeft", vk::LControl, 0x1D),
+    win("ControlRight", vk::RControl, 0x1D, true),
+    win("AltLeft", vk::LMenu, 0x38), win("AltRight", vk::RMenu, 0x38, true),
+    win("MetaLeft", vk::LWin, 0x5B, true),
+    win("MetaRight", vk::RWin, 0x5C, true),
     // Windows reports AltGr as the right Alt key; there is no separate VK.
-    win("AltGraph", vk::RMenu, true),
-    win("CapsLock", vk::Capital), win("NumLock", vk::NumLock, true),
-    win("ScrollLock", vk::Scroll), win("PrintScreen", vk::Snapshot, true),
-    win("Pause", vk::Pause), win("ContextMenu", vk::Apps, true),
-    win("Minus", vk::OemMinus), win("Equal", vk::OemPlus),
-    win("BracketLeft", vk::Oem4), win("BracketRight", vk::Oem6),
-    win("Backslash", vk::Oem5), win("Semicolon", vk::Oem1),
-    win("Quote", vk::Oem7), win("Backquote", vk::Oem3),
-    win("Comma", vk::OemComma), win("Period", vk::OemPeriod),
-    win("Slash", vk::Oem2),
+    win("AltGraph", vk::RMenu, 0x38, true),
+    win("CapsLock", vk::Capital, 0x3A),
+    win("NumLock", vk::NumLock, 0x45, true),
+    win("ScrollLock", vk::Scroll, 0x46),
+    win("PrintScreen", vk::Snapshot, 0x37, true),
+    // Pause is the E1 1D 45 sequence, which KEYEVENTF_SCANCODE cannot spell;
+    // the virtual key makes Windows emit the correct sequence.
+    win_vk("Pause", vk::Pause),
+    win("ContextMenu", vk::Apps, 0x5D, true),
+    win("Minus", vk::OemMinus, 0x0C), win("Equal", vk::OemPlus, 0x0D),
+    win("BracketLeft", vk::Oem4, 0x1A),
+    win("BracketRight", vk::Oem6, 0x1B),
+    win("Backslash", vk::Oem5, 0x2B), win("Semicolon", vk::Oem1, 0x27),
+    win("Quote", vk::Oem7, 0x28), win("Backquote", vk::Oem3, 0x29),
+    win("Comma", vk::OemComma, 0x33), win("Period", vk::OemPeriod, 0x34),
+    win("Slash", vk::Oem2, 0x35),
     // The 102nd key and the JIS ro key share VK_OEM_102; the JIS yen key is in
-    // the backslash position.
-    win("IntlBackslash", vk::Oem102), win("IntlRo", vk::Oem102),
-    win("IntlYen", vk::Oem5),
-    win("NumpadDecimal", vk::Decimal), win("NumpadAdd", vk::Add),
-    win("NumpadSubtract", vk::Subtract), win("NumpadMultiply", vk::Multiply),
-    win("NumpadDivide", vk::Divide, true),
-    win("NumpadEqual", vk::OemNecEqual),
-    // Both DOM codes land on VK_SEPARATOR; Windows has only one separator VK.
-    win("NumpadComma", vk::Separator),
-    win("NumpadSeparator", vk::Separator),
+    // the backslash position. Their scan codes differ by position.
+    win("IntlBackslash", vk::Oem102, 0x56),
+    win("IntlRo", vk::Oem102, 0x73),
+    win("IntlYen", vk::Oem5, 0x7D),
+    win("NumpadDecimal", vk::Decimal, 0x53),
+    win("NumpadAdd", vk::Add, 0x4E),
+    win("NumpadSubtract", vk::Subtract, 0x4A),
+    win("NumpadMultiply", vk::Multiply, 0x37),
+    win("NumpadDivide", vk::Divide, 0x35, true),
+    win("NumpadEqual", vk::OemNecEqual, 0x59),
+    // Both DOM codes land on the same Brazilian/JIS keypad position.
+    win("NumpadComma", vk::Separator, 0x59),
+    win("NumpadSeparator", vk::Separator, 0x59),
     // Media, browser, launch and Sleep are E0-prefixed keys.
-    win("AudioVolumeMute", vk::VolumeMute, true),
-    win("AudioVolumeDown", vk::VolumeDown, true),
-    win("AudioVolumeUp", vk::VolumeUp, true),
-    win("MediaTrackNext", vk::MediaNextTrack, true),
-    win("MediaTrackPrevious", vk::MediaPrevTrack, true),
-    win("MediaStop", vk::MediaStop, true),
-    win("MediaPlayPause", vk::MediaPlayPause, true),
-    win("BrowserBack", vk::BrowserBack, true),
-    win("BrowserForward", vk::BrowserForward, true),
-    win("BrowserRefresh", vk::BrowserRefresh, true),
-    win("BrowserStop", vk::BrowserStop, true),
-    win("BrowserSearch", vk::BrowserSearch, true),
-    win("BrowserFavorites", vk::BrowserFavorites, true),
-    win("BrowserHome", vk::BrowserHome, true),
-    win("LaunchMail", vk::LaunchMail, true),
-    win("LaunchApp1", vk::LaunchApp1, true),
-    win("LaunchApp2", vk::LaunchApp2, true),
-    win("Help", vk::Help), win("Select", vk::Select),
-    win("Execute", vk::Execute), win("Clear", vk::Clear),
+    win("AudioVolumeMute", vk::VolumeMute, 0x20, true),
+    win("AudioVolumeDown", vk::VolumeDown, 0x2E, true),
+    win("AudioVolumeUp", vk::VolumeUp, 0x30, true),
+    win("MediaTrackNext", vk::MediaNextTrack, 0x19, true),
+    win("MediaTrackPrevious", vk::MediaPrevTrack, 0x10, true),
+    win("MediaStop", vk::MediaStop, 0x24, true),
+    win("MediaPlayPause", vk::MediaPlayPause, 0x22, true),
+    win("BrowserBack", vk::BrowserBack, 0x6A, true),
+    win("BrowserForward", vk::BrowserForward, 0x69, true),
+    win("BrowserRefresh", vk::BrowserRefresh, 0x67, true),
+    win("BrowserStop", vk::BrowserStop, 0x68, true),
+    win("BrowserSearch", vk::BrowserSearch, 0x65, true),
+    win("BrowserFavorites", vk::BrowserFavorites, 0x66, true),
+    win("BrowserHome", vk::BrowserHome, 0x32, true),
+    win("LaunchMail", vk::LaunchMail, 0x6C, true),
+    win("LaunchApp1", vk::LaunchApp1, 0x6B, true),
+    win("LaunchApp2", vk::LaunchApp2, 0x21, true),
+    // These keys have no portable set-1 position on a PC keyboard; the
+    // virtual key is the only way most hosts can receive them.
+    win_vk("Help", vk::Help), win_vk("Select", vk::Select),
+    win_vk("Execute", vk::Execute), win_vk("Clear", vk::Clear),
     // Windows has no virtual key for these editing/legacy keys: no keyboard
     // produces them, and SendInput cannot synthesise them either.
     unsupported("Again"), unsupported("Undo"), unsupported("Cut"),
     unsupported("Copy"), unsupported("Paste"), unsupported("Find"),
-    win("Cancel", vk::Cancel),
-    win_scan("Power", vk::ScanPower, true),
-    win("Sleep", vk::Sleep, true),
-    win_scan("WakeUp", vk::ScanWakeUp, true),
-    win("Convert", vk::Convert), win("NonConvert", vk::NonConvert),
-    win("KanaMode", vk::Kana), win("HangulMode", vk::Hangul),
-    win("HanjaMode", vk::Hanja),
+    win_vk("Cancel", vk::Cancel),
+    win("Power", 0, 0x5E, true),
+    win("Sleep", vk::Sleep, 0x5F, true),
+    win("WakeUp", 0, 0x63, true),
+    win_vk("Convert", vk::Convert), win_vk("NonConvert", vk::NonConvert),
+    win_vk("KanaMode", vk::Kana), win_vk("HangulMode", vk::Hangul),
+    win_vk("HanjaMode", vk::Hanja),
     // Lang1/Lang2 are the Korean Hangul/Hanja keys on Windows.
-    win("Lang1", vk::Kana), win("Lang2", vk::Hanja),
+    win_vk("Lang1", vk::Kana), win_vk("Lang2", vk::Hanja),
 };
 
 const key_entry kX11Keys[] = {
-    x11("Enter", "Return"), x11("NumpadEnter", "KP_Enter"),
-    x11("Backspace", "BackSpace"), x11("Tab", "Tab"),
-    x11("Space", "space"), x11("Escape", "Escape"),
-    x11("Delete", "Delete"), x11("Insert", "Insert"),
-    x11("Home", "Home"), x11("End", "End"),
-    x11("PageUp", "Prior"), x11("PageDown", "Next"),
-    x11("ArrowLeft", "Left"), x11("ArrowRight", "Right"),
-    x11("ArrowUp", "Up"), x11("ArrowDown", "Down"),
-    x11("ShiftLeft", "Shift_L"), x11("ShiftRight", "Shift_R"),
-    x11("ControlLeft", "Control_L"), x11("ControlRight", "Control_R"),
-    x11("AltLeft", "Alt_L"), x11("AltRight", "Alt_R"),
-    x11("MetaLeft", "Super_L"), x11("MetaRight", "Super_R"),
-    x11("AltGraph", "ISO_Level3_Shift"),
-    x11("CapsLock", "Caps_Lock"), x11("NumLock", "Num_Lock"),
-    x11("ScrollLock", "Scroll_Lock"), x11("PrintScreen", "Print"),
-    x11("Pause", "Pause"), x11("ContextMenu", "Menu"),
-    x11("Minus", "minus"), x11("Equal", "equal"),
-    x11("BracketLeft", "bracketleft"), x11("BracketRight", "bracketright"),
-    x11("Backslash", "backslash"), x11("Semicolon", "semicolon"),
-    x11("Quote", "apostrophe"), x11("Backquote", "grave"),
-    x11("Comma", "comma"), x11("Period", "period"),
-    x11("Slash", "slash"),
+    // X key code = evdev key code + 8. See the evdev keymap in
+    // /usr/share/X11/xkb/keycodes/evdev; these positions do not depend on
+    // the layout loaded on top of it.
+    x11("Enter", "Return", 36), x11("NumpadEnter", "KP_Enter", 104),
+    x11("Backspace", "BackSpace", 22), x11("Tab", "Tab", 23),
+    x11("Space", "space", 65), x11("Escape", "Escape", 9),
+    x11("Delete", "Delete", 119), x11("Insert", "Insert", 118),
+    x11("Home", "Home", 110), x11("End", "End", 115),
+    x11("PageUp", "Prior", 112), x11("PageDown", "Next", 117),
+    x11("ArrowLeft", "Left", 113), x11("ArrowRight", "Right", 114),
+    x11("ArrowUp", "Up", 111), x11("ArrowDown", "Down", 116),
+    x11("ShiftLeft", "Shift_L", 50), x11("ShiftRight", "Shift_R", 62),
+    x11("ControlLeft", "Control_L", 37),
+    x11("ControlRight", "Control_R", 105),
+    x11("AltLeft", "Alt_L", 64), x11("AltRight", "Alt_R", 108),
+    x11("MetaLeft", "Super_L", 133), x11("MetaRight", "Super_R", 134),
+    x11("AltGraph", "ISO_Level3_Shift", 108),
+    x11("CapsLock", "Caps_Lock", 66), x11("NumLock", "Num_Lock", 77),
+    x11("ScrollLock", "Scroll_Lock", 78),
+    x11("PrintScreen", "Print", 107), x11("Pause", "Pause", 127),
+    x11("ContextMenu", "Menu", 135),
+    x11("Minus", "minus", 20), x11("Equal", "equal", 21),
+    x11("BracketLeft", "bracketleft", 34),
+    x11("BracketRight", "bracketright", 35),
+    x11("Backslash", "backslash", 51), x11("Semicolon", "semicolon", 47),
+    x11("Quote", "apostrophe", 48), x11("Backquote", "grave", 49),
+    x11("Comma", "comma", 59), x11("Period", "period", 60),
+    x11("Slash", "slash", 61),
     // The 102nd key is < > on ISO layouts; the JIS ro key is Romaji and the
     // yen key is yen.
-    x11("IntlBackslash", "less"), x11("IntlRo", "Romaji"),
-    x11("IntlYen", "yen"),
-    x11("NumpadDecimal", "KP_Decimal"), x11("NumpadAdd", "KP_Add"),
-    x11("NumpadSubtract", "KP_Subtract"),
-    x11("NumpadMultiply", "KP_Multiply"),
-    x11("NumpadDivide", "KP_Divide"), x11("NumpadEqual", "KP_Equal"),
-    x11("NumpadComma", "KP_Separator"),
-    x11("NumpadSeparator", "KP_Separator"),
-    x11("AudioVolumeMute", "XF86AudioMute"),
-    x11("AudioVolumeDown", "XF86AudioLowerVolume"),
-    x11("AudioVolumeUp", "XF86AudioRaiseVolume"),
-    x11("MediaTrackNext", "XF86AudioNext"),
-    x11("MediaTrackPrevious", "XF86AudioPrev"),
-    x11("MediaStop", "XF86AudioStop"),
-    x11("MediaPlayPause", "XF86AudioPlay"),
-    x11("BrowserBack", "XF86Back"), x11("BrowserForward", "XF86Forward"),
-    x11("BrowserRefresh", "XF86Refresh"), x11("BrowserStop", "XF86Stop"),
-    x11("BrowserSearch", "XF86Search"),
-    x11("BrowserFavorites", "XF86Favorites"),
-    x11("BrowserHome", "XF86HomePage"),
-    x11("LaunchMail", "XF86Mail"), x11("LaunchApp1", "XF86Launch1"),
-    x11("LaunchApp2", "XF86Launch2"),
-    x11("Help", "Help"), x11("Select", "Select"),
-    x11("Execute", "Execute"), x11("Clear", "Clear"),
-    x11("Again", "Redo"), x11("Undo", "Undo"),
-    x11("Cut", "Cut"), x11("Copy", "Copy"), x11("Paste", "Paste"),
-    x11("Find", "Find"), x11("Cancel", "Cancel"),
-    x11("Power", "XF86PowerOff"), x11("Sleep", "XF86Sleep"),
-    x11("WakeUp", "XF86WakeUp"),
-    x11("Convert", "Henkan"), x11("NonConvert", "Muhenkan"),
-    x11("KanaMode", "Kana_Lock"), x11("HangulMode", "Hangul"),
-    x11("HanjaMode", "Hangul_Hanja"),
-    x11("Lang1", "Hangul"), x11("Lang2", "Hangul_Hanja"),
+    x11("IntlBackslash", "less", 94), x11("IntlRo", "Romaji", 97),
+    x11("IntlYen", "yen", 132),
+    x11("NumpadDecimal", "KP_Decimal", 91),
+    x11("NumpadAdd", "KP_Add", 86),
+    x11("NumpadSubtract", "KP_Subtract", 82),
+    x11("NumpadMultiply", "KP_Multiply", 63),
+    x11("NumpadDivide", "KP_Divide", 106),
+    x11("NumpadEqual", "KP_Equal", 125),
+    x11("NumpadComma", "KP_Separator", 129),
+    x11("NumpadSeparator", "KP_Separator", 129),
+    x11("AudioVolumeMute", "XF86AudioMute", 121),
+    x11("AudioVolumeDown", "XF86AudioLowerVolume", 122),
+    x11("AudioVolumeUp", "XF86AudioRaiseVolume", 123),
+    x11("MediaTrackNext", "XF86AudioNext", 171),
+    x11("MediaTrackPrevious", "XF86AudioPrev", 173),
+    x11("MediaStop", "XF86AudioStop", 174),
+    x11("MediaPlayPause", "XF86AudioPlay", 172),
+    x11("BrowserBack", "XF86Back", 166),
+    x11("BrowserForward", "XF86Forward", 167),
+    x11("BrowserRefresh", "XF86Refresh", 181),
+    x11("BrowserStop", "XF86Stop", 136),
+    x11("BrowserSearch", "XF86Search", 225),
+    x11("BrowserFavorites", "XF86Favorites", 164),
+    x11("BrowserHome", "XF86HomePage", 180),
+    x11("LaunchMail", "XF86Mail", 163),
+    x11("LaunchApp1", "XF86Launch1", 165),
+    x11("LaunchApp2", "XF86Launch2", 148),
+    x11("Help", "Help", 146),
+    // No physical Select/Execute/Clear key exists on evdev keyboards.
+    x11("Select", "Select", 0), x11("Execute", "Execute", 0),
+    x11("Clear", "Clear", 0),
+    x11("Again", "Redo", 137), x11("Undo", "Undo", 139),
+    x11("Cut", "Cut", 145), x11("Copy", "Copy", 141),
+    x11("Paste", "Paste", 143), x11("Find", "Find", 144),
+    x11("Cancel", "Cancel", 231),
+    x11("Power", "XF86PowerOff", 124), x11("Sleep", "XF86Sleep", 150),
+    x11("WakeUp", "XF86WakeUp", 151),
+    x11("Convert", "Henkan", 100), x11("NonConvert", "Muhenkan", 102),
+    x11("KanaMode", "Kana_Lock", 98), x11("HangulMode", "Hangul", 130),
+    x11("HanjaMode", "Hangul_Hanja", 131),
+    x11("Lang1", "Hangul", 130), x11("Lang2", "Hangul_Hanja", 131),
 };
 
 const key_entry kMacKeys[] = {
@@ -468,8 +564,9 @@ key_lookup lookup_key(keymap_platform platform, const std::string& raw_code) {
   const std::string code = canonical_key_code(raw_code);
   key_lookup out;
 
-  // Letters and the main digit row exist on every platform. Windows uses the
-  // ASCII VK value, X11 the keysym name, macOS the ANSI key code.
+  // Letters and the main digit row exist on every platform. Their position is
+  // fixed: `KeyY` is scan 0x15 / X key code 29 on a US, German or French
+  // desktop; only the character the host's layout produces differs.
   int number = 0;
   if (code.size() == 4 && code.compare(0, 3, "Key") == 0 && code[3] >= 'A' &&
       code[3] <= 'Z') {
@@ -478,9 +575,11 @@ key_lookup lookup_key(keymap_platform platform, const std::string& raw_code) {
     switch (platform) {
       case keymap_platform::windows:
         out.value = static_cast<unsigned int>('A' + index);
+        out.scan = kScanLetters[index];
         break;
       case keymap_platform::x11:
         out.keysym = std::string(1, static_cast<char>('a' + index));
+        out.keycode = kEvdevLetters[index] + kX11KeycodeOffset;
         break;
       case keymap_platform::macos:
         out.value = kMacLettersExplicit[index];
@@ -494,9 +593,11 @@ key_lookup lookup_key(keymap_platform platform, const std::string& raw_code) {
     switch (platform) {
       case keymap_platform::windows:
         out.value = static_cast<unsigned int>('0' + number);
+        out.scan = kScanDigits[number];
         break;
       case keymap_platform::x11:
         out.keysym = std::string(1, static_cast<char>('0' + number));
+        out.keycode = kEvdevDigits[number] + kX11KeycodeOffset;
         break;
       case keymap_platform::macos:
         out.value = kMacDigits[number];
@@ -511,9 +612,11 @@ key_lookup lookup_key(keymap_platform platform, const std::string& raw_code) {
     switch (platform) {
       case keymap_platform::windows:
         out.value = 0x60u + static_cast<unsigned int>(number);
+        out.scan = kScanNumpad[number];
         break;
       case keymap_platform::x11:
         out.keysym = "KP_" + std::string(1, static_cast<char>('0' + number));
+        out.keycode = kEvdevNumpad[number] + kX11KeycodeOffset;
         break;
       case keymap_platform::macos:
         out.value = kMacNumpad[number];
@@ -527,9 +630,11 @@ key_lookup lookup_key(keymap_platform platform, const std::string& raw_code) {
     switch (platform) {
       case keymap_platform::windows:
         out.value = vk::F1 + static_cast<unsigned int>(number - 1);
+        out.scan = kScanFunction[number - 1];
         break;
       case keymap_platform::x11:
         out.keysym = code;  // F1..F24 are their own keysym names
+        out.keycode = kEvdevFunction[number - 1] + kX11KeycodeOffset;
         break;
       case keymap_platform::macos:
         out.value = kMacFunction[number - 1];
@@ -561,9 +666,10 @@ key_lookup lookup_key(keymap_platform platform, const std::string& raw_code) {
   out.found = true;
   out.unsupported = entry->unsupported;
   out.value = entry->value;
+  out.scan = entry->scan;
+  out.keycode = entry->keycode;
   if (entry->keysym != nullptr) out.keysym = entry->keysym;
   out.extended = entry->extended;
-  out.scan_code = entry->scan_code;
   return out;
 }
 
