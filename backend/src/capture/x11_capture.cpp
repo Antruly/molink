@@ -26,8 +26,10 @@
 #include <thread>
 #include <vector>
 
+#include "capture/display_layout.h"
 #include "capture/frame_encode.h"
 #include "capture/frame_schedule.h"
+#include "diag_log.h"
 #include "protocol/frame_packet.h"
 
 namespace molink {
@@ -337,8 +339,19 @@ class x11_capture final : public capture_base {
     schedule.reset(now_us(), frame_interval_us());
     auto last_full = std::chrono::steady_clock::now();
     auto last_capture = std::chrono::steady_clock::now();
+    auto next_display_poll = std::chrono::steady_clock::now();
 
     while (running_.load()) {
+      // XRandR reports hotplug, rotation and mode changes live, but the root
+      // geometry only changes for some of them (a rearrangement can leave it
+      // identical). Compare the monitor list once a second so the clients hear
+      // about every change, not only the ones that reach the damage path.
+      const auto poll_now = std::chrono::steady_clock::now();
+      if (poll_now >= next_display_poll) {
+        next_display_poll = poll_now + std::chrono::seconds(1);
+        poll_displays();
+      }
+
       if (!active_.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
         schedule.reset(now_us(), frame_interval_us());
@@ -557,8 +570,16 @@ class x11_capture final : public capture_base {
     }
   }
 
-  void enumerate_displays() {
-    std::vector<display_info> list;
+  struct display_probe {
+    std::vector<display_info> displays;
+    std::vector<display_layout_entry> layout;
+  };
+
+  /// Reads the monitor list without touching the published state, so a
+  /// comparison can run cheaply and a failed probe leaves the old list alone.
+  display_probe probe_displays() {
+    display_probe probe;
+    std::vector<display_info>& list = probe.displays;
     if (get_monitors_ != nullptr && display_ != nullptr && root_ != 0) {
       int count = 0;
       xrr_monitor_info* monitors =
@@ -613,10 +634,112 @@ class x11_capture final : public capture_base {
                      });
     for (std::size_t i = 0; i < list.size(); ++i) {
       list[i].index = static_cast<int>(i);
+      display_layout_entry entry;
+      entry.name = list[i].name;
+      entry.x = list[i].x;
+      entry.y = list[i].y;
+      entry.width = list[i].width;
+      entry.height = list[i].height;
+      entry.primary = list[i].primary;
+      probe.layout.push_back(std::move(entry));
+    }
+    return probe;
+  }
+
+  void enumerate_displays() {
+    display_probe probe = probe_displays();
+    std::lock_guard<std::mutex> lock(displays_mutex_);
+    displays_ = std::move(probe.displays);
+    display_layout_ = std::move(probe.layout);
+    have_layout_ = true;
+  }
+
+  /// Re-enumerates the monitors and, when the list differs from the published
+  /// one, applies the new layout and records a notice for the session layer.
+  /// Returns true when a change was applied.
+  bool sync_displays(std::string& err) {
+    if (display_ == nullptr) return false;
+    display_probe probe = probe_displays();
+    display_change_reason reason = display_change_reason::none;
+    std::string previous_name;
+    {
+      std::lock_guard<std::mutex> lock(displays_mutex_);
+      reason = have_layout_
+                   ? compare_display_layouts(display_layout_, probe.layout)
+                   : display_change_reason::none;
+      const int previous_index = display_index_.load();
+      if (previous_index >= 0 &&
+          previous_index < static_cast<int>(displays_.size())) {
+        previous_name = displays_[previous_index].name;
+      }
+      if (reason == display_change_reason::none) {
+        // First observation: publish the list but do not call it a change.
+        if (!have_layout_) {
+          displays_ = probe.displays;
+          display_layout_ = probe.layout;
+          have_layout_ = true;
+        }
+        return false;
+      }
+      displays_ = probe.displays;
+      display_layout_ = probe.layout;
     }
 
-    std::lock_guard<std::mutex> lock(displays_mutex_);
-    displays_ = std::move(list);
+    // Keep capturing the same panel when it still exists; otherwise fall to
+    // the primary one, which is what the user expects after unplugging.
+    int wanted = find_display_by_name(probe.layout, previous_name);
+    if (wanted < 0) wanted = primary_display_index(probe.layout);
+    if (wanted < 0) wanted = 0;
+
+    std::string apply_error;
+    if (!apply_display(wanted, apply_error)) {
+      err = apply_error.empty() ? "display change could not be applied"
+                                : apply_error;
+    }
+    if (damage_ != 0 && damage_subtract_ != nullptr) {
+      damage_subtract_(display_, damage_, 0, 0);
+    }
+    keyframe_requested_.store(true);
+
+    const display_info& current = probe.displays[wanted];
+    display_change_notice notice;
+    notice.reason = reason;
+    notice.index = wanted;
+    notice.width = current.width;
+    notice.height = current.height;
+    notice.primary = current.primary;
+    notice.displays = probe.displays;
+    note_display_change(std::move(notice));
+
+    int primary = -1;
+    for (std::size_t i = 0; i < probe.displays.size(); ++i) {
+      if (probe.displays[i].primary) {
+        primary = static_cast<int>(i);
+        break;
+      }
+    }
+    diag().log(diag_level::info, "display.changed", std::string(),
+               {{"count", std::to_string(probe.displays.size())},
+                {"index", std::to_string(wanted)},
+                {"primary", std::to_string(primary)},
+                {"w", std::to_string(current.width)},
+                {"h", std::to_string(current.height)},
+                {"reason", display_change_reason_name(reason)}});
+    return true;
+  }
+
+  /// Once-a-second cheap check. refresh_geometry() only reacts to a root size
+  /// change; a rearrangement or a disabled monitor can leave the root alone.
+  void poll_displays() {
+    std::string err;
+    if (!refresh_geometry(err)) return;
+    std::string sync_error;
+    sync_displays(sync_error);
+    if (!sync_error.empty() && sync_error != last_display_error_) {
+      std::fprintf(stderr, "molink capture: display change: %s\n",
+                   sync_error.c_str());
+      last_display_error_ = sync_error;
+    }
   }
 
   bool apply_display(int index, std::string& err) {
@@ -884,9 +1007,10 @@ class x11_capture final : public capture_base {
     if (attrs.width != root_width_ || attrs.height != root_height_) {
       root_width_ = attrs.width;
       root_height_ = attrs.height;
-      enumerate_displays();
-      const int wanted = display_index_.load();
-      if (!apply_display(wanted, err) && !apply_display(0, err)) {
+      std::string sync_error;
+      sync_displays(sync_error);
+      if (!sync_error.empty()) {
+        err = sync_error;
         return false;
       }
     }
@@ -1120,6 +1244,11 @@ class x11_capture final : public capture_base {
   void (*free_monitors_)(xrr_monitor_info*) = nullptr;
   mutable std::mutex displays_mutex_;
   std::vector<display_info> displays_;
+  /// Comparison state for the once-a-second hotplug check. Only the capture
+  /// thread touches it (displays_ is the snapshot other threads read).
+  std::vector<display_layout_entry> display_layout_;
+  bool have_layout_ = false;
+  std::string last_display_error_;
   std::atomic<int> display_index_{0};
   std::atomic<int> requested_display_{-1};
 

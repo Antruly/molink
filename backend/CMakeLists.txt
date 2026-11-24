@@ -1322,6 +1322,21 @@ set_target_properties(molink-core-display-selector-test PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 add_test(NAME display_selector COMMAND molink-core-display-selector-test)
 
+# Multi-monitor hotplug/resize/rotate: the layout comparison and the primary
+# selection are pure, so fake lists drive each case without a display server.
+add_executable(molink-core-display-layout-test
+  tests/display_layout_test.cpp
+)
+target_include_directories(molink-core-display-layout-test PRIVATE src)
+set_target_properties(molink-core-display-layout-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
+  string(TOUPPER ${uvp_config} uvp_config_upper)
+  set_target_properties(molink-core-display-layout-test PROPERTIES
+    "RUNTIME_OUTPUT_DIRECTORY_${uvp_config_upper}" "${CMAKE_BINARY_DIR}")
+endforeach()
+add_test(NAME display_layout COMMAND molink-core-display-layout-test)
+
 # Relative (trackpad / virtual mouse) movement and sensitivity conversion.
 add_executable(molink-core-trackpad-mouse-test
   tests/trackpad_mouse_test.cpp
@@ -1861,6 +1876,10 @@ if (MSVC)
   endif()
   target_compile_options(molink-core-protocol-test PRIVATE /W4 /permissive- /utf-8)
   target_compile_options(molink-core-dirty-rects-test PRIVATE /W4 /permissive- /utf-8)
+  if(TARGET molink-core-display-layout-test)
+    target_compile_options(molink-core-display-layout-test PRIVATE
+      /W4 /permissive- /utf-8)
+  endif()
   if(TARGET molink-core-quic-loopback-test)
     target_compile_options(molink-core-quic-loopback-test PRIVATE
       /W4 /permissive- /utf-8)
@@ -1886,6 +1905,10 @@ else()
   endif()
   target_compile_options(molink-core-protocol-test PRIVATE -Wall -Wextra -Wpedantic)
   target_compile_options(molink-core-dirty-rects-test PRIVATE -Wall -Wextra -Wpedantic)
+  if(TARGET molink-core-display-layout-test)
+    target_compile_options(molink-core-display-layout-test PRIVATE
+      -Wall -Wextra -Wpedantic)
+  endif()
   if(TARGET molink-core-quic-loopback-test)
     target_compile_options(molink-core-quic-loopback-test PRIVATE
       -Wall -Wextra -Wpedantic)

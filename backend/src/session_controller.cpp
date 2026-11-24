@@ -265,6 +265,20 @@ void log_clipboard_route(const clipboard_route& route, const char* direction,
              std::move(fields));
 }
 
+/// Wire shape of one monitor in `welcome.displays` and in the `display`
+/// broadcast that announces a hotplug/resize/rotate change.
+uvcpp_json display_json(const display_info& display) {
+  uvcpp_json item;
+  item["index"] = display.index;
+  item["name"] = display.name;
+  item["x"] = display.x;
+  item["y"] = display.y;
+  item["width"] = display.width;
+  item["height"] = display.height;
+  item["primary"] = display.primary;
+  return item;
+}
+
 }  // namespace
 
 uint64_t epoch_us() {
@@ -1687,15 +1701,7 @@ void send_welcome(session_transport* transport, const session_info& session,
     if (!displays.empty()) {
       j["displays"] = uvcpp_json::array();
       for (const display_info& display : displays) {
-        uvcpp_json item;
-        item["index"] = display.index;
-        item["name"] = display.name;
-        item["x"] = display.x;
-        item["y"] = display.y;
-        item["width"] = display.width;
-        item["height"] = display.height;
-        item["primary"] = display.primary;
-        j["displays"].push_back(std::move(item));
+        j["displays"].push_back(display_json(display));
       }
       j["display_index"] = opt.capture->current_display();
       const display_info current = opt.capture->current_display_info();
@@ -5828,6 +5834,59 @@ void session_supervisor::run() {
     if (options_.capture) {
       // The capture target is host-wide; tell every other session when one of
       // them switches monitors so their selector does not go stale.
+      // A hotplug, resolution or rotation change also reaches the viewers.
+      // The capture backend detects it (indices, sizes and the primary flag
+      // included), and this is the one place that turns it into a control
+      // message. Consuming the notice first also settles `last_display`, so
+      // the index-only fallback below does not send a second, poorer message
+      // for the same change.
+      display_change_notice notice;
+      const bool layout_changed =
+          options_.capture->take_display_change(notice) &&
+          notice.reason != display_change_reason::none;
+      if (layout_changed) {
+        last_display = notice.index;
+        uvcpp_json message;
+        message["type"] = "display";
+        message["index"] = notice.index;
+        message["width"] = notice.width;
+        message["height"] = notice.height;
+        message["primary"] = notice.primary;
+        message["reason"] = display_change_reason_name(notice.reason);
+        message["displays"] = uvcpp_json::array();
+        for (const display_info& item : notice.displays) {
+          message["displays"].push_back(display_json(item));
+        }
+        // The injector must follow the new monitor immediately: a click that
+        // arrives before the next input message would otherwise land at the
+        // old monitor's offset. This is the same rectangle sync_input_rect()
+        // computes per input, pushed once per layout change.
+        if (options_.input) {
+          const display_info current =
+              options_.capture->current_display_info();
+          if (current.input_width > 0 && current.input_height > 0) {
+            auto input = options_.input;
+            app_.post([input, current] {
+              input->set_display_rect(current.x, current.y,
+                                      current.input_width,
+                                      current.input_height);
+            });
+          }
+        }
+        for (const session_info& s : sessions) {
+          if (!s.authenticated) continue;
+          const uint32_t id = s.id;
+          app_.post([registry = registry_, id, message] {
+            const auto live = registry->find(id);
+            if (!live || !live->transport) return;
+            send_json(live->transport.get(), message);
+          });
+        }
+      }
+
+      // `layout_changed` sets `last_display` to the notice's index, so this
+      // only fires when the two disagree: a manual switch raced the hotplug.
+      // Sending the actual selection then keeps the selector honest.
       const int display = options_.capture->current_display();
       if (last_display < 0) {
         last_display = display;

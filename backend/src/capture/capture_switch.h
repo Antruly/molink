@@ -78,6 +78,7 @@ class capture_switch final : public capture_source {
   int current_display() const override;
   display_info current_display_info() const override;
   bool select_display(int index) override;
+  bool take_display_change(display_change_notice& out) override;
   bool set_display_mode(uint16_t width, uint16_t height) override;
   bool supports_display_mode() const override;
   bool is_real() const override;

@@ -826,6 +826,21 @@ bool capture_base::cursor(cursor_snapshot& out) const {
   return true;
 }
 
+bool capture_base::take_display_change(display_change_notice& out) {
+  std::lock_guard<std::mutex> lock(display_notice_mutex_);
+  if (!has_display_change_) return false;
+  out = std::move(pending_display_change_);
+  pending_display_change_ = display_change_notice{};
+  has_display_change_ = false;
+  return true;
+}
+
+void capture_base::note_display_change(display_change_notice notice) {
+  std::lock_guard<std::mutex> lock(display_notice_mutex_);
+  pending_display_change_ = std::move(notice);
+  has_display_change_ = true;
+}
+
 uint32_t next_capture_seq() {
   static std::atomic<uint32_t> seq{0};
   return ++seq;

@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "capture/av1_encoder.h"
+#include "capture/display_layout.h"
 #include "capture/frame_budget.h"
 #include "capture/pipeline_stats.h"
 #include "capture/stream_policy.h"
@@ -156,6 +157,22 @@ struct display_info {
   int input_width = 0;
   int input_height = 0;
   bool primary = false;
+};
+
+/// One hotplug/resize/rotate change seen by a capture backend. The capture
+/// thread records it; the session supervisor consumes it on its own clock and
+/// broadcasts it to every viewer. Only the newest change is kept: a viewer
+/// needs the current layout, not a history of intermediate states.
+struct display_change_notice {
+  display_change_reason reason = display_change_reason::none;
+  /// Display being captured after the change (it may differ from the one
+  /// captured before when the selected monitor disappeared).
+  int index = 0;
+  int width = 0;
+  int height = 0;
+  bool primary = false;
+  /// The complete new monitor list, already re-indexed.
+  std::vector<display_info> displays;
 };
 
 struct capture_stats {  uint64_t frames = 0;
@@ -393,6 +410,14 @@ class capture_source {
   /// keyframe. Returns false for an unknown index.
   virtual bool select_display(int index) {
     return index == 0;
+  }
+
+  /// Pops the newest display-layout change observed by the capture thread.
+  /// The session supervisor polls this on its own clock; false means the
+  /// layout is unchanged since the last call.
+  virtual bool take_display_change(display_change_notice& out) {
+    (void)out;
+    return false;
   }
 
   /// Change the current display mode. Windows applies it with
@@ -802,6 +827,7 @@ class capture_base : public capture_source {
   bool tile_seq(std::vector<uint8_t>& out) override;
 
   bool cursor(cursor_snapshot& out) const override;
+  bool take_display_change(display_change_notice& out) override;
 
   /// Keep at most one second of replayable frames, with independent count and
   /// byte bounds so high capture rates or large keyframes cannot grow memory.
@@ -844,6 +870,9 @@ class capture_base : public capture_source {
   void update_cell_clock(const captured_frame& frame);
   void note_grab(bool full, uint16_t dirty_w, uint16_t dirty_h);
   void set_cursor(cursor_snapshot snapshot);
+  /// Records a layout change for the supervisor. A newer change replaces an
+  /// older unread one.
+  void note_display_change(display_change_notice notice);
 
   mutable std::mutex mutex_;
   std::shared_ptr<const captured_frame> latest_;
@@ -852,6 +881,9 @@ class capture_base : public capture_source {
 
   mutable std::mutex cursor_mutex_;
   cursor_snapshot cursor_;
+  mutable std::mutex display_notice_mutex_;
+  display_change_notice pending_display_change_;
+  bool has_display_change_ = false;
   std::atomic<bool> keyframe_requested_{false};
   std::atomic<bool> active_{false};
   std::atomic<bool> running_{false};

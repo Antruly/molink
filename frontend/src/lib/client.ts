@@ -380,7 +380,12 @@ export interface ClientHandlers {
   onCursorPosition: (position: CursorPosition) => void
   onClipboard: (text: string) => void
   onSessionEvent?: (event: SessionEvent) => void
-  onDisplay?: (index: number) => void
+  /**
+   * The host is capturing a different display, or the display layout changed
+   * (hotplug/resize/rotate). `displays` is present on a layout change and
+   * carries the complete re-indexed list.
+   */
+  onDisplay?: (index: number, displays?: DisplayInfo[]) => void
   onAccessRequested?: (id: number) => void
   /**
    * Host capture rate and encoder build time, once per second. The frame-rate
@@ -432,6 +437,12 @@ interface ControlMessage {
   protocol?: string
   /// Why a `stream-gap` notice was sent (currently "backpressure").
   reason?: string
+  /// `display` broadcast after a hotplug/resize/rotate: the complete new
+  /// monitor list, plus the size and primary flag of the display now captured.
+  displays?: DisplayInfo[]
+  primary?: boolean
+  width?: number
+  height?: number
   /// `codec-status`: whether the pinned encoder can run, and which codec.
   available?: boolean
   codec?: string
@@ -1939,7 +1950,10 @@ export class MolinkClient {
         break
       case 'display':
         if (typeof message.index === 'number') {
-          this.handlers.onDisplay?.(message.index)
+          this.handlers.onDisplay?.(
+            message.index,
+            Array.isArray(message.displays) ? message.displays : undefined,
+          )
         }
         break
       case 'pong': {

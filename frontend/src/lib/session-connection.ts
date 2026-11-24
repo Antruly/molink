@@ -3,6 +3,7 @@ import {
   type ClientPhase,
   type CursorPosition,
   type CursorShape,
+  type DisplayInfo,
   type SessionEvent,
   type SessionEventListener,
   type Welcome,
@@ -341,7 +342,31 @@ export class SessionConnection {
         // turning it on is an explicit settings action.
         if (!isDiagRecordingEnabled()) this.client.setLoggingEnabled(false)
       },
-      onDisplay: (index) => this.sink.onPatch({ displayIndex: index }),
+      onDisplay: (index, displays) => {
+        const patch: TabPatch = { displayIndex: index }
+        // A hotplug/resize/rotate broadcast replaces the welcome's monitor
+        // list. Updating the tiles size as well keeps the resolution selector
+        // in step with the new mode until the first frame in it arrives.
+        if (displays !== undefined && displays.length > 0 &&
+            this.lastWelcome !== null) {
+          const current: DisplayInfo | undefined = displays.find(
+            (display) => display.index === index,
+          )
+          patch.welcome = {
+            ...this.lastWelcome,
+            displays,
+            display_index: index,
+            tiles: current
+              ? {
+                  ...this.lastWelcome.tiles,
+                  screen_w: current.width,
+                  screen_h: current.height,
+                }
+              : this.lastWelcome.tiles,
+          }
+        }
+        this.sink.onPatch(patch)
+      },
       onWireFrame: () => {
         const now = performance.now()
         this.packetTimes.push(now)
