@@ -41,6 +41,9 @@ class macos_clipboard final : public clipboard_service {
     if (value != nil) {
       [pasteboard setString:value forType:NSPasteboardTypeString];
     }
+    // NSPasteboard has no owner API. The change counter is the witness, just
+    // as GetClipboardOwner is on Windows: the next counter value is ours.
+    self_change_count_.store([pasteboard changeCount]);
   }
 
   void request_text(text_callback callback) override {
@@ -78,6 +81,10 @@ class macos_clipboard final : public clipboard_service {
             const NSInteger current = [pasteboard changeCount];
             if (current == last) continue;
             last = current;
+            const clipboard_owner owner =
+                current == self_change_count_.load()
+                    ? clipboard_owner::self
+                    : clipboard_owner::external;
             NSString* text = [pasteboard stringForType:NSPasteboardTypeString];
             if (text != nil) {
               std::lock_guard<std::mutex> lock(watch_mutex_);
@@ -85,9 +92,11 @@ class macos_clipboard final : public clipboard_service {
               if (!value.empty() && value != last_text_) {
                 last_text_ = value;
                 last_files_.clear();
-                if (text_watcher_) text_watcher_(value);
+                if (text_watcher_) text_watcher_(value, owner);
               }
             }
+            // Text and files can both be on the pasteboard; report each when
+            // it changed instead of letting text hide a Finder selection.
             std::vector<clipboard_file> files = read_files();
             if (files.empty()) {
               std::lock_guard<std::mutex> lock(watch_mutex_);
@@ -102,7 +111,10 @@ class macos_clipboard final : public clipboard_service {
             std::lock_guard<std::mutex> lock(watch_mutex_);
             if (signature == last_files_) continue;
             last_files_ = signature;
-            if (files_callback_) files_callback_(std::move(files));
+            last_text_.clear();
+            if (files_callback_) {
+              files_callback_(std::move(files), owner);
+            }
           }
         }
       }
@@ -124,7 +136,9 @@ class macos_clipboard final : public clipboard_service {
     if ([urls count] == 0) return false;
     NSPasteboard* pasteboard = [NSPasteboard generalPasteboard];
     [pasteboard clearContents];
-    return [pasteboard writeObjects:urls] == YES;
+    const BOOL written = [pasteboard writeObjects:urls] == YES;
+    if (written) self_change_count_.store([pasteboard changeCount]);
+    return written;
   }
 
  private:
@@ -174,6 +188,9 @@ class macos_clipboard final : public clipboard_service {
   std::string last_text_;
   std::string last_files_;
   std::atomic<bool> running_{false};
+  /// changeCount after this process last wrote the pasteboard; the watcher
+  /// uses it as the "owner is us" test.
+  std::atomic<NSInteger> self_change_count_{0};
   std::thread watcher_;
 };
 

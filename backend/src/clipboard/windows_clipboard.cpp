@@ -109,6 +109,66 @@ bool open_clipboard_retry(HWND owner, int attempts = 10) {
   return false;
 }
 
+LRESULT CALLBACK clipboard_owner_proc(HWND window, UINT message, WPARAM wparam,
+                                      LPARAM lparam) {
+  // The window exists only so GetClipboardOwner() can name this process. The
+  // delayed-render messages belong to the lazy thread; this one is used for
+  // the eager text/file paths, which use real handles.
+  (void)wparam;
+  (void)lparam;
+  if (message == WM_RENDERALLFORMATS || message == WM_DESTROYCLIPBOARD) {
+    return 0;
+  }
+  return DefWindowProcW(window, message, wparam, lparam);
+}
+
+HWND create_clipboard_owner_window() {
+  static const wchar_t kClass[] = L"moLinkClipboardOwner";
+  WNDCLASSEXW window_class = {};
+  window_class.cbSize = sizeof(window_class);
+  window_class.lpfnWndProc = clipboard_owner_proc;
+  window_class.hInstance = GetModuleHandleW(nullptr);
+  window_class.lpszClassName = kClass;
+  RegisterClassExW(&window_class);  // already registered is fine
+  return CreateWindowExW(0, kClass, L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr,
+                         GetModuleHandleW(nullptr), nullptr);
+}
+
+/// Who owns the clipboard, from this process's point of view.
+///
+/// `GetClipboardOwner` names the window passed to OpenClipboard; OLE's
+/// delayed rendering uses a window owned by the OLE apartment in this same
+/// process. When the owner is null (a task-associated open, or a clipboard
+/// manager that has already released it) the window currently holding the
+/// clipboard is the next best witness. Anything else -- mstsc, TeamViewer,
+/// Sunlogin, RustDesk, a plain application -- is `external` and must be
+/// accepted as a normal local copy.
+clipboard_owner classify_clipboard_owner(HWND self_window) {
+  const HWND owner = GetClipboardOwner();
+  const HWND probe = owner != nullptr ? owner : GetOpenClipboardWindow();
+  if (probe == nullptr) return clipboard_owner::unknown;
+  if (self_window != nullptr && probe == self_window) {
+    return clipboard_owner::self;
+  }
+  DWORD process_id = 0;
+  GetWindowThreadProcessId(probe, &process_id);
+  if (process_id != 0 && process_id == GetCurrentProcessId()) {
+    return clipboard_owner::self;
+  }
+  return clipboard_owner::external;
+}
+
+/// Cheap "might this clipboard hold files?" probe. Reading a text copy must
+/// not pay for the OLE describe (up to two seconds), but a copy of files that
+/// also exposes text has to be announced as both.
+bool clipboard_may_hold_files() {
+  if (!open_clipboard_retry(nullptr, 3)) return false;
+  const bool files = IsClipboardFormatAvailable(CF_HDROP) ||
+                     IsClipboardFormatAvailable(file_descriptor_format());
+  CloseClipboard();
+  return files;
+}
+
 /// mstsc's main window class. Its presence means an inner Windows session is
 /// connected; the viewer is told so it can show an "inner RDP" badge.
 BOOL CALLBACK find_rdp_window(HWND window, LPARAM found) {
@@ -1521,18 +1581,25 @@ LRESULT CALLBACK lazy_window_proc(HWND window, UINT message, WPARAM wparam,
 
 class windows_clipboard final : public clipboard_service {
  public:
+  windows_clipboard() : owner_window_(create_clipboard_owner_window()) {}
+
   ~windows_clipboard() override {
     stop_watch();
     stop_lazy();
+    if (owner_window_ != nullptr) {
+      DestroyWindow(owner_window_);
+      owner_window_ = nullptr;
+    }
   }
 
   bool available() const override { return true; }
   std::string backend() const override { return "win32-clipboard"; }
 
   /// Polls GetClipboardSequenceNumber (cheap; no window needed) and reports
-  /// the new text. This is what pushes what the host user copied to every
-  /// viewer, so the clipboard behaves like RDP redirection in both
-  /// directions.
+  /// the new text. This is what pushes what the host user copied to the
+  /// active viewer, so the clipboard behaves like RDP redirection in both
+  /// directions. The owner is reported with the value: a change this process
+  /// made is logged and dropped instead of being sent back.
   void watch(text_watcher callback) override {
     if (callback == nullptr) {
       stop_watch();
@@ -1552,17 +1619,25 @@ class windows_clipboard final : public clipboard_service {
           if (sequence == sequence_) continue;
           sequence_ = sequence;
         }
+        // Classify before opening the clipboard: our own OpenClipboard would
+        // otherwise make the probe name this process.
+        const clipboard_owner owner = classify_clipboard_owner(owner_window_);
         std::string text;
         request_text([&text](std::string value) { text = std::move(value); });
         if (!text.empty()) {
           std::lock_guard<std::mutex> lock(watch_mutex_);
-          if (text == last_text_) continue;
-          last_text_ = text;
-          last_files_.clear();
-          if (watch_callback_) watch_callback_(text);
-          continue;
+          if (text != last_text_) {
+            last_text_ = text;
+            last_files_.clear();
+            if (watch_callback_) watch_callback_(text, owner);
+          }
         }
-        // No text: the clipboard may hold files (Explorer Ctrl+C).
+
+        // A copy may carry files, text, or both. A text-only copy skips the
+        // OLE describe (it can take seconds); a copy with CF_HDROP or a file
+        // descriptor is inspected even when it also has text, so both formats
+        // reach the viewer.
+        if (!text.empty() && !clipboard_may_hold_files()) continue;
         std::vector<clipboard_file> files;
         request_files([&files](std::vector<clipboard_file> value) {
           files = std::move(value);
@@ -1588,7 +1663,7 @@ class windows_clipboard final : public clipboard_service {
         if (signature == last_files_) continue;
         last_files_ = signature;
         last_text_.clear();
-        if (files_callback_) files_callback_(files);
+        if (files_callback_) files_callback_(std::move(files), owner);
       }
     });
   }
@@ -1615,7 +1690,9 @@ class windows_clipboard final : public clipboard_service {
     const std::wstring wide = to_wide(text);
 
     for (int attempt = 0; attempt < 5; ++attempt) {
-      if (!OpenClipboard(nullptr)) {
+      // Name this process as the owner so the watcher (and another remote
+      // tool reading the clipboard) can tell our write from a local copy.
+      if (!OpenClipboard(owner_window_)) {
         Sleep(10);
         continue;
       }
@@ -1769,7 +1846,7 @@ class windows_clipboard final : public clipboard_service {
         sizeof(DROPFILES) + characters * sizeof(wchar_t);
     bool applied = false;
     for (int attempt = 0; attempt < 5; ++attempt) {
-      if (!OpenClipboard(nullptr)) {
+      if (!OpenClipboard(owner_window_)) {
         Sleep(10);
         continue;
       }
@@ -1999,6 +2076,12 @@ class windows_clipboard final : public clipboard_service {
   DWORD sequence_ = 0;
   std::atomic<bool> running_{false};
   std::thread watcher_;
+
+  /// Message-only window that names this process as the clipboard owner for
+  /// the eager text/file writes. GetClipboardOwner() returning it (or any
+  /// window in this process, which covers the OLE lazy path) makes a change
+  /// an echo rather than a local copy.
+  HWND owner_window_ = nullptr;
 
   /// OLE data-object reader (inner RDP virtual files). Declared after the
   /// watcher so it starts only once this object is fully constructed; its

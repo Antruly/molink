@@ -21,6 +21,14 @@ export const ECHO_TTL_MS = 2 * 60 * 1000
 export const ECHO_MAX_ENTRIES = 64
 export const ECHO_STORAGE_KEY = 'molink.clipboard.echo.v1'
 
+/// One page can hold several session tabs. They share the OS clipboard but
+/// must not share their echo records: a file received in session A would
+/// otherwise suppress a genuine copy of the same name/size offered to session
+/// B, and that is exactly the cross-session bleed this scope prevents.
+export function echoStorageKey(scope: string): string {
+  return scope === '' ? ECHO_STORAGE_KEY : `${ECHO_STORAGE_KEY}.${scope}`
+}
+
 /// Windows paths are case-insensitive and the same file can be spelled with
 /// either separator. Normalising both sides is what makes the record survive
 /// the trip through CF_HDROP and JSON.
@@ -56,15 +64,19 @@ function defaultStorage(): EchoStorage | null {
 export class ClipboardEcho {
   private readonly storage: EchoStorage | null
   private readonly now: () => number
+  /// Storage namespace; empty keeps the historical single-session key.
+  private readonly key: string
   /// Used when localStorage is unavailable (or a test passes no storage).
   private memory: EchoEntry[] = []
 
   constructor(
     storage: EchoStorage | null = defaultStorage(),
     now: () => number = Date.now,
+    scope = '',
   ) {
     this.storage = storage
     this.now = now
+    this.key = echoStorageKey(scope)
   }
 
   /// Records host paths this machine just put on the remote clipboard.
@@ -112,7 +124,7 @@ export class ClipboardEcho {
 
   clear(): void {
     this.memory = []
-    if (this.storage?.removeItem) this.storage.removeItem(ECHO_STORAGE_KEY)
+    if (this.storage?.removeItem) this.storage.removeItem(this.key)
   }
 
   private rememberKeys(keys: string[]): void {
@@ -149,7 +161,7 @@ export class ClipboardEcho {
   private read(): EchoEntry[] {
     if (this.storage === null) return this.memory.slice()
     try {
-      const raw = this.storage.getItem(ECHO_STORAGE_KEY)
+      const raw = this.storage.getItem(this.key)
       if (!raw) return []
       const parsed: unknown = JSON.parse(raw)
       if (!Array.isArray(parsed)) return []
@@ -176,10 +188,10 @@ export class ClipboardEcho {
     }
     try {
       if (entries.length === 0) {
-        this.storage.removeItem?.(ECHO_STORAGE_KEY)
+        this.storage.removeItem?.(this.key)
         return
       }
-      this.storage.setItem(ECHO_STORAGE_KEY, JSON.stringify(entries))
+      this.storage.setItem(this.key, JSON.stringify(entries))
     } catch {
       // Quota or a storage that became unavailable: keep working in memory.
       this.memory = entries.slice()

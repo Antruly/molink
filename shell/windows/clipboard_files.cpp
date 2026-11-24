@@ -3,6 +3,16 @@
 #include <algorithm>
 #include <cstdio>
 
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 namespace molink::clipboard_files {
 namespace {
 
@@ -255,5 +265,22 @@ bool file_echo::suppress_descriptor(std::string_view name, std::uint64_t size,
   if (name.empty()) return false;
   return has(descriptor_key(name, size));
 }
+
+#if defined(_WIN32)
+void* clipboard_owner_window() {
+  static HWND window = []() -> HWND {
+    constexpr wchar_t kClass[] = L"moLinkNativeClipboardOwner";
+    WNDCLASSEXW window_class = {};
+    window_class.cbSize = sizeof(window_class);
+    window_class.lpfnWndProc = DefWindowProcW;
+    window_class.hInstance = GetModuleHandleW(nullptr);
+    window_class.lpszClassName = kClass;
+    RegisterClassExW(&window_class);  // already registered is fine
+    return CreateWindowExW(0, kClass, L"", 0, 0, 0, 0, 0, HWND_MESSAGE,
+                           nullptr, GetModuleHandleW(nullptr), nullptr);
+  }();
+  return window;
+}
+#endif
 
 }  // namespace molink::clipboard_files

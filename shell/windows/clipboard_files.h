@@ -50,6 +50,15 @@ inline constexpr int max_attempts = 3;
 inline constexpr std::uint64_t echo_ttl_ms = 2ull * 60 * 1000;
 inline constexpr std::size_t echo_max_entries = 64;
 
+#if defined(_WIN32)
+/// A lazily created message-only window owned by this process. Win32 headers
+/// are deliberately not pulled into this shared header: callers cast the
+/// result to HWND. Used as the clipboard owner by writes that have no UI
+/// window, so GetClipboardOwner() can tell this process from another remote
+/// tool. Returns nullptr when the window could not be created.
+void* clipboard_owner_window();
+#endif
+
 /// One entry of `clipboard-sync.files` (or of a local CF_HDROP selection).
 /// `path` is the host's own path; the pull path never reads it.
 struct entry {

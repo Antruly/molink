@@ -152,9 +152,10 @@ export class SessionConnection {
   /// The current host serves clipboard-pull, so remote files arrive through
   /// `clipboard-sync.files` instead of the path-based legacy download.
   private clipboardPull = false
-  /// Shared echo table: host paths this machine wrote (and the descriptors it
-  /// offered) are skipped when the remote reports them back.
-  private readonly clipboardEcho = new ClipboardEcho()
+  /// Per-session echo table: host paths this machine wrote (and the
+  /// descriptors it offered) are skipped when the remote reports them back.
+  /// Scoped to this tab, not shared through localStorage across sessions.
+  private readonly clipboardEcho: ClipboardEcho
   /// This viewer's machine name/ID, sent in hello so the shared chat can
   /// attribute its messages. Empty for a plain browser.
   private clientName = ''
@@ -202,6 +203,7 @@ export class SessionConnection {
     /// so a tab switch can paint immediately.
     private readonly sessionKey = '',
   ) {
+    this.clipboardEcho = new ClipboardEcho(undefined, undefined, sessionKey)
     this.client.setHandlers({
       onPhase: (phase, detail) => {
         const phaseKey = `${phase}|${detail ?? ''}`
@@ -743,6 +745,9 @@ export class SessionConnection {
     if (this.fileSync === null || this.fileSyncTimer !== null) return
     this.fileSyncTimer = window.setInterval(() => {
       if (this.fileSyncPaused || !this.client.isLive()) return
+      // Like text, a local file selection belongs to the session the user is
+      // currently looking at. A background tab must not offer it too.
+      if (!this.foreground) return
       void this.fileSync?.poll()
     }, 1200)
   }
@@ -898,6 +903,13 @@ export class SessionConnection {
       // Focus also pulls the remote clipboard once, so a text copied while
       // this tab was in the background becomes available locally.
       this.client.requestClipboard()
+      // And the reverse: this tab is now the only one that may send the local
+      // clipboard, so give it the current value (text and files) immediately
+      // instead of waiting for the next local copy.
+      if (this.client.isLive()) {
+        this.syncLocalClipboard(true)
+        if (!this.fileSyncPaused) void this.fileSync?.poll(true)
+      }
     } else if (this.client.isLive()) {
       this.startBackgroundPull()
     }
@@ -943,35 +955,53 @@ export class SessionConnection {
     this.client.setLoggingEnabled(enabled)
   }
 
-  private startClipboardSync(): void {
-    this.stopClipboardSync()
+  /// One local-clipboard read. `force` is the tab-switch path: send the
+  /// current value even when this session already saw it, because the point
+  /// of selecting a session is that it receives the clipboard as it is now.
+  ///
+  /// Only the foreground session polls. Previously every live tab watched the
+  /// same OS clipboard and sent it to its own remote, so a copy made for one
+  /// session leaked into all of them.
+  private syncLocalClipboard(force: boolean): void {
     if (!this.clipboardEnabled) return
     const clipboard = navigator.clipboard
     if (!clipboard?.readText) return
-    const poll = () => {
-      // Browsers require focus (and sometimes a gesture) for clipboard reads.
-      // A hidden window would only produce permission errors.
-      if (document.visibilityState === 'hidden') return
-      if (Date.now() < this.clipboardRetryAt) return
-      clipboard.readText().then((text) => {
-        this.clipboardFailures = 0
-        this.clipboardRetryAt = 0
-        if (text !== '' && text !== this.lastClipboard) {
-          this.lastClipboard = text
-          this.client.sendClipboardSync(text)
-        }
-      }).catch(() => {
-        this.clipboardFailures += 1
-        // Do not disable sync until the session reconnects: a temporary
-        // permission/focus failure used to stop text clipboard sync for good.
-        // Back off to one attempt every five seconds and recover on success.
-        if (this.clipboardFailures >= 3) {
-          this.clipboardRetryAt = Date.now() + 5000
-        }
-      })
-    }
-    poll()
-    this.clipboardTimer = window.setInterval(poll, 1000)
+    // Browsers require focus (and sometimes a gesture) for clipboard reads.
+    // A hidden window would only produce permission errors.
+    if (document.visibilityState === 'hidden') return
+    if (!this.foreground) return
+    if (Date.now() < this.clipboardRetryAt) return
+    clipboard.readText().then((text) => {
+      this.clipboardFailures = 0
+      this.clipboardRetryAt = 0
+      if (text !== '' && (force || text !== this.lastClipboard)) {
+        this.lastClipboard = text
+        this.client.sendClipboardSync(text)
+        logDiag('info', 'clipboard.sync', undefined, {
+          target: this.target || undefined,
+          direction: 'out',
+          bytes: new TextEncoder().encode(text).length,
+          reason: force ? 'switch' : 'change',
+        })
+      }
+    }).catch(() => {
+      this.clipboardFailures += 1
+      // Do not disable sync until the session reconnects: a temporary
+      // permission/focus failure used to stop text clipboard sync for good.
+      // Back off to one attempt every five seconds and recover on success.
+      if (this.clipboardFailures >= 3) {
+        this.clipboardRetryAt = Date.now() + 5000
+      }
+    })
+  }
+
+  private startClipboardSync(): void {
+    this.stopClipboardSync()
+    if (!this.clipboardEnabled) return
+    if (!navigator.clipboard?.readText) return
+    this.syncLocalClipboard(false)
+    this.clipboardTimer = window.setInterval(
+      () => this.syncLocalClipboard(false), 1000)
   }
 
   private stopClipboardSync(): void {

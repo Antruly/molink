@@ -228,6 +228,7 @@ set(MOLINK_CORE_SOURCES
   src/clipboard/windows_virtual_clipboard.cpp
   src/clipboard/virtual_file_stream.cpp
   src/clipboard/clipboard_files.cpp
+  src/clipboard/clipboard_route.cpp
   src/clipboard/x11_clipboard_fuse.cpp
   src/clipboard_stage.cpp
   src/clipboard_lazy.cpp
@@ -1127,6 +1128,24 @@ target_include_directories(molink-core-clipboard-sync-test PRIVATE
 set_target_properties(molink-core-clipboard-sync-test PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 add_test(NAME clipboard_sync COMMAND molink-core-clipboard-sync-test)
+
+# Clipboard coexistence: who owns the clipboard, which viewer is active, and
+# the per-session echo table (so two connected viewers cannot suppress each
+# other's genuine copies). Pure data; the platform owner calls live in the
+# X11/Windows/macOS backends.
+add_executable(molink-core-clipboard-route-test
+  tests/clipboard_route_test.cpp
+  src/clipboard/clipboard_route.cpp
+)
+target_include_directories(molink-core-clipboard-route-test PRIVATE src)
+set_target_properties(molink-core-clipboard-route-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
+  string(TOUPPER "${uvp_config}" uvp_config_upper)
+  set_target_properties(molink-core-clipboard-route-test PROPERTIES
+    "RUNTIME_OUTPUT_DIRECTORY_${uvp_config_upper}" "${CMAKE_BINARY_DIR}")
+endforeach()
+add_test(NAME clipboard_route COMMAND molink-core-clipboard-route-test)
 
 # Clipboard *files* without Win32: the 8 / 1 TiB / 4 TiB pull caps and
 # omitted count, the 256 KiB range boundaries, the staging path, the retry
