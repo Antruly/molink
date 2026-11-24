@@ -26,6 +26,20 @@ clipboard_pull_result read_error(uint64_t offset) {
 
 }  // namespace
 
+std::vector<clipboard_offer_batch> clipboard_offer_batches(
+    std::size_t count, std::size_t batch_size) {
+  std::vector<clipboard_offer_batch> batches;
+  if (count == 0) return batches;
+  if (batch_size == 0) batch_size = kClipboardPullMaxFiles;
+  for (std::size_t begin = 0; begin < count; begin += batch_size) {
+    clipboard_offer_batch batch;
+    batch.begin = begin;
+    batch.end = std::min(count, begin + batch_size);
+    batches.push_back(batch);
+  }
+  return batches;
+}
+
 clipboard_pull_result read_clipboard_pull(
     const std::vector<clipboard_file>& current,
     const std::vector<clipboard_offer_entry>& offered, uint32_t id,
@@ -41,9 +55,17 @@ clipboard_pull_result read_clipboard_pull(
   const clipboard_file& file = current[index];
   // An inner RDP virtual file has no path: its bytes come from the OLE data
   // object and the caller reads them through the clipboard backend. Anything
-  // with neither a path nor a stream id cannot be read.
+  // with neither a path nor a stream id cannot be read. A directory is
+  // announced without bytes, but its identity still has to match.
   const bool stream = file.stream_id != 0;
-  if ((!stream && file.path.empty()) || file.name != offered[index].name) {
+  if ((!stream && file.path.empty() && !file.is_dir) ||
+      file.name != offered[index].name) {
+    return gone(offset);
+  }
+  if (file.is_dir != offered[index].is_dir) return gone(offset);
+  if (clipboard_file_relative(file) !=
+      (offered[index].rel.empty() ? offered[index].name
+                                  : offered[index].rel)) {
     return gone(offset);
   }
   // A rewritten RDP temporary file can keep its name but change size. The
@@ -59,6 +81,9 @@ clipboard_pull_result read_clipboard_pull(
   result.length = take;
   result.stream = stream;
   result.status = clipboard_pull_status::ok;
+  // A directory has no bytes: creating it is the viewer's whole job. Answer
+  // cleanly instead of opening it as a file.
+  if (file.is_dir) return result;
   if (take == 0) return result;
   if (stream) return result;
 

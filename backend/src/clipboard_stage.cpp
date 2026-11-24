@@ -1,10 +1,12 @@
 #include "clipboard_stage.h"
 
 #include <chrono>
+#include <cctype>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <random>
+#include <set>
 #include <system_error>
 #include <utility>
 
@@ -56,6 +58,60 @@ std::string trim_edges(std::string text) {
     text.pop_back();
   }
   return text;
+}
+
+/// Splits a selection-relative path into safe components. Both separators are
+/// accepted on the wire. Absolute paths, drive letters, empty/`.`/`..`
+/// components and over-deep chains are rejected before any filesystem call.
+bool sanitize_relative_path(const std::string& raw,
+                            std::vector<std::string>& segments) {
+  segments.clear();
+  if (raw.empty() || raw.size() > 4096) return false;
+  std::string text = raw;
+  for (char& c : text) {
+    if (c == '\\') c = '/';
+  }
+  if (text.front() == '/') return false;
+  if (text.size() >= 2 &&
+      std::isalpha(static_cast<unsigned char>(text[0])) && text[1] == ':') {
+    return false;
+  }
+  while (!text.empty() && text.back() == '/') text.pop_back();
+  if (text.empty()) return false;
+  std::size_t start = 0;
+  while (start <= text.size()) {
+    const std::size_t end = text.find('/', start);
+    const std::string part =
+        text.substr(start, end == std::string::npos ? std::string::npos
+                                                    : end - start);
+    if (part.empty() || part == "." || part == "..") return false;
+    const std::string clean = clipboard_stage::sanitize_name(part);
+    if (clean.empty() || clean == "." || clean == "..") return false;
+    segments.push_back(clean);
+    if (segments.size() > 64) return false;
+    if (end == std::string::npos) break;
+    start = end + 1;
+  }
+  return !segments.empty();
+}
+
+std::string join_relative_path(const std::vector<std::string>& segments) {
+  std::string out;
+  for (const std::string& segment : segments) {
+    if (!out.empty()) out.push_back('/');
+    out += segment;
+  }
+  return out;
+}
+
+/// True when @p rel names a top-level item (no parent) or when no announced
+/// directory owns its parent. Such entries are the selection roots the OS
+/// clipboard must reference; passing every descendant would paste duplicates.
+bool is_selection_root(const std::string& rel,
+                       const std::set<std::string>& directories) {
+  const std::size_t slash = rel.rfind('/');
+  if (slash == std::string::npos) return true;
+  return directories.find(rel.substr(0, slash)) == directories.end();
 }
 
 }  // namespace
@@ -142,17 +198,20 @@ std::string clipboard_stage::unique_final_path_locked(
   };
 
   const fs::path name_path = path_from_utf8(name);
+  const fs::path relative_parent = name_path.parent_path();
   fs::path candidate = dir / name_path;
   if (!taken(candidate)) return path_to_utf8(candidate);
   const std::string stem = path_to_utf8(name_path.stem());
   const std::string extension = path_to_utf8(name_path.extension());
   for (int i = 1; i < 10000; ++i) {
-    candidate = dir / path_from_utf8(stem + " (" + std::to_string(i) + ")" +
-                                     extension);
+    candidate = dir / relative_parent /
+                path_from_utf8(stem + " (" + std::to_string(i) + ")" +
+                               extension);
     if (!taken(candidate)) return path_to_utf8(candidate);
   }
-  candidate = dir / path_from_utf8(stem + "-" + std::to_string(now_ms()) +
-                                   extension);
+  candidate = dir / relative_parent /
+              path_from_utf8(stem + "-" + std::to_string(now_ms()) +
+                             extension);
   return path_to_utf8(candidate);
 }
 
@@ -161,7 +220,10 @@ void clipboard_stage::sweep_locked(uint64_t now) {
     if (now > it->second.updated_ms &&
         now - it->second.updated_ms >= kEntryTtlMs) {
       std::error_code ec;
-      if (it->second.temp_path != it->second.final_path) {
+      if (it->second.is_directory) {
+        // Best effort: only an empty directory is removed.
+        fs::remove(path_from_utf8(it->second.final_path), ec);
+      } else if (it->second.temp_path != it->second.final_path) {
         fs::remove(path_from_utf8(it->second.temp_path), ec);
       }
       it = entries_.erase(it);
@@ -216,15 +278,25 @@ void clipboard_stage::sweep_orphan_files_locked(uint64_t now) {
 
 stage_error clipboard_stage::begin(const std::string& name, uint64_t size,
                                    std::string& id, std::string& path,
-                                   const std::string& batch) {
+                                   const std::string& batch,
+                                   const std::string& rel, bool is_dir) {
   std::lock_guard<std::mutex> lock(mutex_);
   const uint64_t now = now_ms();
   sweep_locked(now);
   if (directory_.empty()) return stage_error::unavailable;
-  if (size > kMaxFileBytes) return stage_error::too_large;
+  if (is_dir) {
+    if (size != 0) return stage_error::bad_request;
+  } else if (size > kMaxFileBytes) {
+    return stage_error::too_large;
+  }
   if (!batch.empty() && !valid_batch(batch)) return stage_error::bad_request;
   const std::string clean = sanitize_name(name);
   if (clean.empty()) return stage_error::bad_request;
+  std::vector<std::string> segments;
+  if (!sanitize_relative_path(rel.empty() ? clean : rel, segments)) {
+    return stage_error::bad_request;
+  }
+  const std::string relative = join_relative_path(segments);
   if (!ensure_directory_locked()) return stage_error::io_error;
 
   std::string directory = directory_;
@@ -242,23 +314,45 @@ stage_error clipboard_stage::begin(const std::string& name, uint64_t size,
   while (entries_.find(stage_id) != entries_.end()) {
     stage_id = random_stage_id();
   }
-  const std::string final_path = unique_final_path_locked(clean, directory);
-  const fs::path temp_path =
-      path_from_utf8(directory) / path_from_utf8(".stage-" + stage_id);
-
-  std::ofstream out(temp_path, std::ios::binary | std::ios::trunc);
-  if (!out) return stage_error::io_error;
-  out.close();
-  if (!out) return stage_error::io_error;
+  const std::string final_path = unique_final_path_locked(relative, directory);
+  const fs::path final_fs_path = path_from_utf8(final_path);
 
   staged_clipboard_entry entry;
   entry.id = stage_id;
   entry.name = clean;
   entry.final_path = final_path;
-  entry.temp_path = path_to_utf8(temp_path);
-  entry.size = size;
+  entry.size = is_dir ? 0 : size;
   entry.received = 0;
   entry.updated_ms = now;
+  entry.rel = relative;
+  entry.is_directory = is_dir;
+
+  std::error_code ec;
+  if (is_dir) {
+    // Create the whole chain now: an empty directory has no bytes and nothing
+    // later would otherwise create it.
+    fs::create_directories(final_fs_path, ec);
+    if (ec || !fs::is_directory(final_fs_path, ec) || ec) {
+      return stage_error::io_error;
+    }
+    entry.temp_path = final_path;
+  } else {
+    const fs::path parent = final_fs_path.parent_path();
+    if (!parent.empty()) {
+      fs::create_directories(parent, ec);
+      if (ec || !fs::is_directory(parent, ec) || ec) {
+        return stage_error::io_error;
+      }
+    }
+    const fs::path temp_path =
+        path_from_utf8(directory) / path_from_utf8(".stage-" + stage_id);
+    std::ofstream out(temp_path, std::ios::binary | std::ios::trunc);
+    if (!out) return stage_error::io_error;
+    out.close();
+    if (!out) return stage_error::io_error;
+    entry.temp_path = path_to_utf8(temp_path);
+  }
+
   entries_.emplace(stage_id, std::move(entry));
 
   id = stage_id;
@@ -324,9 +418,28 @@ stage_error clipboard_stage::apply(const std::vector<std::string>& ids,
     finals.push_back(entry.final_path);
   }
 
-  if (!applier_ || !applier_(finals)) return stage_error::apply_failed;
+  // The clipboard must reference the selection's top-level items, not every
+  // descendant: pasting a folder and then each file inside it would duplicate
+  // the tree. Files/directories that are already covered by an announced
+  // directory are still staged on disk but left out of the clipboard list.
+  std::set<std::string> directories;
+  for (const std::string& id : ids) {
+    const staged_clipboard_entry& entry = entries_.at(id);
+    if (entry.is_directory) directories.insert(entry.rel);
+  }
+  std::vector<std::string> roots;
+  roots.reserve(finals.size());
+  for (std::size_t i = 0; i < ids.size(); ++i) {
+    const staged_clipboard_entry& entry = entries_.at(ids[i]);
+    if (is_selection_root(entry.rel, directories)) {
+      roots.push_back(finals[i]);
+    }
+  }
+  if (roots.empty()) roots = finals;
+
+  if (!applier_ || !applier_(roots)) return stage_error::apply_failed;
   for (const std::string& id : ids) entries_.erase(id);
-  count = finals.size();
+  count = roots.size();
   return stage_error::none;
 }
 
@@ -335,7 +448,13 @@ void clipboard_stage::abort(const std::string& id) {
   const auto it = entries_.find(id);
   if (it == entries_.end()) return;
   std::error_code ec;
-  fs::remove(path_from_utf8(it->second.temp_path), ec);
+  if (it->second.is_directory) {
+    // Only succeeds for an empty directory; a partially populated one is left
+    // to the batch's normal lifetime.
+    fs::remove(path_from_utf8(it->second.final_path), ec);
+  } else {
+    fs::remove(path_from_utf8(it->second.temp_path), ec);
+  }
   entries_.erase(it);
 }
 

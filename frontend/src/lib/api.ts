@@ -799,13 +799,21 @@ export function stageClipboardFile(
   name: string,
   size: number,
   batch?: string,
+  /// Path inside the copied folder tree, when the host sent one: the staged
+  /// entry then keeps the directory structure instead of flattening it.
+  rel?: string,
+  isDir?: boolean,
 ): Promise<StagedClipboardFile> {
+  const body: Record<string, unknown> = { name, size }
+  if (batch) body.batch = batch
+  if (rel) body.rel = rel
+  if (isDir) body.is_dir = true
   return request<StagedClipboardFile>(
     '/api/clipboard-stage',
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(batch ? { name, size, batch } : { name, size }),
+      body: JSON.stringify(body),
     },
     token,
   )

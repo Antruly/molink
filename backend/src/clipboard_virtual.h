@@ -23,6 +23,8 @@ struct virtual_offer_request_file {
   uint32_t id = 0;
   std::string name;
   uint64_t size = 0;
+  std::string rel;
+  bool is_dir = false;
 };
 
 enum class virtual_offer_error {
@@ -37,9 +39,10 @@ enum class virtual_offer_error {
   clipboard_unavailable,
 };
 
-/// The virtual clipboard exposes at most this many files. The host applies the
-/// same cap when it builds the id list.
-constexpr std::size_t kVirtualMaxFiles = 8;
+/// The virtual clipboard exposes at most this many entries. Matches the host's
+/// per-selection scan cap, so a folder tree survives intact instead of being
+/// flattened or silently cut at the old 8-file limit.
+constexpr std::size_t kVirtualMaxFiles = 2000;
 /// Sanity bounds only: metadata is a few bytes, so a large file costs nothing
 /// until the local user actually pastes it.
 constexpr uint64_t kVirtualMaxFileBytes = 1ull * 1024 * 1024 * 1024 * 1024;

@@ -9,6 +9,7 @@
 #include <utility>
 
 #include "clipboard_stage.h"
+#include "util.h"
 
 namespace molink {
 namespace {
@@ -30,19 +31,67 @@ uint64_t read_u64(const uint8_t* data) {
   return value;
 }
 
-/// Names are shown inside one flat directory; reuse the staging sanitizer so a
-/// remote name cannot escape it, then make duplicates unique.
-std::string unique_name(const std::string& raw,
-                        const std::set<std::string>& taken) {
-  const std::string name = clipboard_stage::sanitize_name(raw);
-  if (name.empty()) return std::string();
-  if (taken.find(name) == taken.end()) return name;
-  const fs::path path(name);
+/// Splits a selection-relative path into safe components. Both separators are
+/// accepted on the wire; absolute paths, drive letters, `.`/`..` and empty
+/// components are rejected.
+bool sanitize_relative(const std::string& raw,
+                       std::vector<std::string>& segments) {
+  segments.clear();
+  if (raw.empty() || raw.size() > 4096) return false;
+  std::string text = raw;
+  for (char& c : text) {
+    if (c == '\\') c = '/';
+  }
+  if (text.front() == '/') return false;
+  if (text.size() >= 2 && text[1] == ':') return false;
+  while (!text.empty() && text.back() == '/') text.pop_back();
+  if (text.empty()) return false;
+  std::size_t start = 0;
+  while (start <= text.size()) {
+    const std::size_t end = text.find('/', start);
+    const std::string part =
+        text.substr(start, end == std::string::npos ? std::string::npos
+                                                    : end - start);
+    if (part.empty() || part == "." || part == "..") return false;
+    const std::string clean = clipboard_stage::sanitize_name(part);
+    if (clean.empty() || clean == "." || clean == "..") return false;
+    segments.push_back(clean);
+    if (segments.size() > 64) return false;
+    if (end == std::string::npos) break;
+    start = end + 1;
+  }
+  return !segments.empty();
+}
+
+std::string join_relative(const std::vector<std::string>& segments) {
+  std::string out;
+  for (const std::string& segment : segments) {
+    if (!out.empty()) out.push_back('/');
+    out += segment;
+  }
+  return out;
+}
+
+/// Sanitizes a relative path and makes it unique within the offer. Names are
+/// shown in a (possibly nested) directory; no component can escape the mount
+/// root because `sanitize_relative` rejects separators-as-components.
+std::string unique_relative(const std::string& raw,
+                            const std::set<std::string>& taken) {
+  std::vector<std::string> segments;
+  if (!sanitize_relative(raw, segments)) return std::string();
+  std::string relative = join_relative(segments);
+  if (taken.find(relative) == taken.end()) return relative;
+  const std::string leaf = segments.back();
+  segments.pop_back();
+  const fs::path path(leaf);
   const std::string stem = path.stem().string();
   const std::string extension = path.extension().string();
   for (int i = 1; i < 10000; ++i) {
-    const std::string candidate =
+    const std::string candidate_leaf =
         stem + " (" + std::to_string(i) + ")" + extension;
+    segments.push_back(candidate_leaf);
+    const std::string candidate = join_relative(segments);
+    segments.pop_back();
     if (taken.find(candidate) == taken.end()) return candidate;
   }
   return std::string();
@@ -63,18 +112,26 @@ virtual_offer_error plan_virtual_offer(
     const virtual_offer_request_file& file = requested[index];
     if (planned.size() >= kVirtualMaxFiles) break;
     if (file.id == 0 || ids.find(file.id) != ids.end()) continue;
-    if (file.size > kVirtualMaxFileBytes) break;
-    if (file.size > kVirtualMaxTotalBytes - total) break;
-    const std::string name = unique_name(file.name, names);
-    if (name.empty()) continue;
+    if (file.is_dir) {
+      if (file.size != 0) continue;
+    } else {
+      if (file.size > kVirtualMaxFileBytes) break;
+      if (file.size > kVirtualMaxTotalBytes - total) break;
+    }
+    const std::string raw_rel = file.rel.empty() ? file.name : file.rel;
+    const std::string rel = unique_relative(raw_rel, names);
+    if (rel.empty()) continue;
     virtual_mount_file entry;
     entry.id = file.id;
-    entry.name = name;
-    entry.size = file.size;
+    entry.rel = rel;
+    const std::string::size_type slash = rel.rfind('/');
+    entry.name = slash == std::string::npos ? rel : rel.substr(slash + 1);
+    entry.size = file.is_dir ? 0 : file.size;
+    entry.is_dir = file.is_dir;
     planned.push_back(std::move(entry));
-    names.insert(name);
+    names.insert(rel);
     ids.insert(file.id);
-    total += file.size;
+    if (!file.is_dir) total += file.size;
   }
   omitted = requested.size() - planned.size();
   if (planned.empty()) return virtual_offer_error::bad_file;
@@ -269,8 +326,20 @@ virtual_offer_error virtual_clipboard::offer(
 
   std::vector<std::string> local_paths;
   local_paths.reserve(planned.size());
+  // The clipboard references the selection roots only. A folder already covers
+  // every descendant, and pasting the folder plus its files would duplicate.
+  std::set<std::string> directories;
   for (const virtual_mount_file& file : planned) {
-    local_paths.push_back((point / file.name).string());
+    if (file.is_dir) directories.insert(file.mount_path());
+  }
+  for (const virtual_mount_file& file : planned) {
+    const std::string& rel = file.mount_path();
+    const std::string::size_type slash = rel.rfind('/');
+    const bool root =
+        slash == std::string::npos ||
+        directories.find(rel.substr(0, slash)) == directories.end();
+    if (!root) continue;
+    local_paths.push_back((point / path_from_utf8(rel)).string());
   }
   // The state is visible before the clipboard is claimed: a paste that starts
   // the instant set_files() queues a wakeup must find the entries.
@@ -382,6 +451,7 @@ int virtual_clipboard::pull_block(
     if (!bridge_) return -5;
     const auto it = files_.find(file_id);
     if (it == files_.end()) return -5;
+    if (it->second.is_dir) return -5;
     if (offset >= it->second.size) return 0;
     take = std::min<uint64_t>(length, it->second.size - offset);
     take = std::min<uint64_t>(take, capacity);

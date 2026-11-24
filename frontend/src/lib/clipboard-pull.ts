@@ -6,8 +6,9 @@
 /// the batch planning and the per-chunk checks so they can be unit tested
 /// without a browser.
 
-/// Matches the host's per-selection guidance and the files panel.
-export const PULL_MAX_FILES = 8
+/// Matches the host's per-selection scan cap. The host splits an announcement
+/// into batches of 64, but the accumulated selection may be much larger.
+export const PULL_MAX_FILES = 2000
 export const PULL_MAX_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
 export const PULL_MAX_FILE_BYTES = 256 * 1024 * 1024
 export const PULL_CHUNK_BYTES = 256 * 1024
@@ -17,7 +18,8 @@ export const PULL_CONCURRENCY = 2
 
 /// Automatic fallback (no FUSE): downloading without asking is only allowed
 /// for a selection small enough to not swamp the session. Anything larger is
-/// offered behind an explicit button instead.
+/// offered behind an explicit button instead. This stays deliberately small;
+/// only the count cap for an explicit/virtual selection grew.
 export const AUTO_PULL_MAX_FILES = 8
 export const AUTO_PULL_MAX_FILE_BYTES = 64 * 1024 * 1024
 export const AUTO_PULL_MAX_TOTAL_BYTES = 256 * 1024 * 1024
@@ -66,6 +68,10 @@ export interface PullFile {
   name: string
   size: number
   path?: string
+  /// A directory the host copied. It has no bytes; the local core creates it.
+  isDir?: boolean
+  /// Selection-relative path (`sub/dir/file`); absent means `name`.
+  rel?: string
 }
 
 export interface PullPlan {
@@ -82,6 +88,8 @@ function validFile(value: unknown): PullFile | null {
     name?: unknown
     size?: unknown
     path?: unknown
+    is_dir?: unknown
+    rel?: unknown
   }
   if (
     typeof record.id !== 'number' || !Number.isSafeInteger(record.id) ||
@@ -103,6 +111,10 @@ function validFile(value: unknown): PullFile | null {
   }
   if (typeof record.path === 'string' && record.path !== '') {
     file.path = record.path
+  }
+  if (record.is_dir === true) file.isDir = true
+  if (typeof record.rel === 'string' && record.rel !== '') {
+    file.rel = record.rel
   }
   return file
 }
@@ -152,6 +164,60 @@ export function planAutoPullFiles(raw: unknown): PullPlan {
 /// only, so a 500 MB selection is mounted rather than downloaded.
 export function planVirtualFiles(raw: unknown): PullPlan {
   return planPullFilesWithLimits(raw, PULL_LIMITS_VIRTUAL)
+}
+
+/// Accumulator for one `clipboard-sync.files` selection split over several
+/// messages. The host uses this when a copy names more than 64 entries; a
+/// batch-less message (ordinary copy, or an older host) is ready at once.
+export interface ClipboardBatchState {
+  token: string
+  nextIndex: number
+  files: unknown[]
+}
+
+export interface ClipboardBatchMerge {
+  /// The accumulated (or single-message) descriptors.
+  files: unknown[]
+  ready: boolean
+  state: ClipboardBatchState
+}
+
+export function mergeClipboardBatch(
+  state: ClipboardBatchState | null,
+  meta: { token?: unknown; index?: unknown; count?: unknown },
+  incoming: unknown[],
+): ClipboardBatchMerge {
+  const count =
+    typeof meta.count === 'number' && Number.isSafeInteger(meta.count)
+      ? meta.count
+      : 0
+  if (typeof meta.token !== 'string' || meta.token === '' || count <= 1) {
+    return {
+      files: incoming.slice(),
+      ready: true,
+      state: { token: '', nextIndex: 0, files: [] },
+    }
+  }
+  const index =
+    typeof meta.index === 'number' && Number.isSafeInteger(meta.index) &&
+    meta.index >= 0
+      ? meta.index
+      : 0
+  let current =
+    state !== null && state.token === meta.token
+      ? state
+      : { token: meta.token, nextIndex: 0, files: [] as unknown[] }
+  if (index !== current.nextIndex) {
+    // A batch from a different selection (or a protocol-order surprise):
+    // never concatenate unrelated descriptors.
+    current = { token: meta.token, nextIndex: index, files: [] }
+  }
+  const merged: ClipboardBatchState = {
+    token: meta.token,
+    nextIndex: index + 1,
+    files: current.files.concat(incoming),
+  }
+  return { files: merged.files, ready: index + 1 >= count, state: merged }
 }
 
 /// Total count and bytes of every valid entry, for the "N files (xx MB)"

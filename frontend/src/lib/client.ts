@@ -212,6 +212,10 @@ export interface ClipboardFileEntry {
   /// instead, because a host absolute path leaks the user and directory names.
   path?: string
   size: number
+  /// A copied directory. The page does not offer it as a lazy file.
+  is_dir?: boolean
+  /// Selection-relative path for a file inside a copied folder.
+  rel?: string
 }
 
 /// One file announced in `clipboard-sync.files`. `id` is the host's
@@ -222,6 +226,10 @@ export interface ClipboardPullFile {
   name: string
   size: number
   path?: string
+  /// A directory the host copied (empty or not). It has no bytes.
+  is_dir?: boolean
+  /// Selection-relative path (`sub/dir/file`); absent means `name`.
+  rel?: string
 }
 
 export interface FileMessage {
@@ -288,6 +296,10 @@ export type SessionEvent =
       kind: 'clipboard-pull-files'
       files: ClipboardPullFile[]
       omitted?: number
+      /// Present when the host split the selection across messages.
+      batch?: string
+      batchIndex?: number
+      batchCount?: number
     }
   /// One range reply for a clipboard-pull (packet type 0x18).
   | {
@@ -458,6 +470,11 @@ interface ControlMessage {
   files?: (ClipboardFileEntry | ClipboardPullFile)[]
   /// `clipboard-sync`: files the host left out of its capped id list.
   omitted?: number
+  /// `clipboard-sync`: when a selection is split, all pieces share `batch`
+  /// and carry their index (0-based) and the piece count.
+  batch?: string
+  batch_index?: number
+  batch_count?: number
   host_microphone?: boolean
   started_ms?: number
 }
@@ -2001,6 +2018,22 @@ export class MolinkClient {
             omitted:
               typeof message.omitted === 'number' && message.omitted > 0
                 ? message.omitted
+                : undefined,
+            batch:
+              typeof message.batch === 'string' && message.batch !== ''
+                ? message.batch
+                : undefined,
+            batchIndex:
+              typeof message.batch_index === 'number' &&
+              Number.isSafeInteger(message.batch_index) &&
+              message.batch_index >= 0
+                ? message.batch_index
+                : undefined,
+            batchCount:
+              typeof message.batch_count === 'number' &&
+              Number.isSafeInteger(message.batch_count) &&
+              message.batch_count > 1
+                ? message.batch_count
                 : undefined,
           })
         }

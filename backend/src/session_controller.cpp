@@ -111,13 +111,17 @@ clipboard_echo_table g_clipboard_echoes;
 /// One clipboard-pull range is at most this many bytes. The viewer uses the
 /// same size, so a normal download is one packet per request.
 constexpr uint64_t kClipboardPullChunkBytes = 256ull * 1024;
-// The id list is capped by count only: each entry is metadata, so a large
-// file costs a few bytes here. The client decides whether it can stream it
-// (virtual clipboard) or download it (its own, smaller, download caps).
-constexpr std::size_t kClipboardPullMaxFiles = 8;
+// Entries are metadata, so a larger file costs a few bytes here. The first
+// files that fit the byte caps are announced; `clipboard_offer_batches()`
+// splits the list into messages of kClipboardPullMaxFiles descriptors each.
 constexpr uint64_t kClipboardPullMaxFileBytes = 1ull * 1024 * 1024 * 1024 * 1024;
 constexpr uint64_t kClipboardPullMaxTotalBytes =
     4ull * 1024 * 1024 * 1024 * 1024;
+
+/// Groups one list into `clipboard-sync.files` messages. The viewer accumulates
+/// batches that share `batch`, so a selection over 64 entries still arrives as
+/// one clipboard action instead of losing everything past the first message.
+std::atomic<uint64_t> g_clipboard_batch_serial{0};
 
 std::string clipboard_files_signature(
     const std::vector<clipboard_file>& files) {
@@ -418,13 +422,12 @@ void send_clipboard_files_to(
     const std::vector<clipboard_file>& files, bool nested_rdp) {
   if (!peer.authenticated || !peer.transport) return;
 
-  // The id list is capped exactly like the viewer caps it: 8 files, 1 TiB
-  // each, 4 TiB total. The viewer learns how many were left out; the host
-  // also records a warning so a copy that silently lost files leaves a trace.
+  // Count entries are batched, not dropped: the byte caps still end the
+  // prefix, and the viewer learns how many were left out. The host records a
+  // warning so a copy that lost files leaves a trace.
   std::size_t advertised = 0;
   uint64_t total = 0;
   for (const clipboard_file& file : files) {
-    if (advertised >= kClipboardPullMaxFiles) break;
     if (file.size > kClipboardPullMaxFileBytes) break;
     if (total + file.size > kClipboardPullMaxTotalBytes) break;
     total += file.size;
@@ -452,7 +455,7 @@ void send_clipboard_files_to(
   }
   if (omitted > 0) {
     diag().log(diag_level::warn, "clipboard.announce.truncated",
-               "clipboard file list hit the pull caps",
+               "clipboard file list hit the pull byte caps",
                {{"peer", peer.peer_ip},
                 {"files", std::to_string(files.size())},
                 {"advertised", std::to_string(advertised)},
@@ -469,8 +472,10 @@ void send_clipboard_files_to(
   for (const clipboard_file& file : files) {
     uvcpp_json legacy;
     legacy["name"] = file.name;
-    if (expose_paths) legacy["path"] = file.path;
     legacy["size"] = file.size;
+    if (file.is_dir) legacy["is_dir"] = true;
+    if (!file.rel.empty() && file.rel != file.name) legacy["rel"] = file.rel;
+    if (expose_paths) legacy["path"] = file.path;
     legacy_list.push_back(std::move(legacy));
   }
 
@@ -485,25 +490,55 @@ void send_clipboard_files_to(
       clipboard_offer_entry offer;
       offer.id = static_cast<uint32_t>(i + 1);
       offer.name = files[i].name;
+      offer.rel = clipboard_file_relative(files[i]);
       offer.size = files[i].size;
-      offers.push_back(offer);
+      offer.is_dir = files[i].is_dir;
+      offers.push_back(std::move(offer));
 
       uvcpp_json item;
-      item["id"] = static_cast<uint64_t>(offer.id);
-      item["name"] = offer.name;
-      item["size"] = offer.size;
+      item["id"] = static_cast<uint64_t>(i + 1);
+      item["name"] = files[i].name;
+      item["size"] = files[i].size;
+      if (files[i].is_dir) item["is_dir"] = true;
+      if (!files[i].rel.empty() && files[i].rel != files[i].name) {
+        item["rel"] = files[i].rel;
+      }
       // Kept for the loopback browser fallback (the files panel downloads by
       // path); a remote viewer never receives a host absolute path.
       if (expose_paths) item["path"] = files[i].path;
       pull_list.push_back(std::move(item));
     }
-    registry->set_clipboard_offer(peer.id, std::move(offers), nested_rdp);
-    uvcpp_json out;
-    out["type"] = "clipboard-sync";
-    out["files"] = pull_list;
-    if (nested_rdp) out["nested_rdp"] = true;
-    if (omitted > 0) out["omitted"] = static_cast<uint64_t>(omitted);
-    send_json(peer.transport.get(), out);
+    registry->set_clipboard_offer(peer.id, offers, nested_rdp);
+    // The registry stores the whole selection; the wire is split so no single
+    // message grows with a large folder tree. `batch` plus the two indices
+    // let a current viewer accumulate the pieces into one selection. An older
+    // viewer ignores the fields and sees the first batch, exactly as before
+    // (its own 8-file cap already discarded the rest).
+    const std::vector<clipboard_offer_batch> batches =
+        clipboard_offer_batches(advertised, kClipboardPullMaxFiles);
+    const std::string batch_token =
+        "b" + std::to_string(++g_clipboard_batch_serial);
+    for (const clipboard_offer_batch& batch : batches) {
+      uvcpp_json out;
+      out["type"] = "clipboard-sync";
+      uvcpp_json batch_list = uvcpp_json::array();
+      for (std::size_t i = batch.begin; i < batch.end; ++i) {
+        batch_list.push_back(pull_list[i]);
+      }
+      out["files"] = std::move(batch_list);
+      if (nested_rdp) out["nested_rdp"] = true;
+      if (batches.size() > 1) {
+        out["batch"] = batch_token;
+        out["batch_index"] = static_cast<uint64_t>(&batch - batches.data());
+        out["batch_count"] = static_cast<uint64_t>(batches.size());
+      }
+      // One total, reported on the last piece so a viewer that accumulates
+      // does not add it once per batch.
+      if (omitted > 0 && batch.end == advertised) {
+        out["omitted"] = static_cast<uint64_t>(omitted);
+      }
+      send_json(peer.transport.get(), out);
+    }
   }
 
   uvcpp_json legacy_out;
@@ -520,8 +555,7 @@ void publish_clipboard_files(
     bool allow_broadcast) {
   files.erase(std::remove_if(files.begin(), files.end(),
                              [](const clipboard_file& file) {
-                               return !clipboard_file_has_bytes(file) ||
-                                      file.name.empty();
+                               return !clipboard_file_is_announceable(file);
                              }),
               files.end());
   if (files.empty()) return;
@@ -2202,8 +2236,7 @@ void session_controller::announce_current_clipboard(const char* reason) {
                             reason_text](std::vector<clipboard_file> files) {
     files.erase(std::remove_if(files.begin(), files.end(),
                                [](const clipboard_file& file) {
-                                 return !clipboard_file_has_bytes(file) ||
-                                        file.name.empty();
+                                 return !clipboard_file_is_announceable(file);
                                }),
                 files.end());
     if (files.empty()) return;

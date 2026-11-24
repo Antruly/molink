@@ -23,6 +23,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <sstream>
 #include <string>
 #include <sys/mount.h>
@@ -96,17 +97,67 @@ void lazy_detach(const std::string& path) {
 
 struct fuse_state {
   std::vector<virtual_mount_file> files;
-  std::map<std::string, const virtual_mount_file*> by_name;
-  virtual_file_reader* reader = nullptr;
+  /// Relative mount path -> file. Directories keep no file entry.
+  std::map<std::string, const virtual_mount_file*> files_by_path;
+  /// Every directory, including those implied by a descendant's `rel`.
+  std::set<std::string> directories;
+  /// Directory -> its immediate children (relative paths), sorted for a
+  /// stable readdir order.
+  std::map<std::string, std::set<std::string>> children;
 
-  const virtual_mount_file* find(const char* path) const {
-    if (path == nullptr) return nullptr;
-    const char* name = path;
-    while (*name == '/') ++name;
-    if (*name == '\0') return nullptr;
-    const auto it = by_name.find(name);
-    return it == by_name.end() ? nullptr : it->second;
+  void index() {
+    files_by_path.clear();
+    directories.clear();
+    children.clear();
+    for (const virtual_mount_file& file : files) {
+      const std::string rel = normalized(file.mount_path());
+      if (rel.empty()) continue;
+      files_by_path[rel] = &file;
+      std::string parent;
+      std::size_t start = 0;
+      while (true) {
+        const std::size_t slash = rel.find('/', start);
+        const std::string part =
+            rel.substr(start, slash == std::string::npos ? std::string::npos
+                                                         : slash - start);
+        if (slash == std::string::npos) break;
+        const std::string child = parent.empty() ? part : parent + "/" + part;
+        children[parent].insert(child);
+        directories.insert(child);
+        parent = child;
+        start = slash + 1;
+      }
+      children[parent].insert(rel);
+      if (file.is_dir) directories.insert(rel);
+    }
   }
+
+  /// Strips leading and trailing slashes. Takes a std::string because a file
+  /// entry's mount path is a string now (directories carry a relative path).
+  static std::string normalized(const std::string& path) {
+    std::size_t start = 0;
+    while (start < path.size() && path[start] == '/') ++start;
+    std::string out = path.substr(start);
+    while (!out.empty() && out.back() == '/') out.pop_back();
+    return out;
+  }
+
+  static std::string leaf(const std::string& rel) {
+    const std::size_t slash = rel.rfind('/');
+    return slash == std::string::npos ? rel : rel.substr(slash + 1);
+  }
+
+  const virtual_mount_file* find_file(const char* path) const {
+    const std::string key = normalized(path);
+    const auto it = files_by_path.find(key);
+    return it == files_by_path.end() ? nullptr : it->second;
+  }
+
+  bool is_directory(const std::string& key) const {
+    return key.empty() || directories.find(key) != directories.end();
+  }
+
+  virtual_file_reader* reader = nullptr;
 };
 
 void fill_root(struct stat* st) {
@@ -134,27 +185,35 @@ void fill_file(const virtual_mount_file& file, struct stat* st) {
 int op_getattr(const char* path, struct stat* st, struct fuse_file_info*) {
   auto* state = static_cast<fuse_state*>(fuse_get_context()->private_data);
   if (state == nullptr || st == nullptr) return -EIO;
-  const char* name = path;
-  while (name != nullptr && *name == '/') ++name;
-  if (name == nullptr || *name == '\0') {
+  const std::string key = fuse_state::normalized(path);
+  if (key.empty()) {
     fill_root(st);
     return 0;
   }
-  const virtual_mount_file* file = state->find(path);
-  if (file == nullptr) return -ENOENT;
-  fill_file(*file, st);
-  return 0;
+  if (const virtual_mount_file* file = state->find_file(path)) {
+    fill_file(*file, st);
+    return 0;
+  }
+  if (state->is_directory(key)) {
+    fill_root(st);
+    return 0;
+  }
+  return -ENOENT;
 }
 
 int op_readdir(const char* path, void* buffer, fuse_fill_dir_t filler,
                off_t offset, struct fuse_file_info*, enum fuse_readdir_flags) {
   auto* state = static_cast<fuse_state*>(fuse_get_context()->private_data);
   if (state == nullptr) return -EIO;
-  const char* name = path;
-  while (name != nullptr && *name == '/') ++name;
-  if (name == nullptr || *name != '\0') return -ENOENT;
+  const std::string key = fuse_state::normalized(path);
+  if (!state->is_directory(key)) return -ENOENT;
 
-  const std::size_t count = state->files.size();
+  const auto found = state->children.find(key);
+  static const std::set<std::string> kNoChildren;
+  const std::set<std::string>& entries =
+      found == state->children.end() ? kNoChildren : found->second;
+  std::vector<std::string> names(entries.begin(), entries.end());
+  const std::size_t count = names.size();
   std::size_t index = offset < 0 ? 0 : static_cast<std::size_t>(offset);
   struct stat st;
   if (index == 0) {
@@ -172,9 +231,16 @@ int op_readdir(const char* path, void* buffer, fuse_fill_dir_t filler,
     index = 2;
   }
   for (std::size_t i = index - 2; i < count; ++i) {
-    fill_file(state->files[i], &st);
+    const std::string& rel = names[i];
+    const std::string name = fuse_state::leaf(rel);
+    const auto file = state->files_by_path.find(rel);
+    if (file != state->files_by_path.end() && !file->second->is_dir) {
+      fill_file(*file->second, &st);
+    } else {
+      fill_root(&st);
+    }
     const off_t next = static_cast<off_t>(i + 3);
-    if (filler(buffer, state->files[i].name.c_str(), &st, next,
+    if (filler(buffer, name.c_str(), &st, next,
                static_cast<fuse_fill_dir_flags>(0)) != 0) {
       return 0;
     }
@@ -184,7 +250,11 @@ int op_readdir(const char* path, void* buffer, fuse_fill_dir_t filler,
 
 int op_open(const char* path, struct fuse_file_info* info) {
   auto* state = static_cast<fuse_state*>(fuse_get_context()->private_data);
-  if (state == nullptr || state->find(path) == nullptr) return -ENOENT;
+  if (state == nullptr) return -EIO;
+  if (state->find_file(path) == nullptr) {
+    return state->is_directory(fuse_state::normalized(path)) ? -EISDIR
+                                                             : -ENOENT;
+  }
   if (info == nullptr) return 0;
   if ((info->flags & O_ACCMODE) != O_RDONLY || (info->flags & O_TRUNC) != 0) {
     return -EROFS;
@@ -196,8 +266,12 @@ int op_read(const char* path, char* buffer, size_t size, off_t offset,
             struct fuse_file_info*) {
   auto* state = static_cast<fuse_state*>(fuse_get_context()->private_data);
   if (state == nullptr || state->reader == nullptr) return -EIO;
-  const virtual_mount_file* file = state->find(path);
-  if (file == nullptr) return -ENOENT;
+  const virtual_mount_file* file = state->find_file(path);
+  if (file == nullptr) {
+    return state->is_directory(fuse_state::normalized(path)) ? -EISDIR
+                                                             : -ENOENT;
+  }
+  if (file->is_dir) return -EISDIR;
   if (offset < 0) return -EINVAL;
   if (size == 0 || static_cast<uint64_t>(offset) >= file->size) return 0;
   uint64_t want = file->size - static_cast<uint64_t>(offset);
@@ -213,9 +287,9 @@ int op_access(const char* path, int mask) {
   auto* state = static_cast<fuse_state*>(fuse_get_context()->private_data);
   if (state == nullptr) return -EIO;
   if ((mask & W_OK) != 0) return -EROFS;
-  const char* name = path;
-  while (name != nullptr && *name == '/') ++name;
-  if (name != nullptr && *name != '\0' && state->find(path) == nullptr) {
+  const std::string key = fuse_state::normalized(path);
+  if (!key.empty() && !state->is_directory(key) &&
+      state->find_file(path) == nullptr) {
     return -ENOENT;
   }
   return 0;
@@ -370,9 +444,7 @@ virtual_mount_factory platform_virtual_mount_factory() {
     auto state = std::make_shared<fuse_state>();
     state->files = files;
     state->reader = reader;
-    for (const virtual_mount_file& file : state->files) {
-      state->by_name[file.name] = &file;
-    }
+    state->index();
     auto mount = std::make_shared<fuse_virtual_mount>(mountpoint, state);
     if (!mount->start(error)) return nullptr;
     return mount;

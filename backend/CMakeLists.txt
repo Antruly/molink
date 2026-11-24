@@ -969,6 +969,7 @@ if(MOLINK_HAVE_X11)
   add_executable(molink-core-x11-clipboard-files-test
     tests/x11_clipboard_files_test.cpp
     src/clipboard/x11_clipboard.cpp
+    src/clipboard/clipboard_files.cpp
     src/clipboard/clipboard_route.cpp
     src/diag_log.cpp
     src/util.cpp
