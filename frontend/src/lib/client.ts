@@ -207,7 +207,10 @@ export interface FileEntry {
 /// One file on the host's Explorer clipboard (CF_HDROP).
 export interface ClipboardFileEntry {
   name: string
-  path: string
+  /// Present only when the host peer is on the same machine (its own page or
+  /// shell). A remote viewer receives ids through `clipboard-sync.files`
+  /// instead, because a host absolute path leaks the user and directory names.
+  path?: string
   size: number
 }
 
@@ -621,6 +624,8 @@ export class MolinkClient {
   private iceServers: string[] = []
   /** The host offered to drive the frame clock for this session. */
   private pushSupported = false
+  /// Renews the host's foreground lease while this page is visible.
+  private foregroundTimer: number | null = null
   /** The clock is on right now: the page is visible and pulling is off. */
   private pushVideo = false
   private foreground = true
@@ -1422,6 +1427,31 @@ export class MolinkClient {
     return this.foreground && document.visibilityState === 'visible'
   }
 
+  /// The foreground hint is a lease: the host expires it after 15 s. A
+  /// visible page renews it while it is being watched, so a crashed or
+  /// frozen tab stops being the clipboard target instead of owning it until
+  /// it disconnects.
+  private startForegroundRenewal(): void {
+    this.stopForegroundRenewal()
+    this.foregroundTimer = window.setInterval(() => {
+      if (!this.pushSupported || !this.pushVideo) {
+        this.stopForegroundRenewal()
+        return
+      }
+      if (!this.wantsVideoPush()) {
+        this.stopForegroundRenewal()
+        return
+      }
+      this.sendJson({ type: 'video-push', on: true })
+    }, 5000)
+  }
+
+  private stopForegroundRenewal(): void {
+    if (this.foregroundTimer === null) return
+    window.clearInterval(this.foregroundTimer)
+    this.foregroundTimer = null
+  }
+
   private watchVisibility(): void {
     if (this.visibilityListener === null) {
       const apply = () => {
@@ -1431,7 +1461,10 @@ export class MolinkClient {
         const on = this.pushSupported && this.wantsVideoPush()
         if (on === this.pushVideo) return
         this.pushVideo = on
-        if (this.pushSupported) this.sendJson({ type: 'video-push', on })
+        if (!this.pushSupported) return
+        this.sendJson({ type: 'video-push', on })
+        if (on) this.startForegroundRenewal()
+        else this.stopForegroundRenewal()
       }
       this.visibilityListener = apply
       document.addEventListener('visibilitychange', apply)
@@ -1440,6 +1473,7 @@ export class MolinkClient {
   }
 
   private stopWatchingVisibility(): void {
+    this.stopForegroundRenewal()
     if (this.visibilityListener === null) return
     document.removeEventListener('visibilitychange', this.visibilityListener)
     this.visibilityListener = null

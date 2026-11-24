@@ -213,6 +213,8 @@
     "uses": "Uses",
     "allowAccessRequests": "Approve remote requests",
     "allowAccessRequestsHint": "A remote user without a code can ask for access; you still approve every session. Enabled by default.",
+    "syncBetweenSessions": "Sync clipboard across all sessions",
+    "syncBetweenSessionsHint": "When no viewer is clearly active, send a host clipboard change to every connected viewer. Off by default, so two sessions cannot leak into each other.",
     "windowsSessions": "Windows sessions",
     "windowsSessionsHint": "Experimental: uses molink-service. Switching console or kicking RDP requires administrator rights.",
     "windowsServiceMissing": "molink-service is not running. Install it as administrator (see shell/windows/service/README.md).",

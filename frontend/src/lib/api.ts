@@ -483,6 +483,10 @@ export interface SecuritySettings {
   allow_web_client: boolean
   discovery_enabled: boolean
   allow_access_requests: boolean
+  /// Fan a host clipboard change out to every viewer when no viewer is the
+  /// active one. Off by default; the host stores it as
+  /// allow_sync_between_sessions.
+  allow_sync_between_sessions?: boolean
   encrypt_remote?: boolean
   encrypt_lan?: boolean
   stun_server?: string
@@ -502,6 +506,7 @@ export function postSettings(
     allowWeb: boolean
     discovery: boolean
     allowAccessRequests: boolean
+    syncBetweenSessions?: boolean
     encryptRemote?: boolean
     encryptLan?: boolean
     name: string
@@ -515,6 +520,9 @@ export function postSettings(
     access_requests: values.allowAccessRequests ? '1' : '0',
     name: values.name,
   })
+  if (values.syncBetweenSessions !== undefined) {
+    query.set('sync_between_sessions', values.syncBetweenSessions ? '1' : '0')
+  }
   if (values.encryptRemote !== undefined) {
     query.set('encrypt_remote', values.encryptRemote ? '1' : '0')
   }

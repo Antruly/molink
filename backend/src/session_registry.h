@@ -61,8 +61,15 @@ struct session_info {
   std::shared_ptr<rtc_session> rtc;
   /// The client advertised `video_push` in hello: it wants frames on the
   /// host's clock instead of polling `request-frame`. Pull stays the
-  /// compatibility path for every client that does not ask for this.
-  bool video_push = false;
+  /// compatibility path for every client that does not ask for this. This is
+  /// a capability/push preference only; it says nothing about whether the
+  /// window is being watched (see foreground_hint_ms).
+  bool push_enabled = false;
+  /// When the viewer last sent `video-push on`, as a lease (monotonic ms).
+  /// 0 = not foreground, or `video-push off` cancelled it. Expires after
+  /// kClipboardForegroundTtlMs unless renewed. Only an explicit video-push
+  /// message touches this; `video_push` in hello must never set it.
+  uint64_t foreground_hint_ms = 0;
   /// Viewer-owned picture preset last applied for this session. Globally the
   /// capture can only encode one preset at a time (last writer wins), but the
   /// host never pushes this value back to any viewer's UI.
@@ -92,7 +99,7 @@ struct session_info {
   uint64_t last_seen_ms = 0;
   uint64_t last_ping_ms = 0;
   /// Last input message from this viewer. Used to pick the active session for
-  /// clipboard routing when the viewer has no foreground/video-push signal.
+  /// clipboard routing when the viewer has no fresh foreground lease.
   uint64_t last_input_ms = 0;
   uint64_t frames_sent = 0;
   /// Sequence on the wire (one per frame sent to this session).

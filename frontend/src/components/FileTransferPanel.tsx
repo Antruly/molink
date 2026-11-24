@@ -1365,7 +1365,13 @@ export function FileTransferPanel({
   )
 
   const startClipboardDownloads = useCallback(() => {
-    const files = clipboardFiles
+    // The path-based download works only for files the host chose to describe
+    // with a path (its own page/shell). A remote viewer gets ids and uses the
+    // pull path in remote-clipboard instead.
+    const files = clipboardFiles.filter(
+      (file): file is ClipboardFileEntry & { path: string } =>
+        typeof file.path === 'string' && file.path !== '',
+    )
     if (files.length === 0) return
     const names = files.map((file) =>
       suggestedFileName(file.name, file.path))
@@ -4264,6 +4270,11 @@ export function FileTransferPanel({
                 <button
                   type="button"
                   onClick={startClipboardDownloads}
+                  disabled={
+                    !clipboardFiles.some(
+                      (file) => typeof file.path === 'string' && file.path !== '',
+                    )
+                  }
                   className="btn h-5 px-1.5 text-[9px]"
                   title={
                     clipboardMode === 'local-app'
@@ -4285,13 +4296,18 @@ export function FileTransferPanel({
                 </p>
               ) : null}
               <ul className="mt-1 max-h-20 space-y-0.5 overflow-y-auto">
-                {clipboardFiles.map((file) => (
-                  <li key={file.path}>
+                {clipboardFiles.map((file, index) => (
+                  <li key={file.path ?? `${file.name}:${index}`}>
                     <button
                       type="button"
-                      onClick={() => startQuickDownload(file.path, file.name)}
+                      disabled={typeof file.path !== 'string'}
+                      onClick={() => {
+                        if (typeof file.path === 'string') {
+                          startQuickDownload(file.path, file.name)
+                        }
+                      }}
                       className="flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left transition hover:bg-panel/60"
-                      title={file.path}
+                      title={file.path ?? file.name}
                     >
                       <FileIcon size={10} className="shrink-0 text-muted" />
                       <span className="min-w-0 flex-1 truncate text-[10px] text-ink">

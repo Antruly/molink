@@ -2725,6 +2725,8 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
             j["allow_web_client"] = settings.allow_web_client;
             j["discovery_enabled"] = settings.discovery_enabled;
             j["allow_access_requests"] = settings.allow_access_requests;
+            j["allow_sync_between_sessions"] =
+                settings.allow_sync_between_sessions;
             j["encrypt_remote"] = settings.encrypt_remote;
             j["encrypt_lan"] = settings.encrypt_lan;
             j["device_name"] = settings.device_name;
@@ -2762,6 +2764,9 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
              const bool discovery = flag("discovery", before.discovery_enabled);
              const bool access_requests =
                  flag("access_requests", before.allow_access_requests);
+             const bool sync_between_sessions = flag(
+                 "sync_between_sessions",
+                 before.allow_sync_between_sessions);
              const bool encrypt_remote =
                  flag("encrypt_remote", before.encrypt_remote);
              const bool encrypt_lan = flag("encrypt_lan", before.encrypt_lan);
@@ -2775,6 +2780,7 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
              deps.auth->update_access(allow_remote, allow_web, discovery,
                                       name != nullptr ? *name : std::string());
              deps.auth->set_allow_access_requests(access_requests);
+             deps.auth->set_allow_sync_between_sessions(sync_between_sessions);
              deps.auth->set_transport_security(encrypt_remote, encrypt_lan);
              const app_settings after = deps.auth->settings();
              if (deps.on_access_changed &&
@@ -2804,6 +2810,8 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
              j["allow_web_client"] = after.allow_web_client;
              j["discovery_enabled"] = after.discovery_enabled;
              j["allow_access_requests"] = after.allow_access_requests;
+             j["allow_sync_between_sessions"] =
+                 after.allow_sync_between_sessions;
              j["encrypt_remote"] = after.encrypt_remote;
              j["encrypt_lan"] = after.encrypt_lan;
              j["stun_server"] = after.stun_server;

@@ -90,7 +90,7 @@ export function basename(path: string): string {
 
 /// Filenames reported by the host can contain characters the picker rejects.
 /// Keep the suggested name harmless without dropping the extension.
-export function suggestedFileName(name: string, fallbackPath: string): string {
+export function suggestedFileName(name: string, fallbackPath = ''): string {
   const raw = name.trim() !== '' ? name : basename(fallbackPath)
   // Control characters are what we are stripping: the file picker rejects
   // them and a host may hand them over in a name.

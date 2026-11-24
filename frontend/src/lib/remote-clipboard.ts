@@ -211,7 +211,9 @@ export class RemoteClipboardSync {
     if (!this.enabled || this.paused || this.busy || this.pendingCancel) return
     if (this.token() === '') return
     const usable = files.filter(
-      (file) => file.path !== '' && stageableClipboardFile(file),
+      (file) =>
+        typeof file.path === 'string' && file.path !== '' &&
+        stageableClipboardFile(file),
     )
     if (usable.length === 0) return
     // Skip paths/descriptors this machine just wrote to the remote clipboard.
@@ -219,12 +221,12 @@ export class RemoteClipboardSync {
     // (`file (1)(2)`).
     const fresh = usable.filter(
       (file) =>
-        this.echo?.suppressPath(file.path) !== true &&
+        this.echo?.suppressPath(file.path ?? '') !== true &&
         this.echo?.suppressFiles([file]) !== true,
     )
     if (fresh.length === 0) return
     const key = fresh
-      .map((file) => `${file.path}:${file.size}`)
+      .map((file) => `${file.path ?? ''}:${file.size}`)
       .sort()
       .join('|')
     if (key === this.lastKey) return
@@ -986,7 +988,9 @@ export class RemoteClipboardSync {
       return
     }
     active.requesting = true
-    this.connection()?.sendFileAction('request', { path: active.entry.path })
+    this.connection()?.sendFileAction('request', {
+      path: active.entry.path ?? '',
+    })
     this.armTimeout()
   }
 

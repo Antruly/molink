@@ -362,6 +362,7 @@ interface AppState {
     allowWeb: boolean
     discovery: boolean
     allowAccessRequests: boolean
+    syncBetweenSessions?: boolean
     encryptRemote?: boolean
     encryptLan?: boolean
     name: string

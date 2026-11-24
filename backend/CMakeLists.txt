@@ -968,6 +968,9 @@ if(MOLINK_HAVE_X11)
   add_executable(molink-core-x11-clipboard-files-test
     tests/x11_clipboard_files_test.cpp
     src/clipboard/x11_clipboard.cpp
+    src/clipboard/clipboard_route.cpp
+    src/diag_log.cpp
+    src/util.cpp
   )
   target_include_directories(molink-core-x11-clipboard-files-test PRIVATE src)
   target_compile_definitions(molink-core-x11-clipboard-files-test
@@ -1164,6 +1167,7 @@ add_test(NAME clipboard_sync COMMAND molink-core-clipboard-sync-test)
 add_executable(molink-core-clipboard-route-test
   tests/clipboard_route_test.cpp
   src/clipboard/clipboard_route.cpp
+  src/util.cpp
 )
 target_include_directories(molink-core-clipboard-route-test PRIVATE src)
 set_target_properties(molink-core-clipboard-route-test PROPERTIES

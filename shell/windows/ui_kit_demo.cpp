@@ -511,6 +511,12 @@ struct app_state {
   std::wstring id_status = L"ID 服务器未连接";
   std::wstring id_error;
   ULONGLONG id_refresh_at = 0;
+  /// The foreground lease this shell last announced. The host expires a
+  /// `video-push on` after 15 s, so a visible window renews it every 5 s and a
+  /// minimized/hidden one sends `on:false` immediately. Without this the
+  /// native shell kept winning clipboard routing while minimized.
+  bool foreground_sent = false;
+  ULONGLONG foreground_sent_at = 0;
   /// Backoff for restarting a host core that exited while this shell stayed.
   ULONGLONG core_restart_at = 0;
   /// Single-instance guard (Local\moLinkShellInstance), shared with the
@@ -3375,13 +3381,9 @@ void clipboard_local_changed() {
       g.clipboard_sync.on_local_text(text, GetTickCount64());
   if (!result.send) {
     switch (result.reason) {
-      case molink::clipboard::skip_reason::duplicate:
       case molink::clipboard::skip_reason::echo:
         native_log(L"clipboard.sync direction=out bytes=" +
-                   std::to_wstring(result.bytes) +
-                   (result.reason == molink::clipboard::skip_reason::echo
-                        ? L" result=echo"
-                        : L" result=duplicate"));
+                   std::to_wstring(result.bytes) + L" result=echo");
         break;
       case molink::clipboard::skip_reason::too_large:
         native_log(L"clipboard.sync direction=out bytes=" +
@@ -3399,9 +3401,8 @@ void clipboard_local_changed() {
     native_log(L"clipboard.sync direction=out bytes=" +
                std::to_wstring(result.bytes));
   } else {
-    // A closed socket must not make this text permanently unsendable: the
-    // next copy of the same value is a fresh attempt.
-    g.clipboard_sync.reset_last_sent();
+    // The next WM_CLIPBOARDUPDATE (even of the same value) is a fresh attempt,
+    // so nothing has to be reset here.
     native_log(L"clipboard.sync direction=out bytes=" +
                std::to_wstring(result.bytes) + L" result=send_failed");
     show_toast(tr("toast.clipboardFailed"));
@@ -11629,6 +11630,23 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
       surface_poll();
       if (g.session != nullptr) {
         g.session->tick(GetTickCount64());
+        // Foreground lease: only a visible, non-minimized window is being
+        // watched. Hello's `video_push` says nothing about visibility, so the
+        // shell has to say it explicitly and keep the lease fresh.
+        if (g.session->live() && g.session->authenticated()) {
+          const bool watching =
+              IsWindowVisible(window) != 0 && IsIconic(window) == 0;
+          const ULONGLONG now = GetTickCount64();
+          if (watching != g.foreground_sent ||
+              (watching && now - g.foreground_sent_at >= 5000)) {
+            g.foreground_sent = watching;
+            g.foreground_sent_at = now;
+            session_send(watching ? "{\"type\":\"video-push\",\"on\":true}"
+                                  : "{\"type\":\"video-push\",\"on\":false}");
+          }
+        } else {
+          g.foreground_sent = false;
+        }
         if (GetTickCount64() >= g.displays_refresh_at) {
           g.displays_refresh_at = GetTickCount64() + 1000;
           refresh_session_displays();

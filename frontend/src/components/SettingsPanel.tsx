@@ -76,6 +76,9 @@ function SecurityControls({
     allowWeb: boolean
     discovery: boolean
     allowAccessRequests: boolean
+    /// Fan a host clipboard change out to every viewer when no viewer is the
+    /// active one; off by default.
+    syncBetweenSessions?: boolean
     encryptRemote: boolean
     encryptLan: boolean
     name: string
@@ -92,6 +95,9 @@ function SecurityControls({
   const [discovery, setDiscovery] = useState(settings.discovery_enabled)
   const [allowAccessRequests, setAllowAccessRequests] = useState(
     settings.allow_access_requests,
+  )
+  const [syncBetweenSessions, setSyncBetweenSessions] = useState(
+    settings.allow_sync_between_sessions === true,
   )
   const [encryptRemote, setEncryptRemote] = useState(
     settings.encrypt_remote !== false,
@@ -128,6 +134,7 @@ function SecurityControls({
     allowWeb?: boolean
     discovery?: boolean
     allowAccessRequests?: boolean
+    syncBetweenSessions?: boolean
     encryptRemote?: boolean
     encryptLan?: boolean
     name?: string
@@ -140,6 +147,8 @@ function SecurityControls({
       discovery: nextRemote ? (values.discovery ?? discovery) : false,
       allowAccessRequests:
         values.allowAccessRequests ?? allowAccessRequests,
+      syncBetweenSessions:
+        values.syncBetweenSessions ?? syncBetweenSessions,
       encryptRemote: values.encryptRemote ?? encryptRemote,
       encryptLan: values.encryptLan ?? encryptLan,
       name: values.name ?? settings.device_name,
@@ -243,6 +252,24 @@ function SecurityControls({
               void persist({ allowAccessRequests: value })
             }}
             label={t('settings.allowAccessRequests')}
+          />
+        </div>
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <div className="text-[12px] text-ink">
+              {t('settings.syncBetweenSessions')}
+            </div>
+            <div className="mt-0.5 text-[11px] text-muted">
+              {t('settings.syncBetweenSessionsHint')}
+            </div>
+          </div>
+          <Switch
+            checked={syncBetweenSessions}
+            onChange={(value) => {
+              setSyncBetweenSessions(value)
+              void persist({ syncBetweenSessions: value })
+            }}
+            label={t('settings.syncBetweenSessions')}
           />
         </div>
         <div className="flex items-start justify-between gap-3">
@@ -898,7 +925,7 @@ export function SettingsPanel() {
             {section === 'security' ? (
               localMode && security ? (
                 <SecurityControls
-                  key={`${security.allow_remote_access}:${security.allow_web_client}:${security.discovery_enabled}:${security.device_name}:${security.long_term_code}`}
+                  key={`${security.allow_remote_access}:${security.allow_web_client}:${security.discovery_enabled}:${security.allow_sync_between_sessions}:${security.device_name}:${security.long_term_code}`}
                   settings={security}
                   onSave={saveSecurity}
                   onLongTerm={setLongTermCode}

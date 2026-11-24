@@ -122,6 +122,9 @@ export class SessionConnection {
   private lastWirePatch = 0
   private clipboardTimer: number | null = null
   private lastClipboard = ''
+  /// Document-level `copy` listener: the only in-page signal that a copy
+  /// happened when the value is identical to the previous one.
+  private clipboardCopyListener: (() => void) | null = null
   private clipboardFailures = 0
   private clipboardRetryAt = 0
   private dropTimes: number[] = []
@@ -1002,12 +1005,23 @@ export class SessionConnection {
     this.syncLocalClipboard(false)
     this.clipboardTimer = window.setInterval(
       () => this.syncLocalClipboard(false), 1000)
+    // The poll can only compare content, so copying the same text twice looks
+    // like no change. A `copy` event proves a new copy happened; read the
+    // clipboard once after it, even when the value matches the last one.
+    this.clipboardCopyListener = () => {
+      window.setTimeout(() => this.syncLocalClipboard(true), 0)
+    }
+    document.addEventListener('copy', this.clipboardCopyListener, true)
   }
 
   private stopClipboardSync(): void {
     if (this.clipboardTimer !== null) {
       window.clearInterval(this.clipboardTimer)
       this.clipboardTimer = null
+    }
+    if (this.clipboardCopyListener !== null) {
+      document.removeEventListener('copy', this.clipboardCopyListener, true)
+      this.clipboardCopyListener = null
     }
   }
 
