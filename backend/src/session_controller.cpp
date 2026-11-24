@@ -600,15 +600,6 @@ bool decode_input_event(const uvcpp_json& j, input_event& out,
   return false;
 }
 
-input_injector::status inject_one(input_injector& input, const uvcpp_json& event,
-                                  std::string& err) {
-  input_event decoded;
-  if (!decode_input_event(event, decoded, err)) {
-    return input_injector::status::rejected;
-  }
-  return inject_input_event(input, decoded, err, &send_secure_attention);
-}
-
 bool send_frame_payload(session_transport* transport,
                         const std::shared_ptr<session_info>& session,
                         uint16_t flags, uint64_t ts_us,
@@ -1709,6 +1700,52 @@ void session_controller::update_file_retry_timer() {
   }
 }
 
+void session_controller::start_held_key_scan() {
+  if (!options_.input || !options_.loop || held_scan_timer_) return;
+  auto timer = std::make_unique<uvcpp::uvcpp_timer>(options_.loop);
+  if (timer->init() != 0) return;
+  auto weak = weak_from_this();
+  if (timer->start(
+          [weak](uvcpp::uvcpp_timer*) {
+            if (auto self = weak.lock()) self->expire_held_keys();
+          },
+          kHeldKeyScanMs, kHeldKeyScanMs) != 0) {
+    return;
+  }
+  held_scan_timer_ = std::move(timer);
+}
+
+void session_controller::expire_held_keys() {
+  if (!options_.input) return;
+  const std::vector<input_event> expired =
+      held_keys_.expire(now_ms(), kHeldKeyTimeoutMs);
+  for (const input_event& event : expired) {
+    const input_injector::status status = options_.input->key(event.code, false);
+    diag().log(status == input_injector::status::ok ? diag_level::info
+                                                    : diag_level::warn,
+               "input.release", "held modifier expired",
+               {{"code", event.code}, {"reason", "timeout"}});
+  }
+}
+
+void session_controller::sync_input_rect() {
+  if (!options_.capture || !options_.input) return;
+  const display_info display = options_.capture->current_display_info();
+  if (!input_rect_.update(display.x, display.y, display.input_width,
+                          display.input_height)) {
+    return;
+  }
+  options_.input->set_display_rect(display.x, display.y, display.input_width,
+                                   display.input_height);
+  // Resolution changes must be visible in the log: a click that lands at the
+  // old offset is otherwise very hard to attribute.
+  diag().log(diag_level::info, "input.rect", "input.rect updated",
+             {{"w", std::to_string(display.input_width)},
+              {"h", std::to_string(display.input_height)},
+              {"x", std::to_string(display.x)},
+              {"y", std::to_string(display.y)}});
+}
+
 void session_controller::send_lazy_offer_reply(bool ok, bool stream,
                                                const std::string& message,
                                                bool compat) {
@@ -1966,6 +2003,7 @@ bool session_controller::start(const std::string* initial_token) {
     j["version"] = options_.version;
     send_json(transport.get(), j);
   }
+  start_held_key_scan();
   return true;
 }
 
@@ -4158,7 +4196,9 @@ void session_controller::on_text(const std::string& text) {
       return;
     }
 
+    sync_input_rect();
     std::string input_error;
+    std::string rejected_error;
     bool rejected = false;
     bool failed = false;
     // A pressed primary button freezes the tile <-> stream decision: a drag
@@ -4183,15 +4223,39 @@ void session_controller::on_text(const std::string& text) {
       }
       options_.capture->note_pointer(down, false, now_ms());
     };
+    // One bad event in a batch must not swallow the key-up after it: a
+    // rejected event is logged and the loop continues. A batch may carry 64
+    // events, and the one that matters most is `down:false`.
     auto apply = [&](const uvcpp_json& event) {
-      const input_injector::status status =
-          inject_one(*options_.input, event, input_error);
-      if (status == input_injector::status::rejected) {
+      input_event decoded;
+      std::string decode_error;
+      if (!decode_input_event(event, decoded, decode_error)) {
         rejected = true;
+        if (rejected_error.empty()) rejected_error = decode_error;
         return false;
       }
+      const input_injector::status status =
+          inject_input_event(*options_.input, decoded, input_error,
+                             &send_secure_attention, &wheel_notches_);
+      if (status == input_injector::status::rejected) {
+        rejected = true;
+        if (rejected_error.empty()) {
+          rejected_error = input_error.empty() ? "input event was rejected"
+                                               : input_error;
+        }
+      }
       if (status == input_injector::status::unavailable) failed = true;
-      return true;
+      if (decoded.type == input_event::kind::key) {
+        // A key-up clears ownership even when the injector rejected it: the
+        // key is no longer this session's to release. Only an accepted
+        // key-down records a hold.
+        if (!decoded.down) {
+          held_keys_.note(decoded.code, false, now_ms());
+        } else if (status == input_injector::status::ok) {
+          held_keys_.note(decoded.code, true, now_ms());
+        }
+      }
+      return status != input_injector::status::rejected;
     };
     const auto events = j.find("events");
     if (events != j.end() && events->is_array()) {
@@ -4201,23 +4265,23 @@ void session_controller::on_text(const std::string& text) {
         return;
       }
       for (const auto& event : *events) {
-        if (!apply(event)) break;
+        if (!apply(event)) continue;
         note_pointer(event);
       }
     } else if (apply(j)) {
       note_pointer(j);
     }
     if (rejected) {
+      const std::string& message =
+          rejected_error.empty() ? input_error : rejected_error;
       diag().log(diag_level::warn, "input.rejected",
-                 input_error.empty() ? "input event was rejected"
-                                     : input_error,
+                 message.empty() ? "input event was rejected" : message,
                  {{"peer", peer_ip}});
       // Injection failures used to leave this empty, so the page could only
       // show the raw `bad_input` code. The injector now names the value, but
       // keep a last-resort message for an older or future backend.
       send_error(transport.get(), "bad_input",
-                 input_error.empty() ? "input event was rejected"
-                                     : input_error);
+                 message.empty() ? "input event was rejected" : message);
     } else if (failed) {
       // SendInput fails silently on the secure desktop and for elevated
       // windows; tell the client instead of dropping every event without a
@@ -4413,9 +4477,30 @@ void session_controller::on_close(int code, const std::string& reason) {
   if (options_.capture && !registry_->has_authenticated()) {
     options_.capture->set_active(false);
   }
-  // A dropped connection must not leave a button or modifier held down.
-  if (options_.input && !registry_->has_authenticated()) {
-    options_.input->release_all();
+  // A dropped connection must not leave a key down. Release only the keys
+  // this session pressed: another authenticated viewer may still be holding
+  // the same modifier, and a global release_all() would take it away from
+  // them. With no viewers left, release everything (buttons included).
+  if (options_.input) {
+    if (!registry_->has_authenticated()) {
+      options_.input->release_all();
+      held_keys_.clear();
+    } else {
+      const std::vector<input_event> released = held_keys_.release_all();
+      for (const input_event& event : released) {
+        options_.input->key(event.code, false);
+      }
+      if (!released.empty()) {
+        diag().log(diag_level::info, "input.release",
+                   "session close released held keys",
+                   {{"peer", session->peer_ip},
+                    {"keys", std::to_string(released.size())}});
+      }
+    }
+  }
+  if (held_scan_timer_) {
+    held_scan_timer_->stop();
+    held_scan_timer_.reset();
   }
   (void)code;
   (void)reason;
