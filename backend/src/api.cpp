@@ -426,11 +426,11 @@ uvcpp_json fs_roots_json(const std::vector<fslist::root>& roots) {
 std::optional<std::filesystem::path> local_absolute_path(
     const std::string& raw) {
   const std::string home = local_home_directory();
-  if (raw.empty()) return std::filesystem::path(home);
+  if (raw.empty()) return path_from_utf8(home);
   const std::optional<std::string> normalized =
       fslist::normalize_browse_path(raw, home);
   if (!normalized) return std::nullopt;
-  return std::filesystem::path(*normalized);
+  return path_from_utf8(*normalized);
 }
 
 /// The Host header without a port, lowercased. `[::1]:28418` becomes `::1`.
@@ -477,7 +477,7 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
     const std::string config_dir = config_directory();
     if (!config_dir.empty()) {
       stage_directory =
-          (std::filesystem::path(config_dir) / "clipboard-inbox").string();
+          path_to_utf8(path_from_utf8(config_dir) / "clipboard-inbox");
     }
   }
   const auto staging = std::make_shared<clipboard_stage>(
@@ -499,10 +499,10 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
   // the mount fails) the page falls back to the download path.
   std::string virtual_directory = clipboard_virtual_directory();
   if (virtual_directory.empty()) {
-    virtual_directory = stage_directory.empty()
-                            ? std::string()
-                            : (std::filesystem::path(stage_directory) / "mount")
-                                  .string();
+    virtual_directory =
+        stage_directory.empty()
+            ? std::string()
+            : path_to_utf8(path_from_utf8(stage_directory) / "mount");
   }
   std::function<bool(const std::vector<std::string>&)> virtual_apply =
       [clipboard = deps.clipboard](const std::vector<std::string>& paths) {
@@ -1439,7 +1439,7 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
              }
              const std::string final_path =
                  fslist::unique_destination(fslist::native_path(*to));
-             fs::rename(*from, fs::path(final_path), ec);
+             fs::rename(*from, path_from_utf8(final_path), ec);
              if (ec) {
                resp.status(500).json_str(R"({"code":"move_failed"})");
                resp.end();
@@ -1622,7 +1622,7 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
             // caller that reads larger slices through the same route.
             constexpr uint64_t kMaxRangeBytes = 8ull * 1024ull * 1024ull;
             std::error_code ec;
-            const std::filesystem::path fs_path(path);
+            const std::filesystem::path fs_path = path_from_utf8(path);
             if (!std::filesystem::is_regular_file(fs_path, ec) || ec) {
               resp.status(404).json_str(R"({"code":"missing_file"})");
               resp.end();

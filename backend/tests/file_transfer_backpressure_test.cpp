@@ -20,6 +20,21 @@ void expect(bool value, const char* message) {
   }
 }
 
+/// The partial file for upload @p id, whatever the per-instance tag is.
+std::filesystem::path find_partial(const std::filesystem::path& home,
+                                   const std::string& suffix) {
+  namespace fs = std::filesystem;
+  std::error_code ec;
+  for (const auto& entry : fs::directory_iterator(home, ec)) {
+    const std::string name = entry.path().filename().string();
+    if (name.rfind(".upload-", 0) == 0 && name.size() > suffix.size() &&
+        name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0) {
+      return entry.path();
+    }
+  }
+  return fs::path();
+}
+
 void test_download_retries_same_offset_after_backpressure() {
   namespace fs = std::filesystem;
   const fs::path home = fs::temp_directory_path() / "molink-file-transfer-test";
@@ -103,7 +118,10 @@ void test_download_retries_same_offset_after_backpressure() {
   std::ifstream uploaded(home / "upload.bin", std::ios::binary);
   std::array<char, 4> received{};
   uploaded.read(received.data(), received.size());
-  expect(!transfer.has_pending() && json.size() == before_complete + 1 &&
+  // A completing chunk now also emits `file-ack` before `done`, so the exact
+  // message count is not the contract: the file lands and `done` is last.
+  expect(!transfer.has_pending() && json.size() > before_complete &&
+             json.back().find("\"done\"") != std::string::npos &&
              std::string(received.data(), received.size()) == "test",
          "an upload with early complete is saved only after all bytes arrive");
   uploaded.close();
@@ -112,7 +130,7 @@ void test_download_retries_same_offset_after_backpressure() {
   transfer.complete(6, start);
   transfer.retry_pending(start + molink::file_transfer::kRetryTimeout);
   expect(!transfer.has_pending() && !fs::exists(home / "short.bin") &&
-             !fs::exists(home / ".upload-6.part") &&
+             !fs::exists(find_partial(home, "-6.part")) &&
              json.back().find("file ended early") != std::string::npos,
          "incomplete upload times out and its temporary file is removed");
   fs::remove_all(home, ec);
@@ -213,11 +231,13 @@ void test_download_and_upload_slots_are_reclaimed() {
   expect(upload_json.back().find("too many active uploads") !=
              std::string::npos,
          "the ninth upload is refused while eight are open");
-  expect(fs::exists(home / ".upload-1.part"),
-         "an open upload owns its partial file");
+  // The partial name carries a per-instance tag so two cores (or two sessions)
+  // cannot collide on `.upload-1.part`.
+  const fs::path first_partial = find_partial(home, "-1.part");
+  expect(!first_partial.empty(), "an open upload owns its partial file");
   uploads.retry_pending(upload_start + molink::file_transfer::kIdleTimeout +
                         std::chrono::milliseconds(1));
-  expect(!fs::exists(home / ".upload-1.part"),
+  expect(!fs::exists(first_partial),
          "an idle upload's partial file is removed on reclaim");
   uploads.offer("upload.bin", 0, home.string());
   expect(upload_json.back().find("too many active uploads") ==

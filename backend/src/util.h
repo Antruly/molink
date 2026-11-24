@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -37,5 +38,32 @@ std::string url_encode(const std::string& value);
 
 /// Non-loopback IPv4 addresses of this machine, in interface order.
 std::vector<std::string> local_ipv4_addresses();
+
+/// Convert a UTF-8 string from the wire or JSON into a filesystem path.
+///
+/// On Windows the implicit `std::filesystem::path(std::string)` conversion
+/// interprets the bytes in the ANSI code page, so a zh-CN host (CP_ACP 936)
+/// turns a UTF-8 "照片" into garbage. Every path that crosses the network must
+/// go through these helpers instead. Header-only so tests that compile one
+/// source file do not have to drag in the rest of util.cpp.
+inline std::filesystem::path path_from_utf8(const std::string& text) {
+#if defined(__cpp_lib_char8_t)
+  return std::filesystem::path(std::u8string(
+      reinterpret_cast<const char8_t*>(text.data()), text.size()));
+#else
+  // The only spelling available to the C++17 Win7 kit.
+  return std::filesystem::u8path(text);
+#endif
+}
+
+/// The inverse of `path_from_utf8`: native path -> UTF-8 for JSON and logs.
+inline std::string path_to_utf8(const std::filesystem::path& path) {
+#if defined(__cpp_lib_char8_t)
+  const std::u8string value = path.u8string();
+  return std::string(reinterpret_cast<const char*>(value.data()), value.size());
+#else
+  return path.u8string();
+#endif
+}
 
 }  // namespace molink

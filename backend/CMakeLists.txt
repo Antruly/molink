@@ -472,6 +472,23 @@ if(MOLINK_BUILD_CORE)
   add_executable(molink-core ${MOLINK_CORE_SOURCES})
   target_include_directories(molink-core PRIVATE src)
 
+  # Windows: declare UTF-8 as the process ANSI code page. File names arrive as
+  # UTF-8 and are converted explicitly at the std::filesystem boundary, but the
+  # manifest also covers the C runtime and any narrow Win32 call left in the
+  # clipboard/capture code. MSVC embeds the XML directly; MinGW compiles a
+  # small resource script instead.
+  if(WIN32)
+    if(MSVC)
+      target_link_options(molink-core PRIVATE
+        "/MANIFEST:EMBED"
+        "/MANIFESTINPUT:${CMAKE_CURRENT_SOURCE_DIR}/src/molink-core.manifest")
+    else()
+      target_sources(molink-core PRIVATE src/molink-core.rc)
+      set_source_files_properties(src/molink-core.rc PROPERTIES
+        COMPILE_FLAGS "-I\"${CMAKE_CURRENT_SOURCE_DIR}/src\"")
+    endif()
+  endif()
+
   # Per-device self-signed certificate generation for the encrypted
   # transports. The runtime OpenSSL used by libuvcpp is a separate copy; the
   # certificate is exchanged as PEM, so the two never share objects.
