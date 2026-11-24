@@ -1170,6 +1170,10 @@ add_executable(molink-core-clipboard-route-test
   src/util.cpp
 )
 target_include_directories(molink-core-clipboard-route-test PRIVATE src)
+if(WIN32)
+  # util.cpp reaches Winsock/iphlpapi for local_ipv4_addresses.
+  target_link_libraries(molink-core-clipboard-route-test PRIVATE ws2_32 iphlpapi)
+endif()
 set_target_properties(molink-core-clipboard-route-test PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
