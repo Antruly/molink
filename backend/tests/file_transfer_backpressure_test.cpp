@@ -770,9 +770,13 @@ void test_download_pull_offset() {
   std::string received(size, '\0');
   for (const auto& chunk : chunks) {
     if (chunk.first >= size) continue;
-    const std::size_t take =
-        (std::min)(chunk.second.size(), size - chunk.first);
-    received.replace(chunk.first, take, chunk.second.data(), take);
+    // `size` is 64-bit and `size()` is size_t, which is 32-bit on the Windows
+    // 7 x86 build; min() needs both sides to be the same type.
+    const std::uint64_t take =
+        (std::min)(static_cast<std::uint64_t>(chunk.second.size()),
+                   size - chunk.first);
+    received.replace(chunk.first, static_cast<std::size_t>(take),
+                     chunk.second.data(), static_cast<std::size_t>(take));
   }
   // The prefix was already saved before the reconnect.
   received.replace(0, static_cast<std::size_t>(resume),
