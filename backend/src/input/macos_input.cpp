@@ -57,7 +57,7 @@ class macos_input final : public input_injector {
   }
 
   status button(int button_number, bool down) override {
-    if (button_number < 1 || button_number > 3) return status::rejected;
+    if (button_number < 1 || button_number > 5) return status::rejected;
     CGEventType type = kCGEventLeftMouseDown;
     CGMouseButton button = kCGMouseButtonLeft;
     if (button_number == 2) {
@@ -66,6 +66,11 @@ class macos_input final : public input_injector {
     } else if (button_number == 3) {
       type = down ? kCGEventRightMouseDown : kCGEventRightMouseUp;
       button = kCGMouseButtonRight;
+    } else if (button_number >= 4) {
+      // Side buttons: the protocol's 4/5 are back/forward, which CoreGraphics
+      // numbers 3/4 as "other" mouse buttons.
+      type = down ? kCGEventOtherMouseDown : kCGEventOtherMouseUp;
+      button = static_cast<CGMouseButton>(button_number - 1);
     } else {
       type = down ? kCGEventLeftMouseDown : kCGEventLeftMouseUp;
     }

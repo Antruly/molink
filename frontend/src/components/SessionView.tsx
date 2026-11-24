@@ -49,6 +49,11 @@ import {
 import { useTranslation } from 'react-i18next'
 import { MIN_FPS, fpsPlan, nextFpsUp } from '../lib/frame-rate'
 import {
+  createWheelAccumulator,
+  remoteButton,
+  wheelNotches,
+} from '../lib/pointer'
+import {
   ADVANCED_FPS_MAX,
   ADVANCED_FPS_MIN,
   advancedPresetMessage,
@@ -661,6 +666,9 @@ export function SessionView({
   const longPressTimer = useRef<number | null>(null)
   const suppressTap = useRef(false)
   const scrollAccum = useRef({ x: 0, y: 0 })
+  // Wheel notches the host has not received yet: a trackpad's 3 px steps add
+  // up here instead of each becoming a whole notch.
+  const wheelAccum = useRef(createWheelAccumulator())
   const lastCentroid = useRef<{ x: number; y: number } | null>(null)
   const composingRef = useRef(false)
 
@@ -2126,8 +2134,8 @@ export function SessionView({
     if (grabEligible) setKeyboardGrab(true)
     event.currentTarget.setPointerCapture(event.pointerId)
     connection()?.sendInput({ k: 'move', ...point })
-    if (event.button <= 2) {
-      const button = event.button + 1
+    const button = remoteButton(event.button)
+    if (button !== null) {
       pressedButtons.current.add(button)
       connection()?.sendInput({ k: 'button', button, down: true })
     }
@@ -2142,8 +2150,8 @@ export function SessionView({
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId)
     }
-    if (event.button <= 2) {
-      const button = event.button + 1
+    const button = remoteButton(event.button)
+    if (button !== null) {
       pressedButtons.current.delete(button)
       connection()?.sendInput({ k: 'button', button, down: false })
     }
@@ -2185,8 +2193,10 @@ export function SessionView({
       // the remote as well would defeat the purpose of that mode.
       if (displayMode === 'actual') return
       event.preventDefault()
-      const dy = event.deltaY === 0 ? 0 : event.deltaY > 0 ? 1 : -1
-      const dx = event.deltaX === 0 ? 0 : event.deltaX > 0 ? 1 : -1
+      // A trackpad reports pixels a few at a time. Accumulate them into whole
+      // notches (line/page modes are already whole units) instead of turning
+      // every event into one notch. Shift+wheel is horizontal.
+      const { dx, dy } = wheelNotches(wheelAccum.current, event)
       if (dx !== 0 || dy !== 0) connection()?.sendInput({ k: 'wheel', dx, dy })
     }
     element.addEventListener('wheel', onWheel, { passive: false })

@@ -86,12 +86,17 @@ class x11_input final : public input_injector {
   status button(int button_number, bool down) override {
     std::lock_guard<std::mutex> lock(mutex_);
     if (display_ == nullptr) return status::unavailable;
-    if (button_number < 1 || button_number > 7) return status::rejected;
-    fake_button_(display_, static_cast<unsigned>(button_number), down ? True : False,
-                 CurrentTime);
+    if (button_number < 1 || button_number > 9) return status::rejected;
+    // The protocol uses the Windows numbering for the side buttons (4 back,
+    // 5 forward). X11 calls the same physical buttons 8 and 9; its 4..7 are
+    // the wheel, which the `wheel` event injects directly.
+    unsigned int xbutton = static_cast<unsigned int>(button_number);
+    if (button_number == 4) xbutton = 8;
+    else if (button_number == 5) xbutton = 9;
+    fake_button_(display_, xbutton, down ? True : False, CurrentTime);
     XFlush(display_);
-    if (down) held_buttons_.insert(button_number);
-    else held_buttons_.erase(button_number);
+    if (down) held_buttons_.insert(static_cast<int>(xbutton));
+    else held_buttons_.erase(static_cast<int>(xbutton));
     return status::ok;
   }
 

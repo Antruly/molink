@@ -19,7 +19,9 @@
 #include "clipboard/clipboard.h"
 #include "clipboard_lazy.h"
 #include "file_transfer.h"
+#include "input/display_rect.h"
 #include "input/input.h"
+#include "input/input_event.h"
 #include "lock_state.h"
 #include "network_settings.h"
 #include "session_registry.h"
@@ -114,6 +116,14 @@ class session_controller final
   void attach_chat();
   void chat_history();
   void attach_call();
+  /// Re-aligns the injector with the capture when the host changes resolution
+  /// or display layout. Called before each input message, so the click that
+  /// follows a resolution change already uses the new rectangle.
+  void sync_input_rect();
+  /// Releases modifiers this session never sent a key-up for. The scan runs
+  /// every 10 s; the lease is 360 s.
+  void expire_held_keys();
+  void start_held_key_scan();
   /// Hop the call event onto the app loop: accept/decline arrive on an HTTP
   /// worker thread, while the voice engine and the websocket are owned by the
   /// app loop. Running both sides on the same thread also keeps the WASAPI
@@ -181,6 +191,16 @@ class session_controller final
   bool announced_initial_files_ = false;
   /// Rate limit for reporting silent input-injection failures to the client.
   std::uint64_t last_input_error_ms_ = 0;
+  /// Keys this session pressed and has not released. `release_all` at close
+  /// touches only these, so another viewer's held modifier survives.
+  held_key_state held_keys_;
+  /// Fractional wheel notches that did not reach a whole notch yet.
+  wheel_accumulator wheel_notches_;
+  /// Rectangle last given to the injector.
+  display_rect_state input_rect_;
+  std::unique_ptr<uvcpp::uvcpp_timer> held_scan_timer_;
+  static constexpr std::uint64_t kHeldKeyTimeoutMs = 360000;
+  static constexpr std::uint64_t kHeldKeyScanMs = 10000;
 };
 
 /// Sends keepalive pings and reaps sessions that never authenticated or went
