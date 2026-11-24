@@ -40,3 +40,7 @@ docs/testing.local.md
 
 # clangd's index cache: build output, not source.
 backend/.cache/
+
+# 本地构建产物与自签证书（不随仓库分发）
+dist-*/
+cer/
