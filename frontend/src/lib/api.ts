@@ -490,6 +490,9 @@ export interface SecuritySettings {
   encrypt_remote?: boolean
   encrypt_lan?: boolean
   stun_server?: string
+  /// Whitespace-separated CIDR list for incoming peers. Empty means no
+  /// restriction; loopback is always allowed.
+  ip_allowlist?: string
   device_name: string
   long_term_code: string
   restart_required: boolean
@@ -548,6 +551,7 @@ export function postSettings(
     encryptLan?: boolean
     name: string
     stunServer?: string
+    ipAllowlist?: string
   },
 ): Promise<SecuritySettings> {
   const query = new URLSearchParams({
@@ -567,6 +571,9 @@ export function postSettings(
     query.set('encrypt_lan', values.encryptLan ? '1' : '0')
   }
   if (values.stunServer !== undefined) query.set('stun', values.stunServer)
+  if (values.ipAllowlist !== undefined) {
+    query.set('ip_allowlist', values.ipAllowlist)
+  }
   return request<SecuritySettings>(
     `/api/settings?${query.toString()}`,
     { method: 'POST' },

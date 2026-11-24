@@ -47,6 +47,7 @@
 #include "directory_listing.h"
 #include "discovery.h"
 #include "identity.h"
+#include "net/ip_allowlist.h"
 #include "ui_store.h"
 #include "util.h"
 #include "version.h"
@@ -625,6 +626,33 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
     body["type"] = "error";
     body["code"] = "remote_access_disabled";
     body["message"] = "LAN access is disabled; enable it in Security";
+    resp.status(403).json(body);
+    resp.end();
+  });
+
+  // ---- IP allowlist ----------------------------------------------------
+  // Applies to /api/* for non-loopback peers. The settings API has already
+  // rejected malformed lists; a hand-edited one fails closed here. Loopback is
+  // never filtered, so the local UI can always fix the list. The value is read
+  // per request: a change affects the next request/connection and never drops
+  // a session that is already established.
+  app.use([deps](uvcpp_web_request& req, uvcpp_web_response& resp,
+                 uvcpp_web_next next) {
+    if (is_loopback_peer(req.peer_ip()) ||
+        req.path().compare(0, 5, "/api/") != 0) {
+      next();
+      return;
+    }
+    const app_settings settings =
+        deps.auth ? deps.auth->settings() : app_settings{};
+    if (allowlist_allows_text(settings.ip_allowlist, req.peer_ip())) {
+      next();
+      return;
+    }
+    uvcpp_json body;
+    body["type"] = "error";
+    body["code"] = "ip_not_allowed";
+    body["message"] = "this address is not in the host's IP allowlist";
     resp.status(403).json(body);
     resp.end();
   });
@@ -2983,6 +3011,7 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
             j["encrypt_lan"] = settings.encrypt_lan;
             j["file_sandbox"] = settings.file_sandbox;
             j["file_sandbox_roots"] = settings.file_sandbox_roots;
+            j["ip_allowlist"] = settings.ip_allowlist;
             j["device_name"] = settings.device_name;
             j["avatar"] = settings.avatar;
             j["server_enabled"] = settings.server_enabled;
@@ -3028,6 +3057,25 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
                  flag("file_sandbox", before.file_sandbox);
              const std::string* sandbox_roots =
                  req.query("file_sandbox_roots");
+             // Validate the allowlist before applying any other change, so an
+             // invalid list cannot leave the request half-applied. An empty
+             // value clears the restriction.
+             const std::string* allowlist_text = req.query("ip_allowlist");
+             if (allowlist_text != nullptr) {
+               allowlist parsed;
+               allowlist_error allowlist_error;
+               if (!allowlist_parse(*allowlist_text, parsed,
+                                    &allowlist_error)) {
+                 uvcpp_json body;
+                 body["type"] = "error";
+                 body["code"] = "invalid_ip_allowlist";
+                 body["entry"] = allowlist_error.entry;
+                 body["message"] = allowlist_error.message;
+                 resp.status(400).json(body);
+                 resp.end();
+                 return;
+               }
+             }
              const std::string* stun = req.query("stun");
              if (stun != nullptr && !deps.auth->set_stun_server(*stun)) {
                resp.status(400).json_str(R"({"code":"invalid_stun"})");
@@ -3054,6 +3102,9 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
                  file_sandbox,
                  sandbox_roots != nullptr ? *sandbox_roots
                                           : before.file_sandbox_roots);
+             if (allowlist_text != nullptr) {
+               deps.auth->set_ip_allowlist(*allowlist_text);
+             }
              const app_settings after = deps.auth->settings();
              if (deps.on_access_changed &&
                  after.allow_remote_access != before.allow_remote_access) {
@@ -3089,6 +3140,7 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
              j["encrypt_lan"] = after.encrypt_lan;
              j["file_sandbox"] = after.file_sandbox;
              j["file_sandbox_roots"] = after.file_sandbox_roots;
+             j["ip_allowlist"] = after.ip_allowlist;
              j["stun_server"] = after.stun_server;
              j["device_name"] = after.device_name;
              j["restart_required"] = false;

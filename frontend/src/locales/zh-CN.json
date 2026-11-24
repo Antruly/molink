@@ -260,6 +260,8 @@
     "domainHint": "同一域组码的设备会出现在各自的域组列表中；码的所有者更换后旧码立即失效。",
     "stunServer": "STUN 服务器",
     "stunServerHint": "用于跨 NAT 打洞。留空使用内置 stun.miwifi.com:3478；填 none 关闭 STUN。",
+    "ipAllowlist": "IP 白名单（CIDR）",
+    "ipAllowlistHint": "用空格或换行分隔，例如 192.168.2.0/24。留空表示不限制；回环地址始终允许。修改后对下一次连接生效，不会断开已建立的会话。",
     "encryptRemote": "远程会话加密（ID 服务器）",
     "encryptRemoteHint": "默认开启，修改后需要重启 moLink 才能切换监听模式。经 ID 服务器/中继的会话目前只加密外层 WSS。",
     "encryptLan": "局域网会话加密",

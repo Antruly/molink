@@ -33,6 +33,7 @@
 #include "capture/video_push.h"
 #include "clipboard_pull.h"
 #include "input/input_event.h"
+#include "net/ip_allowlist.h"
 #if MOLINK_HAVE_WEBRTC
 #include "webrtc/rtc_session.h"
 #endif
@@ -2045,6 +2046,23 @@ bool session_controller::start(const std::string* initial_token) {
     fields.push_back({"proto", transport->name()});
     fields.push_back({"path", transport->path()});
     diag().log(diag_level::info, "session.connect", std::string(), fields);
+  }
+
+  // Earliest possible rejection: the peer address is known before the hello
+  // is read. Loopback is always allowed and an empty list restricts nothing.
+  // The list is read live, so a change takes effect on the next connection;
+  // established sessions are never dropped by an allowlist edit.
+  if (options_.auth) {
+    const app_settings settings = options_.auth->settings();
+    if (!allowlist_allows_text(settings.ip_allowlist, peer_ip)) {
+      diag().log(diag_level::warn, "session.reject",
+                 "peer address is not in the IP allowlist",
+                 {{"reason", "allowlist"}, {"peer", peer_ip}});
+      send_error(transport.get(), "ip_not_allowed",
+                 "this address is not in the host's IP allowlist");
+      transport->close(transport_close::policy, "address not allowed");
+      return false;
+    }
   }
 
   if (options_.lock) {

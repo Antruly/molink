@@ -572,7 +572,7 @@ X11 的屏幕抓取**不包含鼠标光标**，服务端单独发送形状与位
 | GET | `/api/device` | 仅回环 | 设备 ID、本机会话 token、临时码状态；锁定时 423 |
 | GET | `/api/discovery` | 是 + 仅回环 | 局域网发现的设备列表 |
 | GET | `/api/settings` | 是 + 仅回环 | 安全设置与长期授权码 |
-| POST | `/api/settings?allow_remote=&allow_web=&discovery=&name=` | 是 + 仅回环 | 修改安全设置 |
+| POST | `/api/settings?allow_remote=&allow_web=&discovery=&name=&ip_allowlist=` | 是 + 仅回环 | 修改安全设置 |
 | POST | `/api/auth/code?mode=&uses=&value=` | 是 + 仅回环 | 切换/刷新单次或多次临时码 |
 | POST | `/api/auth/long-term?value=` | 是 + 仅回环 | 设置/生成长期授权码 |
 | GET | `/api/info` | 是 | 版本、绑定地址、能力开关、会话数 |
@@ -612,6 +612,7 @@ CORS 只对本地开发来源 `http://localhost:1420`、`http://127.0.0.1:1420` 
 
 - `peer` 为回环地址（`127.0.0.1`、`::1`、`::ffff:127.0.0.1`）时视为本机访问，可免验证读取 `/api/device`。
 - 默认只绑定回环；`allow_remote_access` 打开后才接受非回环连接，`allow_web_client` 控制非回环浏览器能否加载 UI/登录页。
+- `ip_allowlist`：空格或换行分隔的 CIDR 列表（IPv4/IPv6），空列表表示不限制。除回环（`127.0.0.0/8`、`::1`）外，地址必须落在列表内：WebSocket 握手在读取 `hello` 前即被关闭（`session.reject reason=allowlist`），非回环 `/api/*` 请求返回 `403 ip_not_allowed`。列表在每次连接/请求时读取，因此修改后对下一次连接生效；**不会断开已建立的会话**。保存时任意一条非法（如 `192.168.1.1/33`、缺少前缀）都会整条拒绝，返回 `400 invalid_ip_allowlist` 与 `entry` 序号。
 - 其他来源必须用授权码登录（`POST /api/login`）；成功后返回 `session_token`，后续 API 使用该 token。授权码分长期码、单次码、多次码：长期码始终有效；单次码用一次后自动换新；多次码按次数扣减，用完后自动换新。
 - 没有已鉴权 WebSocket 会话、且所有 UI 窗口上报的 `sessions` 为 0、且空闲超过 `lock_timeout` 秒时，核心锁定。
 - 锁定期间：除 `/api/state`、`/api/login`、`/api/health` 外的 `/api/*` 返回 `423 locked`；WS `hello` 以 `1008 locked` 关闭。

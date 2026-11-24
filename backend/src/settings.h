@@ -46,6 +46,10 @@ struct app_settings {
   /// `;`/newline separated write roots. Empty with `file_sandbox` on means the
   /// ordinary receive folder (`~/moLink`).
   std::string file_sandbox_roots;
+  /// Whitespace-separated CIDR list for incoming peers. Empty means no
+  /// restriction. Loopback is always allowed. Read per connection/request, so
+  /// a change applies to the next one and never drops an established session.
+  std::string ip_allowlist;
   std::string device_name;
 
   /// Host-side AV1 encoding. When on, the capture thread encodes the changed
