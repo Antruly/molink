@@ -371,6 +371,7 @@ interface AppState {
     encryptLan?: boolean
     name: string
     stunServer?: string
+    ipAllowlist?: string
   }) => Promise<boolean>
   decideAccessRequest: (id: number, allow: boolean) => Promise<void>
   setLongTermCode: (value: string) => Promise<boolean>

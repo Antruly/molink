@@ -256,6 +256,7 @@ set(MOLINK_CORE_SOURCES
   src/identity.cpp
   src/tls_identity.cpp
   src/lock_state.cpp
+  src/net/ip_allowlist.cpp
   src/session_registry.cpp
   src/session_preset.cpp
   src/service_control.cpp
@@ -734,6 +735,26 @@ endforeach()
 
 enable_testing()
 add_test(NAME protocol COMMAND molink-core-protocol-test)
+
+# CIDR parsing and matching for the IP allowlist. Pure libc (inet_pton), so it
+# builds and runs without libuvcpp.
+add_executable(molink-core-ip-allowlist-test
+  tests/ip_allowlist_test.cpp
+  src/net/ip_allowlist.cpp
+)
+target_include_directories(molink-core-ip-allowlist-test PRIVATE src)
+if(WIN32)
+  # inet_pton lives in Winsock.
+  target_link_libraries(molink-core-ip-allowlist-test PRIVATE ws2_32)
+endif()
+set_target_properties(molink-core-ip-allowlist-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
+  string(TOUPPER "${uvp_config}" uvp_config_upper)
+  set_target_properties(molink-core-ip-allowlist-test PROPERTIES
+    "RUNTIME_OUTPUT_DIRECTORY_${uvp_config_upper}" "${CMAKE_BINARY_DIR}")
+endforeach()
+add_test(NAME ip_allowlist COMMAND molink-core-ip-allowlist-test)
 
 # Diagnostic log rotation, retention, tailing and redaction. Pure filesystem
 # plus a fake clock, so it builds without libuvcpp.

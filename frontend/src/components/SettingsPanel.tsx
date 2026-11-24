@@ -86,6 +86,7 @@ function SecurityControls({
     encryptLan: boolean
     name: string
     stunServer?: string
+    ipAllowlist?: string
   }) => Promise<boolean>
   onLongTerm: (value: string) => Promise<boolean>
   onCustomCode: (uses: number, value: string) => Promise<AuthCode | null>
@@ -110,6 +111,7 @@ function SecurityControls({
   )
   const [name, setName] = useState(settings.device_name)
   const [stunServer, setStunServer] = useState(settings.stun_server ?? '')
+  const [ipAllowlist, setIpAllowlist] = useState(settings.ip_allowlist ?? '')
   const [longTerm, setLongTerm] = useState('')
   const [showLongTerm, setShowLongTerm] = useState(false)
   const [customUses, setCustomUses] = useState('1')
@@ -142,6 +144,7 @@ function SecurityControls({
     encryptLan?: boolean
     name?: string
     stunServer?: string
+    ipAllowlist?: string
   }) => {
     const nextRemote = values.allowRemote ?? allowRemote
     const ok = await onSave({
@@ -156,6 +159,7 @@ function SecurityControls({
       encryptLan: values.encryptLan ?? encryptLan,
       name: values.name ?? settings.device_name,
       stunServer: values.stunServer ?? stunServer,
+      ipAllowlist: values.ipAllowlist ?? ipAllowlist,
     })
     setNote(ok ? t('settings.saved') : t('error.settings_failed'))
     return ok
@@ -311,6 +315,22 @@ function SecurityControls({
             label={t('settings.encryptLan')}
           />
         </div>
+        <label className="block">
+          <span className="mb-1 block text-[10px] uppercase tracking-[0.14em] text-muted">
+            {t('settings.ipAllowlist')}
+          </span>
+          <textarea
+            className="field min-h-[72px] w-full px-2 py-1 font-mono text-[11px]"
+            value={ipAllowlist}
+            onChange={(event) => setIpAllowlist(event.target.value)}
+            onBlur={() => void persist({ ipAllowlist })}
+            placeholder={'192.168.2.0/24 10.0.0.5/32 fd00::/8'}
+            spellCheck={false}
+          />
+          <span className="mt-1 block text-[10px] leading-relaxed text-muted">
+            {t('settings.ipAllowlistHint')}
+          </span>
+        </label>
         <label className="block">
           <span className="mb-1 block text-[10px] uppercase tracking-[0.14em] text-muted">
             {t('settings.stunServer')}
@@ -1076,7 +1096,7 @@ export function SettingsPanel() {
             {section === 'security' ? (
               localMode && security ? (
                 <SecurityControls
-                  key={`${security.allow_remote_access}:${security.allow_web_client}:${security.discovery_enabled}:${security.allow_sync_between_sessions}:${security.device_name}:${security.long_term_code}`}
+                  key={`${security.allow_remote_access}:${security.allow_web_client}:${security.discovery_enabled}:${security.allow_sync_between_sessions}:${security.device_name}:${security.long_term_code}:${security.ip_allowlist ?? ''}`}
                   settings={security}
                   onSave={saveSecurity}
                   onLongTerm={setLongTermCode}

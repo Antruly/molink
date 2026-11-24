@@ -260,6 +260,8 @@
     "domainHint": "Devices with the same domain code appear in each other's domain list; rotating the owner's code invalidates the old one immediately.",
     "stunServer": "STUN server",
     "stunServerHint": "Used for ICE across NATs. Leave empty for the built-in stun.miwifi.com:3478; enter none to disable STUN.",
+    "ipAllowlist": "IP allowlist (CIDR)",
+    "ipAllowlistHint": "Space- or newline-separated CIDRs, for example 192.168.2.0/24. Empty means no restriction. Loopback is always allowed. A change applies to the next connection and does not disconnect established sessions.",
     "encryptRemote": "Encrypt ID-server sessions",
     "encryptRemoteHint": "On by default; restart moLink after changing it. ID-server/relay sessions currently encrypt the outer WSS only.",
     "encryptLan": "Encrypt LAN sessions",

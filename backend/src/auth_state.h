@@ -131,6 +131,9 @@ class auth_state {
   /// Optional write sandbox for the file channel. Off by default; `roots` is
   /// the raw `;`/newline separated list the settings screen edits.
   void set_file_sandbox(bool enabled, std::string roots);
+  /// Replacement CIDR allowlist text. The caller has already validated it;
+  /// an empty string clears the restriction.
+  void set_ip_allowlist(std::string value);
   /// Pinned stream codec: auto / av1 / h264 / vp9 / vp8.
   bool set_stream_codec(const std::string& codec);
   /// Video path: stream / mixed / tiles.

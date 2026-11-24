@@ -34,8 +34,16 @@ std::string trim(std::string value) {
   return value.substr(start);
 }
 
-bool parse_bool(const std::string& value, bool fallback) {
-  if (value == "1" || value == "true" || value == "yes" || value == "on") {
+/// The settings file is line-oriented, so a value that came from a textarea
+/// must be flattened before it is written.
+std::string single_line(std::string value) {
+  for (char& ch : value) {
+    if (ch == '\r' || ch == '\n' || ch == '\t') ch = ' ';
+  }
+  return value;
+}
+
+bool parse_bool(const std::string& value, bool fallback) {  if (value == "1" || value == "true" || value == "yes" || value == "on") {
     return true;
   }
   if (value == "0" || value == "false" || value == "no" || value == "off") {
@@ -179,6 +187,8 @@ app_settings load_settings() {
       settings.file_sandbox = parse_bool(value, false);
     } else if (key == "file_sandbox_roots") {
       settings.file_sandbox_roots = value;
+    } else if (key == "ip_allowlist") {
+      settings.ip_allowlist = value;
     } else if (key == "av1_enabled") {
       settings.av1_enabled = parse_bool(value, true);
     } else if (key == "av1_full_frame") {
@@ -312,6 +322,8 @@ void save_settings(const app_settings& settings) {
          << "\n";
   stream << "file_sandbox=" << (settings.file_sandbox ? 1 : 0) << "\n";
   stream << "file_sandbox_roots=" << settings.file_sandbox_roots << "\n";
+  // The settings file is line-oriented; a textarea's newlines become spaces.
+  stream << "ip_allowlist=" << single_line(settings.ip_allowlist) << "\n";
   stream << "av1_enabled=" << (settings.av1_enabled ? 1 : 0) << "\n";
   stream << "av1_full_frame=" << (settings.av1_full_frame ? 1 : 0) << "\n";
   stream << "av1_device=" << settings.av1_device << "\n";

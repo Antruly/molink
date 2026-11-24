@@ -84,6 +84,7 @@ QUIC/HTTP3 数据面在验证通过前保持 `available=false`。
 
 - 配置文件：`<配置目录>/settings`，权限 0600，包含：
   - `allow_remote_access`（默认 0）：允许非回环连接；关闭时非回环 TCP 在 HTTP 解析前立即关闭，打开/关闭都无需重启；
+  - `ip_allowlist`（默认空）：空格或换行分隔的 CIDR（如 `192.168.2.0/24 fd00::/8`）。空列表不限制；回环（`127.0.0.0/8`、`::1`）始终允许。只校验新连接：非回环的 `/api/*` 请求和 WebSocket 握手会被拒绝，已建立的会话不受影响；非法条目在保存时整条拒绝（400，带出错条目序号）。
   - `allow_web_client`（默认 0）：允许非回环浏览器加载 Web UI / 登录页；
   - `discovery_enabled`（默认 0）：UDP 组播发现，必须先开 `allow_remote_access`；
   - `device_name`；
