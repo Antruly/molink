@@ -90,10 +90,21 @@ class synthetic_capture : public capture_base {
       std::vector<uint8_t> payload;
       bool keyframe = false;
       std::string err;
+      const uint64_t capture_start_us = epoch_us();
       if (build_test_frame_payload(seq, pattern_, payload, keyframe, err)) {
+        const uint64_t capture_done_us = epoch_us();
         auto frame = std::make_shared<captured_frame>();
         frame->seq = seq++;
-        frame->ts_us = epoch_us();
+        frame->ts_us = capture_done_us;
+        frame->capture_start_us = capture_start_us;
+        frame->capture_done_us = capture_done_us;
+        // The synthetic source has no separate grab and encode: the pattern
+        // build is both. Report it as the encode so the latency line has a
+        // number for a host running on the test source.
+        frame->encode_start_us = capture_start_us;
+        frame->encode_end_us = capture_done_us;
+        frame->trigger = capture_trigger::timer;
+        frame->trigger_us = capture_start_us;
         frame->keyframe = keyframe;
         frame->width = pattern_.width;
         frame->height = pattern_.height;
@@ -115,10 +126,18 @@ class synthetic_capture : public capture_base {
     std::vector<uint8_t> payload;
     bool keyframe = false;
     std::string err;
+    const uint64_t capture_start_us = epoch_us();
     if (!build_test_frame_payload(seq, pattern_, payload, keyframe, err)) return;
+    const uint64_t capture_done_us = epoch_us();
     auto frame = std::make_shared<captured_frame>();
     frame->seq = seq;
-    frame->ts_us = epoch_us();
+    frame->ts_us = capture_done_us;
+    frame->capture_start_us = capture_start_us;
+    frame->capture_done_us = capture_done_us;
+    frame->encode_start_us = capture_start_us;
+    frame->encode_end_us = capture_done_us;
+    frame->trigger = capture_trigger::initial;
+    frame->trigger_us = capture_start_us;
     frame->keyframe = keyframe;
     frame->width = pattern_.width;
     frame->height = pattern_.height;

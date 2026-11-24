@@ -145,6 +145,7 @@ class windows_capture final : public capture_base {
     keyframe_requested_.store(true);
     auto next_allowed = std::chrono::steady_clock::now();
     auto last_full = std::chrono::steady_clock::now();
+    last_publish_ = std::chrono::steady_clock::now() - kInputCaptureGap;
     std::vector<uint8_t> pixels;
     // The last successful grab is still the current desktop whenever DXGI
     // reports no new frame. Kept for on-demand keyframes while the screen is
@@ -183,18 +184,28 @@ class windows_capture final : public capture_base {
       }
 
       std::string grab_error;
+      const bool input_ready = input_capture_ready(last_publish_);
+      const uint64_t loop_start_us = epoch_us();
+      capture_start_us_ = loop_start_us;
+      trigger_us_ = input_ready ? pending_input_us() : loop_start_us;
+      trigger_ = input_ready ? capture_trigger::input
+                             : capture_trigger::change;
       const bool got = grab(pixels, grab_error);
+      capture_done_us_ = epoch_us();
       update_cursor();
       if (got) {
         pixels_valid = true;
         last_grab_error.clear();
         const bool key = keyframe_requested_.exchange(false) || !have_previous_;
+        if (key) trigger_ = capture_trigger::keyframe;
         const int interval_ms =
             periodic_keyframe_ms() > 0 ? periodic_keyframe_ms() : 120000;
         const bool refresh_due =
             std::chrono::steady_clock::now() - last_full >
             std::chrono::milliseconds(interval_ms);
+        if (refresh_due) trigger_ = capture_trigger::keyframe;
         publish_frame(pixels, key || refresh_due);
+        last_publish_ = std::chrono::steady_clock::now();
         if (key || refresh_due) last_full = std::chrono::steady_clock::now();
       } else if (grab_error == "access_lost") {
         pixels_valid = false;
@@ -220,7 +231,12 @@ class windows_capture final : public capture_base {
         if (pixels_valid &&
             (keyframe_requested_.load() || refresh_due)) {
           keyframe_requested_.store(false);
+          trigger_ = capture_trigger::keyframe;
+          trigger_us_ = epoch_us();
+          capture_start_us_ = trigger_us_;
+          capture_done_us_ = trigger_us_;
           publish_frame(pixels, true);
+          last_publish_ = std::chrono::steady_clock::now();
           last_full = now;
         } else if (pixels_valid && stream_active()) {
           // An unchanged desktop needs no frame at all: re-encoding it every
@@ -241,9 +257,22 @@ class windows_capture final : public capture_base {
 
       const int fps = target_fps();
       next_allowed += std::chrono::milliseconds(1000 / fps);
-      const auto now = std::chrono::steady_clock::now();
-      if (next_allowed > now) std::this_thread::sleep_until(next_allowed);
-      else next_allowed = now;
+      auto now = std::chrono::steady_clock::now();
+      if (next_allowed < now) next_allowed = now;
+      // Input may skip the rest of the target-fps interval, but only down to
+      // the minimum gap; this is what turns a 200 ms wait at 5 fps into one
+      // frame interval on the next grab.
+      auto deadline = next_allowed;
+      if (input_priority_pending()) {
+        const auto input_deadline = last_publish_ + kInputCaptureGap;
+        if (input_deadline > now && input_deadline < deadline) {
+          deadline = input_deadline;
+        }
+      }
+      while (std::chrono::steady_clock::now() < deadline) {
+        wait_until(deadline);
+        if (input_capture_ready(last_publish_)) break;
+      }
     }
 
     teardown();
@@ -516,6 +545,7 @@ class windows_capture final : public capture_base {
     header.tile_h = tile;
 
     const auto build_start = std::chrono::steady_clock::now();
+    const uint64_t encode_start_us = epoch_us();
     std::vector<protocol::tile_blob> tiles;
     build_changed_tiles(pixels.data(), stride, width_, height_, tile,
                         previous_.data(), keyframe, nullptr,
@@ -549,6 +579,7 @@ class windows_capture final : public capture_base {
                            &av1_payload, err, &av1_only)) {
       return;
     }
+    const uint64_t encode_end_us = epoch_us();
     note_build_time(static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - build_start)
@@ -557,6 +588,12 @@ class windows_capture final : public capture_base {
     auto frame = std::make_shared<captured_frame>();
     frame->seq = frame_seq;
     frame->ts_us = epoch_us();
+    frame->capture_start_us = capture_start_us_;
+    frame->capture_done_us = capture_done_us_;
+    frame->encode_start_us = encode_start_us;
+    frame->encode_end_us = encode_end_us;
+    frame->trigger = trigger_;
+    frame->trigger_us = trigger_us_;
     frame->keyframe = keyframe;
     frame->width = width_;
     frame->height = height_;
@@ -674,6 +711,11 @@ class windows_capture final : public capture_base {
   }
 
   capture_options options_;
+  uint64_t capture_start_us_ = 0;
+  uint64_t capture_done_us_ = 0;
+  uint64_t trigger_us_ = 0;
+  capture_trigger trigger_ = capture_trigger::change;
+  std::chrono::steady_clock::time_point last_publish_{};
   ID3D11Device* device_ = nullptr;
   ID3D11DeviceContext* context_ = nullptr;
   IDXGIDevice* dxgi_device_ = nullptr;

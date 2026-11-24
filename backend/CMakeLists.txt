@@ -215,6 +215,7 @@ set(MOLINK_CORE_SOURCES
   src/capture/windows_secure_capture.cpp
   src/capture/capture_switch.cpp
   src/capture/frame_encode.cpp
+  src/capture/pipeline_stats.cpp
   src/capture/dirty_rects.cpp
   src/capture/av1_encoder.cpp
   src/capture/vpx_stream_encoder.cpp
@@ -801,6 +802,17 @@ target_include_directories(molink-core-frame-budget-test PRIVATE src)
 set_target_properties(molink-core-frame-budget-test PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 add_test(NAME frame_budget COMMAND molink-core-frame-budget-test)
+
+# The media pipeline window: injected clock, fake samples, and the exact
+# percentiles/counters the video.pipeline line reports.
+add_executable(molink-core-pipeline-stats-test
+  tests/pipeline_stats_test.cpp
+  src/capture/pipeline_stats.cpp
+)
+target_include_directories(molink-core-pipeline-stats-test PRIVATE src)
+set_target_properties(molink-core-pipeline-stats-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME pipeline_stats COMMAND molink-core-pipeline-stats-test)
 
 # Input event validation and the legacy key aliases. Pure platform-neutral
 # code: a fake injector checks every rejected path still carries a message.

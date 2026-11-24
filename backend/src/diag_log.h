@@ -16,7 +16,17 @@ struct diag_field {
   std::string value;
 };
 
-enum class diag_level { info, warn, error };
+/// Severity of a diagnostic line. `debug` is per-event detail (one line per
+/// frame); it is filtered out unless the minimum level is lowered, so the
+/// default file stays a 2-second summary timeline.
+enum class diag_level { debug, info, warn, error };
+
+/// Rank used for level filtering; higher is more severe.
+int diag_level_rank(diag_level level);
+
+/// Parses "debug"/"info"/"warn"/"error" (case-insensitive). False when the
+/// name is not recognised.
+bool diag_level_from_name(const std::string& name, diag_level& out);
 
 /// A daily-rolling, local-only diagnostic log.
 ///
@@ -39,7 +49,8 @@ class diag_log {
                     int retention_days = 7,
                     uint64_t max_file_bytes = 32ull * 1024 * 1024,
                     std::function<int64_t()> now_ms = {},
-                    std::size_t ring_lines = 2000);
+                    std::size_t ring_lines = 2000,
+                    diag_level min_level = diag_level::info);
   ~diag_log();
 
   diag_log(const diag_log&) = delete;
@@ -49,6 +60,15 @@ class diag_log {
   /// creates the directory and never deletes existing files.
   void set_enabled(bool enabled);
   bool enabled() const;
+
+  /// Lines below this level are dropped before formatting. Defaults to info;
+  /// MOLINK_DIAG_LEVEL=debug (or MOLINK_DIAG_DEBUG=1) lowers it for the
+  /// process-wide logger so the per-frame lines can be collected on a host.
+  void set_min_level(diag_level level);
+  diag_level min_level() const;
+  /// Whether a line at @p level would be written. Callers use this before
+  /// building per-frame fields, which are cheap but not free.
+  bool would_log(diag_level level) const;
 
   void log(diag_level level, const std::string& event,
            const std::string& message = std::string(),
@@ -100,6 +120,7 @@ class diag_log {
   uint64_t max_file_bytes_;
   std::function<int64_t()> now_ms_;
   std::size_t ring_capacity_;
+  diag_level min_level_;
 
   mutable std::mutex mutex_;
   std::deque<std::string> ring_;

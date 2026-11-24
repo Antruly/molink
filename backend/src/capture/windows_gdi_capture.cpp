@@ -152,6 +152,7 @@ class gdi_capture final : public capture_base {
 
   void run() {
     auto next = std::chrono::steady_clock::now();
+    last_publish_ = next - kInputCaptureGap;
     while (running_.load()) {
       if (!active_.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
@@ -162,9 +163,16 @@ class gdi_capture final : public capture_base {
       // made the host cursor (and layered windows) blink -- the same fix the
       // secure-desktop helper already carries. The composed desktop is in the
       // screen DC on every supported Windows version.
+      const uint64_t loop_start_us = epoch_us();
+      const bool input_ready = input_capture_ready(last_publish_);
+      capture_start_us_ = loop_start_us;
+      trigger_us_ = input_ready ? pending_input_us() : loop_start_us;
+      trigger_ = input_ready ? capture_trigger::input
+                             : capture_trigger::timer;
       const auto grab_start = std::chrono::steady_clock::now();
       if (BitBlt(mem_dc_, 0, 0, width_, height_, screen_dc_, x_, y_,
                  SRCCOPY)) {
+        capture_done_us_ = epoch_us();
         const auto grab_end = std::chrono::steady_clock::now();
         note_grab(true, width_, height_);
         publish_frame();
@@ -187,9 +195,19 @@ class gdi_capture final : public capture_base {
         }
       }
       next += std::chrono::milliseconds(1000 / std::max(1, target_fps()));
-      const auto now = std::chrono::steady_clock::now();
+      auto now = std::chrono::steady_clock::now();
       if (next < now) next = now;
-      std::this_thread::sleep_until(next);
+      auto deadline = next;
+      if (input_priority_pending()) {
+        const auto input_deadline = last_publish_ + kInputCaptureGap;
+        if (input_deadline > now && input_deadline < deadline) {
+          deadline = input_deadline;
+        }
+      }
+      while (std::chrono::steady_clock::now() < deadline) {
+        wait_until(deadline);
+        if (input_capture_ready(last_publish_)) break;
+      }
     }
   }
 
@@ -287,6 +305,11 @@ class gdi_capture final : public capture_base {
     if (tiles.empty() && !keyframe && encoding.av1_stream == nullptr) {
       return;
     }
+    if (keyframe) {
+      trigger_ = capture_trigger::keyframe;
+    } else if (encoding.av1_stream != nullptr) {
+      trigger_ = capture_trigger::stream;
+    }
     encoding.av1_stream_keyframe = stream_keyframe;
     encoding.av1_stream_qp = quality_av1_qp_stream();
     std::vector<uint8_t> av1_payload;
@@ -294,8 +317,10 @@ class gdi_capture final : public capture_base {
 
     std::vector<uint8_t> payload;
     std::string err;
+    const uint64_t encode_start_us = epoch_us();
     if (!encode_capture_frame(header, tiles, encoding, pixels, stride, payload,
                            &av1_payload, err, &av1_only)) return;
+    const uint64_t encode_end_us = epoch_us();
     note_build_time(static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - build_start)
@@ -304,6 +329,12 @@ class gdi_capture final : public capture_base {
     auto frame = std::make_shared<captured_frame>();
     frame->seq = frame_seq;
     frame->ts_us = epoch_us();
+    frame->capture_start_us = capture_start_us_;
+    frame->capture_done_us = capture_done_us_;
+    frame->encode_start_us = encode_start_us;
+    frame->encode_end_us = encode_end_us;
+    frame->trigger = trigger_;
+    frame->trigger_us = trigger_us_;
     frame->keyframe = keyframe;
     frame->width = width_;
     frame->height = height_;
@@ -313,6 +344,7 @@ class gdi_capture final : public capture_base {
     frame->payload = std::move(payload);
     frame->av1_payload = std::move(av1_payload);
     frame->av1_only = av1_only;
+    last_publish_ = std::chrono::steady_clock::now();
     publish(std::move(frame));
     have_previous_ = true;
   }
@@ -413,6 +445,11 @@ class gdi_capture final : public capture_base {
   }
 
   capture_options options_;
+  uint64_t capture_start_us_ = 0;
+  uint64_t capture_done_us_ = 0;
+  uint64_t trigger_us_ = 0;
+  capture_trigger trigger_ = capture_trigger::timer;
+  std::chrono::steady_clock::time_point last_publish_{};
   HDC screen_dc_ = nullptr;
   HDC mem_dc_ = nullptr;
   HBITMAP bitmap_ = nullptr;

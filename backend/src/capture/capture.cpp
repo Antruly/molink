@@ -103,8 +103,45 @@ void capture_base::note_viewer_rate(double fps, int target_fps, bool demand,
   }
 }
 
-int capture_base::quality_change_threshold(int configured) const {
-  const quality_profile profile = quality_profile_for(effective_quality());
+void capture_base::notify_wake() {
+  {
+    std::lock_guard<std::mutex> lock(wake_mutex_);
+    wake_pending_ = true;
+  }
+  wake_cv_.notify_all();
+}
+
+void capture_base::wait_until(
+    std::chrono::steady_clock::time_point deadline) {
+  std::unique_lock<std::mutex> lock(wake_mutex_);
+  wake_cv_.wait_until(lock, deadline, [this] {
+    if (!wake_pending_) return false;
+    wake_pending_ = false;
+    return true;
+  });
+}
+
+bool capture_base::input_priority_pending() const {
+  if (pending_input_us_.load() == 0) return false;
+  if (viewer_pressure_.load()) return false;
+  return monotonic_ms() >= switch_inhibit_until_ms_.load();
+}
+
+bool capture_base::input_capture_ready(
+    std::chrono::steady_clock::time_point last_capture) const {
+  if (!input_priority_pending()) return false;
+  return std::chrono::steady_clock::now() - last_capture >= kInputCaptureGap;
+}
+
+void capture_base::note_input_trigger(uint64_t& trigger_us,
+                                      capture_trigger& trigger) const {
+  const uint64_t input_us = pending_input_us_.load();
+  if (input_us == 0) return;
+  trigger_us = input_us;
+  trigger = capture_trigger::input;
+}
+
+int capture_base::quality_change_threshold(int configured) const {  const quality_profile profile = quality_profile_for(effective_quality());
   int value = configured;
   if (profile.minimum_change_threshold > 0) {
     value = std::max(value, profile.minimum_change_threshold);
@@ -683,6 +720,46 @@ void capture_base::publish(std::shared_ptr<captured_frame> frame) {
   // with what the viewer last acknowledged and sends stream-epoch_id before
   // the first frame of a new mode.
   frame->stream_epoch = stream_epoch_.load();
+
+  // The capture start is the anchor for "how long did the user's input wait".
+  // Only the first event of a burst is kept (see note_input) and it is
+  // consumed only by a frame that started after it; an input that arrives
+  // while the grab is already running belongs to the next frame.
+  const uint64_t input_us = pending_input_us_.load();
+  if (input_us != 0 && frame->capture_start_us >= input_us) {
+    uint64_t expected = input_us;
+    if (pending_input_us_.compare_exchange_strong(expected, 0)) {
+      const uint64_t delay = frame->capture_start_us - input_us;
+      // A pending input that no frame answered for seconds is a real stall,
+      // not noise; report it up to this bound, then treat it as history.
+      if (delay <= 2000000ULL) frame->input_delay_us = delay;
+    }
+  }
+  video_pipeline().note_capture(
+      frame->trigger, frame->trigger_us, frame->capture_start_us,
+      frame->capture_done_us, frame->encode_start_us, frame->encode_end_us,
+      frame->input_delay_us);
+  // Per-frame detail is opt-in (MOLINK_DIAG_LEVEL=debug). The info timeline
+  // carries only the two-second summary.
+  if (diag().would_log(diag_level::debug)) {
+    diag().log(diag_level::debug, "video.frame", std::string(),
+               {{"seq", std::to_string(frame->seq)},
+                {"trigger", capture_trigger_name(frame->trigger)},
+                {"capture_us",
+                 std::to_string(frame->capture_done_us >
+                                        frame->capture_start_us
+                                    ? frame->capture_done_us -
+                                          frame->capture_start_us
+                                    : 0)},
+                {"encode_us", std::to_string(frame->encode_end_us >
+                                                     frame->encode_start_us
+                                                 ? frame->encode_end_us -
+                                                       frame->encode_start_us
+                                                 : 0)},
+                {"input_ms", std::to_string(frame->input_delay_us / 1000)},
+                {"bytes", std::to_string(frame->payload.size() +
+                                         frame->av1_payload.size())}});
+  }
 
   std::lock_guard<std::mutex> lock(mutex_);
   update_cell_clock(*frame);

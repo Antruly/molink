@@ -193,6 +193,8 @@ std::string normalize_key(std::string key) {
 
 std::string level_name(diag_level level) {
   switch (level) {
+    case diag_level::debug:
+      return "DEBUG";
     case diag_level::warn:
       return "WARN";
     case diag_level::error:
@@ -320,16 +322,58 @@ std::vector<std::string> read_last_lines(const fs::path& path,
 
 }  // namespace
 
+int diag_level_rank(diag_level level) {
+  switch (level) {
+    case diag_level::debug:
+      return 0;
+    case diag_level::info:
+      return 1;
+    case diag_level::warn:
+      return 2;
+    case diag_level::error:
+      return 3;
+  }
+  return 1;
+}
+
+bool diag_level_from_name(const std::string& name, diag_level& out) {
+  std::string lower;
+  lower.reserve(name.size());
+  for (char c : name) {
+    lower.push_back(static_cast<char>(
+        std::tolower(static_cast<unsigned char>(c))));
+  }
+  if (lower == "debug") {
+    out = diag_level::debug;
+    return true;
+  }
+  if (lower == "info") {
+    out = diag_level::info;
+    return true;
+  }
+  if (lower == "warn" || lower == "warning") {
+    out = diag_level::warn;
+    return true;
+  }
+  if (lower == "error") {
+    out = diag_level::error;
+    return true;
+  }
+  return false;
+}
+
 diag_log::diag_log(std::string directory, bool enabled, int retention_days,
                    uint64_t max_file_bytes,
-                   std::function<int64_t()> now_ms, std::size_t ring_lines)
+                   std::function<int64_t()> now_ms, std::size_t ring_lines,
+                   diag_level min_level)
     : directory_(std::move(directory)),
       enabled_(enabled),
       retention_days_(std::max(1, retention_days)),
       max_file_bytes_(max_file_bytes > 0 ? max_file_bytes
                                          : 32ull * 1024 * 1024),
       now_ms_(std::move(now_ms)),
-      ring_capacity_(std::max<std::size_t>(1, ring_lines)) {}
+      ring_capacity_(std::max<std::size_t>(1, ring_lines)),
+      min_level_(min_level) {}
 
 diag_log::~diag_log() {
   std::lock_guard<std::mutex> lock(mutex_);
@@ -357,6 +401,21 @@ void diag_log::set_enabled(bool enabled) {
 bool diag_log::enabled() const {
   std::lock_guard<std::mutex> lock(mutex_);
   return enabled_;
+}
+
+void diag_log::set_min_level(diag_level level) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  min_level_ = level;
+}
+
+diag_level diag_log::min_level() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return min_level_;
+}
+
+bool diag_log::would_log(diag_level level) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return diag_level_rank(level) >= diag_level_rank(min_level_);
 }
 
 bool diag_log::is_secret_key(const std::string& key) {
@@ -535,6 +594,12 @@ void diag_log::write_locked(const std::string& line, int64_t now) {
 void diag_log::log(diag_level level, const std::string& event,
                    const std::string& message,
                    const std::vector<diag_field>& fields) {
+  // Filter before formatting: per-frame debug lines are the whole reason the
+  // level exists, and they must cost nothing when the summary is all we want.
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (diag_level_rank(level) < diag_level_rank(min_level_)) return;
+  }
   const int64_t now = now_ms();
   const std::string line = format_line(now, level, event, message, fields);
   std::lock_guard<std::mutex> lock(mutex_);
@@ -699,7 +764,20 @@ std::string default_diag_directory() {
 }
 
 diag_log& diag() {
-  static diag_log instance(default_diag_directory(), true);
+  static diag_log instance = [] {
+    diag_level level = diag_level::info;
+    if (const char* name = std::getenv("MOLINK_DIAG_LEVEL")) {
+      diag_level parsed = diag_level::info;
+      if (diag_level_from_name(name, parsed)) level = parsed;
+    } else if (const char* debug = std::getenv("MOLINK_DIAG_DEBUG")) {
+      // Shorthand kept for field diagnosis: MOLINK_DIAG_DEBUG=1.
+      if (debug != nullptr && *debug != '\0' && std::strcmp(debug, "0") != 0) {
+        level = diag_level::debug;
+      }
+    }
+    return diag_log(default_diag_directory(), true, 7,
+                    32ull * 1024 * 1024, {}, 2000, level);
+  }();
   return instance;
 }
 
