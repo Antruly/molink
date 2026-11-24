@@ -1753,11 +1753,12 @@ export const useAppStore = create<AppState>((set, get) => {
             useVirtual: () =>
               get().clipboardVirtualFiles &&
               get().device?.capabilities.clipboard_virtual === true,
-            // On Linux the setting is on but the core has no libfuse: say so
-            // instead of silently falling back to a full download.
+            // This core has the setting on but cannot publish virtual files:
+            // say so instead of silently falling back to a full download.
             noteVirtualFallback: () =>
               get().clipboardVirtualFiles &&
-              get().device?.platform === 'linux' &&
+              (get().device?.platform === 'linux' ||
+                get().device?.platform === 'windows') &&
               get().device?.capabilities.clipboard_virtual !== true,
             onPrompt: (prompt) => patchTab(id, { clipboardOffer: prompt }),
           },

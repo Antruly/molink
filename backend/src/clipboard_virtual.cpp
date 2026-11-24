@@ -146,6 +146,7 @@ void virtual_clipboard::clear_locked() {
     send_ = nullptr;
     bridge_ = false;
     bridge_id_ = 0;
+    pulls_disabled_ = false;
     for (auto& item : pending_) item.second->failed = true;
     pending_.clear();
   }
@@ -261,6 +262,9 @@ virtual_offer_error virtual_clipboard::offer(
     send_ = nullptr;
     bridge_ = false;
     bridge_id_ = 0;
+    // clear_locked() stopped the previous publisher, and stopping it disabled
+    // reads; this generation can serve again.
+    pulls_disabled_ = false;
   }
 
   std::vector<std::string> local_paths;
@@ -367,6 +371,10 @@ int virtual_clipboard::pull_block(
   {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!mount_) return -5;  // EIO
+    // The publisher lost the clipboard without a new generation being
+    // installed. Failing here is what turns a stale paste into a visible
+    // error instead of a 15 s block.
+    if (pulls_disabled_) return -5;
     // A read can only be served by a live session bridge. Without one the pull
     // would wait out the whole deadline and then report EIO, which shows up as
     // a file manager frozen for a minute mid-paste; fail while the paste has
@@ -496,6 +504,15 @@ int virtual_clipboard::pull_block(
   }
   std::memcpy(buffer, pending->data.data(), take);
   return static_cast<int>(take);
+}
+
+void virtual_clipboard::cancel_reads() {
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    pulls_disabled_ = true;
+    for (auto& item : pending_) item.second->failed = true;
+  }
+  cv_.notify_all();
 }
 
 int virtual_clipboard::read_file_range(uint32_t file_id, uint64_t offset,

@@ -224,6 +224,8 @@ set(MOLINK_CORE_SOURCES
   src/clipboard/x11_clipboard.cpp
   src/clipboard/windows_clipboard.cpp
   src/clipboard/windows_data_object.cpp
+  src/clipboard/windows_virtual_clipboard.cpp
+  src/clipboard/virtual_file_stream.cpp
   src/clipboard/clipboard_files.cpp
   src/clipboard/x11_clipboard_fuse.cpp
   src/clipboard_stage.cpp
@@ -887,6 +889,20 @@ set_target_properties(molink-core-clipboard-virtual-test PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 add_test(NAME clipboard_virtual COMMAND molink-core-clipboard-virtual-test)
 
+# The viewer-side IStream rules behind a virtual offer: 256 KiB range cap,
+# EOF/short-read handling, seek arithmetic and failure propagation. COM is not
+# involved, so this runs on every platform, including the Windows data object's
+# byte accounting on Linux CI.
+add_executable(molink-core-virtual-file-stream-test
+  tests/virtual_file_stream_test.cpp
+  src/clipboard/virtual_file_stream.cpp
+)
+target_include_directories(molink-core-virtual-file-stream-test PRIVATE src)
+set_target_properties(molink-core-virtual-file-stream-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME virtual_file_stream
+  COMMAND molink-core-virtual-file-stream-test)
+
 # Delayed clipboard rendering state machine: offer limits, per-session clear,
 # and the 15 s / 10 s render budget. Platform-neutral, so Windows-only delayed
 # rendering is still covered by the Linux CI build.
@@ -930,6 +946,8 @@ if(WIN32)
     tests/windows_clipboard_stream_test.cpp
     src/clipboard/windows_clipboard.cpp
     src/clipboard/windows_data_object.cpp
+    src/clipboard/windows_virtual_clipboard.cpp
+    src/clipboard/virtual_file_stream.cpp
     src/clipboard/clipboard_files.cpp
     src/clipboard_lazy.cpp
   )
@@ -959,6 +977,44 @@ if(WIN32)
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
   add_test(NAME windows_data_object
     COMMAND molink-core-windows-data-object-test)
+
+  # The viewer-side counterpart: the data object that publishes a remote
+  # clipboard selection as FileContents streams. It never touches the real
+  # clipboard, so it runs unconditionally on Windows.
+  add_executable(molink-core-windows-virtual-object-test
+    tests/windows_virtual_clipboard_test.cpp
+    src/clipboard/windows_virtual_clipboard.cpp
+    src/clipboard/windows_data_object.cpp
+    src/clipboard/virtual_file_stream.cpp
+  )
+  target_include_directories(molink-core-windows-virtual-object-test
+    PRIVATE src)
+  target_link_libraries(molink-core-windows-virtual-object-test
+    PRIVATE ole32 oleaut32 uuid shell32 user32)
+  set_target_properties(molink-core-windows-virtual-object-test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+  add_test(NAME windows_virtual_object
+    COMMAND molink-core-windows-virtual-object-test)
+
+  # The same offer through the real clipboard: STA thread, message loop,
+  # OleSetClipboard and a read back via OleGetClipboard. Gated because it
+  # replaces the developer's clipboard.
+  add_executable(molink-core-windows-virtual-install-test
+    tests/windows_virtual_clipboard_install_test.cpp
+    src/clipboard/windows_virtual_clipboard.cpp
+    src/clipboard/windows_data_object.cpp
+    src/clipboard/virtual_file_stream.cpp
+  )
+  target_include_directories(molink-core-windows-virtual-install-test
+    PRIVATE src)
+  target_link_libraries(molink-core-windows-virtual-install-test
+    PRIVATE ole32 oleaut32 uuid shell32 user32)
+  set_target_properties(molink-core-windows-virtual-install-test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+  add_test(NAME windows_virtual_install
+    COMMAND molink-core-windows-virtual-install-test)
+  set_tests_properties(windows_virtual_install PROPERTIES
+    SKIP_RETURN_CODE 77)
 endif()
 
 add_executable(molink-core-tile-scale-test

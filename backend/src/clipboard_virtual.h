@@ -130,6 +130,10 @@ class virtual_clipboard final
   int read_file_range(uint32_t file_id, uint64_t offset, uint64_t length,
                       char* buffer, std::size_t capacity) override;
 
+  /// The published offer stopped owning the clipboard. Fail every waiting
+  /// pull now instead of leaving a paste blocked until its 15 s timeout.
+  void cancel_reads() override;
+
  private:
   struct pending_read {
     uint32_t file_id = 0;
@@ -190,6 +194,9 @@ class virtual_clipboard final
   uint64_t next_generation_ = 0;
   send_text_fn send_;
   bool bridge_ = false;
+  /// Set when the publisher lost the clipboard. Reads fail immediately until
+  /// a new offer installs a fresh generation.
+  bool pulls_disabled_ = false;
   uint64_t next_bridge_id_ = 1;
   uint64_t bridge_id_ = 0;
   uint64_t pull_timeout_ms_ = kVirtualPullTimeoutMs;
