@@ -971,6 +971,7 @@ if(MOLINK_HAVE_X11)
   add_executable(molink-core-x11-clipboard-files-test
     tests/x11_clipboard_files_test.cpp
     src/clipboard/x11_clipboard.cpp
+    src/clipboard/clipboard_files.cpp
     src/clipboard/clipboard_image.cpp
     src/clipboard/clipboard_route.cpp
     src/diag_log.cpp
@@ -999,12 +1000,15 @@ if(WIN32)
     src/clipboard/clipboard_files.cpp
     src/clipboard/clipboard_image.cpp
     src/clipboard/clipboard_image_win.cpp
+    src/diag_log.cpp
+    src/util.cpp
     src/clipboard_lazy.cpp
   )
   target_include_directories(molink-core-windows-clipboard-stream-test
     PRIVATE src)
   target_link_libraries(molink-core-windows-clipboard-stream-test
-    PRIVATE ole32 oleaut32 uuid shell32 user32 gdi32 windowscodecs)
+    PRIVATE ole32 oleaut32 uuid shell32 user32 gdi32 windowscodecs
+            ws2_32 iphlpapi)
   set_target_properties(molink-core-windows-clipboard-stream-test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
   add_test(NAME windows_clipboard_stream

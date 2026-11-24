@@ -26,6 +26,9 @@
 #include <utility>
 #include <vector>
 
+#include "clipboard/clipboard_files.h"
+#include "diag_log.h"
+
 namespace molink {
 namespace {
 
@@ -98,10 +101,12 @@ std::string uri_encode_path(const std::string& path) {
 }
 
 /// Parse text/uri-list (one URI per line) or x-special/gnome-copied-files
-/// (a copy/cut line followed by URIs). Only local regular files are returned.
+/// (a copy/cut line followed by URIs). Local paths are walked, so a copied
+/// folder keeps its directory entries (including empty ones) and each
+/// descendant's relative path instead of arriving as loose files.
 std::vector<clipboard_file> parse_uri_list(const std::string& data,
                                            bool gnome_format) {
-  std::vector<clipboard_file> files;
+  std::vector<std::string> roots;
   std::istringstream stream(data);
   std::string line;
   bool first_line = true;
@@ -122,24 +127,19 @@ std::vector<clipboard_file> parse_uri_list(const std::string& data,
     if (!host.empty() && host != "localhost") continue;
     const std::string path = uri_decode(rest.substr(slash));
     if (path.empty()) continue;
-    std::error_code ec;
-    const std::filesystem::path fs_path(path);
-    if (!std::filesystem::is_regular_file(fs_path, ec) || ec) continue;
-    clipboard_file file;
-    file.path = path;
-    file.name = fs_path.filename().string();
-    const auto size = std::filesystem::file_size(fs_path, ec);
-    file.size = ec ? 0 : static_cast<uint64_t>(size);
-    bool duplicate = false;
-    for (const clipboard_file& existing : files) {
-      if (existing.path == file.path) {
-        duplicate = true;
-        break;
-      }
-    }
-    if (!duplicate) files.push_back(std::move(file));
+    roots.push_back(path);
   }
-  return files;
+  const clipboard_scan_result scan = scan_clipboard_paths(roots);
+  if (scan.truncated) {
+    diag().log(diag_level::warn, "clipboard.files",
+               "clipboard file enumeration truncated",
+               {{"truncated", "1"},
+                {"omitted", std::to_string(scan.omitted)},
+                {"max_files", std::to_string(kClipboardPathScanMax)},
+                {"directories", std::to_string(scan.directories)}});
+  }
+  clipboard_path_build built = build_clipboard_files(scan.entries);
+  return std::move(built.files);
 }
 
 class x11_clipboard final : public clipboard_service {
