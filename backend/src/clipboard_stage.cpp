@@ -8,6 +8,8 @@
 #include <system_error>
 #include <utility>
 
+#include "util.h"
+
 namespace molink {
 namespace {
 
@@ -106,9 +108,10 @@ uint64_t clipboard_stage::now_ms() const {
 bool clipboard_stage::ensure_directory_locked() {
   if (directory_.empty()) return false;
   std::error_code ec;
-  fs::create_directories(directory_, ec);
+  const fs::path directory = path_from_utf8(directory_);
+  fs::create_directories(directory, ec);
   if (ec) return false;
-  return fs::is_directory(directory_, ec) && !ec;
+  return fs::is_directory(directory, ec) && !ec;
 }
 
 bool clipboard_stage::valid_batch(const std::string& batch) {
@@ -121,35 +124,36 @@ bool clipboard_stage::valid_batch(const std::string& batch) {
 
 std::string clipboard_stage::unique_final_path_locked(
     const std::string& name, const std::string& directory) const {
-  const fs::path dir(directory);
+  const fs::path dir = path_from_utf8(directory);
   auto taken = [this](const fs::path& candidate) {
     std::error_code ec;
     if (fs::exists(candidate, ec) && !ec) return true;
-    const std::string text = candidate.filename().string();
+    const std::string text = path_to_utf8(candidate.filename());
     for (const auto& item : entries_) {
-      const fs::path existing(item.second.final_path);
+      const fs::path existing = path_from_utf8(item.second.final_path);
       // Names only collide inside one directory; `a.txt` in another batch's
       // folder is a different file.
       if (existing.parent_path() == candidate.parent_path() &&
-          same_name(existing.filename().string(), text)) {
+          same_name(path_to_utf8(existing.filename()), text)) {
         return true;
       }
     }
     return false;
   };
 
-  fs::path candidate = dir / name;
-  if (!taken(candidate)) return candidate.string();
-  const fs::path stem = fs::path(name).stem();
-  const std::string extension = fs::path(name).extension().string();
+  const fs::path name_path = path_from_utf8(name);
+  fs::path candidate = dir / name_path;
+  if (!taken(candidate)) return path_to_utf8(candidate);
+  const std::string stem = path_to_utf8(name_path.stem());
+  const std::string extension = path_to_utf8(name_path.extension());
   for (int i = 1; i < 10000; ++i) {
-    candidate =
-        dir / (stem.string() + " (" + std::to_string(i) + ")" + extension);
-    if (!taken(candidate)) return candidate.string();
+    candidate = dir / path_from_utf8(stem + " (" + std::to_string(i) + ")" +
+                                     extension);
+    if (!taken(candidate)) return path_to_utf8(candidate);
   }
-  candidate = dir / (stem.string() + "-" + std::to_string(now_ms()) +
-                     extension);
-  return candidate.string();
+  candidate = dir / path_from_utf8(stem + "-" + std::to_string(now_ms()) +
+                                   extension);
+  return path_to_utf8(candidate);
 }
 
 void clipboard_stage::sweep_locked(uint64_t now) {
@@ -158,7 +162,7 @@ void clipboard_stage::sweep_locked(uint64_t now) {
         now - it->second.updated_ms >= kEntryTtlMs) {
       std::error_code ec;
       if (it->second.temp_path != it->second.final_path) {
-        fs::remove(it->second.temp_path, ec);
+        fs::remove(path_from_utf8(it->second.temp_path), ec);
       }
       it = entries_.erase(it);
     } else {
@@ -184,7 +188,7 @@ void clipboard_stage::sweep_orphan_files_locked(uint64_t now) {
   auto sweep_one = [&](const fs::directory_entry& entry) {
     std::error_code file_ec;
     if (!entry.is_regular_file(file_ec) || file_ec) return;
-    const std::string name = entry.path().filename().string();
+    const std::string name = path_to_utf8(entry.path().filename());
     std::error_code time_ec;
     const auto written = entry.last_write_time(time_ec);
     if (time_ec) return;
@@ -194,7 +198,7 @@ void clipboard_stage::sweep_orphan_files_locked(uint64_t now) {
       fs::remove(entry.path(), time_ec);
     }
   };
-  fs::directory_iterator it(directory_, ec);
+  fs::directory_iterator it(path_from_utf8(directory_), ec);
   if (ec) return;
   for (const fs::directory_entry& entry : it) {
     std::error_code type_ec;
@@ -225,10 +229,11 @@ stage_error clipboard_stage::begin(const std::string& name, uint64_t size,
 
   std::string directory = directory_;
   if (!batch.empty()) {
-    directory = (fs::path(directory_) / batch).string();
+    const fs::path batch_dir = path_from_utf8(directory_) / path_from_utf8(batch);
+    directory = path_to_utf8(batch_dir);
     std::error_code dir_ec;
-    fs::create_directories(directory, dir_ec);
-    if (dir_ec || !fs::is_directory(directory, dir_ec) || dir_ec) {
+    fs::create_directories(batch_dir, dir_ec);
+    if (dir_ec || !fs::is_directory(batch_dir, dir_ec) || dir_ec) {
       return stage_error::io_error;
     }
   }
@@ -238,7 +243,8 @@ stage_error clipboard_stage::begin(const std::string& name, uint64_t size,
     stage_id = random_stage_id();
   }
   const std::string final_path = unique_final_path_locked(clean, directory);
-  const fs::path temp_path = fs::path(directory) / (".stage-" + stage_id);
+  const fs::path temp_path =
+      path_from_utf8(directory) / path_from_utf8(".stage-" + stage_id);
 
   std::ofstream out(temp_path, std::ios::binary | std::ios::trunc);
   if (!out) return stage_error::io_error;
@@ -249,7 +255,7 @@ stage_error clipboard_stage::begin(const std::string& name, uint64_t size,
   entry.id = stage_id;
   entry.name = clean;
   entry.final_path = final_path;
-  entry.temp_path = temp_path.string();
+  entry.temp_path = path_to_utf8(temp_path);
   entry.size = size;
   entry.received = 0;
   entry.updated_ms = now;
@@ -272,7 +278,7 @@ stage_error clipboard_stage::append(const std::string& id, uint64_t offset,
   if (offset != entry.received) return stage_error::conflict;
   if (length > entry.size - entry.received) return stage_error::too_large;
   if (length > 0) {
-    std::ofstream out(entry.temp_path,
+    std::ofstream out(path_from_utf8(entry.temp_path),
                       std::ios::binary | std::ios::app);
     if (!out) return stage_error::io_error;
     out.write(data, static_cast<std::streamsize>(length));
@@ -309,7 +315,8 @@ stage_error clipboard_stage::apply(const std::vector<std::string>& ids,
     staged_clipboard_entry& entry = entries_.at(id);
     if (entry.temp_path != entry.final_path) {
       std::error_code ec;
-      fs::rename(entry.temp_path, entry.final_path, ec);
+      fs::rename(path_from_utf8(entry.temp_path),
+                 path_from_utf8(entry.final_path), ec);
       if (ec) return stage_error::io_error;
       // A retry after a failed applier must not rename again.
       entry.temp_path = entry.final_path;
@@ -328,7 +335,7 @@ void clipboard_stage::abort(const std::string& id) {
   const auto it = entries_.find(id);
   if (it == entries_.end()) return;
   std::error_code ec;
-  fs::remove(it->second.temp_path, ec);
+  fs::remove(path_from_utf8(it->second.temp_path), ec);
   entries_.erase(it);
 }
 

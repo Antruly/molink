@@ -29,6 +29,17 @@ class file_transfer {
   using clock = std::chrono::steady_clock;
   static constexpr std::size_t kChunkBytes = 256 * 1024;
   static constexpr uint64_t kMaxFileBytes = 8ull * 1024 * 1024 * 1024;
+  /// Acknowledge at least this often, in chunks, and at least this often in
+  /// time. Acks are small control messages; batching them keeps a fast upload
+  /// from turning the control channel into a per-chunk echo.
+  static constexpr uint64_t kAckEveryChunks = 4;
+  static constexpr auto kAckInterval = std::chrono::milliseconds(200);
+  /// A chunk that arrives ahead of the contiguous receive point is answered
+  /// with `file-nack` so the viewer can resume there. A viewer that keeps
+  /// sending beyond this window, or makes no progress for this long, is
+  /// treated as unrecoverable and the upload is failed.
+  static constexpr uint64_t kMaxAheadBytes = 16ull * kChunkBytes;
+  static constexpr auto kOrderTimeout = std::chrono::seconds(30);
 
   enum class upload_event { accepted, progress, done, failed };
   /// Upload lifecycle for the delayed clipboard path. `tag` is the opaque
@@ -97,6 +108,13 @@ class file_transfer {
     std::string final_dir;
     uint64_t size = 0;
     uint64_t received = 0;
+    /// Contiguous offset already acknowledged to the viewer, and the ack
+    /// pacing state.
+    uint64_t acked = 0;
+    uint64_t chunks_since_ack = 0;
+    clock::time_point last_ack = clock::now();
+    /// Set when a chunk arrived beyond `received`; cleared by any progress.
+    std::optional<clock::time_point> disorder_since;
     std::ofstream out;
     std::optional<clock::time_point> complete_deadline;
     clock::time_point last_activity = clock::now();
@@ -118,10 +136,19 @@ class file_transfer {
   bool send_next(download& item, clock::time_point now);
 
   void fail(const std::string& action, uint32_t id, const std::string& why);
+  /// Fail an upload: `cancel` keeps older viewers working, `file-failed`
+  /// carries the file name and reason for the batch-failure summary.
+  void fail_upload(upload& item, const std::string& why);
+  void send_ack(upload& item);
+  void send_nack(upload& item);
+  void maybe_ack(upload& item, bool force);
   void send_simple(const std::string& action, uint32_t id = 0);
   void drop_upload(uint32_t id, bool remove_file);
   void notify_upload(const upload& item, upload_event event,
                      const std::string& path = std::string());
+  /// Creates the upload's temporary file without ever reusing a name that is
+  /// already on disk. Updates `item.temp_path`; false on failure.
+  bool create_temp_upload_file(upload& item, const std::string& dir);
 
   json_sender send_json_;
   chunk_sender send_chunk_;
@@ -129,6 +156,10 @@ class file_transfer {
   std::map<uint32_t, upload> uploads_;
   std::map<uint32_t, download> downloads_;
   uint32_t next_id_ = 1;
+  /// Random per-instance tag in the `.part` name. Each session owns its own
+  /// file_transfer, and the id counter restarts at 1, so the bare id used to
+  /// collide between two viewers uploading into the same folder.
+  std::string temp_tag_;
 };
 
 }  // namespace molink
