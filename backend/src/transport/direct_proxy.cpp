@@ -18,6 +18,8 @@
 #include <utility>
 #include <vector>
 
+#include <handle/uvcpp_loop.h>
+#include <handle/uvcpp_timer.h>
 #include <net/uvcpp_net_read.h>
 #include <net/uvcpp_tcp_client.h>
 #include <ssl/uvcpp_ssl_context.h>
@@ -41,12 +43,15 @@
 #endif
 
 #include "capture/av1_frame.h"
+#include "capture/pipeline_stats.h"
+#include "diag_log.h"
 #include "surface/frame_surface.h"
 #include "compression.h"
 #include "protocol/frame_packet.h"
 #include "transport/h2_ws_transport.h"
 #include "transport/peer_transports.h"
 #include "transport/relay_transport.h"
+#include "transport/tcp_backlog_policy.h"
 #include "transport/tls_pin.h"
 #include "transport/stream_transport.h"
 #include "util.h"
@@ -58,6 +63,12 @@ namespace {
 /// bounded backlog, matching the host's tcp_listener.
 constexpr std::size_t kMaxTcpBacklogBytes = 8u * 1024u * 1024u;
 
+/// File chunks the transport refused are held here and retried instead of
+/// being dropped. The viewer's ack window keeps at most ~2 MiB in flight, so
+/// this holds several windows' worth during a burst; beyond it the oldest
+/// chunk is discarded and the viewer's 2 s ack timeout resends it.
+constexpr std::size_t kMaxFileRetryBytes = 1024u * 1024u;
+
 struct tcp_link_state {
   uvcpp::uvcpp_tcp_client* client = nullptr;
   std::shared_ptr<stream_transport> link;
@@ -65,7 +76,39 @@ struct tcp_link_state {
   std::size_t queued = 0;
   bool writing = false;
   bool closed = false;
+  /// One keyframe request a second while video is being dropped, so a stalled
+  /// queue asks the host for a fresh baseline instead of only throwing frames
+  /// away. The host applies its own one-per-second budget as well.
+  std::chrono::steady_clock::time_point last_keyframe_request{};
 };
+
+void tcp_link_pump(const std::shared_ptr<tcp_link_state>& state);
+
+/// Queues a `request-keyframe` control packet on the upstream link, but only
+/// when the small message actually fits the backlog. The drop path calls this
+/// after a video frame was refused; if there is no room yet the next drop will
+/// try again once a write completed.
+void tcp_request_keyframe(const std::shared_ptr<tcp_link_state>& state) {
+  if (state->closed || state->client == nullptr) return;
+  const auto now = std::chrono::steady_clock::now();
+  if (state->last_keyframe_request.time_since_epoch().count() != 0 &&
+      now - state->last_keyframe_request < std::chrono::seconds(1)) {
+    return;
+  }
+  protocol::packet packet;
+  packet.type = static_cast<uint8_t>(protocol::packet_type::control);
+  const std::string text = "{\"type\":\"request-keyframe\"}";
+  packet.payload.assign(text.begin(), text.end());
+  std::vector<uint8_t> bytes;
+  std::string error;
+  if (!protocol::encode_packet(packet, bytes, error)) return;
+  if (state->queued + bytes.size() > kMaxTcpBacklogBytes) return;
+  state->last_keyframe_request = now;
+  state->queue.emplace_back(reinterpret_cast<const char*>(bytes.data()),
+                            bytes.size());
+  state->queued += bytes.size();
+  tcp_link_pump(state);
+}
 
 void tcp_link_fail(const std::shared_ptr<tcp_link_state>& state,
                    const std::string& reason) {
@@ -140,6 +183,10 @@ class direct_proxy final : public std::enable_shared_from_this<direct_proxy> {
           self->on_browser_close(code, reason);
         });
 
+    if (loop_ != nullptr) {
+      auto timer = std::make_unique<uvcpp::uvcpp_timer>(loop_);
+      if (timer->init() == 0) file_retry_timer_ = std::move(timer);
+    }
     start_worker();
     start_discovery();
   }
@@ -293,12 +340,25 @@ class direct_proxy final : public std::enable_shared_from_this<direct_proxy> {
       return;
     }
     std::shared_ptr<tcp_link_state> state = tcp_state_;
+    std::weak_ptr<direct_proxy> weak = weak_from_this();
     auto link = std::make_shared<stream_transport>(
-        [state](const uint8_t* data, std::size_t len) {
+        [state, weak](transport_channel channel, const uint8_t* data,
+                      std::size_t len) {
           if (state->closed || state->client == nullptr) return false;
-          if (state->queued + len > kMaxTcpBacklogBytes) {
-            tcp_link_fail(state, "TCP send backlog exceeded");
-            return false;
+          switch (tcp_backlog_admit(channel, state->queued, len,
+                                    kMaxTcpBacklogBytes)) {
+            case tcp_backlog_action::accept:
+              break;
+            case tcp_backlog_action::drop_video:
+              // The frame is obsolete by the time the backlog drains. Keep the
+              // link and ask for a fresh baseline instead of tearing the
+              // session down; control and file messages are still reliable.
+              if (auto self = weak.lock()) self->note_video_drop();
+              tcp_request_keyframe(state);
+              return false;
+            case tcp_backlog_action::fail_link:
+              tcp_link_fail(state, "TCP send backlog exceeded");
+              return false;
           }
           state->queue.emplace_back(reinterpret_cast<const char*>(data), len);
           state->queued += len;
@@ -655,7 +715,60 @@ class direct_proxy final : public std::enable_shared_from_this<direct_proxy> {
       pending_binary_.emplace_back(data, data + len);
       return;
     }
-    transport_->send_binary(data, len);
+    send_upstream_binary(data, len);
+  }
+
+  /// Sends one browser packet upstream. A file chunk refused by the transport
+  /// queue (the relay's file budget is 4 MiB) is retried, not dropped: a lost
+  /// chunk used to surface as "file chunk is out of order". Video and audio
+  /// keep their lossy behaviour.
+  void send_upstream_binary(const uint8_t* data, std::size_t len) {
+    if (!transport_ || !transport_->is_open()) {
+      pending_binary_.emplace_back(data, data + len);
+      return;
+    }
+    flush_file_retry();
+    if (pending_file_.empty() && transport_->send_binary(data, len)) return;
+    if (protocol::packet_stream_of(data, len) != protocol::packet_stream::file) {
+      // Lossy channels: dropping is the existing backpressure policy.
+      return;
+    }
+    while (!pending_file_.empty() &&
+           pending_file_bytes_ + len > kMaxFileRetryBytes) {
+      pending_file_bytes_ -= pending_file_.front().size();
+      pending_file_.pop_front();
+      std::fprintf(stderr,
+                   "direct proxy: file retry queue full; a chunk waits for the "
+                   "viewer's ack timeout\n");
+    }
+    if (pending_file_bytes_ + len > kMaxFileRetryBytes) return;
+    pending_file_.emplace_back(data, data + len);
+    pending_file_bytes_ += len;
+    start_file_retry_timer();
+  }
+
+  void flush_file_retry() {
+    if (!transport_ || !transport_->is_open()) return;
+    while (!pending_file_.empty()) {
+      const std::vector<uint8_t>& front = pending_file_.front();
+      if (!transport_->send_binary(front.data(), front.size())) break;
+      pending_file_bytes_ -= front.size();
+      pending_file_.pop_front();
+    }
+    if (pending_file_.empty() && file_retry_timer_ &&
+        file_retry_timer_->is_active()) {
+      file_retry_timer_->stop();
+    }
+  }
+
+  void start_file_retry_timer() {
+    if (!file_retry_timer_ || file_retry_timer_->is_active()) return;
+    std::weak_ptr<direct_proxy> weak = weak_from_this();
+    file_retry_timer_->start(
+        [weak](uvcpp::uvcpp_timer*) {
+          if (auto self = weak.lock()) self->flush_file_retry();
+        },
+        5, 5);
   }
 
   void on_browser_close(uvcpp::ws_close_code code, const std::string& reason) {
@@ -664,8 +777,11 @@ class direct_proxy final : public std::enable_shared_from_this<direct_proxy> {
     browser_ = nullptr;
     closed_ = true;
     stop_worker();
+    if (file_retry_timer_) file_retry_timer_->stop();
     pending_text_.clear();
     pending_binary_.clear();
+    pending_file_.clear();
+    pending_file_bytes_ = 0;
     if (transport_) transport_->close(transport_close::normal, "browser closed");
     transport_.reset();
 #if UVCPP_QUIC_ENABLE
@@ -678,6 +794,24 @@ class direct_proxy final : public std::enable_shared_from_this<direct_proxy> {
     stop_h2();
 #endif
     if (tcp_client_) tcp_client_->close();
+  }
+
+  /// One video frame was dropped because the upstream TCP queue is full. The
+  /// count feeds the pipeline's `dropped` summary; the log line is throttled
+  /// so a sustained backlog writes one per two seconds, not one per frame.
+  void note_video_drop() {
+    video_pipeline().note_dropped(1);
+    ++pending_video_drops_;
+    const auto now = std::chrono::steady_clock::now();
+    if (last_video_drop_log_.time_since_epoch().count() != 0 &&
+        now - last_video_drop_log_ < std::chrono::seconds(2)) {
+      return;
+    }
+    last_video_drop_log_ = now;
+    const std::size_t frames = pending_video_drops_;
+    pending_video_drops_ = 0;
+    diag().log(diag_level::warn, "video.drop", std::string(),
+               {{"reason", "backlog"}, {"frames", std::to_string(frames)}});
   }
 
   /// The page pushes the quality preset through this proxy; stream frames
@@ -707,7 +841,7 @@ class direct_proxy final : public std::enable_shared_from_this<direct_proxy> {
     flushed_ = true;
     for (const std::string& text : pending_text_) transport_->send_text(text);
     for (const std::vector<uint8_t>& data : pending_binary_) {
-      transport_->send_binary(data.data(), data.size());
+      send_upstream_binary(data.data(), data.size());
     }
     pending_text_.clear();
     pending_binary_.clear();
@@ -1006,6 +1140,9 @@ class direct_proxy final : public std::enable_shared_from_this<direct_proxy> {
 #endif
   std::deque<std::string> pending_text_;
   std::deque<std::vector<uint8_t>> pending_binary_;
+  std::deque<std::vector<uint8_t>> pending_file_;
+  std::size_t pending_file_bytes_ = 0;
+  std::unique_ptr<uvcpp::uvcpp_timer> file_retry_timer_;
   std::string hello_text_;
   bool hello_resent_ = false;
   bool flushed_ = false;
@@ -1036,6 +1173,9 @@ class direct_proxy final : public std::enable_shared_from_this<direct_proxy> {
   std::map<uint8_t, int> frame_codec_counts_;
   int frame_count_ = 0;
   std::chrono::steady_clock::time_point last_frame_log_{};
+  /// Egress drops on the bounded TCP link (see note_video_drop).
+  std::size_t pending_video_drops_ = 0;
+  std::chrono::steady_clock::time_point last_video_drop_log_{};
 };
 
 }  // namespace

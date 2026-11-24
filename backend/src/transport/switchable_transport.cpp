@@ -147,6 +147,15 @@ bool switchable_transport::send_binary(const uint8_t* data, std::size_t len) {
   return active_ && active_->send_binary(data, len);
 }
 
+uint64_t switchable_transport::take_video_drops() {
+  uint64_t drops = 0;
+  if (active_) drops += active_->take_video_drops();
+  if (relay_ && relay_.get() != active_.get()) {
+    drops += relay_->take_video_drops();
+  }
+  return drops;
+}
+
 bool switchable_transport::send_binary(transport_channel channel,
                                        const uint8_t* data,
                                        std::size_t len) {

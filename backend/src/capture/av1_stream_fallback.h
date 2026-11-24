@@ -60,6 +60,10 @@ class fallback_av1_stream_encoder final : public av1_stream_encoder {
         if (error.empty()) error = "av1 stream: no CPU encoder to fall back to";
         return false;
       }
+      // The factory captured the configuration from when this wrapper was
+      // built; carry a bitrate change that happened since into the new CPU
+      // encoder before its first picture.
+      if (has_kbps_) cpu_->set_bitrate(static_cast<uint32_t>(kbps_));
       // A fresh CPU stream has no reference picture, whatever the caller's
       // keyframe flag says.
       cpu_keyframe_ = true;
@@ -70,6 +74,15 @@ class fallback_av1_stream_encoder final : public av1_stream_encoder {
       return false;
     }
     cpu_keyframe_ = false;
+    return true;
+  }
+
+  bool set_bitrate(uint32_t kbps) override {
+    kbps_ = static_cast<int>(kbps);
+    has_kbps_ = true;
+    if (gpu_) return gpu_->set_bitrate(kbps);
+    if (cpu_) return cpu_->set_bitrate(kbps);
+    // Nothing built yet: the lazy CPU encoder applies this when it starts.
     return true;
   }
 
@@ -84,6 +97,8 @@ class fallback_av1_stream_encoder final : public av1_stream_encoder {
   int failures_ = 0;
   bool reported_ = false;
   bool cpu_keyframe_ = false;
+  int kbps_ = 0;
+  bool has_kbps_ = false;
 };
 
 }  // namespace molink

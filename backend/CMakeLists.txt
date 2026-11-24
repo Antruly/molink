@@ -473,6 +473,23 @@ if(MOLINK_BUILD_CORE)
   add_executable(molink-core ${MOLINK_CORE_SOURCES})
   target_include_directories(molink-core PRIVATE src)
 
+  # Windows: declare UTF-8 as the process ANSI code page. File names arrive as
+  # UTF-8 and are converted explicitly at the std::filesystem boundary, but the
+  # manifest also covers the C runtime and any narrow Win32 call left in the
+  # clipboard/capture code. MSVC embeds the XML directly; MinGW compiles a
+  # small resource script instead.
+  if(WIN32)
+    if(MSVC)
+      target_link_options(molink-core PRIVATE
+        "/MANIFEST:EMBED"
+        "/MANIFESTINPUT:${CMAKE_CURRENT_SOURCE_DIR}/src/molink-core.manifest")
+    else()
+      target_sources(molink-core PRIVATE src/molink-core.rc)
+      set_source_files_properties(src/molink-core.rc PROPERTIES
+        COMPILE_FLAGS "-I\"${CMAKE_CURRENT_SOURCE_DIR}/src\"")
+    endif()
+  endif()
+
   # Per-device self-signed certificate generation for the encrypted
   # transports. The runtime OpenSSL used by libuvcpp is a separate copy; the
   # certificate is exchanged as PEM, so the two never share objects.
@@ -804,6 +821,15 @@ target_include_directories(molink-core-frame-budget-test PRIVATE src)
 set_target_properties(molink-core-frame-budget-test PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 add_test(NAME frame_budget COMMAND molink-core-frame-budget-test)
+
+# Absolute-deadline capture pacing: no drift by encode time, no catch-up burst.
+add_executable(molink-core-frame-schedule-test
+  tests/frame_schedule_test.cpp
+)
+target_include_directories(molink-core-frame-schedule-test PRIVATE src)
+set_target_properties(molink-core-frame-schedule-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME frame_schedule COMMAND molink-core-frame-schedule-test)
 
 # The media pipeline window: injected clock, fake samples, and the exact
 # percentiles/counters the video.pipeline line reports.
@@ -1393,6 +1419,15 @@ target_include_directories(molink-core-channel-scheduler-test PRIVATE src)
 set_target_properties(molink-core-channel-scheduler-test PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 add_test(NAME channel_scheduler COMMAND molink-core-channel-scheduler-test)
+
+# A bounded TCP queue may drop video but must never drop reliable traffic.
+add_executable(molink-core-tcp-backlog-test
+  tests/tcp_backlog_test.cpp
+)
+target_include_directories(molink-core-tcp-backlog-test PRIVATE src)
+set_target_properties(molink-core-tcp-backlog-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME tcp_backlog COMMAND molink-core-tcp-backlog-test)
 
 # The relay/ICE split is pure routing: no libuvcpp and no sockets.
 add_executable(molink-core-switchable-test

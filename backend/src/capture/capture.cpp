@@ -507,8 +507,47 @@ av1_stream_encoder* capture_base::stream_for_frame_moving(
     rollback_stream("no decodable codec");
     return nullptr;
   }
+  const bool codec_changed = stream_encoder_ && video_codec_ != ladder.front();
   const bool budget_changed = applied_budget_kbps_ != budget_kbps;
-  if (stream_encoder_ && (video_codec_ != ladder.front() || budget_changed)) {
+  // Make before break: building a new encoder can take a second on the CPU
+  // VP9/VP8 path. Keep the old one producing frames meanwhile, so the viewer's
+  // picture never stops updating; the swap happens next frame.
+  const auto build_next_encoder = [&](const char* reason) {
+    av1_encoding_settings settings;
+    {
+      std::lock_guard<std::mutex> lock(av1_settings_mutex_);
+      settings = av1_settings_;
+    }
+    av1_encoder_config config;
+    config.device = settings.device;
+    config.speed = settings.speed;
+    config.threads = settings.threads;
+    config.max_bitrate_kbps = budget_kbps;
+    config.rate_mode = effective_rate_mode(budget_kbps);
+    for (const video_codec codec : ladder) {
+      std::string error;
+      if (auto encoder = make_stream_encoder(config, codec, &error)) {
+        stream_encoder_next_ = std::move(encoder);
+        next_codec_ = codec;
+        next_budget_kbps_ = budget_kbps;
+        break;
+      }
+    }
+    if (stream_encoder_next_ != nullptr) {
+      switch_pending_ = true;
+      diag().log(diag_level::info, "video.encoder", std::string(),
+                 {{"action", "rebuild"},
+                  {"reason", reason},
+                  {"codec", video_codec_name(ladder.front())},
+                  {"kbps", std::to_string(budget_kbps)},
+                  {"backend", backend()}});
+    } else {
+      // The new rung cannot be built: keep the old picture instead of
+      // dropping to tiles, and let the next evaluation try again.
+      stream_keyframe_pending_.store(false);
+    }
+  };
+  if (stream_encoder_ && (codec_changed || budget_changed)) {
     const bool pending_matches =
         switch_pending_ && next_codec_ == ladder.front() &&
         next_budget_kbps_ == budget_kbps;
@@ -524,37 +563,24 @@ av1_stream_encoder* capture_base::stream_for_frame_moving(
                  {{"codec", video_codec_name(video_codec_)},
                   {"kbps", std::to_string(applied_budget_kbps_)},
                   {"backend", backend()}});
+    } else if (!codec_changed && !switch_pending_ &&
+               stream_encoder_->set_bitrate(
+                   static_cast<uint32_t>(budget_kbps))) {
+      // The QoS controller moved the budget: apply it to the live encoder so
+      // its reference chain (and the viewer's decoder state) survives. Before
+      // this, every one-second weight change re-created the encoder and
+      // inserted a full keyframe, which is exactly the stutter the controller
+      // is trying to avoid.
+      applied_budget_kbps_ = budget_kbps;
+      diag().log(diag_level::info, "video.encoder", "bitrate",
+                 {{"codec", video_codec_name(video_codec_)},
+                  {"kbps", std::to_string(applied_budget_kbps_)},
+                  {"backend", backend()}});
     } else {
-      // Make before break: building the new encoder can take a second on the
-      // CPU VP9/VP8 path. Keep the old one producing frames meanwhile, so the
-      // viewer's picture never stops updating; the swap happens next frame.
-      av1_encoding_settings settings;
-      {
-        std::lock_guard<std::mutex> lock(av1_settings_mutex_);
-        settings = av1_settings_;
-      }
-      av1_encoder_config config;
-      config.device = settings.device;
-      config.speed = settings.speed;
-      config.threads = settings.threads;
-      config.max_bitrate_kbps = budget_kbps;
-      config.rate_mode = effective_rate_mode(budget_kbps);
-      for (const video_codec codec : ladder) {
-        std::string error;
-        if (auto encoder = make_stream_encoder(config, codec, &error)) {
-          stream_encoder_next_ = std::move(encoder);
-          next_codec_ = codec;
-          next_budget_kbps_ = budget_kbps;
-          break;
-        }
-      }
-      if (stream_encoder_next_ != nullptr) {
-        switch_pending_ = true;
-      } else {
-        // The new rung cannot be built: keep the old picture instead of
-        // dropping to tiles, and let the next evaluation try again.
-        stream_keyframe_pending_.store(false);
-      }
+      // Codec change, or a backend without an in-place rate control: rebuild
+      // on the side and swap next frame. The log names the reason so a field
+      // report can tell a codec switch from a rate-control fallback.
+      build_next_encoder(codec_changed ? "codec" : "budget");
     }
   }
   if (!stream_policy_.streaming && !stream_policy_.armed) return nullptr;

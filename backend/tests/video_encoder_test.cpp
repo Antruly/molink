@@ -99,6 +99,23 @@ void test_base_defaults() {
   expect(!encoder.hardware(), "backends are software unless they say otherwise");
 }
 
+/// In-place bitrate changes are opt-in: a backend that cannot reconfigure its
+/// rate control says so, and the capture rebuilds it instead.
+void test_stream_bitrate_default() {
+  struct stream_only final : molink::av1_stream_encoder {
+    molink::video_codec codec() const override {
+      return molink::video_codec::av1_stream;
+    }
+    bool encode_stream(const uint8_t*, std::size_t, int, int, int, bool,
+                       std::vector<uint8_t>&, bool&, std::string&) override {
+      return true;
+    }
+  };
+  stream_only encoder;
+  expect(!encoder.set_bitrate(2000),
+         "the base stream interface refuses an unsupported rate change");
+}
+
 }  // namespace
 
 int main() {
@@ -106,6 +123,7 @@ int main() {
   test_backend_list_is_consistent();
   test_codec_names();
   test_base_defaults();
+  test_stream_bitrate_default();
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
 }

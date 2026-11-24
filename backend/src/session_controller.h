@@ -229,6 +229,9 @@ class session_supervisor {
   /// before the capture is told to cut detail, so one hiccup cannot soften
   /// the picture.
   int viewer_behind_streak_ = 0;
+  /// Last `video.drop` line; a sustained egress backlog writes at most one
+  /// per two seconds instead of one per discarded frame.
+  uint64_t last_video_drop_log_ms_ = 0;
 };
 
 }  // namespace molink

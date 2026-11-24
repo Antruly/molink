@@ -242,6 +242,9 @@ export interface FileMessage {
   /// The host stopped at its entry cap.
   truncated?: boolean
   chunk?: number
+  /// Upload pacing: the host's contiguous byte count, on `file-ack`
+  /// (confirmed) and `file-nack` (how far it got before the gap).
+  received?: number
   count?: number
   entries?: FileEntry[]
   message?: string

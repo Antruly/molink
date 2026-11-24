@@ -165,6 +165,11 @@ bool relay_ladder::send_binary(const uint8_t* data, std::size_t len) {
   return active_->send_binary(data, len);
 }
 
+uint64_t relay_ladder::take_video_drops() {
+  if (!active_) return 0;
+  return active_->take_video_drops();
+}
+
 void relay_ladder::close(int code, const std::string& reason) {
   (void)code;
   (void)reason;

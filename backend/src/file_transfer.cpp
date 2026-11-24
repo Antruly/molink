@@ -1,14 +1,26 @@
 #include "file_transfer.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <cctype>
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <optional>
+#include <random>
 #include <system_error>
 #include <utility>
 #include <vector>
+
+#if defined(_WIN32)
+#include <fcntl.h>
+#include <io.h>
+#include <sys/stat.h>
+#else
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 #include <webapp/uvcpp_web_json.h>
 
@@ -28,17 +40,64 @@ std::string dump_json(const uvcpp_json& value) {
                     nlohmann::json::error_handler_t::replace);
 }
 
+std::string errno_text() {
+  const int value = errno;
+  return value == 0 ? std::string("unknown error") : std::strerror(value);
+}
+
+/// A short random tag for a temporary file name, so two sessions (or two
+/// cores) can never mistake each other's `.part` file for their own.
+std::string random_hex_tag(std::size_t digits) {
+  static const char kHex[] = "0123456789abcdef";
+  std::random_device device;
+  std::string out;
+  out.reserve(digits);
+  while (out.size() < digits) {
+    const uint32_t value = static_cast<uint32_t>(device());
+    for (int shift = 28; shift >= 0 && out.size() < digits; shift -= 4) {
+      out.push_back(kHex[(value >> shift) & 0xf]);
+    }
+  }
+  return out;
+}
+
 std::string home_directory() {
 #if defined(_WIN32)
-  const char* profile = std::getenv("USERPROFILE");
-  if (profile != nullptr && *profile != '\0') return profile;
-  const char* drive = std::getenv("HOMEDRIVE");
-  const char* path = std::getenv("HOMEPATH");
-  if (drive != nullptr && path != nullptr) return std::string(drive) + path;
+  // The environment block is Unicode; reading it as narrow text would use the
+  // ANSI code page and mangle a Chinese user name on a zh-CN host.
+  const wchar_t* profile = _wgetenv(L"USERPROFILE");
+  if (profile != nullptr && *profile != L'\0') {
+    return path_to_utf8(fs::path(std::wstring(profile)));
+  }
+  const wchar_t* drive = _wgetenv(L"HOMEDRIVE");
+  const wchar_t* path = _wgetenv(L"HOMEPATH");
+  if (drive != nullptr && path != nullptr) {
+    return path_to_utf8(fs::path(std::wstring(drive) + path));
+  }
   return "C:\\";
 #else
   const char* home = std::getenv("HOME");
   return home != nullptr && *home != '\0' ? home : "/";
+#endif
+}
+
+/// Reserves `path` exclusively (`O_EXCL`). The returned handle is only used as
+/// a collision test: the actual writes go through `item.out`.
+int open_exclusive(const fs::path& path) {
+#if defined(_WIN32)
+  return _wopen(path.c_str(),
+                _O_CREAT | _O_EXCL | _O_WRONLY | _O_BINARY,
+                _S_IREAD | _S_IWRITE);
+#else
+  return ::open(path.c_str(), O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0600);
+#endif
+}
+
+void close_handle(int handle) {
+#if defined(_WIN32)
+  _close(handle);
+#else
+  ::close(handle);
 #endif
 }
 
@@ -55,15 +114,15 @@ bool within_root(const fs::path& root, const fs::path& candidate) {
   auto c = candidate.begin();
   for (; r != root.end(); ++r, ++c) {
     if (c == candidate.end()) return false;
-    if (lowered(r->string()) != lowered(c->string())) return false;
+    if (lowered(path_to_utf8(*r)) != lowered(path_to_utf8(*c))) return false;
   }
   return true;
 }
 
 fs::path home_root() {
   std::error_code ec;
-  fs::path root = fs::weakly_canonical(fs::path(home_directory()), ec);
-  return ec ? fs::path(home_directory()) : root;
+  fs::path root = fs::weakly_canonical(path_from_utf8(home_directory()), ec);
+  return ec ? path_from_utf8(home_directory()) : root;
 }
 
 /// Resolve a peer-supplied path to an absolute path on this machine. `~` and
@@ -73,11 +132,11 @@ fs::path home_root() {
 /// the viewer can browse and fetch any file the host user can read. `..` is
 /// collapsed lexically and can never climb above a volume root.
 std::optional<fs::path> resolve_path(const std::string& raw) {
-  if (raw.empty()) return fs::path(home_directory());
+  if (raw.empty()) return path_from_utf8(home_directory());
   const std::optional<std::string> normalized =
       fslist::normalize_browse_path(raw, home_directory());
   if (!normalized) return std::nullopt;
-  return fs::path(*normalized);
+  return path_from_utf8(*normalized);
 }
 
 /// The character filter shared by file names and path segments.
@@ -110,25 +169,27 @@ std::string clean_file_name(const std::string& name) {
 }
 
 std::string unique_path_in(const fs::path& dir, const std::string& name) {
-  fs::path candidate = dir / name;
+  const fs::path name_path = path_from_utf8(name);
+  fs::path candidate = dir / name_path;
   std::error_code ec;
-  if (!fs::exists(candidate, ec)) return candidate.string();
-  const fs::path stem = fs::path(name).stem();
-  const std::string extension = fs::path(name).extension().string();
+  if (!fs::exists(candidate, ec)) return path_to_utf8(candidate);
+  const std::string stem = path_to_utf8(name_path.stem());
+  const std::string extension = path_to_utf8(name_path.extension());
   for (int i = 1; i < 10000; ++i) {
-    candidate = dir / (stem.string() + " (" + std::to_string(i) + ")" +
-                       extension);
-    if (!fs::exists(candidate, ec)) return candidate.string();
+    candidate = dir / path_from_utf8(stem + " (" + std::to_string(i) + ")" +
+                                     extension);
+    if (!fs::exists(candidate, ec)) return path_to_utf8(candidate);
   }
-  return (dir / (stem.string() + "-" + std::to_string(now_ms()) + extension))
-      .string();
+  return path_to_utf8(dir / path_from_utf8(stem + "-" +
+                                           std::to_string(now_ms()) +
+                                           extension));
 }
 
 std::string receive_directory() {
   const fs::path dir = home_root() / "moLink";
   std::error_code ec;
   fs::create_directories(dir, ec);
-  return dir.string();
+  return path_to_utf8(dir);
 }
 
 /// Resolves the viewer's destination folder. Empty means ~/moLink; `~` is the
@@ -144,14 +205,14 @@ std::string resolve_destination(const std::string& requested) {
   } else if (text.rfind("~/", 0) == 0 || text.rfind("~\\", 0) == 0) {
     target = home_root() / text.substr(2);
   } else {
-    target = fs::path(text);
+    target = path_from_utf8(text);
     if (target.is_relative()) target = home_root() / target;
   }
   std::error_code ec;
   fs::create_directories(target, ec);
   if (ec) return std::string();
   if (!fs::is_directory(target, ec) || ec) return std::string();
-  return target.lexically_normal().string();
+  return path_to_utf8(target.lexically_normal());
 }
 
 /// Windows reserves these device names in every directory, with or without an
@@ -227,7 +288,7 @@ bool prepare_directory(const fs::path& root,
   if (ec) base = root;
   out = base;
   for (const std::string& segment : segments) {
-    out /= segment;
+    out /= path_from_utf8(segment);
     std::error_code check_ec;
     const fs::path canonical = fs::weakly_canonical(out, check_ec);
     if (check_ec || !within_root(base, canonical)) return false;
@@ -247,7 +308,9 @@ std::string join_segments(const std::vector<std::string>& segments) {
 }  // namespace
 
 file_transfer::file_transfer(json_sender send_json, chunk_sender send_chunk)
-    : send_json_(std::move(send_json)), send_chunk_(std::move(send_chunk)) {}
+    : send_json_(std::move(send_json)),
+      send_chunk_(std::move(send_chunk)),
+      temp_tag_(random_hex_tag(8)) {}
 
 file_transfer::~file_transfer() { close_all(); }
 
@@ -281,6 +344,77 @@ void file_transfer::send_simple(const std::string& action, uint32_t id) {
   j["action"] = action;
   if (id != 0) j["id"] = id;
   j["ok"] = true;
+  send_json_(dump_json(j));
+}
+
+bool file_transfer::create_temp_upload_file(upload& item,
+                                            const std::string& dir) {
+  const fs::path dir_path = path_from_utf8(dir);
+  for (int attempt = 0; attempt < 2; ++attempt) {
+    const std::string suffix =
+        attempt == 0 ? std::string() : "-" + random_hex_tag(4);
+    const fs::path candidate =
+        dir_path / path_from_utf8(".upload-" + temp_tag_ + "-" +
+                                  std::to_string(item.id) + suffix + ".part");
+    const int handle = open_exclusive(candidate);
+    if (handle < 0) {
+      if (errno != EEXIST) return false;
+      continue;
+    }
+    close_handle(handle);
+    std::ofstream out(candidate, std::ios::binary | std::ios::trunc);
+    if (!out) {
+      std::error_code remove_ec;
+      fs::remove(candidate, remove_ec);
+      return false;
+    }
+    item.temp_path = path_to_utf8(candidate);
+    item.out = std::move(out);
+    return true;
+  }
+  return false;
+}
+
+void file_transfer::send_ack(upload& item) {
+  uvcpp_json j;
+  j["type"] = "file";
+  j["action"] = "file-ack";
+  j["id"] = item.id;
+  j["received"] = item.received;
+  send_json_(dump_json(j));
+  item.acked = item.received;
+  item.chunks_since_ack = 0;
+  item.last_ack = clock::now();
+}
+
+void file_transfer::send_nack(upload& item) {
+  uvcpp_json j;
+  j["type"] = "file";
+  j["action"] = "file-nack";
+  j["id"] = item.id;
+  j["received"] = item.received;
+  send_json_(dump_json(j));
+}
+
+void file_transfer::maybe_ack(upload& item, bool force) {
+  if (!force && item.chunks_since_ack < kAckEveryChunks &&
+      clock::now() - item.last_ack < kAckInterval) {
+    return;
+  }
+  send_ack(item);
+}
+
+void file_transfer::fail_upload(upload& item, const std::string& why) {
+  fail("cancel", item.id, why);
+  // Additive signal for viewers that can aggregate a failed batch. Older
+  // viewers ignore an unknown action and already saw the `cancel` above.
+  uvcpp_json j;
+  j["type"] = "file";
+  j["action"] = "file-failed";
+  j["ok"] = false;
+  j["id"] = item.id;
+  j["name"] = item.name;
+  j["message"] = why;
   send_json_(dump_json(j));
 }
 
@@ -325,16 +459,15 @@ void file_transfer::offer(const std::string& name, uint64_t size,
   item.id = id;
   item.tag = tag;
   item.name = base;
-  item.final_dir = final_dir.string();
-  item.temp_path = (fs::path(dir) / (".upload-" + std::to_string(id) + ".part"))
-                       .string();
+  item.final_dir = path_to_utf8(final_dir);
   item.size = size;
-  item.out.open(item.temp_path, std::ios::binary | std::ios::trunc);
-  if (!item.out) {
-    fail("reject", 0, "could not create the file");
+  if (!create_temp_upload_file(item, dir)) {
+    fail("reject", 0,
+         "could not create " + base + ": " + errno_text());
     return;
   }
   item.last_activity = clock::now();
+  item.last_ack = item.last_activity;
   uploads_.emplace(id, std::move(item));
   uvcpp_json j;
   j["type"] = "file";
@@ -342,6 +475,10 @@ void file_transfer::offer(const std::string& name, uint64_t size,
   j["ok"] = true;
   j["id"] = id;
   j["chunk"] = kChunkBytes;
+  // A viewer that understands this paces its chunks and waits for
+  // `file-ack`. Older viewers ignore it and keep the legacy fire-and-forget
+  // upload; the host accepts both.
+  j["ack"] = true;
   j["dir"] = dir;
   send_json_(dump_json(j));
   diag().log(diag_level::info, "file.accept", std::string(),
@@ -388,24 +525,58 @@ void file_transfer::chunk(uint32_t id, uint64_t offset, const uint8_t* data,
   auto it = uploads_.find(id);
   if (it == uploads_.end()) return;
   upload& item = it->second;
-  if (offset != item.received || item.received + len > item.size) {
-    fail("cancel", id, "file chunk is out of order");
+  if ((len != 0 && data == nullptr) || offset > item.size ||
+      len > item.size - offset) {
+    fail_upload(item, "file chunk exceeds the declared size");
     drop_upload(id, true);
     return;
   }
-  item.out.write(reinterpret_cast<const char*>(data),
-                 static_cast<std::streamsize>(len));
+  const auto now = clock::now();
+  if (offset > item.received) {
+    // Ahead of the contiguous point: a chunk was lost or reordered. Tell the
+    // viewer where to resume instead of discarding the whole upload. A
+    // viewer that ignores the nack (or never sends the missing range) is
+    // failed by the timeout below.
+    if (!item.disorder_since) item.disorder_since = now;
+    item.last_activity = now;
+    if (offset > item.received + kMaxAheadBytes) {
+      fail_upload(item, "file chunk is out of order; expected=" +
+                            std::to_string(item.received));
+      drop_upload(id, true);
+      return;
+    }
+    send_nack(item);
+    return;
+  }
+  if (offset + len <= item.received) {
+    // A replay of bytes already on disk (the viewer resent after a lost ack,
+    // or two acks crossed). Writing them again would duplicate data, so just
+    // answer with the current contiguous point.
+    item.disorder_since.reset();
+    item.last_activity = now;
+    maybe_ack(item, true);
+    return;
+  }
+  // The chunk overlaps the durable prefix: skip the bytes already written and
+  // append the rest. This is the resume case after a `file-nack`.
+  const std::size_t skip =
+      static_cast<std::size_t>(item.received - offset);
+  item.out.write(reinterpret_cast<const char*>(data) + skip,
+                 static_cast<std::streamsize>(len - skip));
   // Delayed clipboard rendering may read the staging file from another
   // thread; flush each chunk so a reader never waits on this buffer.
   item.out.flush();
   if (!item.out) {
-    fail("cancel", id, "could not write the file");
+    fail_upload(item, "could not write " + item.name + ": " + errno_text());
     drop_upload(id, true);
     return;
   }
-  item.received += len;
-  item.last_activity = clock::now();
+  item.received += len - skip;
+  item.disorder_since.reset();
+  item.last_activity = now;
+  ++item.chunks_since_ack;
   notify_upload(item, upload_event::progress);
+  maybe_ack(item, item.received == item.size);
   if (item.complete_deadline && item.received == item.size) complete(id);
 }
 
@@ -422,16 +593,16 @@ void file_transfer::complete(uint32_t id, clock::time_point now) {
   }
   item.out.close();
   if (!item.out) {
-    fail("done", id, "could not write the file");
+    fail_upload(item, "could not write " + item.name + ": " + errno_text());
     drop_upload(id, true);
     return;
   }
   const std::string final_path =
-      unique_path_in(fs::path(item.final_dir), item.name);
+      unique_path_in(path_from_utf8(item.final_dir), item.name);
   std::error_code ec;
-  fs::rename(item.temp_path, final_path, ec);
+  fs::rename(path_from_utf8(item.temp_path), path_from_utf8(final_path), ec);
   if (ec) {
-    fail("done", id, "could not finish the file");
+    fail_upload(item, "could not finish " + item.name + ": " + ec.message());
     drop_upload(id, true);
     return;
   }
@@ -589,11 +760,11 @@ void file_transfer::request(const std::string& path,
   }
   download item;
   item.id = next_id_++;
-  item.name = resolved->filename().string();
-  item.path = resolved->string();
+  item.name = path_to_utf8(resolved->filename());
+  item.path = path_to_utf8(*resolved);
   item.size = size;
   item.last_activity = now;
-  item.in.open(item.path, std::ios::binary);
+  item.in.open(*resolved, std::ios::binary);
   if (!item.in) {
     fail("sending", 0, "could not open the file");
     return;
@@ -602,14 +773,14 @@ void file_transfer::request(const std::string& path,
   diag().log(diag_level::info, "file.send", std::string(),
              {{"id", std::to_string(id)},
               {"bytes", std::to_string(size)},
-              {"name", resolved->filename().string()}});
+              {"name", item.name}});
   downloads_.emplace(id, std::move(item));
   uvcpp_json j;
   j["type"] = "file";
   j["action"] = "sending";
   j["ok"] = true;
   j["id"] = id;
-  j["name"] = resolved->filename().string();
+  j["name"] = item.name;
   j["size"] = size;
   send_json_(dump_json(j));
 }
@@ -667,10 +838,17 @@ bool file_transfer::send_next(download& item, clock::time_point now) {
 void file_transfer::retry_pending(clock::time_point now) {
   for (auto it = uploads_.begin(); it != uploads_.end();) {
     auto current = it++;
-    if (current->second.complete_deadline &&
-        now >= *current->second.complete_deadline) {
-      const auto id = current->first;
-      fail("done", id, "file ended early");
+    upload& item = current->second;
+    const auto id = current->first;
+    if (item.disorder_since && now - *item.disorder_since >= kOrderTimeout) {
+      fail_upload(item, "file chunk is out of order; expected=" +
+                            std::to_string(item.received));
+      drop_upload(id, true);
+      continue;
+    }
+    if (item.complete_deadline && now >= *item.complete_deadline) {
+      fail_upload(item, "file ended early; expected=" +
+                            std::to_string(item.received));
       drop_upload(id, true);
     }
   }
@@ -720,7 +898,7 @@ void file_transfer::fail_pending() {
     auto current = it++;
     if (current->second.complete_deadline) {
       const auto id = current->first;
-      fail("done", id, "could not schedule file receive timeout");
+      fail_upload(current->second, "could not schedule file receive timeout");
       drop_upload(id, true);
     }
   }
@@ -741,7 +919,7 @@ void file_transfer::drop_upload(uint32_t id, bool remove_file) {
   it->second.out.close();
   if (remove_file) {
     std::error_code ec;
-    fs::remove(it->second.temp_path, ec);
+    fs::remove(path_from_utf8(it->second.temp_path), ec);
   }
   uploads_.erase(it);
 }
@@ -755,7 +933,7 @@ std::vector<std::string> file_transfer::resolve_files(
     if (!resolved) continue;
     std::error_code ec;
     if (!fs::is_regular_file(*resolved, ec)) continue;
-    out.push_back(resolved->string());
+    out.push_back(path_to_utf8(*resolved));
     if (out.size() >= 256) break;
   }
   return out;
@@ -765,7 +943,7 @@ void file_transfer::close_all() {
   for (auto& item : uploads_) {
     item.second.out.close();
     std::error_code ec;
-    fs::remove(item.second.temp_path, ec);
+    fs::remove(path_from_utf8(item.second.temp_path), ec);
   }
   uploads_.clear();
   for (auto& item : downloads_) item.second.in.close();

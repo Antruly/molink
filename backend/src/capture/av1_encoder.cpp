@@ -502,6 +502,26 @@ class svt_stream_encoder final : public av1_stream_encoder {
     return true;
   }
 
+  bool set_bitrate(uint32_t kbps) override {
+    const int wanted = static_cast<int>(kbps);
+    config_.max_bitrate_kbps = wanted;
+    if (handle_ == nullptr) {
+      // No session yet: the next init picks the new budget up.
+      bitrate_kbps_ = wanted;
+      return true;
+    }
+    if (wanted == bitrate_kbps_) return true;
+    // This SVT-AV1 API has no in-place rate-control update: set_parameter is
+    // only valid before init. Re-create the encoder and let its first picture
+    // be a keyframe, which keeps the receiver in sync without a gap.
+    const int width = width_;
+    const int height = height_;
+    const int qp = qp_;
+    shutdown();
+    std::string error;
+    return init(width, height, qp, wanted, error);
+  }
+
  private:
   bool init(int width, int height, int qp, int bitrate_kbps,
             std::string& error) {

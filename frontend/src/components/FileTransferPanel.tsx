@@ -81,6 +81,64 @@ import {
   supportsDirectoryInput,
   type SaveStrategy,
 } from '../lib/download-save'
+// ---------------------------------------------------------------- upload acks
+//
+// The file channel has a byte budget: past it the proxy drops chunks and the
+// host sees a gap, which it can only report as "out of order". The viewer
+// therefore keeps a credit window and waits for `file-ack` before running
+// further ahead; a missing ack rewinds to the last confirmed byte.
+const kUploadWindowBytes = 2 * 1024 * 1024
+const kUploadAckTimeoutMs = 2000
+
+interface UploadAck {
+  confirmed: number
+  failed: boolean
+  waiters: Array<(reached: boolean) => void>
+  wait: (ms: number) => Promise<boolean>
+}
+
+const uploadAcks = new Map<number, UploadAck>()
+
+function uploadAckFor(id: number): UploadAck {
+  const existing = uploadAcks.get(id)
+  if (existing) return existing
+  const ack: UploadAck = {
+    confirmed: 0,
+    failed: false,
+    waiters: [],
+    wait(ms) {
+      return new Promise<boolean>((resolve) => {
+        let settled = false
+        const timer = window.setTimeout(() => {
+          if (settled) return
+          settled = true
+          ack.waiters = ack.waiters.filter((w) => w !== waiter)
+          resolve(false)
+        }, ms)
+        const waiter = (reached: boolean) => {
+          if (settled) return
+          settled = true
+          window.clearTimeout(timer)
+          resolve(reached)
+        }
+        ack.waiters.push(waiter)
+      })
+    },
+  }
+  uploadAcks.set(id, ack)
+  return ack
+}
+
+function settleUploadAcks(id: number, received: number, failed: boolean) {
+  const ack = uploadAcks.get(id)
+  if (!ack) return
+  ack.confirmed = Math.max(ack.confirmed, received)
+  ack.failed = ack.failed || failed
+  const waiters = ack.waiters
+  ack.waiters = []
+  for (const wake of waiters) wake(true)
+}
+
 import {
   aggregateProgress,
   buildUploadPlan,
@@ -1440,6 +1498,23 @@ export function FileTransferPanel({
           }
           break
         }
+        case 'file-ack':
+          if (message.id) {
+            settleUploadAcks(message.id, message.received ?? 0, false)
+          }
+          break
+        case 'file-nack':
+          // The host hit a gap: rewind the window to what it really has and
+          // let the upload loop resend from there.
+          if (message.id) {
+            const ack = uploadAckFor(message.id)
+            const reached = message.received ?? 0
+            if (reached < ack.confirmed) ack.confirmed = reached
+            const waiters = ack.waiters
+            ack.waiters = []
+            for (const wake of waiters) wake(true)
+          }
+          break
         case 'reject':
           resolveUpload({ ok: false, message: message.message })
           break
@@ -2597,10 +2672,33 @@ export function FileTransferPanel({
             target.sendFileChunk(id, offset, bytes)
             offset = end
             patchProgress(taskKey, child.key, offset)
+            // Credit window: never run more than kUploadWindowBytes ahead of
+            // the host's contiguous point. Without this the file channel's
+            // byte budget drops chunks on a slow link and the host cancels the
+            // whole upload as "out of order".
+            const ack = uploadAckFor(id)
+            if (offset - ack.confirmed >= kUploadWindowBytes) {
+              const reached = await ack.wait(kUploadAckTimeoutMs)
+              if (run.cancelled) continue
+              if (ack.failed) {
+                patchChild(taskKey, child.key, {
+                  status: 'error',
+                  error: t('files.error'),
+                })
+                failed = true
+                break
+              }
+              if (!reached) {
+                // No ack in time: rewind to the last confirmed byte and let
+                // the loop resend. The host treats the replay as idempotent.
+                offset = ack.confirmed
+              }
+            }
             // Yield so a large file does not freeze the UI thread.
             await new Promise((resolve) => window.setTimeout(resolve, 0))
           }
           run.activeId = 0
+          uploadAcks.delete(id)
           if (failed) continue
 
           patchProgress(taskKey, child.key, offset, true)

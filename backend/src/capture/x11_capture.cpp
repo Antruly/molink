@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "capture/frame_encode.h"
+#include "capture/frame_schedule.h"
 #include "protocol/frame_packet.h"
 
 namespace molink {
@@ -311,7 +312,18 @@ class x11_capture final : public capture_base {
     // Damage gives prompt updates; this tick keeps the stream alive if the
     // extension is silent (a static screen, or a server that never reports).
     const auto safety_interval = std::chrono::milliseconds(500);
-    auto next_allowed = std::chrono::steady_clock::now();
+    // Absolute-deadline pacing: the period is the target interval, not the
+    // interval plus this frame's encode time.
+    const auto now_us = [] {
+      return static_cast<int64_t>(
+          std::chrono::duration_cast<std::chrono::microseconds>(
+              std::chrono::steady_clock::now().time_since_epoch())
+              .count());
+    };
+    const auto frame_interval_us = [this]() -> int64_t {
+      return 1000000 / (std::max)(1, target_fps());
+    };
+    frame_schedule schedule;
     bool damage_mode = damage_ != 0;
     bool ever_damaged = false;
     std::string last_error;
@@ -322,16 +334,15 @@ class x11_capture final : public capture_base {
     trigger_ = capture_trigger::initial;
     trigger_us_ = epoch_us();
     capture_full(true, last_error);
-    next_allowed = std::chrono::steady_clock::now() +
-                   std::chrono::milliseconds(1000 / std::max(1, target_fps()));
+    schedule.reset(now_us(), frame_interval_us());
     auto last_full = std::chrono::steady_clock::now();
     auto last_capture = std::chrono::steady_clock::now();
 
     while (running_.load()) {
       if (!active_.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
-        next_allowed = std::chrono::steady_clock::now();
-        last_capture = next_allowed;
+        schedule.reset(now_us(), frame_interval_us());
+        last_capture = std::chrono::steady_clock::now();
         continue;
       }
 
@@ -423,10 +434,17 @@ class x11_capture final : public capture_base {
       if (input_ready) want_capture = true;
       if (!want_capture) continue;
 
+      // A target-rate change re-anchors the grid; keeping the old deadline
+      // would otherwise mix two intervals on the same schedule.
+      const int64_t wanted_interval = frame_interval_us();
+      if (wanted_interval != schedule.interval()) {
+        schedule.set_interval(now_us(), wanted_interval);
+      }
       // Rate limit, but let a pending input shorten the wait to the minimum
       // gap instead of the full target interval (200 ms at 5 fps).
       if (!input_ready) {
-        auto deadline = next_allowed;
+        auto deadline = std::chrono::steady_clock::time_point(
+            std::chrono::microseconds(schedule.next()));
         const auto input_deadline = last_capture + kInputCaptureGap;
         if (pending_input_us() != 0 && input_deadline < deadline) {
           deadline = input_deadline;
@@ -477,9 +495,10 @@ class x11_capture final : public capture_base {
         last_error = grab_error;
       }
 
-      next_allowed = std::chrono::steady_clock::now() +
-                     std::chrono::milliseconds(1000 /
-                                               std::max(1, target_fps()));
+      // Advance the absolute deadline by one interval. If this grab overran
+      // more than a full interval, note_capture restarts the grid at "now"
+      // instead of replaying the missed slots, so the backlog never grows.
+      schedule.note_capture(now_us(), /*reanchor=*/input_ready);
       last_capture = std::chrono::steady_clock::now();
     }
 
