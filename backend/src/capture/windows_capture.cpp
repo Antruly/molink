@@ -24,7 +24,9 @@
 #include <utility>
 #include <vector>
 
+#include "capture/display_layout.h"
 #include "capture/frame_encode.h"
+#include "diag_log.h"
 #include "protocol/frame_packet.h"
 
 namespace molink {
@@ -155,6 +157,14 @@ class windows_capture final : public capture_base {
     std::string last_grab_error;
 
     while (running_.load()) {
+      // Hotplug, rotation and mode changes are not reported by DXGI; a cheap
+      // once-a-second re-enumeration is the only way to notice them. It only
+      // rebuilds duplication when the layout actually differs.
+      if (check_displays()) {
+        pixels_valid = false;
+        last_full = std::chrono::steady_clock::now();
+      }
+
       if (!active_.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
         next_allowed = std::chrono::steady_clock::now();
@@ -316,26 +326,63 @@ class windows_capture final : public capture_base {
     }
     if (!enumerate_outputs(err)) return false;
 
+    // The first observation becomes the comparison baseline. Later
+    // re-enumerations (access-lost recovery) leave it alone so the once a
+    // second check can still see and announce the change.
+    if (!have_layout_ && !pending_layout_.empty()) {
+      display_layout_ = pending_layout_;
+      have_layout_ = true;
+    }
+
     int wanted = requested_output_.exchange(-1);
-    if (wanted < 0 || wanted >= static_cast<int>(display_dxgi_indices_.size())) {
-      wanted = options_.display_index;
+    if (wanted < 0) {
+      if (!current_device_name_.empty()) {
+        wanted = device_name_index(current_device_name_);
+        // The panel being captured is gone: land on the primary one, not on
+        // whichever output happens to be first now.
+        if (wanted < 0) wanted = primary_display_index(pending_layout_);
+      } else {
+        // The configured default 0 means "first/primary"; with a real primary
+        // flag available it must not mean "whatever EnumOutputs returned
+        // first".
+        wanted = options_.display_index;
+        if (wanted == 0) wanted = primary_display_index(pending_layout_);
+      }
     }
     if (wanted < 0 ||
         wanted >= static_cast<int>(display_dxgi_indices_.size())) {
-      wanted = 0;
+      wanted = primary_display_index(pending_layout_);
     }
     if (!switch_output(wanted, err)) {
-      if (wanted == 0 || !switch_output(0, err)) return false;
-      wanted = 0;
+      const int primary = primary_display_index(pending_layout_);
+      if (wanted != primary && switch_output(primary, err)) {
+        wanted = primary;
+      } else if (!switch_output(0, err)) {
+        return false;
+      } else {
+        wanted = 0;
+      }
     }
     output_index_.store(wanted);
     have_previous_ = false;
     return true;
   }
 
-  bool enumerate_outputs(std::string& err) {
+  struct display_probe {
     std::vector<display_info> displays;
-    std::vector<UINT> indices;
+    std::vector<UINT> dxgi_indices;
+    std::vector<std::string> names;
+    std::vector<display_layout_entry> layout;
+  };
+
+  /// Enumerates the adapter's outputs into a local snapshot. Does not publish
+  /// anything, so a failed probe leaves the current list untouched.
+  bool probe_outputs(display_probe& probe, std::string& err) {
+    probe = display_probe{};
+    if (adapter_ == nullptr) {
+      err = "no DXGI adapter";
+      return false;
+    }
     for (UINT i = 0;; ++i) {
       IDXGIOutput* output = nullptr;
       const HRESULT result = adapter_->EnumOutputs(i, &output);
@@ -349,14 +396,21 @@ class windows_capture final : public capture_base {
             desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top;
         if (width > 0 && height > 0 && width <= 65535 && height <= 65535) {
           display_info info;
-          info.index = static_cast<int>(displays.size());
+          info.index = static_cast<int>(probe.displays.size());
           info.x = desc.DesktopCoordinates.left;
           info.y = desc.DesktopCoordinates.top;
           info.width = static_cast<uint16_t>(width);
           info.height = static_cast<uint16_t>(height);
           info.input_width = width;
           info.input_height = height;
-          info.primary = displays.empty();
+          // "Primary" is a system-wide property, not a position in the
+          // enumeration. GetMonitorInfoW is the only reliable source (the
+          // first output is not necessarily the primary monitor).
+          MONITORINFO monitor{};
+          monitor.cbSize = sizeof(monitor);
+          info.primary = desc.Monitor != nullptr &&
+                         GetMonitorInfoW(desc.Monitor, &monitor) &&
+                         (monitor.dwFlags & MONITORINFOF_PRIMARY) != 0;
           char name[128] = {};
           WideCharToMultiByte(CP_UTF8, 0, desc.DeviceName, -1, name,
                               sizeof(name), nullptr, nullptr);
@@ -364,19 +418,143 @@ class windows_capture final : public capture_base {
           if (info.name.empty()) {
             info.name = "Display " + std::to_string(info.index);
           }
-          displays.push_back(std::move(info));
-          indices.push_back(i);
+          display_layout_entry entry;
+          entry.name = info.name;
+          entry.x = info.x;
+          entry.y = info.y;
+          entry.width = info.width;
+          entry.height = info.height;
+          entry.rotation = static_cast<int>(desc.Rotation);
+          entry.primary = info.primary;
+          probe.displays.push_back(info);
+          probe.layout.push_back(std::move(entry));
+          probe.names.push_back(info.name);
+          probe.dxgi_indices.push_back(i);
         }
       }
       output->Release();
     }
-    if (displays.empty()) {
+    if (probe.displays.empty()) {
       err = "no attached display output";
       return false;
     }
-    std::lock_guard<std::mutex> lock(displays_mutex_);
-    displays_ = std::move(displays);
-    display_dxgi_indices_ = std::move(indices);
+    return true;
+  }
+
+  bool enumerate_outputs(std::string& err) {
+    display_probe probe;
+    if (!probe_outputs(probe, err)) return false;
+    {
+      std::lock_guard<std::mutex> lock(displays_mutex_);
+      displays_ = probe.displays;
+      display_dxgi_indices_ = std::move(probe.dxgi_indices);
+    }
+    display_device_names_ = std::move(probe.names);
+    pending_layout_ = std::move(probe.layout);
+    return true;
+  }
+
+  int device_name_index(const std::string& name) const {
+    if (name.empty()) return -1;
+    for (std::size_t i = 0; i < display_device_names_.size(); ++i) {
+      if (display_device_names_[i] == name) return static_cast<int>(i);
+    }
+    return -1;
+  }
+
+  /// Once-a-second hotplug/resize/rotate check. Returns true when the layout
+  /// changed and the retained pixels can no longer be published.
+  bool check_displays() {
+    const auto now = std::chrono::steady_clock::now();
+    if (now < next_display_check_) return false;
+    next_display_check_ = now + std::chrono::seconds(1);
+
+    display_probe probe;
+    std::string probe_error;
+    if (!probe_outputs(probe, probe_error)) return false;
+
+    if (!have_layout_) {
+      display_layout_ = std::move(probe.layout);
+      have_layout_ = true;
+      std::lock_guard<std::mutex> lock(displays_mutex_);
+      displays_ = std::move(probe.displays);
+      display_dxgi_indices_ = std::move(probe.dxgi_indices);
+      display_device_names_ = std::move(probe.names);
+      return false;
+    }
+
+    const display_change_reason reason =
+        compare_display_layouts(display_layout_, probe.layout);
+    if (reason == display_change_reason::none) return false;
+
+    // Prefer the panel we are duplicating now (its index may have shifted);
+    // fall back to the primary monitor when it was unplugged.
+    int wanted = find_display_by_name(probe.layout, current_device_name_);
+    if (wanted < 0) wanted = primary_display_index(probe.layout);
+    if (wanted < 0) wanted = 0;
+
+    {
+      std::lock_guard<std::mutex> lock(displays_mutex_);
+      displays_ = probe.displays;
+      display_dxgi_indices_ = probe.dxgi_indices;
+    }
+    display_device_names_ = probe.names;
+    display_layout_ = probe.layout;
+    pending_layout_ = probe.layout;
+
+    // Desktop duplication is bound to the output it was created for, so a
+    // layout change needs a fresh duplication (and a staging texture at the
+    // new size). Only this once-a-second path rebuilds; the frame loop never
+    // re-creates it.
+    std::string rebuild_error;
+    bool rebuilt = switch_output(wanted, rebuild_error) &&
+                   create_staging(rebuild_error);
+    if (!rebuilt) {
+      const int primary = primary_display_index(probe.layout);
+      if (wanted != primary && switch_output(primary, rebuild_error) &&
+          create_staging(rebuild_error)) {
+        wanted = primary;
+        rebuilt = true;
+      } else if (wanted != 0 && switch_output(0, rebuild_error) &&
+                 create_staging(rebuild_error)) {
+        wanted = 0;
+        rebuilt = true;
+      }
+    }
+    if (rebuilt) {
+      output_index_.store(wanted);
+      keyframe_requested_.store(true);
+    } else {
+      // grab() reports access_lost on the next attempt and its recovery path
+      // re-enumerates and retries; do not spin here.
+      std::fprintf(stderr, "molink capture: display change: %s\n",
+                   rebuild_error.c_str());
+    }
+
+    const display_info& current = probe.displays[wanted];
+    display_change_notice notice;
+    notice.reason = reason;
+    notice.index = wanted;
+    notice.width = current.width;
+    notice.height = current.height;
+    notice.primary = current.primary;
+    notice.displays = probe.displays;
+    note_display_change(std::move(notice));
+
+    int primary = -1;
+    for (std::size_t i = 0; i < probe.displays.size(); ++i) {
+      if (probe.displays[i].primary) {
+        primary = static_cast<int>(i);
+        break;
+      }
+    }
+    diag().log(diag_level::info, "display.changed", std::string(),
+               {{"count", std::to_string(probe.displays.size())},
+                {"index", std::to_string(wanted)},
+                {"primary", std::to_string(primary)},
+                {"w", std::to_string(current.width)},
+                {"h", std::to_string(current.height)},
+                {"reason", display_change_reason_name(reason)}});
     return true;
   }
 
@@ -418,6 +596,9 @@ class windows_capture final : public capture_base {
     }
     width_ = static_cast<uint16_t>(width);
     height_ = static_cast<uint16_t>(height);
+    if (index < static_cast<int>(display_device_names_.size())) {
+      current_device_name_ = display_device_names_[index];
+    }
     have_previous_ = false;
     previous_.clear();
     return true;
@@ -737,6 +918,16 @@ class windows_capture final : public capture_base {
 
   std::vector<display_info> displays_;
   std::vector<UINT> display_dxgi_indices_;
+  /// UTF-8 device name per published display, parallel to displays_. Used to
+  /// keep the same panel selected when indices shift after a hotplug.
+  std::vector<std::string> display_device_names_;
+  /// Layout from the last enumeration, for compare_display_layouts(). Only the
+  /// capture thread touches it.
+  std::vector<display_layout_entry> display_layout_;
+  std::vector<display_layout_entry> pending_layout_;
+  bool have_layout_ = false;
+  std::string current_device_name_;
+  std::chrono::steady_clock::time_point next_display_check_{};
   mutable std::mutex displays_mutex_;
   std::atomic<int> output_index_{0};
   std::atomic<int> requested_output_{-1};

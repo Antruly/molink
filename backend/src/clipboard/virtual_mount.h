@@ -13,9 +13,17 @@ namespace molink {
 struct virtual_mount_file {
   /// Session-scoped id from `clipboard-sync.files`; passed back to the reader.
   uint32_t id = 0;
-  /// Base name only, already sanitized and unique.
+  /// Base name only, already sanitized and unique within its directory.
   std::string name;
   uint64_t size = 0;
+  /// Selection-relative path (`/`-separated). Empty means `name`. A copied
+  /// folder keeps its tree instead of flattening into the mount root.
+  std::string rel;
+  /// A directory entry: no bytes, no reader; the mount shows a real folder.
+  bool is_dir = false;
+
+  /// The path this entry occupies inside the mount.
+  const std::string& mount_path() const { return rel.empty() ? name : rel; }
 };
 
 /// Blocking range read, called on a FUSE worker thread. Returns the number of

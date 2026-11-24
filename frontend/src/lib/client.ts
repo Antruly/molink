@@ -212,6 +212,10 @@ export interface ClipboardFileEntry {
   /// instead, because a host absolute path leaks the user and directory names.
   path?: string
   size: number
+  /// A copied directory. The page does not offer it as a lazy file.
+  is_dir?: boolean
+  /// Selection-relative path for a file inside a copied folder.
+  rel?: string
 }
 
 /// One file announced in `clipboard-sync.files`. `id` is the host's
@@ -222,6 +226,10 @@ export interface ClipboardPullFile {
   name: string
   size: number
   path?: string
+  /// A directory the host copied (empty or not). It has no bytes.
+  is_dir?: boolean
+  /// Selection-relative path (`sub/dir/file`); absent means `name`.
+  rel?: string
 }
 
 /// The `clipboard-sync.image` hint: one entry of `files` is a PNG image, not
@@ -300,6 +308,10 @@ export type SessionEvent =
       kind: 'clipboard-pull-files'
       files: ClipboardPullFile[]
       omitted?: number
+      /// Present when the host split the selection across messages.
+      batch?: string
+      batchIndex?: number
+      batchCount?: number
       /// Set when one of `files` is a clipboard image; its bytes are pulled
       /// and written to the image clipboard instead of the file clipboard.
       image?: ClipboardSyncImage
@@ -380,7 +392,12 @@ export interface ClientHandlers {
   onCursorPosition: (position: CursorPosition) => void
   onClipboard: (text: string) => void
   onSessionEvent?: (event: SessionEvent) => void
-  onDisplay?: (index: number) => void
+  /**
+   * The host is capturing a different display, or the display layout changed
+   * (hotplug/resize/rotate). `displays` is present on a layout change and
+   * carries the complete re-indexed list.
+   */
+  onDisplay?: (index: number, displays?: DisplayInfo[]) => void
   onAccessRequested?: (id: number) => void
   /**
    * Host capture rate and encoder build time, once per second. The frame-rate
@@ -432,6 +449,12 @@ interface ControlMessage {
   protocol?: string
   /// Why a `stream-gap` notice was sent (currently "backpressure").
   reason?: string
+  /// `display` broadcast after a hotplug/resize/rotate: the complete new
+  /// monitor list, plus the size and primary flag of the display now captured.
+  displays?: DisplayInfo[]
+  primary?: boolean
+  width?: number
+  height?: number
   /// `codec-status`: whether the pinned encoder can run, and which codec.
   available?: boolean
   codec?: string
@@ -473,6 +496,11 @@ interface ControlMessage {
   files?: (ClipboardFileEntry | ClipboardPullFile)[]
   /// `clipboard-sync`: files the host left out of its capped id list.
   omitted?: number
+  /// `clipboard-sync`: when a selection is split, all pieces share `batch`
+  /// and carry their index (0-based) and the piece count.
+  batch?: string
+  batch_index?: number
+  batch_count?: number
   host_microphone?: boolean
   started_ms?: number
 }
@@ -1939,7 +1967,10 @@ export class MolinkClient {
         break
       case 'display':
         if (typeof message.index === 'number') {
-          this.handlers.onDisplay?.(message.index)
+          this.handlers.onDisplay?.(
+            message.index,
+            Array.isArray(message.displays) ? message.displays : undefined,
+          )
         }
         break
       case 'pong': {
@@ -2049,6 +2080,22 @@ export class MolinkClient {
             omitted:
               typeof message.omitted === 'number' && message.omitted > 0
                 ? message.omitted
+                : undefined,
+            batch:
+              typeof message.batch === 'string' && message.batch !== ''
+                ? message.batch
+                : undefined,
+            batchIndex:
+              typeof message.batch_index === 'number' &&
+              Number.isSafeInteger(message.batch_index) &&
+              message.batch_index >= 0
+                ? message.batch_index
+                : undefined,
+            batchCount:
+              typeof message.batch_count === 'number' &&
+              Number.isSafeInteger(message.batch_count) &&
+              message.batch_count > 1
+                ? message.batch_count
                 : undefined,
             image,
           })

@@ -128,8 +128,12 @@ void plan_caps_and_names() {
   expect(molink::plan_virtual_offer(requested, planned, omitted) ==
              virtual_offer_error::none,
          "a normal list is accepted");
-  expect(planned.size() == molink::kVirtualMaxFiles,
-         "at most eight files are kept");
+  // Ten offered: the `..` segment makes the escaping name unusable, so nine
+  // reach the mount; the duplicate is kept under a distinct name rather than
+  // dropped, because both files were really copied. The cap is checked
+  // separately below.
+  expect(planned.size() == 9,
+         "the escape attempt is dropped, the duplicate kept under a new name");
   expect(omitted == requested.size() - planned.size(),
          "the rest are reported as omitted");
   expect(planned[0].name == "same.txt", "the first duplicate keeps its name");

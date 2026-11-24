@@ -316,7 +316,28 @@ QUIC 会话（`transport=quic`）在一条双向 QUIC 流上复用完全相同�
 
 ### 4.2.1 显示器选择
 
-`welcome.displays` 的每一项包含 `index`、`name`、`x`、`y`、`width`、`height`、`primary`；`display_index` 是当前采集的显示器，默认 `0`（主显示器）。客户端发送 `{"type":"display","index":N}` 后，服务端切换采集、按新显示器重算输入坐标，并发布关键帧。显示器列表是主机级共享的：一个会话切换会影响同一主机上的其他会话。
+`welcome.displays` 的每一项包含 `index`、`name`、`x`、`y`、`width`、`height`、`primary`；`display_index` 是当前采集的显示器，默认主显示器（Windows 用 `MONITORINFOF_PRIMARY` 判定，X11 用 XRandR 的 primary 标志，而不是枚举顺序里的第一个）。客户端发送 `{"type":"display","index":N}` 后，服务端切换采集、按新显示器重算输入坐标，并发布关键帧。显示器列表是主机级共享的：一个会话切换会影响同一主机上的其他会话。
+
+主机每秒重新枚举一次显示器。热插拔、改分辨率、旋转或主屏切换时，服务端向所有已鉴权会话发送一条扩展的 `display` 消息，客户端据此刷新 `displays` 并重新适配：
+
+```json
+{
+  "type": "display",
+  "index": 1,
+  "width": 2560,
+  "height": 1440,
+  "primary": false,
+  "reason": "hotplug",
+  "displays": [
+    {"index": 0, "name": "\\\\.\\DISPLAY1", "x": 0, "y": 0,
+     "width": 1920, "height": 1080, "primary": true},
+    {"index": 1, "name": "\\\\.\\DISPLAY2", "x": 1920, "y": 0,
+     "width": 2560, "height": 1440, "primary": false}
+  ]
+}
+```
+
+`reason` 是 `hotplug`（增减显示器、重排或主屏切换）、`resize` 或 `rotate`。若当前采集的显示器被拔掉，服务端自动落到主屏，`index/width/height/primary` 描述新的采集目标。只带 `index` 的旧格式仍然合法（例如一个会话手动切屏时），老客户端可以忽略新增字段。
 
 ### 4.3 输入事件
 
