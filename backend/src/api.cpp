@@ -19,6 +19,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iterator>
 #include <map>
 #include <mutex>
@@ -503,11 +504,7 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
                             : (std::filesystem::path(stage_directory) / "mount")
                                   .string();
   }
-  const auto virtual_clipboard_service = std::make_shared<virtual_clipboard>(
-      virtual_directory,
-      deps.clipboard != nullptr && deps.clipboard->available()
-          ? platform_virtual_mount_factory()
-          : virtual_mount_factory(),
+  std::function<bool(const std::vector<std::string>&)> virtual_apply =
       [clipboard = deps.clipboard](const std::vector<std::string>& paths) {
         if (!clipboard || !clipboard->available() ||
             !clipboard->set_files(paths)) {
@@ -516,10 +513,24 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
         // The mount paths must not travel back to the remote as a fresh copy.
         remember_clipboard_echoes(paths);
         return true;
-      },
-      [clipboard = deps.clipboard] {
-        if (clipboard && clipboard->available()) clipboard->set_text({});
-      },
+      };
+  std::function<void()> virtual_clear = [clipboard = deps.clipboard] {
+    if (clipboard && clipboard->available()) clipboard->set_text({});
+  };
+#if defined(_WIN32)
+  // The Windows publisher installs an OLE virtual-file data object itself
+  // (see windows_virtual_clipboard.cpp). There are no real paths to hand to
+  // CF_HDROP, and releasing the object is the mount's job, so applying and
+  // clearing the path list must stay side-effect free.
+  virtual_apply = [](const std::vector<std::string>&) { return true; };
+  virtual_clear = [] {};
+#endif
+  const auto virtual_clipboard_service = std::make_shared<virtual_clipboard>(
+      virtual_directory,
+      deps.clipboard != nullptr && deps.clipboard->available()
+          ? platform_virtual_mount_factory()
+          : virtual_mount_factory(),
+      std::move(virtual_apply), std::move(virtual_clear),
       [&app](std::function<void()> fn) { app.post(std::move(fn)); });
 
   // ---- Remote access gate ---------------------------------------------

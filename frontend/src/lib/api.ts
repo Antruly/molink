@@ -827,11 +827,13 @@ export interface VirtualClipboardOffer {
   paths: string[]
 }
 
-/// Mount remote clipboard files read-only in the local core and put the mount
-/// paths on this machine's clipboard. Loopback only. The reply's `mount` id is
-/// used to open the relay WebSocket; a failed offer throws ApiError
-/// (`clipboard_virtual_unavailable`, `clipboard_virtual_mount_failed`, …) so
-/// the caller can fall back to downloading.
+/// Publish remote clipboard files on this machine's clipboard and return the
+/// relay generation. Linux mounts them read-only (FUSE); Windows installs an
+/// OLE virtual-file data object so Explorer runs the copy itself. Loopback
+/// only. The reply's `mount` id is used to open the relay WebSocket; a failed
+/// offer throws ApiError (`clipboard_virtual_unavailable`,
+/// `clipboard_virtual_mount_failed`, …) so the caller can fall back to
+/// downloading.
 export function offerVirtualClipboard(
   token: string,
   files: VirtualClipboardOfferFile[],

@@ -381,7 +381,7 @@ virtual_mount_factory platform_virtual_mount_factory() {
 
 }  // namespace molink
 
-#else  // !linux || !MOLINK_HAVE_FUSE
+#elif !defined(_WIN32)  // !linux || !MOLINK_HAVE_FUSE
 
 namespace molink {
 
