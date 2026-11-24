@@ -88,6 +88,17 @@ void run_codec(molink::video_codec codec, const char* name) {
   expect(delta_bytes > 0 && delta_bytes < key_bytes,
          "a delta is much smaller than the keyframe");
 
+  // A QoS budget change is reconfigured on the live codec, keeping the
+  // reference chain (and therefore no keyframe is inserted).
+  expect(encoder->set_bitrate(2000), "the live encoder takes a new budget");
+  paint(bgra, width, height, 5);
+  keyframe = true;
+  expect(encoder->encode_stream(bgra.data(), width * 4, width, height, 30,
+                                /*keyframe=*/false, out, keyframe, error),
+         "a delta encodes after the budget change");
+  expect(!out.empty() && !keyframe,
+         "the budget change keeps the delta chain intact");
+
   std::string message = std::string(" ") + name + ": key=" +
                         std::to_string(key_bytes) + "B delta=" +
                         std::to_string(delta_bytes) + "B";

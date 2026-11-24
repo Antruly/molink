@@ -48,6 +48,7 @@ class relay_transport final : public relay_session {
   bool send_binary(const uint8_t* data, std::size_t len) override;
   bool send_binary(transport_channel channel, const uint8_t* data,
                    std::size_t len) override;
+  uint64_t take_video_drops() override;
   void close(int code, const std::string& reason) override;
   void set_handlers(text_handler on_text, binary_handler on_binary,
                     close_handler on_close) override;
@@ -58,8 +59,10 @@ class relay_transport final : public relay_session {
 
  private:
   void thread_main();
+  /// @p chain_broken is set when the video budget policy discarded queued
+  /// frames to make room; the caller must ask for a fresh baseline.
   bool enqueue(transport_channel channel, bool text, std::string data,
-               bool keyframe = false);
+               bool keyframe = false, bool* chain_broken = nullptr);
   void deliver_close(int code, const std::string& reason);
 
   std::string url_;

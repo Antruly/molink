@@ -90,6 +90,11 @@ class session_transport {
     return send_text(text);
   }
 
+  /// Video frames this transport discarded locally since the last call
+  /// (budget or backlog). The session layer adds them to the pipeline's
+  /// `dropped` summary; a transport with no local video queue reports zero.
+  virtual uint64_t take_video_drops() { return 0; }
+
   virtual void close(int code, const std::string& reason) = 0;
 
   /// Installs the inbound handlers. Passing empty handlers is allowed and

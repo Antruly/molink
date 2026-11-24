@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -22,9 +23,18 @@ class stream_transport final : public session_transport {
  public:
   /// Writes bytes to the stream; false when the stream is gone.
   using write_fn = std::function<bool(const uint8_t* data, std::size_t len)>;
+  /// A writer that also sees the logical channel, so a bounded path (the
+  /// direct TCP proxy) can drop video without touching reliable traffic.
+  using channel_write_fn =
+      std::function<bool(transport_channel channel, const uint8_t* data,
+                         std::size_t len)>;
   using close_fn = std::function<void(int code, const std::string& reason)>;
 
   stream_transport(write_fn write, close_fn close,
+                   const char* protocol = "quic",
+                   std::string peer_ip = std::string(),
+                   unsigned int peer_port = 0);
+  stream_transport(channel_write_fn write, close_fn close,
                    const char* protocol = "quic",
                    std::string peer_ip = std::string(),
                    unsigned int peer_port = 0);
@@ -37,6 +47,9 @@ class stream_transport final : public session_transport {
   bool is_open() const override;
   bool send_text(const std::string& text) override;
   bool send_binary(const uint8_t* data, std::size_t len) override;
+  bool send_binary(transport_channel channel, const uint8_t* data,
+                   std::size_t len) override;
+  uint64_t take_video_drops() override;
   void close(int code, const std::string& reason) override;
   void set_handlers(text_handler on_text, binary_handler on_binary,
                     close_handler on_close) override;
@@ -53,7 +66,10 @@ class stream_transport final : public session_transport {
   std::string peer_ip_;
   unsigned int peer_port_ = 0;
   write_fn write_;
+  channel_write_fn channel_write_;
   close_fn close_;
+  /// Video frames a bounded writer refused locally (the direct TCP backlog).
+  std::atomic<std::uint64_t> dropped_video_{0};
   text_handler text_;
   binary_handler binary_;
   close_handler on_close_;

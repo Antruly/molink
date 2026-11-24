@@ -247,17 +247,20 @@ void test_single_video_frame_larger_than_budget() {
                            big_keyframe.data(), big_keyframe.size(), true),
          "a keyframe larger than the video budget still queues");
   const auto delta = bytes(512, 0x78);
-  expect(!scheduler.enqueue(molink::transport_channel::video, delta.data(),
-                            delta.size()),
-         "a delta is dropped while the oversized keyframe is pending");
+  expect(scheduler.enqueue(molink::transport_channel::video, delta.data(),
+                           delta.size()),
+         "a frame is accepted over budget when only the keyframe is queued");
+  expect(scheduler.dropped_video_frames() == 0,
+         "no queued delta exists to discard");
 
   std::vector<std::vector<uint8_t>> sent;
   scheduler.drain([&sent](const molink::channel_scheduler::message& message) {
     sent.push_back(message.data);
     return true;
   });
-  expect(sent.size() == 1 && sent.front() == big_keyframe,
-         "the oversized keyframe drains intact and alone");
+  expect(sent.size() == 2 && sent.front() == big_keyframe &&
+             sent.back() == delta,
+         "the oversized keyframe and the newest delta drain intact");
 
   // Once it is gone the deltas flow again.
   expect(scheduler.enqueue(molink::transport_channel::video, delta.data(),
@@ -265,54 +268,88 @@ void test_single_video_frame_larger_than_budget() {
          "small frames queue again after the oversized frame drains");
 }
 
-void test_video_pressure_preserves_accepted_reference_chain() {
+void test_video_newest_frame_wins_over_old_deltas() {
   molink::channel_scheduler::limits limits;
   limits.video_bytes = 12;
   molink::channel_scheduler scheduler(limits);
   const auto key = bytes(4, 1);
   const auto first = bytes(4, 2);
   const auto second = bytes(4, 3);
-  const auto rejected = bytes(4, 4);
-  scheduler.enqueue(molink::transport_channel::video, key.data(), key.size(), true);
-  scheduler.enqueue(molink::transport_channel::video, first.data(), first.size());
-  scheduler.enqueue(molink::transport_channel::video, second.data(), second.size());
-  expect(!scheduler.enqueue(molink::transport_channel::video,
-                            rejected.data(), rejected.size()),
-         "video pressure is reported to the sender instead of evicting a dependency");
+  const auto newest = bytes(4, 4);
+  scheduler.enqueue(molink::transport_channel::video, key.data(), key.size(),
+                    true);
+  scheduler.enqueue(molink::transport_channel::video, first.data(),
+                    first.size());
+  scheduler.enqueue(molink::transport_channel::video, second.data(),
+                    second.size());
+  expect(scheduler.enqueue(molink::transport_channel::video, newest.data(),
+                           newest.size()),
+         "the newest frame is accepted instead of being refused");
+  expect(scheduler.queued_messages(molink::transport_channel::video) == 3,
+         "the queue keeps the keyframe and the newest two deltas");
+  expect(scheduler.dropped_video_frames() == 1,
+         "the oldest delta was the one discarded");
+
   std::vector<uint8_t> sequence;
   scheduler.drain([&](const molink::channel_scheduler::message& message) {
     sequence.push_back(message.data.front());
     return true;
   });
-  expect(sequence == std::vector<uint8_t>({1, 2, 3}),
-         "every accepted reference frame is preserved in order");
+  // The keyframe stays; the oldest delta is gone; the newest frame is last.
+  expect(sequence == std::vector<uint8_t>({1, 3, 4}),
+         "drain sends the keyframe, the newer delta, then the newest frame");
+  expect(scheduler.take_dropped_video_frames() == 1 &&
+             scheduler.dropped_video_frames() == 0,
+         "the discard counter is readable and resets on take");
+}
+
+void test_video_drops_every_old_delta_that_blocks_the_newest() {
+  molink::channel_scheduler::limits limits;
+  limits.video_bytes = 12;
+  molink::channel_scheduler scheduler(limits);
+  const auto key = bytes(4, 10);
+  const auto d1 = bytes(4, 11);
+  const auto d2 = bytes(4, 12);
+  const auto d3 = bytes(4, 13);
+  const auto d4 = bytes(4, 14);
+  scheduler.enqueue(molink::transport_channel::video, key.data(), key.size(),
+                    true);
+  scheduler.enqueue(molink::transport_channel::video, d1.data(), d1.size());
+  scheduler.enqueue(molink::transport_channel::video, d2.data(), d2.size());
+  expect(scheduler.enqueue(molink::transport_channel::video, d3.data(),
+                           d3.size()),
+         "a third delta evicts the oldest one");
+  expect(scheduler.enqueue(molink::transport_channel::video, d4.data(),
+                           d4.size()),
+         "a fourth delta evicts the next oldest one");
+  expect(scheduler.dropped_video_frames() == 2,
+         "each discard is counted");
+  std::vector<uint8_t> sequence;
+  scheduler.drain([&](const molink::channel_scheduler::message& message) {
+    sequence.push_back(message.data.front());
+    return true;
+  });
+  expect(sequence == std::vector<uint8_t>({10, 13, 14}),
+         "only the keyframe and the two newest deltas remain");
 }
 
 void test_video_backpressure_is_silent_and_throttled() {
-  molink::channel_scheduler::limits limits;
-  limits.video_bytes = 8;
-  molink::channel_scheduler scheduler(limits);
-  const auto keyframe = bytes(8, 0x11);
-  const auto delta = bytes(4, 0x22);
-  expect(scheduler.enqueue(molink::transport_channel::video, keyframe.data(),
-                           keyframe.size(), true),
-         "a keyframe fills the bounded video queue");
-
   int errors = 0;
   int keyframe_requests = 0;
   int gap_notices = 0;
   molink::video_drop_throttle throttle;
+  // The scheduler now keeps the newest frame instead of refusing it, but a
+  // bounded transport (the direct TCP writer) can still refuse one. The
+  // recovery policy is the same path either way.
   const auto attempt = [&](uint64_t now) {
-    const bool accepted = scheduler.enqueue(molink::transport_channel::video,
-                                            delta.data(), delta.size());
     return molink::handle_video_send_result(
-        accepted, /*transport_open=*/true, now, throttle,
+        /*accepted=*/false, /*transport_open=*/true, now, throttle,
         [&] { ++keyframe_requests; }, [&] { ++gap_notices; },
         [&] { ++errors; });
   };
 
   expect(attempt(1000) == molink::video_send_status::dropped,
-         "a full queue reports local backpressure");
+         "a refused frame reports local backpressure");
   expect(errors == 0, "backpressure does not produce an error payload");
   expect(keyframe_requests == 1 && gap_notices == 1,
          "the first drop asks for one keyframe and one stream-gap notice");
@@ -364,7 +401,8 @@ int main() {
   test_sustained_file_backpressure_preserves_backlog_and_control();
   test_drain_isolates_channel_backpressure();
   test_single_video_frame_larger_than_budget();
-  test_video_pressure_preserves_accepted_reference_chain();
+  test_video_newest_frame_wins_over_old_deltas();
+  test_video_drops_every_old_delta_that_blocks_the_newest();
   test_video_backpressure_is_silent_and_throttled();
   test_control_holds_a_large_clipboard_message();
   std::printf("%d checks, %d failures\n", checks, failures);

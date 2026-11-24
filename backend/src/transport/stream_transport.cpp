@@ -18,10 +18,22 @@ stream_transport::stream_transport(write_fn write, close_fn close,
   if (peer_ip_.empty()) peer_ip_ = protocol_;
 }
 
+stream_transport::stream_transport(channel_write_fn write, close_fn close,
+                                   const char* protocol, std::string peer_ip,
+                                   unsigned int peer_port)
+    : protocol_(protocol != nullptr ? protocol : "stream"),
+      peer_ip_(std::move(peer_ip)),
+      peer_port_(peer_port),
+      channel_write_(std::move(write)),
+      close_(std::move(close)) {
+  if (peer_ip_.empty()) peer_ip_ = protocol_;
+}
+
 stream_transport::~stream_transport() = default;
 
 bool stream_transport::is_open() const {
-  return !closed_ && static_cast<bool>(write_);
+  return !closed_ && (static_cast<bool>(write_) ||
+                      static_cast<bool>(channel_write_));
 }
 
 bool stream_transport::send_text(const std::string& text) {
@@ -36,8 +48,38 @@ bool stream_transport::send_text(const std::string& text) {
 }
 
 bool stream_transport::send_binary(const uint8_t* data, std::size_t len) {
+  // The untyped path still carries whole sessions: classify by packet header
+  // so video keeps its channel through a bounded writer.
+  transport_channel channel = transport_channel::control;
+  switch (protocol::packet_stream_of(data, len)) {
+    case protocol::packet_stream::video:
+      channel = transport_channel::video;
+      break;
+    case protocol::packet_stream::audio:
+      channel = transport_channel::audio;
+      break;
+    case protocol::packet_stream::file:
+      channel = transport_channel::file;
+      break;
+    case protocol::packet_stream::control:
+      break;
+  }
+  return send_binary(channel, data, len);
+}
+
+bool stream_transport::send_binary(transport_channel channel,
+                                   const uint8_t* data, std::size_t len) {
   if (!is_open() || (data == nullptr && len > 0)) return false;
-  return write_(data, len);
+  const bool ok = channel_write_ ? channel_write_(channel, data, len)
+                                 : write_(data, len);
+  if (!ok && channel == transport_channel::video) {
+    dropped_video_.fetch_add(1, std::memory_order_relaxed);
+  }
+  return ok;
+}
+
+uint64_t stream_transport::take_video_drops() {
+  return dropped_video_.exchange(0, std::memory_order_relaxed);
 }
 
 void stream_transport::close(int code, const std::string& reason) {

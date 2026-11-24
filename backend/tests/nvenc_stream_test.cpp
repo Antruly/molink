@@ -99,6 +99,31 @@ bool run_codec(molink::video_codec codec, const char* name,
   }
   expect(delta_packets >= 2, "deltas produce packets");
 
+  // A QoS budget change must be applied in place: the reference chain
+  // survives, so the next packet is a delta and not a keyframe.
+  if (encoder->set_bitrate(2500)) {
+    bool got = false;
+    bool saw_key = false;
+    for (int i = 0; i < 3 && !got; ++i) {
+      const std::vector<uint8_t> pixels = picture(7 + i);
+      out.clear();
+      keyframe = true;  // the encoder must clear it for a delta
+      if (!encoder->encode_stream(pixels.data(), kWidth * 4, kWidth, kHeight,
+                                  30, /*keyframe=*/false, out, keyframe,
+                                  error)) {
+        break;
+      }
+      if (!out.empty()) {
+        got = true;
+        saw_key = keyframe;
+      }
+    }
+    expect(got, "a delta still encodes after an in-place budget change");
+    expect(!saw_key, "the budget change does not insert a keyframe");
+  } else {
+    std::printf("%s: in-place bitrate change unavailable\n", name);
+  }
+
   // A forced keyframe must come back as one; this is the resync path.
   out.clear();
   keyframe = false;

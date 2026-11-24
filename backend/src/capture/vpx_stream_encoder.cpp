@@ -182,6 +182,34 @@ class vpx_stream_encoder final : public av1_stream_encoder {
     return true;
   }
 
+  bool set_bitrate(uint32_t kbps) override {
+    const int wanted = static_cast<int>(kbps);
+    config_.max_bitrate_kbps = wanted;
+    if (!open_) {
+      // No session yet; the next init applies the budget.
+      bitrate_kbps_ = wanted;
+      return true;
+    }
+    if (wanted == bitrate_kbps_) return true;
+    if (wanted <= 0) {
+      // Switching a live session to constant quality is not the case this
+      // hook exists for (a budget change); let the caller rebuild.
+      return false;
+    }
+    vpx_codec_enc_cfg_t cfg = cfg_;
+    const stream_rate_mode rate_mode = config_.rate_mode;
+    const bool constant_bitrate = rate_mode == stream_rate_mode::constant_bitrate;
+    const bool constant_quality = rate_mode == stream_rate_mode::constant_quality;
+    cfg.rc_end_usage = constant_bitrate
+                           ? VPX_CBR
+                           : (constant_quality ? VPX_Q : VPX_CQ);
+    cfg.rc_target_bitrate = static_cast<unsigned int>(wanted);
+    if (vpx_codec_enc_config_set(&ctx_, &cfg) != VPX_CODEC_OK) return false;
+    cfg_ = cfg;
+    bitrate_kbps_ = wanted;
+    return true;
+  }
+
  private:
   bool init(int width, int height, int qp, int max_kbps,
             std::string& error) {
@@ -246,6 +274,7 @@ class vpx_stream_encoder final : public av1_stream_encoder {
       // an omission.
       vpx_codec_control(&ctx_, VP9E_SET_COLOR_RANGE, VPX_CR_STUDIO_RANGE);
     }
+    cfg_ = cfg;
     width_ = width;
     height_ = height;
     qp_ = qp;
@@ -269,6 +298,9 @@ class vpx_stream_encoder final : public av1_stream_encoder {
   av1_encoder_config config_;
   video_codec codec_;
   vpx_codec_ctx_t ctx_{};
+  /// Last applied configuration, so a bitrate change can reconfigure the live
+  /// codec (which keeps its reference frames) instead of re-creating it.
+  vpx_codec_enc_cfg_t cfg_{};
   bool open_ = false;
   int width_ = 0;
   int height_ = 0;

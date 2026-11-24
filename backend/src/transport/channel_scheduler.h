@@ -56,8 +56,12 @@ video_send_status handle_video_send_result(
 ///
 /// The scheduler owns queued bytes and never blocks the caller. Control,
 /// audio, and file messages are rejected when their channel budget is full.
-/// Video deltas are rejected at their budget so callers can rebuild the
-/// reference chain; a new keyframe supersedes the queued video baseline.
+/// Video is newest-first: when the queue is over budget the oldest deltas are
+/// discarded until the new frame fits, because a queued old frame is latency
+/// the viewer cannot get back. A new keyframe supersedes all queued video.
+/// Every discard is counted so the caller can request a fresh baseline and
+/// report it; one frame is always accepted, even when it alone exceeds the
+/// budget.
 class channel_scheduler final {
  public:
   struct limits {
@@ -96,6 +100,12 @@ class channel_scheduler final {
   std::size_t queued_messages(transport_channel channel) const;
   bool empty() const;
 
+  /// Video frames discarded by the budget policy since the last take. A drop
+  /// breaks the reference chain, so the caller must ask the capture for a new
+  /// baseline; the count also feeds the pipeline's `dropped` summary.
+  std::size_t dropped_video_frames() const { return dropped_video_; }
+  std::size_t take_dropped_video_frames();
+
  private:
   struct queue {
     std::deque<message> messages;
@@ -111,6 +121,7 @@ class channel_scheduler final {
   queue video_;
   queue audio_;
   queue file_;
+  std::size_t dropped_video_ = 0;
 };
 
 }  // namespace molink
