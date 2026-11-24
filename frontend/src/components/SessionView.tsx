@@ -80,7 +80,9 @@ import {
 import {
   keyboardGrabApplicable,
   keyboardGrabAvailable,
+  onKeyboardGrabReleased,
   setKeyboardGrab,
+  setKeyboardGrabSurface,
   shellInfo,
   windowAction,
 } from '../lib/shell'
@@ -498,9 +500,14 @@ export function SessionView({
     !qualityPanelOpen
   const [surfaceFocused, setSurfaceFocused] = useState(false)
   const grabWanted = grabEligible && surfaceFocused
+  /// The surface element only exists once the first frame has arrived.
+  const surfaceMounted = tab.frame !== null
   const clipboardAvailable = welcome?.clipboard === true
 
   const surfaceRef = useRef<HTMLDivElement>(null)
+  /// Mirror of the shell's pointer-in-picture condition. Only used to stop
+  /// forwarding in X11 grab mode; elsewhere it stays out of the decision.
+  const pointerInSurface = useRef(false)
   const pendingMove = useRef<{ x: number; y: number } | null>(null)
   const moveScheduled = useRef(false)
   const pressedKeys = useRef<Set<string>>(new Set())
@@ -2062,6 +2069,7 @@ export function SessionView({
     if (!point) return
     event.preventDefault()
     event.currentTarget.focus()
+    pointerInSurface.current = true
     // focus() fires onFocus only when the surface was not already focused;
     // clicking after the local escape combo must re-arm the grab explicitly.
     if (grabEligible) setKeyboardGrab(true)
@@ -2091,6 +2099,10 @@ export function SessionView({
   }
 
   const onPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    // A move that reaches the surface proves the pointer is over the picture,
+    // even when no pointerenter was delivered (e.g. it was already there when
+    // the first frame mounted).
+    pointerInSurface.current = true
     // One pointer event feeds both paths: the remote mouse and the local
     // overlay proximity test (rAF-throttled, so no second hit-test per frame).
     watermarkProximity.onPointerMove(event)
@@ -2150,6 +2162,13 @@ export function SessionView({
       localTarget: isLocalInputTarget(target),
       settingsOpen: useAppStore.getState().settingsOpen,
       localPanelOpen: useAppStore.getState().qualityPanelOpen,
+      // The Linux shell releases the grab when the pointer leaves the picture;
+      // stop forwarding at the same moment so those keys are truly local.
+      // Windows, macOS and the plain web page keep their old behaviour.
+      remotePictureHover:
+        keyboardGrabApplicable() && useAppStore.getState().keyboardGrab
+          ? pointerInSurface.current
+          : undefined,
     })
     const down = (event: KeyboardEvent) => {
       if (event.repeat || event.isComposing) return
@@ -2289,6 +2308,57 @@ export function SessionView({
 
   // A tab switch unmounts this view; never leave the desktop keyboard grabbed.
   useEffect(() => () => setKeyboardGrab(false), [])
+
+  // The shell keeps the X11 grab only while the pointer is over the remote
+  // picture. Publish that rectangle whenever the layout, scrolling or window
+  // size moves it; the shell combines it with the live pointer position and
+  // releases the grab as soon as the pointer leaves.
+  useEffect(() => {
+    if (!keyboardGrabApplicable() || !surfaceMounted) return
+    const surface = surfaceRef.current
+    if (!surface) return
+    let lastRect = ''
+    const publish = () => {
+      const rect = surface.getBoundingClientRect()
+      // The pointer may already be over the picture when the first frame
+      // mounts, in which case no pointerenter is delivered.
+      pointerInSurface.current = surface.matches(':hover')
+      // Scroll events can fire many times per second while the rect is
+      // unchanged; only a real move needs a bridge message.
+      const key = `${rect.left},${rect.top},${rect.width},${rect.height}`
+      if (key === lastRect) return
+      lastRect = key
+      setKeyboardGrabSurface({
+        x: rect.left,
+        y: rect.top,
+        width: rect.width,
+        height: rect.height,
+      })
+    }
+    publish()
+    const observer =
+      typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(publish)
+    observer?.observe(surface)
+    window.addEventListener('resize', publish)
+    window.addEventListener('scroll', publish, true)
+    return () => {
+      observer?.disconnect()
+      window.removeEventListener('resize', publish)
+      window.removeEventListener('scroll', publish, true)
+    }
+  }, [surfaceMounted, tab.id])
+
+  // The shell releases the grab on Ctrl+Alt+Shift+Escape; show the matching
+  // local notice so it is clear the keyboard went back to the desktop.
+  useEffect(
+    () =>
+      onKeyboardGrabReleased((reason) => {
+        if (reason === 'escape') {
+          pushToast(tab.id, 'keyboard_grab_released', 'info')
+        }
+      }),
+    [pushToast, tab.id],
+  )
 
   const copyFromRemote = () => {
     connection()?.requestClipboard()
@@ -2654,7 +2724,15 @@ export function SessionView({
           onPointerUp={onPointerUp}
           onPointerMove={onPointerMove}
           onPointerCancel={onTouchpadCancel}
+          onPointerEnter={() => {
+            pointerInSurface.current = true
+            // Re-arm immediately instead of waiting for the shell's next poll.
+            if (grabEligible) setKeyboardGrab(true)
+          }}
           onPointerLeave={() => {
+            // The shell releases the X11 grab for the same condition; stop
+            // forwarding too, so those keys are local from this moment on.
+            pointerInSurface.current = false
             panPointer.current = null
             watermarkProximity.onPointerLeave()
           }}
