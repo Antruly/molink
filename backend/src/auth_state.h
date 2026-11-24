@@ -128,6 +128,9 @@ class auth_state {
   void set_service_desired_running(bool enabled);
   /// Local diagnostic log recording (the ring buffer stays either way).
   void set_diag_logs_enabled(bool enabled);
+  /// Optional write sandbox for the file channel. Off by default; `roots` is
+  /// the raw `;`/newline separated list the settings screen edits.
+  void set_file_sandbox(bool enabled, std::string roots);
   /// Pinned stream codec: auto / av1 / h264 / vp9 / vp8.
   bool set_stream_codec(const std::string& codec);
   /// Video path: stream / mixed / tiles.

@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <filesystem>
 #include <optional>
 #include <fstream>
 #include <functional>
@@ -40,6 +41,20 @@ class file_transfer {
   /// treated as unrecoverable and the upload is failed.
   static constexpr uint64_t kMaxAheadBytes = 16ull * kChunkBytes;
   static constexpr auto kOrderTimeout = std::chrono::seconds(30);
+  /// A closed session keeps an unfinished `.part` for this long so the same
+  /// viewer can reconnect and offer the same file with an `offset`. Explicit
+  /// cancel, a completed upload and an idle reclaim still delete it at once.
+  static constexpr auto kResumeGrace = std::chrono::seconds(60);
+
+  /// Optional write sandbox. Off by default: the file channel deliberately
+  /// lets a viewer write any folder the host user can create. When enabled,
+  /// uploads and `mkdir` must resolve inside one of `roots` (raw text; `~` is
+  /// the host home, and an empty list means `~/moLink`).
+  struct write_policy {
+    bool enabled = false;
+    std::vector<std::string> roots;
+  };
+  using write_policy_provider = std::function<write_policy()>;
 
   enum class upload_event { accepted, progress, done, failed };
   /// Upload lifecycle for the delayed clipboard path. `tag` is the opaque
@@ -54,12 +69,25 @@ class file_transfer {
   ~file_transfer();
 
   void watch_uploads(upload_watcher watcher);
+  /// The id logged on every `file.*` diagnostic. Optional: tests and the
+  /// clipboard-only paths simply leave it empty.
+  void set_session_id(std::string id);
+  /// Called for every upload and `mkdir`. An empty provider, or a disabled
+  /// policy, keeps the historical "any folder" behaviour.
+  void set_write_policy(write_policy_provider provider);
 
   /// `name` is a bare file name from the peer; `size` is the declared length.
   /// `destination` is the viewer's chosen folder; empty means ~/moLink. A
   /// relative parent inside `name` (a folder drag) is created underneath it.
+  /// `offset`/`digest` are the additive resume hint: the viewer already has
+  /// the first `offset` bytes and (optionally) their SHA-256. `resume` is an
+  /// opaque, client-stable key that ties two sessions of the same logical
+  /// upload to one `.part`; an older client sends neither and starts at 0.
   void offer(const std::string& name, uint64_t size,
-             const std::string& destination, int tag = -1);
+             const std::string& destination, int tag = -1,
+             uint64_t offset = 0,
+             const std::string& digest = std::string(),
+             const std::string& resume = std::string());
   /// Creates an empty directory (and its parents) under the viewer's chosen
   /// destination. `path` must be relative and is validated like an upload
   /// name; a peer that sends only a bare file name never needs this.
@@ -83,6 +111,10 @@ class file_transfer {
   /// moved for this long; the viewer that left never sends `cancel`.
   static constexpr auto kIdleTimeout = std::chrono::seconds(120);
   void pull(uint32_t id, clock::time_point now = clock::now());
+  /// Resume a download at `offset`. Old viewers keep the first overload; a
+  /// viewer that reconnects asks for the byte it already saved.
+  void pull(uint32_t id, uint64_t offset,
+            clock::time_point now = clock::now());
   void retry_pending(clock::time_point now = clock::now());
   bool has_pending() const;
   /// True while any download or upload is open, including one that is merely
@@ -91,8 +123,13 @@ class file_transfer {
   bool has_transfers() const;
   void fail_pending();
 
-  /// Drop partial uploads when the session closes.
+  /// Drop partial uploads when the session closes. An unfinished `.part` is
+  /// kept for `kResumeGrace` so a reconnecting viewer can resume it; the
+  /// supervisor (or the next constructor) sweeps expired ones.
   void close_all();
+  /// Delete `.part` files whose resume grace has elapsed. Public static so
+  /// tests can drive the clock without a running supervisor.
+  static void sweep_orphans(clock::time_point now = clock::now());
 
   /// Resolve peer-supplied paths to existing files anywhere on the host.
   /// Used by the "copy to the remote clipboard" action.
@@ -106,6 +143,10 @@ class file_transfer {
     std::string name;
     std::string temp_path;
     std::string final_dir;
+    /// Identity shared by every attempt at this logical upload. It is part of
+    /// the `.part` name, so a new session can find the file the previous one
+    /// left behind without guessing.
+    std::string ident;
     uint64_t size = 0;
     uint64_t received = 0;
     /// Contiguous offset already acknowledged to the viewer, and the ack
@@ -134,6 +175,8 @@ class file_transfer {
 
   // Returns true when the pull is complete or failed and the item is done.
   bool send_next(download& item, clock::time_point now);
+  void pull_impl(uint32_t id, std::optional<uint64_t> offset,
+                 clock::time_point now);
 
   void fail(const std::string& action, uint32_t id, const std::string& why);
   /// Fail an upload: `cancel` keeps older viewers working, `file-failed`
@@ -149,10 +192,24 @@ class file_transfer {
   /// Creates the upload's temporary file without ever reusing a name that is
   /// already on disk. Updates `item.temp_path`; false on failure.
   bool create_temp_upload_file(upload& item, const std::string& dir);
+  /// Finds a `.part` for the same logical upload left by a previous session
+  /// and opens it for append. False when there is nothing safe to resume.
+  bool adopt_temp_upload_file(upload& item, const std::string& dir,
+                              uint64_t offset, const std::string& digest);
+  write_policy current_write_policy() const;
+  /// True when @p target is inside one of the configured roots. `root` is the
+  /// matching canonical root in UTF-8.
+  bool sandbox_allows(const std::filesystem::path& target,
+                      const write_policy& policy, std::string& root) const;
+  void deny_path(const std::string& action,
+                 const std::filesystem::path& target,
+                 const write_policy& policy);
 
   json_sender send_json_;
   chunk_sender send_chunk_;
   upload_watcher upload_watcher_;
+  write_policy_provider write_policy_provider_;
+  std::string session_id_;
   std::map<uint32_t, upload> uploads_;
   std::map<uint32_t, download> downloads_;
   uint32_t next_id_ = 1;

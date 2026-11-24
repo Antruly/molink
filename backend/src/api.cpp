@@ -2789,6 +2789,8 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
                 settings.allow_sync_between_sessions;
             j["encrypt_remote"] = settings.encrypt_remote;
             j["encrypt_lan"] = settings.encrypt_lan;
+            j["file_sandbox"] = settings.file_sandbox;
+            j["file_sandbox_roots"] = settings.file_sandbox_roots;
             j["device_name"] = settings.device_name;
             j["avatar"] = settings.avatar;
             j["server_enabled"] = settings.server_enabled;
@@ -2830,6 +2832,10 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
              const bool encrypt_remote =
                  flag("encrypt_remote", before.encrypt_remote);
              const bool encrypt_lan = flag("encrypt_lan", before.encrypt_lan);
+             const bool file_sandbox =
+                 flag("file_sandbox", before.file_sandbox);
+             const std::string* sandbox_roots =
+                 req.query("file_sandbox_roots");
              const std::string* stun = req.query("stun");
              if (stun != nullptr && !deps.auth->set_stun_server(*stun)) {
                resp.status(400).json_str(R"({"code":"invalid_stun"})");
@@ -2852,6 +2858,10 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
              }
              deps.auth->set_allow_sync_between_sessions(sync_between_sessions);
              deps.auth->set_transport_security(encrypt_remote, encrypt_lan);
+             deps.auth->set_file_sandbox(
+                 file_sandbox,
+                 sandbox_roots != nullptr ? *sandbox_roots
+                                          : before.file_sandbox_roots);
              const app_settings after = deps.auth->settings();
              if (deps.on_access_changed &&
                  after.allow_remote_access != before.allow_remote_access) {
@@ -2885,6 +2895,8 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
                  after.allow_sync_between_sessions;
              j["encrypt_remote"] = after.encrypt_remote;
              j["encrypt_lan"] = after.encrypt_lan;
+             j["file_sandbox"] = after.file_sandbox;
+             j["file_sandbox_roots"] = after.file_sandbox_roots;
              j["stun_server"] = after.stun_server;
              j["device_name"] = after.device_name;
              j["restart_required"] = false;

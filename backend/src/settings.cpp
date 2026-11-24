@@ -175,6 +175,10 @@ app_settings load_settings() {
       settings.service_desired_running = parse_bool(value, true);
     } else if (key == "diag_logs_enabled") {
       settings.diag_logs_enabled = parse_bool(value, true);
+    } else if (key == "file_sandbox") {
+      settings.file_sandbox = parse_bool(value, false);
+    } else if (key == "file_sandbox_roots") {
+      settings.file_sandbox_roots = value;
     } else if (key == "av1_enabled") {
       settings.av1_enabled = parse_bool(value, true);
     } else if (key == "av1_full_frame") {
@@ -306,6 +310,8 @@ void save_settings(const app_settings& settings) {
          << (settings.service_desired_running ? 1 : 0) << "\n";
   stream << "diag_logs_enabled=" << (settings.diag_logs_enabled ? 1 : 0)
          << "\n";
+  stream << "file_sandbox=" << (settings.file_sandbox ? 1 : 0) << "\n";
+  stream << "file_sandbox_roots=" << settings.file_sandbox_roots << "\n";
   stream << "av1_enabled=" << (settings.av1_enabled ? 1 : 0) << "\n";
   stream << "av1_full_frame=" << (settings.av1_full_frame ? 1 : 0) << "\n";
   stream << "av1_device=" << settings.av1_device << "\n";

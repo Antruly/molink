@@ -7,8 +7,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <mutex>
 #include <optional>
 #include <random>
+#include <set>
+#include <string_view>
 #include <system_error>
 #include <utility>
 #include <vector>
@@ -26,6 +29,7 @@
 
 #include "diag_log.h"
 #include "directory_listing.h"
+#include "sha256.h"
 #include "util.h"
 
 namespace molink {
@@ -185,34 +189,195 @@ std::string unique_path_in(const fs::path& dir, const std::string& name) {
                                            extension));
 }
 
-std::string receive_directory() {
-  const fs::path dir = home_root() / "moLink";
-  std::error_code ec;
-  fs::create_directories(dir, ec);
-  return path_to_utf8(dir);
-}
-
 /// Resolves the viewer's destination folder. Empty means ~/moLink; `~` is the
 /// host user's home; relative paths are taken relative to home. Any absolute
-/// path the host user can create is allowed -- the host owner decides what the
-/// remote side may write.
-std::string resolve_destination(const std::string& requested) {
-  if (requested.empty()) return receive_directory();
-  std::string text = requested;
+/// path the host user can create is allowed when the optional sandbox is off.
+/// This only computes the path -- creating it is the caller's job, after the
+/// write policy has had a chance to reject it.
+std::optional<fs::path> resolve_destination_path(const std::string& requested) {
   fs::path target;
-  if (text == "~") {
+  if (requested.empty()) {
+    target = home_root() / "moLink";
+  } else if (requested == "~") {
     target = home_root();
-  } else if (text.rfind("~/", 0) == 0 || text.rfind("~\\", 0) == 0) {
-    target = home_root() / text.substr(2);
+  } else if (requested.rfind("~/", 0) == 0 ||
+             requested.rfind("~\\", 0) == 0) {
+    target = home_root() / path_from_utf8(requested.substr(2));
   } else {
-    target = path_from_utf8(text);
+    target = path_from_utf8(requested);
     if (target.is_relative()) target = home_root() / target;
   }
-  std::error_code ec;
-  fs::create_directories(target, ec);
-  if (ec) return std::string();
-  if (!fs::is_directory(target, ec) || ec) return std::string();
-  return path_to_utf8(target.lexically_normal());
+  if (target.empty()) return std::nullopt;
+  return target.lexically_normal();
+}
+
+/// Expands one configured sandbox root. An empty root is ignored; a relative
+/// root is taken from the host home, matching `resolve_destination_path`.
+std::optional<fs::path> expand_root(const std::string& raw) {
+  std::string text = raw;
+  while (!text.empty() &&
+         (text.front() == ' ' || text.front() == '\t' ||
+          text.front() == '\r' || text.front() == '\n')) {
+    text.erase(text.begin());
+  }
+  while (!text.empty() &&
+         (text.back() == ' ' || text.back() == '\t' ||
+          text.back() == '\r' || text.back() == '\n')) {
+    text.pop_back();
+  }
+  if (text.empty()) return std::nullopt;
+  return resolve_destination_path(text);
+}
+
+bool ascii_lower_equal(std::string_view left, std::string_view right) {
+  if (left.size() != right.size()) return false;
+  for (std::size_t index = 0; index < left.size(); ++index) {
+    const unsigned char a = static_cast<unsigned char>(left[index]);
+    const unsigned char b = static_cast<unsigned char>(right[index]);
+    if (std::tolower(a) != std::tolower(b)) return false;
+  }
+  return true;
+}
+
+/// Settings store multiple roots as one line (`;` or newline separated). Each
+/// produced string is trimmed by `expand_root`.
+std::vector<std::string> split_root_list(const std::string& raw) {
+  std::vector<std::string> out;
+  std::string current;
+  for (char c : raw) {
+    if (c == ';' || c == '\n' || c == '\r') {
+      out.push_back(current);
+      current.clear();
+    } else {
+      current.push_back(c);
+    }
+  }
+  out.push_back(current);
+  return out;
+}
+
+/// Stable 64-bit FNV-1a, formatted as 16 hex digits. Used only to name a
+/// `.part` so two sessions of the same logical upload agree on it.
+std::string stable_ident(const std::string& text) {
+  uint64_t hash = 1469598103934665603ull;
+  for (unsigned char byte : text) {
+    hash ^= byte;
+    hash *= 1099511628211ull;
+  }
+  static const char kHex[] = "0123456789abcdef";
+  std::string out(16, '0');
+  for (int index = 15; index >= 0; --index) {
+    out[static_cast<std::size_t>(index)] = kHex[hash & 0xf];
+    hash >>= 4;
+  }
+  return out;
+}
+
+std::string upload_ident(const std::string& resume, const std::string& dir,
+                         const std::string& name, uint64_t size) {
+  std::string key = resume.empty() ? "path" : "resume";
+  key += '\n';
+  key += resume;
+  key += '\n';
+  key += dir;
+  key += '\n';
+  key += name;
+  key += '\n';
+  key += std::to_string(size);
+  return stable_ident(key);
+}
+
+std::string error_text(const std::error_code& ec) {
+  return ec ? ec.message() : errno_text();
+}
+
+/// SHA-256 of the first `limit` bytes of a file. False when the file is
+/// missing or shorter than `limit`: a resume must never accept a short prefix
+/// as proof that the retained bytes are the ones the viewer already has.
+bool sha256_prefix_file(const std::string& path, uint64_t limit,
+                        std::string& hex) {
+  std::ifstream in(path, std::ios::binary);
+  if (!in) return false;
+  sha256 hasher;
+  char buffer[64 * 1024];
+  uint64_t left = limit;
+  while (left > 0 && in) {
+    const std::size_t want = static_cast<std::size_t>(
+        (std::min)(left, static_cast<uint64_t>(sizeof(buffer))));
+    in.read(buffer, static_cast<std::streamsize>(want));
+    const std::streamsize got = in.gcount();
+    if (got <= 0) break;
+    hasher.update(buffer, static_cast<std::size_t>(got));
+    left -= static_cast<uint64_t>(got);
+  }
+  if (left != 0) return false;
+  hex = hasher.hex_digest();
+  return true;
+}
+
+/// `.part` files a closed session asked us to keep. The supervisor sweeps
+/// them; tests call `file_transfer::sweep_orphans` with an explicit time.
+struct orphan_entry {
+  std::string path;
+  file_transfer::clock::time_point expires;
+};
+
+std::mutex& orphan_mutex() {
+  static auto* mutex = new std::mutex();
+  return *mutex;
+}
+
+std::vector<orphan_entry>& orphan_list() {
+  static auto* list = new std::vector<orphan_entry>();
+  return *list;
+}
+
+/// `.part` paths currently owned by a live transfer. A reconnect must never
+/// adopt a file that another session is still appending to.
+std::mutex& active_mutex() {
+  static auto* mutex = new std::mutex();
+  return *mutex;
+}
+
+std::set<std::string>& active_parts() {
+  static auto* parts = new std::set<std::string>();
+  return *parts;
+}
+
+void mark_part_active(const std::string& path) {
+  std::lock_guard<std::mutex> lock(active_mutex());
+  active_parts().insert(path);
+}
+
+void unmark_part_active(const std::string& path) {
+  std::lock_guard<std::mutex> lock(active_mutex());
+  active_parts().erase(path);
+}
+
+bool part_is_active(const std::string& path) {
+  std::lock_guard<std::mutex> lock(active_mutex());
+  return active_parts().count(path) != 0;
+}
+
+void keep_orphan(const std::string& path, file_transfer::clock::time_point when) {
+  std::lock_guard<std::mutex> lock(orphan_mutex());
+  for (orphan_entry& entry : orphan_list()) {
+    if (entry.path == path) {
+      entry.expires = when;
+      return;
+    }
+  }
+  orphan_list().push_back(orphan_entry{path, when});
+}
+
+void forget_orphan(const std::string& path) {
+  std::lock_guard<std::mutex> lock(orphan_mutex());
+  auto& list = orphan_list();
+  list.erase(std::remove_if(list.begin(), list.end(),
+                            [&path](const orphan_entry& entry) {
+                              return entry.path == path;
+                            }),
+             list.end());
 }
 
 /// Windows reserves these device names in every directory, with or without an
@@ -310,12 +475,101 @@ std::string join_segments(const std::vector<std::string>& segments) {
 file_transfer::file_transfer(json_sender send_json, chunk_sender send_chunk)
     : send_json_(std::move(send_json)),
       send_chunk_(std::move(send_chunk)),
-      temp_tag_(random_hex_tag(8)) {}
+      temp_tag_(random_hex_tag(8)) {
+  sweep_orphans();
+}
 
-file_transfer::~file_transfer() { close_all(); }
+file_transfer::~file_transfer() {
+  for (auto& entry : uploads_) {
+    entry.second.out.close();
+    unmark_part_active(entry.second.temp_path);
+    std::error_code ec;
+    fs::remove(path_from_utf8(entry.second.temp_path), ec);
+  }
+  uploads_.clear();
+  for (auto& entry : downloads_) entry.second.in.close();
+  downloads_.clear();
+}
 
 void file_transfer::watch_uploads(upload_watcher watcher) {
   upload_watcher_ = std::move(watcher);
+}
+
+void file_transfer::set_session_id(std::string id) {
+  session_id_ = std::move(id);
+}
+
+void file_transfer::set_write_policy(write_policy_provider provider) {
+  write_policy_provider_ = std::move(provider);
+}
+
+file_transfer::write_policy file_transfer::current_write_policy() const {
+  return write_policy_provider_ ? write_policy_provider_() : write_policy{};
+}
+
+bool file_transfer::sandbox_allows(const fs::path& target,
+                                   const write_policy& policy,
+                                   std::string& root) const {
+  if (!policy.enabled) return true;
+  std::vector<fs::path> roots;
+  for (const std::string& raw : policy.roots) {
+    for (const std::string& part : split_root_list(raw)) {
+      if (const std::optional<fs::path> expanded = expand_root(part)) {
+        roots.push_back(*expanded);
+      }
+    }
+  }
+  // An enabled sandbox with no configured root still has a sensible default:
+  // the ordinary receive folder.
+  if (roots.empty()) roots.push_back(home_root() / "moLink");
+  std::error_code ec;
+  const fs::path candidate = fs::weakly_canonical(target, ec);
+  for (const fs::path& allowed : roots) {
+    std::error_code root_ec;
+    const fs::path canonical =
+        fs::weakly_canonical(allowed, root_ec);
+    const fs::path& base = root_ec ? allowed : canonical;
+    if (within_root(base, ec ? target : candidate)) {
+      root = path_to_utf8(base);
+      return true;
+    }
+  }
+  return false;
+}
+
+void file_transfer::deny_path(const std::string& action,
+                              const fs::path& target,
+                              const write_policy& policy) {
+  std::vector<std::string> roots;
+  for (const std::string& raw : policy.roots) {
+    for (const std::string& part : split_root_list(raw)) {
+      if (const std::optional<fs::path> expanded = expand_root(part)) {
+        roots.push_back(path_to_utf8(*expanded));
+      }
+    }
+  }
+  if (roots.empty()) {
+    roots.push_back(path_to_utf8(home_root() / "moLink"));
+  }
+  std::vector<diag_field> fields = {{"action", action},
+                                    {"path", path_to_utf8(target)}};
+  if (!session_id_.empty()) fields.push_back({"session_id", session_id_});
+  diag().log(diag_level::warn, "file.forbidden",
+             "write sandbox denied the path", fields);
+  uvcpp_json j;
+  j["type"] = "file";
+  j["action"] = "forbidden_path";
+  j["code"] = "forbidden_path";
+  j["ok"] = false;
+  j["message"] = "write sandbox: path is outside the allowed roots";
+  j["path"] = path_to_utf8(target);
+  // `root` is the first allowed folder for a one-line prompt; `allowed_roots`
+  // carries the whole list. Neither collides with the `roots` volume list a
+  // `listing` answer uses.
+  j["root"] = roots.front();
+  j["allowed_roots"] = uvcpp_json::array();
+  for (const std::string& root : roots) j["allowed_roots"].push_back(root);
+  send_json_(dump_json(j));
 }
 
 void file_transfer::notify_upload(const upload& item, upload_event event,
@@ -327,8 +581,10 @@ void file_transfer::notify_upload(const upload& item, upload_event event,
 
 void file_transfer::fail(const std::string& action, uint32_t id,
                          const std::string& why) {
-  diag().log(diag_level::warn, "file.fail", why,
-             {{"action", action}, {"id", std::to_string(id)}});
+  std::vector<diag_field> fields = {{"action", action},
+                                    {"id", std::to_string(id)}};
+  if (!session_id_.empty()) fields.push_back({"session_id", session_id_});
+  diag().log(diag_level::warn, "file.fail", why, fields);
   uvcpp_json j;
   j["type"] = "file";
   j["action"] = action;
@@ -354,8 +610,9 @@ bool file_transfer::create_temp_upload_file(upload& item,
     const std::string suffix =
         attempt == 0 ? std::string() : "-" + random_hex_tag(4);
     const fs::path candidate =
-        dir_path / path_from_utf8(".upload-" + temp_tag_ + "-" +
-                                  std::to_string(item.id) + suffix + ".part");
+        dir_path / path_from_utf8(".upload-" + item.ident + "-" + temp_tag_ +
+                                  "-" + std::to_string(item.id) + suffix +
+                                  ".part");
     const int handle = open_exclusive(candidate);
     if (handle < 0) {
       if (errno != EEXIST) return false;
@@ -370,9 +627,59 @@ bool file_transfer::create_temp_upload_file(upload& item,
     }
     item.temp_path = path_to_utf8(candidate);
     item.out = std::move(out);
+    mark_part_active(item.temp_path);
     return true;
   }
   return false;
+}
+
+bool file_transfer::adopt_temp_upload_file(upload& item,
+                                           const std::string& dir,
+                                           uint64_t offset,
+                                           const std::string& digest) {
+  if (offset == 0) return false;
+  const fs::path dir_path = path_from_utf8(dir);
+  const std::string prefix = ".upload-" + item.ident + "-";
+  std::error_code ec;
+  fs::path best;
+  uint64_t best_size = 0;
+  for (const auto& entry : fs::directory_iterator(dir_path, ec)) {
+    if (ec) break;
+    const std::string name = path_to_utf8(entry.path().filename());
+    if (name.rfind(prefix, 0) != 0) continue;
+    if (name.size() < 6 ||
+        name.compare(name.size() - 5, 5, ".part") != 0) {
+      continue;
+    }
+    std::error_code entry_ec;
+    if (!entry.is_regular_file(entry_ec) || entry_ec) continue;
+    const std::string path = path_to_utf8(entry.path());
+    if (part_is_active(path)) continue;
+    const uint64_t disk = entry.file_size(entry_ec);
+    if (entry_ec || disk == 0 || disk > item.size) continue;
+    if (!digest.empty()) {
+      // Only a prefix long enough to cover the digest can prove the file is
+      // the one the viewer is talking about. A short `.part` is not a match:
+      // the viewer would otherwise resume into bytes we cannot verify.
+      if (disk < offset) continue;
+      std::string got;
+      if (!sha256_prefix_file(path, offset, got)) continue;
+      if (!ascii_lower_equal(got, digest)) continue;
+    }
+    if (disk > best_size) {
+      best = entry.path();
+      best_size = disk;
+    }
+  }
+  if (best.empty()) return false;
+  std::ofstream out(best, std::ios::binary | std::ios::app);
+  if (!out) return false;
+  item.temp_path = path_to_utf8(best);
+  item.out = std::move(out);
+  item.received = best_size;
+  mark_part_active(item.temp_path);
+  forget_orphan(item.temp_path);
+  return true;
 }
 
 void file_transfer::send_ack(upload& item) {
@@ -419,7 +726,10 @@ void file_transfer::fail_upload(upload& item, const std::string& why) {
 }
 
 void file_transfer::offer(const std::string& name, uint64_t size,
-                          const std::string& destination, int tag) {
+                          const std::string& destination, int tag,
+                          uint64_t offset, const std::string& digest,
+                          const std::string& resume) {
+  sweep_orphans();
   if (uploads_.size() >= 8) {
     fail("reject", 0, "too many active uploads");
     return;
@@ -428,9 +738,10 @@ void file_transfer::offer(const std::string& name, uint64_t size,
     fail("reject", 0, "file is larger than 8 GiB");
     return;
   }
-  const std::string dir = resolve_destination(destination);
-  if (dir.empty()) {
-    fail("reject", 0, "could not create the receive folder");
+  const std::optional<fs::path> dest_path =
+      resolve_destination_path(destination);
+  if (!dest_path) {
+    fail("reject", 0, "could not resolve the receive folder");
     return;
   }
   // A folder drag sends `sub/dir/file`; keep the relative parents and create
@@ -444,14 +755,26 @@ void file_transfer::offer(const std::string& name, uint64_t size,
   const std::string base = segments.back();
   segments.pop_back();
   fs::path final_dir;
-  if (!prepare_directory(dir, segments, final_dir)) {
+  if (!prepare_directory(*dest_path, segments, final_dir)) {
     fail("reject", 0, "invalid file path");
+    return;
+  }
+  // The optional sandbox is checked before `create_directories`, so a denied
+  // path leaves nothing behind. The second check uses the canonical directory
+  // `prepare_directory` produced, which catches a symlink that would have
+  // redirected the create.
+  const write_policy policy = current_write_policy();
+  std::string allowed_root;
+  if (!sandbox_allows(*dest_path, policy, allowed_root) ||
+      !sandbox_allows(final_dir, policy, allowed_root)) {
+    deny_path("offer", final_dir, policy);
     return;
   }
   std::error_code dir_ec;
   fs::create_directories(final_dir, dir_ec);
   if (dir_ec) {
-    fail("reject", 0, "could not create the destination folder");
+    fail("reject", 0,
+         "could not create the destination folder: " + error_text(dir_ec));
     return;
   }
   const uint32_t id = next_id_++;
@@ -461,13 +784,20 @@ void file_transfer::offer(const std::string& name, uint64_t size,
   item.name = base;
   item.final_dir = path_to_utf8(final_dir);
   item.size = size;
-  if (!create_temp_upload_file(item, dir)) {
+  item.ident = upload_ident(resume, item.final_dir, base, size);
+  bool resumed = false;
+  if (offset > 0) {
+    resumed = adopt_temp_upload_file(item, path_to_utf8(*dest_path), offset,
+                                     digest);
+  }
+  if (!resumed && !create_temp_upload_file(item, path_to_utf8(*dest_path))) {
     fail("reject", 0,
          "could not create " + base + ": " + errno_text());
     return;
   }
   item.last_activity = clock::now();
   item.last_ack = item.last_activity;
+  const uint64_t resumed_at = item.received;
   uploads_.emplace(id, std::move(item));
   uvcpp_json j;
   j["type"] = "file";
@@ -479,13 +809,19 @@ void file_transfer::offer(const std::string& name, uint64_t size,
   // `file-ack`. Older viewers ignore it and keep the legacy fire-and-forget
   // upload; the host accepts both.
   j["ack"] = true;
-  j["dir"] = dir;
+  j["dir"] = path_to_utf8(*dest_path);
+  // Additive resume reply: the host's real contiguous point. A viewer that
+  // asked for `offset` but found no matching `.part` gets 0 and restarts.
+  j["offset"] = resumed_at;
+  j["resumed"] = resumed_at > 0;
   send_json_(dump_json(j));
-  diag().log(diag_level::info, "file.accept", std::string(),
-             {{"id", std::to_string(id)},
-              {"name", base},
-              {"bytes", std::to_string(size)},
-              {"dir", dir}});
+  std::vector<diag_field> fields = {{"id", std::to_string(id)},
+                                    {"name", base},
+                                    {"bytes", std::to_string(size)},
+                                    {"dir", path_to_utf8(*dest_path)},
+                                    {"offset", std::to_string(resumed_at)}};
+  if (!session_id_.empty()) fields.push_back({"session_id", session_id_});
+  diag().log(diag_level::info, "file.accept", std::string(), fields);
   notify_upload(uploads_.at(id), upload_event::accepted);
 }
 
@@ -496,20 +832,29 @@ void file_transfer::mkdir(const std::string& path,
     fail("mkdir", 0, "invalid folder path");
     return;
   }
-  const std::string dir = resolve_destination(destination);
-  if (dir.empty()) {
-    fail("mkdir", 0, "could not create the receive folder");
+  const std::optional<fs::path> dest_path =
+      resolve_destination_path(destination);
+  if (!dest_path) {
+    fail("mkdir", 0, "could not resolve the receive folder");
     return;
   }
   fs::path target;
-  if (!prepare_directory(dir, segments, target)) {
+  if (!prepare_directory(*dest_path, segments, target)) {
     fail("mkdir", 0, "invalid folder path");
+    return;
+  }
+  const write_policy policy = current_write_policy();
+  std::string allowed_root;
+  if (!sandbox_allows(*dest_path, policy, allowed_root) ||
+      !sandbox_allows(target, policy, allowed_root)) {
+    deny_path("mkdir", target, policy);
     return;
   }
   std::error_code ec;
   fs::create_directories(target, ec);
   if (ec || !fs::is_directory(target, ec)) {
-    fail("mkdir", 0, "could not create the folder");
+    fail("mkdir", 0,
+         "could not create the folder: " + error_text(ec));
     return;
   }
   uvcpp_json j;
@@ -606,10 +951,12 @@ void file_transfer::complete(uint32_t id, clock::time_point now) {
     drop_upload(id, true);
     return;
   }
-  diag().log(diag_level::info, "file.done", std::string(),
-             {{"id", std::to_string(id)},
-              {"bytes", std::to_string(item.size)},
-              {"path", final_path}});
+  unmark_part_active(item.temp_path);
+  std::vector<diag_field> fields = {{"id", std::to_string(id)},
+                                    {"bytes", std::to_string(item.size)},
+                                    {"path", final_path}};
+  if (!session_id_.empty()) fields.push_back({"session_id", session_id_});
+  diag().log(diag_level::info, "file.done", std::string(), fields);
   notify_upload(item, upload_event::done, final_path);
   uploads_.erase(it);
   uvcpp_json j;
@@ -744,6 +1091,15 @@ void file_transfer::request(const std::string& path,
     fail("sending", 0, "invalid path");
     return;
   }
+  // The optional sandbox covers both directions: a download must also resolve
+  // inside the configured roots when it is enabled. Off by default, so the
+  // historical "browse and fetch anything readable" path is unchanged.
+  const write_policy policy = current_write_policy();
+  std::string allowed_root;
+  if (!sandbox_allows(*resolved, policy, allowed_root)) {
+    deny_path("request", *resolved, policy);
+    return;
+  }
   std::error_code ec;
   if (!fs::is_regular_file(*resolved, ec)) {
     fail("sending", 0, "not a file");
@@ -751,7 +1107,7 @@ void file_transfer::request(const std::string& path,
   }
   const uint64_t size = static_cast<uint64_t>(fs::file_size(*resolved, ec));
   if (ec) {
-    fail("sending", 0, "could not read the file");
+    fail("sending", 0, "could not read the file: " + error_text(ec));
     return;
   }
   if (size > kMaxFileBytes) {
@@ -766,14 +1122,15 @@ void file_transfer::request(const std::string& path,
   item.last_activity = now;
   item.in.open(*resolved, std::ios::binary);
   if (!item.in) {
-    fail("sending", 0, "could not open the file");
+    fail("sending", 0, "could not open the file: " + errno_text());
     return;
   }
   const uint32_t id = item.id;
-  diag().log(diag_level::info, "file.send", std::string(),
-             {{"id", std::to_string(id)},
-              {"bytes", std::to_string(size)},
-              {"name", item.name}});
+  std::vector<diag_field> send_fields = {{"id", std::to_string(id)},
+                                         {"bytes", std::to_string(size)},
+                                         {"name", item.name}};
+  if (!session_id_.empty()) send_fields.push_back({"session_id", session_id_});
+  diag().log(diag_level::info, "file.send", std::string(), send_fields);
   downloads_.emplace(id, std::move(item));
   uvcpp_json j;
   j["type"] = "file";
@@ -786,15 +1143,58 @@ void file_transfer::request(const std::string& path,
 }
 
 void file_transfer::pull(uint32_t id, clock::time_point now) {
+  pull_impl(id, std::nullopt, now);
+}
+
+void file_transfer::pull(uint32_t id, uint64_t offset,
+                         clock::time_point now) {
+  pull_impl(id, offset, now);
+}
+
+void file_transfer::pull_impl(uint32_t id, std::optional<uint64_t> offset,
+                              clock::time_point now) {
   auto it = downloads_.find(id);
   if (it == downloads_.end()) {
     fail("eof", id, "unknown transfer");
     return;
   }
+  download& item = it->second;
   // Every pull is proof that the viewer is still consuming this download.
-  it->second.last_activity = now;
-  // The wire request has no offset, so retain only one outstanding pull.
-  if (!it->second.retry_deadline && send_next(it->second, now)) {
+  item.last_activity = now;
+  if (offset && *offset != item.sent) {
+    if (*offset > item.size) {
+      fail("eof", id, "download offset is past the file end");
+      downloads_.erase(it);
+      return;
+    }
+    if (*offset == item.size) {
+      // Everything was already saved before the reconnect. There is nothing
+      // left to read, and the viewer treats this as a complete transfer.
+      send_simple("eof", id);
+      downloads_.erase(it);
+      return;
+    }
+    item.sent = *offset;
+    item.pending_chunk.clear();
+    item.retry_deadline.reset();
+    item.in.clear();
+    item.in.seekg(static_cast<std::streamoff>(*offset), std::ios::beg);
+    if (!item.in) {
+      fail("eof", id,
+           "could not seek the file: " + errno_text());
+      downloads_.erase(it);
+      return;
+    }
+    diag().log(diag_level::info, "file.resume", std::string(),
+               {{"id", std::to_string(id)},
+                {"offset", std::to_string(*offset)},
+                {"session_id", session_id_}});
+  }
+  if (offset) item.retry_deadline.reset();
+  // A pull without an offset keeps the legacy retry semantics: retain the
+  // outstanding chunk and let the retry timer resend it. An explicit offset
+  // is a fresh request from the viewer, so `send_next` runs immediately.
+  if (!item.retry_deadline && send_next(item, now)) {
     downloads_.erase(it);
   }
 }
@@ -815,7 +1215,8 @@ bool file_transfer::send_next(download& item, clock::time_point now) {
     item.in.read(reinterpret_cast<char*>(item.pending_chunk.data()),
                  static_cast<std::streamsize>(want));
     if (item.in.gcount() != static_cast<std::streamsize>(want)) {
-      fail("eof", item.id, "could not read the file");
+      fail("eof", item.id,
+           "could not read the file: " + errno_text());
       return true;
     }
   }
@@ -917,6 +1318,8 @@ void file_transfer::drop_upload(uint32_t id, bool remove_file) {
   if (it == uploads_.end()) return;
   notify_upload(it->second, upload_event::failed);
   it->second.out.close();
+  unmark_part_active(it->second.temp_path);
+  forget_orphan(it->second.temp_path);
   if (remove_file) {
     std::error_code ec;
     fs::remove(path_from_utf8(it->second.temp_path), ec);
@@ -940,14 +1343,46 @@ std::vector<std::string> file_transfer::resolve_files(
 }
 
 void file_transfer::close_all() {
-  for (auto& item : uploads_) {
-    item.second.out.close();
-    std::error_code ec;
-    fs::remove(path_from_utf8(item.second.temp_path), ec);
+  const clock::time_point now = clock::now();
+  for (auto& entry : uploads_) {
+    upload& item = entry.second;
+    item.out.close();
+    unmark_part_active(item.temp_path);
+    // An unfinished upload is the resume case: keep its bytes for a short
+    // grace period. A zero-byte attempt has nothing worth keeping. Note that
+    // `received == size` also lands here: all bytes arrived but `complete`
+    // never did (the viewer disconnected), and a reconnect can commit the
+    // existing `.part` without resending anything.
+    if (item.received > 0) {
+      keep_orphan(item.temp_path, now + kResumeGrace);
+    } else {
+      std::error_code ec;
+      fs::remove(path_from_utf8(item.temp_path), ec);
+    }
   }
   uploads_.clear();
-  for (auto& item : downloads_) item.second.in.close();
+  for (auto& entry : downloads_) entry.second.in.close();
   downloads_.clear();
+}
+
+void file_transfer::sweep_orphans(clock::time_point now) {
+  std::vector<std::string> expired;
+  {
+    std::lock_guard<std::mutex> lock(orphan_mutex());
+    auto& list = orphan_list();
+    for (auto it = list.begin(); it != list.end();) {
+      if (it->expires <= now && !part_is_active(it->path)) {
+        expired.push_back(it->path);
+        it = list.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
+  for (const std::string& path : expired) {
+    std::error_code ec;
+    fs::remove(path_from_utf8(path), ec);
+  }
 }
 
 }  // namespace molink

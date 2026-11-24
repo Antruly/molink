@@ -70,7 +70,10 @@ import type {
 import type { SessionConnection } from '../lib/session-connection'
 import {
   acceptDownloadChunk,
+  clearDownloadOffset,
   downloadComplete,
+  downloadResumeKey,
+  type OffsetStore,
 } from '../lib/download-state'
 import {
   canPickDirectory,
@@ -98,6 +101,10 @@ interface UploadAck {
 }
 
 const uploadAcks = new Map<number, UploadAck>()
+
+/// Upload id -> resume key, so a `file-ack` can persist the confirmed prefix
+/// without threading the key through every message handler.
+const uploadAckKeys = new Map<number, { key: string; size: number }>()
 
 function uploadAckFor(id: number): UploadAck {
   const existing = uploadAcks.get(id)
@@ -142,6 +149,7 @@ function settleUploadAcks(id: number, received: number, failed: boolean) {
 import {
   aggregateProgress,
   buildUploadPlan,
+  clearUploadOffset,
   downloadBlockReason,
   downloadModeFor,
   droppedTree,
@@ -149,6 +157,7 @@ import {
   isUnsupportedAction,
   joinPath,
   joinRelative,
+  loadUploadOffset,
   localEntriesAt,
   normalizeRelativePath,
   parentPath,
@@ -157,10 +166,12 @@ import {
   relativeUnder,
   resolveRemotePath,
   safeTargetSegments,
+  saveUploadOffset,
   sourceFromInputFiles,
   summarizeTask,
   taskStatusFromChildren,
   uploadBlockReason,
+  uploadResumeKey,
   type ChildStatus,
   type DownloadMode,
   type TransferBlock,
@@ -171,9 +182,56 @@ const downloadTimeoutMs = 30_000
 const browseTimeoutMs = 15_000
 const uploadReplyTimeoutMs = 30_000
 const uploadDoneTimeoutMs = 90_000
+/// How long an interrupted upload waits for the session to come back before
+/// it gives up. The client retries a dead socket for about a minute and then
+/// once a minute, so five minutes covers a short host restart.
+const uploadReconnectMs = 5 * 60_000
 
 const LOCAL_PATH_KEY = 'molink.files.localPath'
 const REMOTE_PATH_KEY = 'molink.files.remotePath'
+
+/// localStorage-backed offset bookkeeping. Storage can be unavailable (private
+/// mode, a dropped quota), so every access is best-effort.
+const resumeStore: OffsetStore = {
+  getItem(key) {
+    try {
+      return window.localStorage.getItem(key)
+    } catch {
+      return null
+    }
+  },
+  setItem(key, value) {
+    try {
+      window.localStorage.setItem(key, value)
+    } catch {
+      // A lost offset only means the next attempt starts from the host's
+      // `.part` size instead of the locally remembered one.
+    }
+  },
+  removeItem(key) {
+    try {
+      window.localStorage.removeItem(key)
+    } catch {
+      // Nothing to remove.
+    }
+  },
+}
+
+/// Waits for the session socket to be live again. Returns false on timeout or
+/// when the user cancelled the transfer while waiting.
+async function waitUntilLive(
+  isLive: () => boolean,
+  timeoutMs: number,
+  cancelled: () => boolean,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    if (cancelled()) return false
+    if (isLive()) return true
+    if (Date.now() >= deadline) return false
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 250))
+  }
+}
 
 function readStored(key: string): string {
   try {
@@ -216,6 +274,20 @@ function looksAbsolutePath(text: string): boolean {
 function errorText(error: unknown): string {
   if (error instanceof Error && error.message !== '') return error.message
   return typeof error === 'string' ? error : ''
+}
+
+/// The host's optional write sandbox refused a path. It sends the allowed
+/// roots so the page can name the limit instead of showing a bare "failed".
+function isForbiddenPath(message: FileMessage): boolean {
+  return message.action === 'forbidden_path' ||
+    message.code === 'forbidden_path'
+}
+
+function sandboxDeniedText(t: TFunction, message: FileMessage): string {
+  const roots = message.allowed_roots ?? []
+  return t('files.sandboxDenied', {
+    roots: roots.length > 0 ? roots.join(' · ') : '~/moLink',
+  })
 }
 
 interface RemoteListing {
@@ -326,6 +398,8 @@ interface UploadAnswer {
   path?: string
   message?: string
   code?: string
+  /// On `accept`: the host's real contiguous offset. Older hosts omit it.
+  offset?: number
 }
 
 interface UploadWaiter {
@@ -377,6 +451,16 @@ interface DownloadJob {
   requesting: boolean
   id: number
   size: number
+  /// Remote mtime, part of the resume key. 0 when the caller did not supply
+  /// one (a dropped set, the clipboard queue).
+  mtime: number
+  /// Key of the persisted offset, filled in when `sending` names the size.
+  resumeKey: string
+  /// The socket went away mid-transfer; keep the job and re-request it once
+  /// the session is live instead of failing it.
+  waitingLive: boolean
+  /// When the offset was last written to storage.
+  lastPersist: number
   received: number
   eofSeen: boolean
   cancelled: boolean
@@ -400,6 +484,7 @@ interface RemotePlanFile {
   path: string
   rel: string
   size: number
+  mtime?: number
 }
 
 /// The shape `buildUploadPlan` returns; named here because both the snapshot
@@ -950,11 +1035,20 @@ export function FileTransferPanel({
     const job = downloadSection.current
     if (!job) return
     window.clearTimeout(job.timer)
-    job.timer = window.setTimeout(() => {
-      if (downloadSection.current === job) {
-        finishDownloadRef.current(job, t('files.incomplete'))
+    const tick = () => {
+      if (downloadSection.current !== job || job.finishing) return
+      const connection = connectionRef.current
+      if (connection && !connection.isLive()) {
+        // The session is retrying the socket. The bytes already written stay
+        // in place and the reconnect poll below re-requests the file, so do
+        // not fail a transfer that is only waiting for the link.
+        job.waitingLive = true
+        job.timer = window.setTimeout(tick, downloadTimeoutMs)
+        return
       }
-    }, downloadTimeoutMs)
+      finishDownloadRef.current(job, t('files.incomplete'))
+    }
+    job.timer = window.setTimeout(tick, downloadTimeoutMs)
   }, [t])
 
   const discardPartial = useCallback(async (job: DownloadJob) => {
@@ -994,6 +1088,7 @@ export function FileTransferPanel({
       if (job.finishing) return
       job.finishing = true
       window.clearTimeout(job.timer)
+      if (job.resumeKey !== '') clearDownloadOffset(resumeStore, job.resumeKey)
       if (downloadSection.current === job) downloadSection.current = null
 
       const settle = async () => {
@@ -1238,6 +1333,31 @@ export function FileTransferPanel({
     downloadPumpRef.current = pumpDownloads
   })
 
+  // A dropped session loses the host's download id, but the viewer still has
+  // the bytes already written. Once the socket is live again, ask for the same
+  // file and let `sending` continue at `job.received`.
+  useEffect(() => {
+    if (!open) return
+    const timer = window.setInterval(() => {
+      const job = downloadSection.current
+      if (!job || job.finishing || job.cancelled) return
+      const connection = connectionRef.current
+      if (!connection) return
+      if (!connection.isLive()) {
+        job.waitingLive = true
+        return
+      }
+      if (!job.waitingLive) return
+      job.waitingLive = false
+      job.id = 0
+      job.requesting = true
+      window.clearTimeout(job.timer)
+      connection.sendFileAction('request', { path: job.path })
+      armDownloadTimeout()
+    }, 1000)
+    return () => window.clearInterval(timer)
+  }, [open, armDownloadTimeout])
+
   const makeJob = useCallback(
     (props: {
       path: string
@@ -1250,6 +1370,7 @@ export function FileTransferPanel({
       baseDir: FileSystemDirectoryHandle | null
       segments: string[] | null
       fsTarget?: string | null
+      mtime?: number
       onDone?: (path: string | null) => void
       autoDownload?: boolean
       resolve: () => void
@@ -1270,6 +1391,10 @@ export function FileTransferPanel({
         requesting: false,
         id: 0,
         size: 0,
+        mtime: props.mtime ?? 0,
+        resumeKey: '',
+        waitingLive: false,
+        lastPersist: 0,
         received: 0,
         eofSeen: false,
         cancelled: false,
@@ -1296,7 +1421,12 @@ export function FileTransferPanel({
     async (
       taskKey: number,
       run: DownloadRun,
-      files: Array<{ path: string; name: string; childKey: string }>,
+      files: Array<{
+        path: string
+        name: string
+        childKey: string
+        mtime?: number
+      }>,
       targets: Array<Promise<FileSystemWritableFileStream> | null>,
       strategy: SaveStrategy,
       silent: boolean,
@@ -1322,6 +1452,7 @@ export function FileTransferPanel({
               baseDir: null,
               segments: null,
               fsTarget: fsTargets[index] ?? null,
+              mtime: file.mtime ?? 0,
               resolve,
             })
             queueJob(job)
@@ -1336,7 +1467,7 @@ export function FileTransferPanel({
   )
 
   const startQuickDownload = useCallback(
-    (path: string, name: string) => {
+    (path: string, name: string, mtime = 0) => {
       const suggested = suggestedFileName(name, path)
       const pick = pickSaveTarget(suggested)
       const childKey = `c${childSeq.current++}`
@@ -1355,7 +1486,7 @@ export function FileTransferPanel({
       void runQuickDownloads(
         taskKey,
         run,
-        [{ path, name: suggested, childKey }],
+        [{ path, name: suggested, childKey, mtime }],
         [pick.target],
         pick.strategy,
         false,
@@ -1491,6 +1622,7 @@ export function FileTransferPanel({
             id: message.id,
             chunk: message.chunk,
             dir: message.dir,
+            offset: message.offset,
           })
           if (!consumed && message.id) {
             const cancelling = [...uploadRuns.current.values()].some(
@@ -1507,6 +1639,17 @@ export function FileTransferPanel({
         case 'file-ack':
           if (message.id) {
             settleUploadAcks(message.id, message.received ?? 0, false)
+            // Remember the confirmed prefix so a reconnect resumes here
+            // instead of re-sending gigabytes.
+            const run = uploadAckKeys.get(message.id)
+            if (run) {
+              saveUploadOffset(
+                resumeStore,
+                run.key,
+                message.received ?? 0,
+                run.size,
+              )
+            }
           }
           break
         case 'file-nack':
@@ -1571,12 +1714,27 @@ export function FileTransferPanel({
           ) {
             finishDownloadRef.current(
               job,
-              message.message ?? t('files.error'),
+              isForbiddenPath(message)
+                ? sandboxDeniedText(t, message)
+                : (message.message ?? t('files.error')),
             )
+            return
+          }
+          // `job.received > 0` means this is the reconnect path: the local
+          // writer already holds that prefix, so keep it instead of zeroing
+          // the progress and overwriting the file from the start.
+          if ((job.size !== 0 && job.size !== size) || job.received > size) {
+            finishDownloadRef.current(job, t('files.incomplete'))
             return
           }
           job.id = message.id
           job.size = size
+          job.resumeKey = downloadResumeKey(
+            connectionRef.current?.targetAddress() ?? '',
+            job.path,
+            size,
+            job.mtime,
+          )
           job.name = suggestedFileName(message.name ?? '', job.name)
           if (job.taskKey !== null && job.childKey) {
             patchChild(job.taskKey, job.childKey, {
@@ -1590,10 +1748,17 @@ export function FileTransferPanel({
             key: job.key,
             phase: 'transferring',
             name: job.name,
-            received: 0,
+            received: job.received,
             size,
           })
-          connectionRef.current?.sendFileAction('pull', { id: job.id })
+          // An additive field: only ask for an offset once there is one. An
+          // old host ignores it and the viewer sees the usual chunk sequence.
+          connectionRef.current?.sendFileAction(
+            'pull',
+            job.received > 0
+              ? { id: job.id, offset: job.received }
+              : { id: job.id },
+          )
           break
         }
         case 'eof': {
@@ -2587,11 +2752,23 @@ export function FileTransferPanel({
           }
           patchChild(taskKey, child.key, { status: 'running' })
 
+          // A resumed upload names the same `.part` on the host (the key is
+          // stable across reconnects) and tells it how much we already sent.
+          const resumeKey = uploadResumeKey(
+            connectionRef.current?.targetKey ?? '',
+            dest,
+            file.path,
+            file.size,
+          )
+          const resumeFrom = loadUploadOffset(resumeStore, resumeKey, file.size)
           const answerPromise = waitUpload('offer', uploadReplyTimeoutMs)
           connectionRef.current?.sendFileAction('offer', {
             name: file.path,
             size: file.size,
             dest,
+            ...(resumeFrom > 0
+              ? { offset: resumeFrom, resume: resumeKey }
+              : {}),
           })
           const answer = await answerPromise
           if (run.cancelled || answer.cancelled) {
@@ -2623,10 +2800,13 @@ export function FileTransferPanel({
 
           const id = answer.id
           run.activeId = id
+          uploadAckKeys.set(id, { key: resumeKey, size: file.size })
           const chunk = answer.chunk && answer.chunk > 0
             ? answer.chunk
             : 256 * 1024
-          let offset = 0
+          // The host is authoritative: it says how much of the `.part` it
+          // really has, which may be less than what we offered.
+          let offset = Math.min(answer.offset ?? 0, file.size)
           let failed = false
           while (offset < file.size) {
             if (run.cancelled) {
@@ -2635,7 +2815,18 @@ export function FileTransferPanel({
               failed = true
               break
             }
-            const target = connectionRef.current
+            let target = connectionRef.current
+            if (!target) {
+              // The host may restart mid-transfer. Wait for the session to
+              // come back instead of throwing the upload away; the resume
+              // offset makes the wait cheap even for a gigabyte.
+              const live = await waitUntilLive(
+                () => connectionRef.current !== null,
+                uploadReconnectMs,
+                () => run.cancelled,
+              )
+              target = live ? connectionRef.current : null
+            }
             if (!target) {
               patchChild(taskKey, child.key, {
                 status: 'error',
@@ -2705,6 +2896,8 @@ export function FileTransferPanel({
           }
           run.activeId = 0
           uploadAcks.delete(id)
+          uploadAckKeys.delete(id)
+          if (!failed) clearUploadOffset(resumeStore, resumeKey)
           if (failed) continue
 
           patchProgress(taskKey, child.key, offset, true)
@@ -3534,6 +3727,7 @@ export function FileTransferPanel({
               path: childPath,
               rel: childRel,
               size: entry.size,
+              mtime: entry.mtime,
             })
           }
         }
@@ -3548,6 +3742,7 @@ export function FileTransferPanel({
             path: entry.path,
             rel: relativeUnder(remoteRoot, entry.path) ?? entry.name,
             size: entry.size,
+            mtime: entry.mtime,
           })
         }
       }
@@ -3629,6 +3824,7 @@ export function FileTransferPanel({
             baseDir: fsTarget ? null : destination,
             segments: fsTarget ? null : parent,
             fsTarget,
+            mtime: file.mtime ?? 0,
             resolve,
           })
           queueJob(job)
@@ -4410,7 +4606,11 @@ export function FileTransferPanel({
                         <button
                           type="button"
                           onClick={() =>
-                            startQuickDownload(entryPath, entry.name)
+                            startQuickDownload(
+                              entryPath,
+                              entry.name,
+                              entry.mtime,
+                            )
                           }
                           className="grid h-6 w-6 shrink-0 place-items-center rounded text-muted transition hover:bg-panel hover:text-accent"
                           aria-label={t('files.download')}

@@ -246,8 +246,16 @@ export interface FileMessage {
   truncated?: boolean
   chunk?: number
   /// Upload pacing: the host's contiguous byte count, on `file-ack`
-  /// (confirmed) and `file-nack` (how far it got before the gap).
+  /// (confirmed) and `file-nack` (how far it got before the gap). On an
+  /// `accept` it is the additive resume point the host can continue from.
   received?: number
+  /// On `accept`: how many bytes the host already holds for this upload and
+  /// will not ask the viewer to send again. Absent on an older host (0).
+  offset?: number
+  /// The host's write sandbox refused the path. `root` is the first allowed
+  /// root and `allowed_roots` lists all of them, so the page can say what the
+  /// limit is. Only present on a `forbidden_path` action.
+  allowed_roots?: string[]
   count?: number
   entries?: FileEntry[]
   message?: string
@@ -260,7 +268,6 @@ export interface FileMessage {
   /// Virtual-file stream: the offer reply says `stream: true`, and a `fetch`
   /// names a byte range of one offered file. `id` is the host's range id.
   stream?: boolean
-  offset?: number
   length?: number
   /// The host rejected a delayed offer because its clipboard belongs to an
   /// inner RDP session; upload the files instead.
