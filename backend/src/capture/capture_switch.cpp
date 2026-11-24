@@ -301,6 +301,14 @@ bool capture_switch::select_display(int index) {
   return result;
 }
 
+bool capture_switch::take_display_change(display_change_notice& out) {
+  bool result = false;
+  with([&out, &result](capture_source& s) {
+    result = s.take_display_change(out);
+  });
+  return result;
+}
+
 bool capture_switch::set_display_mode(uint16_t width, uint16_t height) {
   bool result = false;
   with([&](capture_source& s) { result = s.set_display_mode(width, height); });
