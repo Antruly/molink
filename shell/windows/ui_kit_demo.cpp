@@ -1890,7 +1890,7 @@ void native_log(const std::wstring& text) {
 
 /// Version of this native shell (shipped together with the core). Bump it in
 /// the same commit that tags a release.
-constexpr wchar_t kNativeVersion[] = L"0.12.16";
+constexpr wchar_t kNativeVersion[] = L"0.12.17";
 constexpr wchar_t kReleasesApi[] =
     L"https://api.github.com/repos/Antruly/molink/releases/latest";
 
