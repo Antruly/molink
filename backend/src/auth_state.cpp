@@ -9,11 +9,13 @@
 #include <sys/stat.h>
 #endif
 #include <fstream>
+#include <iterator>
 #include <random>
 #include <string>
 
 #include "config.h"
 #include "identity.h"
+#include "totp.h"
 #include "video_mode.h"
 
 namespace molink {
@@ -110,6 +112,34 @@ long long epoch_day_now() {
   return static_cast<long long>(std::time(nullptr) / 86400);
 }
 
+/// Raw 32-byte key that seals the TOTP secret at rest. It lives beside the
+/// other per-installation secrets with owner-only permissions, so copying the
+/// `2fa` file alone does not reveal the shared secret.
+std::string load_or_create_totp_key() {
+  const std::string dir = config_directory();
+  if (dir.empty()) return std::string();
+  std::error_code ec;
+  std::filesystem::create_directories(dir, ec);
+  const std::filesystem::path path = std::filesystem::path(dir) / "2fa.key";
+  {
+    std::ifstream in(path, std::ios::binary);
+    if (in) {
+      std::string key((std::istreambuf_iterator<char>(in)),
+                      std::istreambuf_iterator<char>());
+      if (key.size() == 32) return key;
+    }
+  }
+  std::string key = totp::random_bytes(32);
+  std::ofstream out(path, std::ios::binary | std::ios::trunc);
+  if (!out) return key;
+  out.write(key.data(), static_cast<std::streamsize>(key.size()));
+  out.close();
+#ifndef _WIN32
+  ::chmod(path.c_str(), S_IRUSR | S_IWUSR);
+#endif
+  return key;
+}
+
 }  // namespace
 
 auth_state::auth_state(app_settings settings)
@@ -139,12 +169,206 @@ auth_state::auth_state(app_settings settings)
   }
   save_settings(settings_);
   load_sessions_locked();
+  load_totp_locked();
 }
 
 bool auth_state::authenticate(const std::string& supplied, bool consume) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (valid_session_locked(supplied)) return true;
   return verify_code_locked(supplied, consume);
+}
+
+login_result auth_state::login(const std::string& supplied,
+                               const std::string& totp, bool consume) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  login_result result;
+  if (valid_session_locked(supplied)) {
+    result.ok = true;
+    result.session_token = true;
+    return result;
+  }
+  if (!totp_enabled_) {
+    result.ok = verify_code_locked(supplied, consume);
+    return result;
+  }
+  // Check the first factor without spending it: a wrong six-digit code must
+  // not consume a single-use verification code.
+  if (!verify_code_locked(supplied, /*consume=*/false)) return result;
+  if (totp.empty()) {
+    result.totp_required = true;
+    return result;
+  }
+  if (!verify_totp_code_locked(totp_secret_, totp)) {
+    result.totp_invalid = true;
+    return result;
+  }
+  // Both factors are right; now the temporary code may be spent.
+  if (consume) verify_code_locked(supplied, /*consume=*/true);
+  result.ok = true;
+  return result;
+}
+
+bool auth_state::totp_required() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return totp_enabled_;
+}
+
+totp_view auth_state::totp_status() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  totp_view view;
+  view.enabled = totp_enabled_;
+  view.account = settings_.device_name;
+  if (totp_enabled_ && !totp_secret_.empty()) {
+    view.uri = totp_uri_locked(totp_secret_);
+  } else {
+    ensure_pending_totp_locked();
+    if (!totp_pending_.empty()) {
+      view.uri = totp_uri_locked(totp_pending_);
+    }
+  }
+  return view;
+}
+
+bool auth_state::enable_totp(const std::string& code, std::string& err) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  err.clear();
+  if (totp_enabled_) {
+    err = "two-factor authentication is already enabled";
+    return false;
+  }
+  if (totp_key_.empty()) {
+    err = "no secure configuration directory is available";
+    return false;
+  }
+  ensure_pending_totp_locked();
+  if (totp_pending_.empty()) {
+    err = "no enrollment is in progress";
+    return false;
+  }
+  if (!verify_totp_code_locked(totp_pending_, code)) {
+    err = "the six-digit code is not valid";
+    return false;
+  }
+  totp_secret_ = totp_pending_;
+  totp_pending_.clear();
+  totp_enabled_ = true;
+  // Session tokens issued before two-factor was turned on must not bypass it.
+  invalidate_remote_sessions_locked();
+  save_totp_locked();
+  return true;
+}
+
+bool auth_state::disable_totp(const std::string& credential, std::string& err) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  err.clear();
+  if (!totp_enabled_) {
+    err = "two-factor authentication is not enabled";
+    return false;
+  }
+  if (!verify_code_locked(credential, /*consume=*/true)) {
+    err = "the verification code is not valid";
+    return false;
+  }
+  totp_enabled_ = false;
+  totp_secret_.clear();
+  totp_pending_.clear();
+  save_totp_locked();
+  return true;
+}
+
+bool auth_state::set_access_policy(const std::string& policy) {
+  if (policy != "full" && policy != "view_only" && policy != "assist") {
+    return false;
+  }
+  std::lock_guard<std::mutex> lock(mutex_);
+  settings_.access_policy = policy;
+  persist_locked();
+  return true;
+}
+
+void auth_state::ensure_pending_totp_locked() {
+  if (totp_enabled_ || !totp_pending_.empty()) return;
+  totp_pending_ = totp::generate_secret();
+  save_totp_locked();
+}
+
+std::string auth_state::totp_uri_locked(const std::string& secret) const {
+  return totp::otpauth_uri(totp::base32_encode(secret),
+                           settings_.device_name.empty()
+                               ? std::string("moLink")
+                               : settings_.device_name,
+                           "moLink");
+}
+
+bool auth_state::verify_totp_code_locked(const std::string& secret,
+                                         const std::string& code) const {
+  if (secret.empty()) return false;
+  return totp::verify(secret, code,
+                      static_cast<uint64_t>(std::time(nullptr)));
+}
+
+void auth_state::load_totp_locked() {
+  totp_key_ = load_or_create_totp_key();
+  totp_enabled_ = false;
+  totp_secret_.clear();
+  totp_pending_.clear();
+  const std::string dir = config_directory();
+  if (dir.empty() || totp_key_.empty()) return;
+  std::ifstream in(dir + "/2fa");
+  if (!in) return;
+  std::string line;
+  while (std::getline(in, line)) {
+    while (!line.empty() &&
+           (line.back() == '\r' || line.back() == ' ' || line.back() == '\t')) {
+      line.pop_back();
+    }
+    const std::size_t eq = line.find('=');
+    if (eq == std::string::npos) continue;
+    const std::string key = line.substr(0, eq);
+    const std::string value = line.substr(eq + 1);
+    if (key == "enabled") {
+      totp_enabled_ = value == "1" || value == "true";
+    } else if (key == "secret") {
+      std::string raw;
+      if (totp::open(value, totp_key_, raw)) totp_secret_ = std::move(raw);
+    } else if (key == "pending") {
+      std::string raw;
+      if (totp::open(value, totp_key_, raw)) totp_pending_ = std::move(raw);
+    }
+  }
+  // A lost or replaced key file makes the sealed secret unreadable. Disabling
+  // is safer than keeping an enabled flag that can never be satisfied.
+  if (totp_enabled_ && totp_secret_.size() != totp::kSecretBytes) {
+    totp_enabled_ = false;
+    totp_secret_.clear();
+  }
+}
+
+void auth_state::save_totp_locked() const {
+  if (totp_key_.empty()) return;
+  const std::string dir = config_directory();
+  if (dir.empty()) return;
+  const std::filesystem::path path = std::filesystem::path(dir) / "2fa";
+  const std::filesystem::path temp = std::filesystem::path(dir) / "2fa.tmp";
+  std::ofstream out(temp, std::ios::binary | std::ios::trunc);
+  if (!out) return;
+  out << "enabled=" << (totp_enabled_ ? 1 : 0) << '\n';
+  if (!totp_secret_.empty()) {
+    out << "secret=" << totp::seal(totp_secret_, totp_key_) << '\n';
+  }
+  if (!totp_pending_.empty()) {
+    out << "pending=" << totp::seal(totp_pending_, totp_key_) << '\n';
+  }
+  out.close();
+  std::error_code ec;
+  std::filesystem::rename(temp, path, ec);
+  if (ec) {
+    std::filesystem::remove(path, ec);
+    std::filesystem::rename(temp, path, ec);
+  }
+#ifndef _WIN32
+  ::chmod(path.c_str(), S_IRUSR | S_IWUSR);
+#endif
 }
 
 bool auth_state::valid_session(const std::string& token) const {

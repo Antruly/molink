@@ -163,6 +163,8 @@ export class SessionConnection {
   /// attribute its messages. Empty for a plain browser.
   private clientName = ''
   private clientId = ''
+  /// Six-digit TOTP for the current attempt only; never persisted.
+  private totp = ''
   /// Sticky across manual reconnects (Windows 7 forces TCP, and the user may
   /// have checked "force relay").
   private forceRelay = false
@@ -815,12 +817,15 @@ export class SessionConnection {
 
   connect(host: string, port: number, token: string,
           requestAccess = false, deviceId = '', forceRelay?: boolean,
-          clientName?: string, clientId?: string): void {
+          clientName?: string, clientId?: string, totp?: string): void {
     // Keep the identity and TCP-only choice across manual reconnects; only the
     // first connect supplies them.
     if (forceRelay !== undefined) this.forceRelay = forceRelay
     if (clientName !== undefined) this.clientName = clientName
     if (clientId !== undefined) this.clientId = clientId
+    // Kept only for this attempt: a TOTP is good for 30 seconds and must not
+    // survive into a later reconnect.
+    this.totp = totp ?? ''
     this.target = `${host}:${port}`
     this.dropLogAt = 0
     this.dropLogCount = 0
@@ -867,7 +872,8 @@ export class SessionConnection {
       frame: null,
     })
     this.client.connect(host, port, token, requestAccess, deviceId,
-                        this.forceRelay, this.clientName, this.clientId)
+                        this.forceRelay, this.clientName, this.clientId,
+                        this.totp)
   }
 
   private stopAv1Indicator(): void {

@@ -17,6 +17,10 @@ struct app_settings {
   /// Let a remote peer ask the local user for access when it has no code.
   /// The local user still has to approve every request.
   bool allow_access_requests = true;
+  /// What an authenticated viewer may do by default: "full", "view_only"
+  /// (screen and host audio) or "assist" (screen plus keyboard/mouse).
+  /// A per-session approval can override it.
+  std::string access_policy = "full";
   /// Fan a host clipboard change out to every connected viewer when no
   /// viewer is clearly the active one. Off by default: a silent fan-out let
   /// one session's clipboard overwrite another's. The explicit opt-in exists

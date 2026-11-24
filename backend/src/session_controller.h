@@ -163,7 +163,9 @@ class session_controller final
   /// Brings up the WebRTC peer for a session that asked for one (Phase 4).
   void start_rtc(const std::shared_ptr<session_info>& session);
   /// Called from the local approval dialog (through the request registry).
-  void approve_access_request();
+  /// @p policy is the preset the local user chose, or empty for the host
+  /// default.
+  void approve_access_request(const std::string& policy);
   void deny_access_request();
 
   std::shared_ptr<session_registry> registry_;

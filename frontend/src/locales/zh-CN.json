@@ -88,7 +88,8 @@
     "enableIp": "去开启",
     "idNotRegistered": "尚未注册到服务端",
     "ipUnavailable": "未检测到局域网 IP",
-    "codeDisabled": "已禁用"
+    "codeDisabled": "已禁用",
+    "twoFactor": "两步验证码（可选）"
   },
   "settings": {
     "tabGeneral": "常规",
@@ -295,7 +296,18 @@
     "videoModeHint": "自动（推荐）按画面内容切换：静止桌面只传变化的平铺，全屏运动时切到视频流，并用迟滞避免来回抖动。也可手动锁定视频流或平铺。",
     "videoModeAuto": "自动（推荐）",
     "videoModeStream": "视频流（始终使用视频编码）",
-    "videoModeTiles": "平铺（只传变化的格子）"
+    "videoModeTiles": "平铺（只传变化的格子）",
+    "twoFactor": "两步验证",
+    "twoFactorOn": "已启用：登录时需要用验证器 App 中的 6 位码",
+    "twoFactorOff": "未启用。建议开启，避免验证码被暴力猜中",
+    "twoFactorScan": "把这个地址添加到验证器（Google Authenticator / 1Password / Authy），再输入它显示的 6 位码确认",
+    "twoFactorNoSecret": "（尚未生成密钥）",
+    "twoFactorCredential": "当前 6 位码或长期密码",
+    "twoFactorEnabled": "两步验证已启用",
+    "twoFactorDisabled": "两步验证已关闭",
+    "twoFactorBadCode": "验证失败，请检查验证器时间是否准确",
+    "enable": "启用",
+    "disable": "关闭"
   },
   "session": {
     "connecting": "连接中…",

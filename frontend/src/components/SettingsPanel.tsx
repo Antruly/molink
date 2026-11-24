@@ -15,7 +15,10 @@ import {
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
+  disableTwoFactor,
+  enableTwoFactor,
   fetchServerConfig,
+  fetchTwoFactor,
   postServerConfig,
   type AuthCode,
   type SecuritySettings,
@@ -405,6 +408,8 @@ function SecurityControls({
         </div>
       </div>
 
+      <TwoFactorCard />
+
       <div className="space-y-2 rounded-lg border border-line bg-panel/60 p-3">
         <div className="text-[12px] text-ink">{t('settings.codePolicy')}</div>
         <label
@@ -469,6 +474,152 @@ function SecurityControls({
   )
 }
 
+
+/// Two-factor enrollment. The secret is shown once as an `otpauth://` URI the
+/// user pastes (or scans) into an authenticator; the code they read back
+/// confirms it, after which the host asks for a code at every login.
+function TwoFactorCard() {
+  const { t } = useTranslation()
+  const token = useAppStore((state) => state.token)
+  const [status, setStatus] = useState<{ enabled: boolean; uri: string } | null>(
+    null,
+  )
+  const [code, setCode] = useState('')
+  const [credential, setCredential] = useState('')
+  const [note, setNote] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  const reload = useCallback(async () => {
+    if (!token) return
+    try {
+      const value = await fetchTwoFactor(token)
+      setStatus({ enabled: value.enabled, uri: value.uri })
+    } catch {
+      setStatus(null)
+    }
+  }, [token])
+
+  useEffect(() => {
+    // The fetch resolves later, so the state write is not a render-phase
+    // update; the flag keeps a fast token change from landing a stale answer.
+    let cancelled = false
+    void (async () => {
+      if (!token) return
+      try {
+        const value = await fetchTwoFactor(token)
+        if (!cancelled) setStatus({ enabled: value.enabled, uri: value.uri })
+      } catch {
+        if (!cancelled) setStatus(null)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [token])
+
+  const enable = async () => {
+    if (!token) return
+    setBusy(true)
+    try {
+      await enableTwoFactor(token, code.trim())
+      setNote(t('settings.twoFactorEnabled'))
+      setCode('')
+      await reload()
+    } catch {
+      setNote(t('settings.twoFactorBadCode'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const disable = async () => {
+    if (!token) return
+    setBusy(true)
+    try {
+      await disableTwoFactor(token, credential.trim())
+      setNote(t('settings.twoFactorDisabled'))
+      setCredential('')
+      await reload()
+    } catch {
+      setNote(t('settings.twoFactorBadCode'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (status === null) return null
+
+  return (
+    <div className="space-y-2 rounded-lg border border-line bg-panel/60 p-3">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <div className="text-[12px] text-ink">{t('settings.twoFactor')}</div>
+          <div className="mt-0.5 text-[11px] text-muted">
+            {status.enabled
+              ? t('settings.twoFactorOn')
+              : t('settings.twoFactorOff')}
+          </div>
+        </div>
+        <span
+          className={
+            'rounded-md px-2 py-0.5 text-[10px] ' +
+            (status.enabled
+              ? 'bg-accent/15 text-accent'
+              : 'bg-panel text-muted')
+          }
+        >
+          {status.enabled ? 'ON' : 'OFF'}
+        </span>
+      </div>
+
+      {status.enabled ? (
+        <div className="flex items-center gap-2">
+          <input
+            value={credential}
+            onChange={(event) => setCredential(event.target.value)}
+            placeholder={t('settings.twoFactorCredential')}
+            className="field font-mono"
+          />
+          <button
+            type="button"
+            onClick={() => void disable()}
+            disabled={busy || credential.trim() === ''}
+            className="btn"
+          >
+            {t('settings.disable')}
+          </button>
+        </div>
+      ) : (
+        <>
+          <div className="text-[11px] text-muted">{t('settings.twoFactorScan')}</div>
+          <code className="block break-all rounded-md border border-line bg-surface px-2 py-1.5 font-mono text-[11px] text-ink">
+            {status.uri === '' ? t('settings.twoFactorNoSecret') : status.uri}
+          </code>
+          <div className="flex items-center gap-2">
+            <input
+              value={code}
+              onChange={(event) =>
+                setCode(event.target.value.replace(/[^0-9]/g, '').slice(0, 6))
+              }
+              inputMode="numeric"
+              placeholder="123456"
+              className="field font-mono"
+            />
+            <button
+              type="button"
+              onClick={() => void enable()}
+              disabled={busy || code.trim().length !== 6}
+              className="btn"
+            >
+              {t('settings.enable')}
+            </button>
+          </div>
+        </>
+      )}
+      {note ? <div className="text-[11px] text-muted">{note}</div> : null}
+    </div>
+  )
+}
 
 function ServerControls() {
   const { t } = useTranslation()

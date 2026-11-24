@@ -48,15 +48,23 @@ class lock_state {
   /// Per-IP authentication budget. Returns 0 when @p peer_ip may try now, a
   /// positive number of seconds to wait while temporarily blocked, or -1 when
   /// the address has been permanently banned. Loopback is always allowed.
+  ///
+  /// The optional scope keeps independent budgets: the password/code factor
+  /// ("auth") and the six-digit second factor ("totp") count separately while
+  /// sharing the same escalation ladder and ban list.
   int attempt_delay(const std::string& peer_ip) const;
+  int attempt_delay(const std::string& peer_ip,
+                    const std::string& scope) const;
 
   /// Records one failed attempt and returns the same encoding as
   /// attempt_delay(). The fifth failure starts a lockout; later lockouts grow
   /// (30 s, 2 min, 10 min, 1 h, 6 h) and the sixth round bans the address.
   int record_failure(const std::string& peer_ip);
+  int record_failure(const std::string& peer_ip, const std::string& scope);
 
   /// Clears the failure/escalation state after a successful authentication.
   void record_success(const std::string& peer_ip);
+  void record_success(const std::string& peer_ip, const std::string& scope);
 
  private:
   mutable std::mutex mutex_;
@@ -85,6 +93,8 @@ class lock_state {
   std::set<std::string> banned_;
 
   static std::string normalize_peer(const std::string& peer);
+  static std::string attempt_key(const std::string& peer_ip,
+                                 const std::string& scope);
   void save_bans() const;
 
   int total_sessions_locked(uint64_t now) const;

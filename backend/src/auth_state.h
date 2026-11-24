@@ -21,6 +21,27 @@ struct code_view {
   bool multi_enabled = true;
 };
 
+/// Two-factor status for the local settings page. The URI is an
+/// `otpauth://` document an authenticator app can scan; it is only served to
+/// loopback clients.
+struct totp_view {
+  bool enabled = false;
+  std::string uri;
+  std::string account;
+  std::string issuer = "moLink";
+};
+
+/// Outcome of a login attempt. `totp_required` means the first factor was
+/// right but the second one has not been supplied; no failure should be
+/// counted for that. `totp_invalid` is a wrong six-digit code.
+struct login_result {
+  bool ok = false;
+  bool totp_required = false;
+  bool totp_invalid = false;
+  /// The supplied value was an existing session token, not a code.
+  bool session_token = false;
+};
+
 /// Owns the verification codes and the short-lived session tokens issued after
 /// a successful login.
 ///
@@ -42,6 +63,27 @@ class auth_state {
   /// supplied value is a temporary code, one use is deducted (and the code may
   /// rotate). Long-term codes are never consumed.
   bool authenticate(const std::string& supplied, bool consume);
+
+  /// Full login path: a session token is accepted as-is, a verification code
+  /// additionally needs @p totp when two-factor authentication is enabled.
+  /// The temporary code is only consumed once every factor has passed, so a
+  /// mistyped six-digit code does not spend a single-use code.
+  login_result login(const std::string& supplied, const std::string& totp,
+                     bool consume);
+
+  /// Whether a verification code alone is no longer enough.
+  bool totp_required() const;
+  /// Current two-factor state. When disabled this creates (once) a pending
+  /// enrollment secret and returns its otpauth URI.
+  totp_view totp_status();
+  /// Confirms the pending enrollment with a current six-digit code.
+  bool enable_totp(const std::string& code, std::string& err);
+  /// Turns two-factor off. @p credential must be a valid long-term or
+  /// temporary verification code.
+  bool disable_totp(const std::string& credential, std::string& err);
+
+  /// Host-wide default capability policy: full, view_only or assist.
+  bool set_access_policy(const std::string& policy);
 
   bool valid_session(const std::string& token) const;
   /// True when `token` is a session token issued no more than `max_age_ms` ago.
@@ -130,12 +172,26 @@ class auth_state {
   /// spent, so dropping the tokens on restart locks that viewer out for good.
   void load_sessions_locked();
   void save_sessions_locked() const;
+  /// Two-factor state lives beside the settings, encrypted with a local key.
+  void load_totp_locked();
+  void save_totp_locked() const;
+  bool verify_totp_code_locked(const std::string& secret,
+                               const std::string& code) const;
+  std::string totp_uri_locked(const std::string& secret) const;
+  void ensure_pending_totp_locked();
+  std::string totp_key_;
 
   mutable std::mutex mutex_;
   app_settings settings_;
   std::string local_session_;
   /// Session tokens and when they were issued (monotonic ms).
   std::deque<std::pair<std::string, uint64_t>> remote_sessions_;
+
+  /// Raw 20-byte TOTP secret, kept in memory only; at rest it is sealed in
+  /// the `2fa` file. `totp_pending_` is the enrollment candidate.
+  bool totp_enabled_ = false;
+  std::string totp_secret_;
+  std::string totp_pending_;
 };
 
 }  // namespace molink

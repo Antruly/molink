@@ -88,7 +88,8 @@
     "enableIp": "Enable",
     "idNotRegistered": "Not registered with a server",
     "ipUnavailable": "No LAN address detected",
-    "codeDisabled": "Disabled"
+    "codeDisabled": "Disabled",
+    "twoFactor": "Two-factor code (optional)"
   },
   "settings": {
     "tabGeneral": "General",
@@ -295,7 +296,18 @@
     "videoModeHint": "Auto (recommended) follows the content: changed-cell tiles while the desktop is still, the video stream when the screen keeps moving, with hysteresis so it does not oscillate. You can also pin either path.",
     "videoModeAuto": "Auto (recommended)",
     "videoModeStream": "Video only (always the stream)",
-    "videoModeTiles": "Tiles only (changed cells)"
+    "videoModeTiles": "Tiles only (changed cells)",
+    "twoFactor": "Two-factor authentication",
+    "twoFactorOn": "On: signing in needs the 6-digit code from your authenticator",
+    "twoFactorOff": "Off. Turn it on so a guessed code is not enough",
+    "twoFactorScan": "Add this URI to an authenticator (Google Authenticator / 1Password / Authy), then confirm with the 6-digit code it shows",
+    "twoFactorNoSecret": "(no secret yet)",
+    "twoFactorCredential": "Current 6-digit code or the long-term password",
+    "twoFactorEnabled": "Two-factor is on",
+    "twoFactorDisabled": "Two-factor is off",
+    "twoFactorBadCode": "That did not verify; check the authenticator's clock",
+    "enable": "Enable",
+    "disable": "Disable"
   },
   "session": {
     "connecting": "Connecting…",

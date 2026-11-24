@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "capabilities.h"
 #include "clipboard_pull.h"
 #include "transport/channel_scheduler.h"
 #include "transport/session_transport.h"
@@ -21,6 +22,11 @@ struct session_info {
   std::string peer_ip;
   unsigned int peer_port = 0;
   bool authenticated = false;
+  /// What this viewer may do. Copied from the host's access policy when the
+  /// session is created, and replaced when an access request is approved with
+  /// a different preset. Read through session_registry so a concurrent update
+  /// from an HTTP route is visible.
+  uint32_t capabilities = kCapabilityAll;
   /// The client advertised AV1 support in hello (the connect proxy injects it
   /// when its core was built with dav1d). AV1 patches are only produced when
   /// every authenticated session supports them.
@@ -139,8 +145,24 @@ struct session_info {
 /// shared_ptr so a record cannot disappear between a lookup and a send.
 class session_registry {
  public:
+  /// Refused because a connection limit was reached. The controller logs
+  /// `session.reject reason=limit` and closes the transport.
+  enum class add_status {
+    ok,
+    global_unauthenticated_limit,
+    per_ip_unauthenticated_limit,
+  };
+
+  /// Unauthenticated connections are cheap but must not be free: 64 may wait
+  /// for a hello in total, and 16 per peer address. Authenticated sessions
+  /// have their own budget.
+  static constexpr std::size_t kMaxUnauthenticated = 64;
+  static constexpr std::size_t kMaxUnauthenticatedPerIp = 16;
+  static constexpr std::size_t kMaxAuthenticated = 32;
+
   std::shared_ptr<session_info> add(
-      std::shared_ptr<session_transport> transport);
+      std::shared_ptr<session_transport> transport,
+      add_status* status = nullptr);
   void remove(uint32_t id);
   std::shared_ptr<session_info> find(uint32_t id);
   std::shared_ptr<session_info> find_by_public_id(const std::string& public_id);
@@ -150,9 +172,15 @@ class session_registry {
   /// Authentication is written by the session thread and read by the
   /// supervisor thread through snapshot(); take the registry lock so the
   /// flag is actually visible before the 5 s hello timeout is evaluated.
-  void set_authenticated(const std::shared_ptr<session_info>& s);
+  /// Returns false when the authenticated-session budget is already full.
+  bool set_authenticated(const std::shared_ptr<session_info>& s);
   void set_awaiting_approval(const std::shared_ptr<session_info>& s,
                              bool awaiting);
+  /// Replaces the capability mask of a live session (per-session override).
+  bool set_capabilities(uint32_t id, uint32_t capabilities);
+  /// Lock-protected read of one capability bit.
+  bool has_capability(uint32_t id, capability value) const;
+  uint32_t capabilities(uint32_t id) const;
   void touch(session_info& s);
   /// Records the file list just published to one session. A later pull is
   /// validated against it.

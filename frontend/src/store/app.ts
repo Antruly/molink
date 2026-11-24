@@ -265,6 +265,9 @@ interface AppState {
   preferredMode: SessionMode
   /// Force every device-ID connection through the server relay (no ICE).
   forceRelay: boolean
+  /// Six-digit TOTP for this connection attempt. Set by the connect form and
+  /// consumed by the next hello; a host without two-factor ignores it.
+  twoFactorCode: string
   uiMode: UiMode
   savedDevices: SavedDevice[]
   /// User notes keyed by the normalized device name. Saved devices, recents,
@@ -327,6 +330,7 @@ interface AppState {
   setHistoryView: (view: HistoryView) => void
   setPreferredMode: (mode: SessionMode) => void
   setForceRelay: (value: boolean) => void
+  setTwoFactorCode: (value: string) => void
   setUiMode: (mode: UiMode) => void
   setConnectDraft: (patch: Partial<ConnectDraft>) => void
   loadUiPreferences: () => Promise<void>
@@ -904,6 +908,7 @@ export const useAppStore = create<AppState>((set, get) => {
     historyView: initialHistoryView(),
     preferredMode: initialSessionMode(),
     forceRelay: readStorage('molink.forceRelay') === '1',
+    twoFactorCode: '',
     uiMode: initialUiMode(),
     savedDevices: initialSavedDevices(),
     deviceNotes: initialDeviceNotes(),
@@ -1100,6 +1105,9 @@ export const useAppStore = create<AppState>((set, get) => {
     setForceRelay: (value) => {
       writeStorage('molink.forceRelay', value ? '1' : '0')
       set({ forceRelay: value })
+    },
+    setTwoFactorCode: (value: string) => {
+      set({ twoFactorCode: value })
     },
     setPreferredMode: (mode) => {
       writeStorage(MODE_KEY, mode)
@@ -1807,7 +1815,7 @@ export const useAppStore = create<AppState>((set, get) => {
           /Windows NT 6\.1/i.test(navigator.userAgent)
         connection.connect(tab.host, port, trimmedToken, requestAccess,
                            deviceId, self.forceRelay || windows7,
-                           clientName, clientId)
+                           clientName, clientId, self.twoFactorCode || '')
         if (trimmedToken !== '') {
           remember(tab.host, port, tab.label, trimmedToken, saveToken, {
             id: deviceId,

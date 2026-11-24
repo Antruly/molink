@@ -728,6 +728,8 @@ export class MolinkClient {
     /// label who typed each message. Empty for a plain browser viewer.
     clientName: string
     clientId: string
+    /// Six-digit TOTP when the host has two-factor enabled.
+    totp: string
   } | null = null
   /// The ICE proxy failed; use the resolved address directly from now on.
   private proxyFailed = false
@@ -842,7 +844,7 @@ export class MolinkClient {
 
   connect(host: string, port: number, token: string,
           requestAccess = false, targetId = '', forceRelay = false,
-          clientName = '', clientId = ''): void {
+          clientName = '', clientId = '', totp = ''): void {
     this.disconnect()
     this.stopRetryTimers()
     this.closedByUser = false
@@ -863,7 +865,7 @@ export class MolinkClient {
     this.cellReceivedSeq.clear()
     this.lastSeqRequest = 0
     this.lastConnect = { host, port, token, requestAccess, targetId,
-                        forceRelay, clientName, clientId }
+                        forceRelay, clientName, clientId, totp }
     this.openSocket()
   }
 
@@ -3509,6 +3511,10 @@ export class MolinkClient {
       protocol: 1,
     }
     if (this.resumeToken !== '') hello.session = this.resumeToken
+    // Only sent when the user supplied one; a host without two-factor ignores
+    // the field, so leaving it out keeps a normal login byte-identical.
+    const totp = this.lastConnect?.totp ?? ''
+    if (totp !== '') hello.totp = totp
     transport.sendText(JSON.stringify(hello))
     // The file stream is a second byte pipe with its own channel tag; a
     // transfer on it never queues behind control messages.

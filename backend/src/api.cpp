@@ -929,9 +929,57 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
              }
              const std::string peer = req.peer_ip();
              if (reject_throttled(resp, deps.lock->attempt_delay(peer))) return;
-             if (!deps.auth ||
-                 !deps.auth->authenticate(bearer_token(req),
-                                          /*consume=*/true)) {
+             // The second factor has its own failure budget; a locked TOTP
+             // budget must also stop the request before the password check.
+             if (reject_throttled(
+                     resp, deps.lock->attempt_delay(peer, "totp"))) {
+               return;
+             }
+             // The six-digit code travels in a header or a small JSON body.
+             // (An old client sends neither, which is fine until 2FA is on.)
+             std::string totp = req.header("X-MoLink-TOTP");
+             if (totp.empty() && req.body_size() > 0) {
+               try {
+                 const uvcpp_json body =
+                     uvcpp_json::parse(req.body_str());
+                 if (body.is_object()) {
+                   const auto it = body.find("totp");
+                   if (it != body.end() && it->is_string()) {
+                     totp = it->get<std::string>();
+                   }
+                 }
+               } catch (...) {
+                 // A malformed body is treated as "no second factor"; the
+                 // normal missing/invalid replies below cover it.
+               }
+             }
+             const login_result result =
+                 deps.auth ? deps.auth->login(bearer_token(req), totp,
+                                              /*consume=*/true)
+                           : login_result{};
+             if (result.totp_required) {
+               uvcpp_json body;
+               body["type"] = "error";
+               body["code"] = "totp_required";
+               body["message"] = "a six-digit two-factor code is required";
+               resp.status(401).json(body);
+               resp.end();
+               return;
+             }
+             if (result.totp_invalid) {
+               if (reject_throttled(
+                       resp, deps.lock->record_failure(peer, "totp"))) {
+                 return;
+               }
+               uvcpp_json body;
+               body["type"] = "error";
+               body["code"] = "invalid_totp";
+               body["message"] = "the six-digit code is not valid";
+               resp.status(401).json(body);
+               resp.end();
+               return;
+             }
+             if (!result.ok) {
                if (reject_throttled(resp, deps.lock->record_failure(peer))) {
                  return;
                }
@@ -945,6 +993,7 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
              }
              deps.lock->unlock();
              deps.lock->record_success(peer);
+             deps.lock->record_success(peer, "totp");
              uvcpp_json j;
              j["ok"] = true;
              j["session_token"] = deps.auth->create_session();
@@ -2328,9 +2377,19 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
                             ? static_cast<uint32_t>(
                                   std::strtoul(raw->c_str(), nullptr, 10))
                             : 0;
+    // Approving can narrow this one connection: "view_only" or "assist".
+    // An empty/absent policy keeps the host-wide default.
+    const std::string* requested_policy = req.query("policy");
+    const std::string policy =
+        requested_policy != nullptr ? *requested_policy : std::string();
+    if (!policy.empty() && !valid_access_policy(policy)) {
+      resp.status(400).json_str(R"({"code":"invalid_access_policy"})");
+      resp.end();
+      return;
+    }
     const bool ok =
         deps.access_requests != nullptr &&
-        (allow ? deps.access_requests->approve(id)
+        (allow ? deps.access_requests->approve(id, policy)
                : deps.access_requests->deny(id));
     uvcpp_json j;
     j["ok"] = ok;
@@ -2725,6 +2784,7 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
             j["allow_web_client"] = settings.allow_web_client;
             j["discovery_enabled"] = settings.discovery_enabled;
             j["allow_access_requests"] = settings.allow_access_requests;
+            j["access_policy"] = settings.access_policy;
             j["allow_sync_between_sessions"] =
                 settings.allow_sync_between_sessions;
             j["encrypt_remote"] = settings.encrypt_remote;
@@ -2780,6 +2840,16 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
              deps.auth->update_access(allow_remote, allow_web, discovery,
                                       name != nullptr ? *name : std::string());
              deps.auth->set_allow_access_requests(access_requests);
+             // The host-wide default for new sessions. A live session keeps
+             // the mask it was created with unless the local user changes it
+             // through /api/sessions/access.
+             const std::string* access_policy = req.query("access_policy");
+             if (access_policy != nullptr &&
+                 !deps.auth->set_access_policy(*access_policy)) {
+               resp.status(400).json_str(R"({"code":"invalid_access_policy"})");
+               resp.end();
+               return;
+             }
              deps.auth->set_allow_sync_between_sessions(sync_between_sessions);
              deps.auth->set_transport_security(encrypt_remote, encrypt_lan);
              const app_settings after = deps.auth->settings();
@@ -2810,6 +2880,7 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
              j["allow_web_client"] = after.allow_web_client;
              j["discovery_enabled"] = after.discovery_enabled;
              j["allow_access_requests"] = after.allow_access_requests;
+             j["access_policy"] = after.access_policy;
              j["allow_sync_between_sessions"] =
                  after.allow_sync_between_sessions;
              j["encrypt_remote"] = after.encrypt_remote;
@@ -3096,6 +3167,104 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
              resp.end();
            });
 
+  // Two-factor authentication (TOTP, RFC 6238). These routes are local-only:
+  // the URI carries the shared secret, and only the person at the machine may
+  // enroll or remove an authenticator.
+  auto totp_body_field = [](uvcpp_web_request& req, const char* key,
+                            const char* query_name) -> std::string {
+    std::string value;
+    if (req.body_size() > 0) {
+      try {
+        const uvcpp_json body = uvcpp_json::parse(req.body_str());
+        if (body.is_object()) {
+          const auto it = body.find(key);
+          if (it != body.end() && it->is_string()) {
+            value = it->get<std::string>();
+          }
+        }
+      } catch (...) {
+        // Fall through to the query string.
+      }
+    }
+    if (value.empty()) {
+      const std::string* query = req.query(query_name);
+      if (query != nullptr) value = *query;
+    }
+    return value;
+  };
+
+  app.get("/api/2fa",
+          [deps](uvcpp_web_request& req, uvcpp_web_response& resp,
+                 uvcpp_web_next) {
+            if (!is_loopback_peer(req.peer_ip()) || !deps.auth) {
+              resp.status(403).json_str(R"({"code":"loopback_only"})");
+              resp.end();
+              return;
+            }
+            const totp_view view = deps.auth->totp_status();
+            uvcpp_json j;
+            j["enabled"] = view.enabled;
+            j["uri"] = view.uri;
+            j["issuer"] = view.issuer;
+            j["account"] = view.account;
+            resp.set_header("Cache-Control", "no-store").json(j);
+            resp.end();
+          });
+
+  app.post("/api/2fa/enable",
+           [deps, totp_body_field](uvcpp_web_request& req,
+                                   uvcpp_web_response& resp,
+                                   uvcpp_web_next) {
+             if (!is_loopback_peer(req.peer_ip()) || !deps.auth) {
+               resp.status(403).json_str(R"({"code":"loopback_only"})");
+               resp.end();
+               return;
+             }
+             const std::string code =
+                 totp_body_field(req, "code", "code");
+             std::string error;
+             if (!deps.auth->enable_totp(code, error)) {
+               uvcpp_json body;
+               body["code"] = "invalid_totp";
+               body["message"] = error;
+               resp.status(400).json(body);
+               resp.end();
+               return;
+             }
+             uvcpp_json j;
+             j["ok"] = true;
+             j["enabled"] = true;
+             resp.set_header("Cache-Control", "no-store").json(j);
+             resp.end();
+           });
+
+  app.post("/api/2fa/disable",
+           [deps, totp_body_field](uvcpp_web_request& req,
+                                   uvcpp_web_response& resp,
+                                   uvcpp_web_next) {
+             if (!is_loopback_peer(req.peer_ip()) || !deps.auth) {
+               resp.status(403).json_str(R"({"code":"loopback_only"})");
+               resp.end();
+               return;
+             }
+             const std::string credential =
+                 totp_body_field(req, "credential", "credential");
+             std::string error;
+             if (!deps.auth->disable_totp(credential, error)) {
+               uvcpp_json body;
+               body["code"] = "invalid_credential";
+               body["message"] = error;
+               resp.status(400).json(body);
+               resp.end();
+               return;
+             }
+             uvcpp_json j;
+             j["ok"] = true;
+             j["enabled"] = false;
+             resp.set_header("Cache-Control", "no-store").json(j);
+             resp.end();
+           });
+
   app.get("/api/info",
           [deps, virtual_clipboard_service](uvcpp_web_request&,
                                             uvcpp_web_response& resp,
@@ -3176,6 +3345,19 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
               item["has_image"] = s.has_image;
               item["last_capture_seq"] = s.last_capture_seq;
               item["out_seq"] = s.out_seq;
+              item["capabilities_mask"] = s.capabilities;
+              uvcpp_json caps;
+              const capability all[] = {
+                  capability::screen,         capability::input,
+                  capability::clipboard_read, capability::clipboard_write,
+                  capability::files_read,     capability::files_write,
+                  capability::audio,          capability::chat,
+                  capability::logs,           capability::restart};
+              for (capability value : all) {
+                caps[capability_name(value)] =
+                    has_capability(s.capabilities, value);
+              }
+              item["capabilities"] = std::move(caps);
               list.push_back(std::move(item));
             }
             uvcpp_json j;
@@ -3184,6 +3366,45 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
             resp.set_header("Cache-Control", "no-store").json(j);
             resp.end();
           });
+
+  // Per-session capability override (in memory). This is local-only: the
+  // host user narrows or widens one live connection without changing the
+  // default for future ones.
+  app.post("/api/sessions/access",
+           [deps](uvcpp_web_request& req, uvcpp_web_response& resp,
+                  uvcpp_web_next) {
+             if (!is_loopback_peer(req.peer_ip())) {
+               resp.status(403).json_str(R"({"code":"loopback_only"})");
+               resp.end();
+               return;
+             }
+             const std::string* id_text = req.query("id");
+             const std::string* policy = req.query("policy");
+             const uint32_t id =
+                 id_text != nullptr
+                     ? static_cast<uint32_t>(
+                           std::strtoul(id_text->c_str(), nullptr, 10))
+                     : 0;
+             if (policy == nullptr || !valid_access_policy(*policy)) {
+               resp.status(400).json_str(
+                   R"({"code":"invalid_access_policy"})");
+               resp.end();
+               return;
+             }
+             const uint32_t mask = capabilities_for_policy(*policy);
+             if (!deps.registry || !deps.registry->set_capabilities(id, mask)) {
+               resp.status(404).json_str(R"({"code":"no_such_session"})");
+               resp.end();
+               return;
+             }
+             uvcpp_json j;
+             j["ok"] = true;
+             j["id"] = id;
+             j["policy"] = *policy;
+             j["capabilities_mask"] = mask;
+             resp.set_header("Cache-Control", "no-store").json(j);
+             resp.end();
+           });
 
   if (!deps.serve_web) {
     app.get("/", [](uvcpp_web_request&, uvcpp_web_response& resp,

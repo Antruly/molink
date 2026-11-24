@@ -161,6 +161,10 @@ app_settings load_settings() {
       settings.discovery_enabled = parse_bool(value, false);
     } else if (key == "allow_access_requests") {
       settings.allow_access_requests = parse_bool(value, true);
+    } else if (key == "access_policy") {
+      if (value == "full" || value == "view_only" || value == "assist") {
+        settings.access_policy = value;
+      }
     } else if (key == "allow_sync_between_sessions") {
       settings.allow_sync_between_sessions = parse_bool(value, false);
     } else if (key == "encrypt_remote") {
@@ -293,6 +297,7 @@ void save_settings(const app_settings& settings) {
          << "\n";
   stream << "allow_access_requests="
          << (settings.allow_access_requests ? 1 : 0) << "\n";
+  stream << "access_policy=" << settings.access_policy << "\n";
   stream << "allow_sync_between_sessions="
          << (settings.allow_sync_between_sessions ? 1 : 0) << "\n";
   stream << "encrypt_remote=" << (settings.encrypt_remote ? 1 : 0) << "\n";
