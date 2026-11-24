@@ -39,6 +39,13 @@ struct app_settings {
   /// the in-memory ring buffer, stops writing files and does not delete the
   /// files that already exist.
   bool diag_logs_enabled = true;
+  /// Restrict incoming uploads and `mkdir` to explicit roots. Off by default:
+  /// "write any folder the host user can write" is an existing feature, not a
+  /// defect, so the sandbox is an opt-in hardening switch.
+  bool file_sandbox = false;
+  /// `;`/newline separated write roots. Empty with `file_sandbox` on means the
+  /// ordinary receive folder (`~/moLink`).
+  std::string file_sandbox_roots;
   std::string device_name;
 
   /// Host-side AV1 encoding. When on, the capture thread encodes the changed

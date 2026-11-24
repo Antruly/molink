@@ -6,6 +6,8 @@
 /// the path arithmetic here makes the same rules testable without a DOM and
 /// keeps the React component to state management and protocol plumbing.
 
+import type { OffsetStore } from './download-state'
+
 export interface TransferEntry {
   /// Path relative to the local source root, slash separated.
   path: string
@@ -581,6 +583,75 @@ export function downloadModeFor(scope: DirectoryScope): DownloadMode {
     typeof scope.showDirectoryPicker === 'function'
     ? 'directory'
     : 'files-only'
+}
+
+/// Identity of one resumable upload. The host keeps a `.part` keyed by the
+/// same logical file: destination folder plus the relative path and size. The
+/// host address is included so two different hosts never share an offset.
+export function uploadResumeKey(
+  host: string,
+  destination: string,
+  path: string,
+  size: number,
+): string {
+  return [
+    'molink.upload.v1',
+    encodeURIComponent(host),
+    encodeURIComponent(destination),
+    encodeURIComponent(path),
+    String(size),
+  ].join('|')
+}
+
+function clampUploadOffset(offset: number, size: number): number {
+  if (!Number.isSafeInteger(offset) || offset < 0) return 0
+  return offset > size ? size : offset
+}
+
+/// Remembers the host-confirmed prefix of an interrupted upload. Zero (or a
+/// complete file) clears the entry: there is nothing left to resume then.
+export function saveUploadOffset(
+  store: OffsetStore,
+  key: string,
+  offset: number,
+  size: number,
+): void {
+  const value = clampUploadOffset(offset, size)
+  try {
+    if (value <= 0 || value >= size) {
+      store.removeItem(key)
+      return
+    }
+    store.setItem(key, String(value))
+  } catch {
+    // Storage can be disabled; a manual retry still resumes from what the
+    // host reports in its `accept` answer.
+  }
+}
+
+export function loadUploadOffset(
+  store: OffsetStore,
+  key: string,
+  size: number,
+): number {
+  let raw: string | null = null
+  try {
+    raw = store.getItem(key)
+  } catch {
+    return 0
+  }
+  if (raw === null) return 0
+  const value = Number(raw)
+  if (!Number.isSafeInteger(value) || value <= 0 || value > size) return 0
+  return value
+}
+
+export function clearUploadOffset(store: OffsetStore, key: string): void {
+  try {
+    store.removeItem(key)
+  } catch {
+    // Nothing to clean up when storage is unavailable.
+  }
 }
 
 /// Parses `webkitRelativePath` / dropped paths into a flat local source.

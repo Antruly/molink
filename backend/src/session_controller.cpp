@@ -2012,6 +2012,22 @@ bool session_controller::start(const std::string* initial_token) {
           self->on_upload_event(tag, event, id, received, size, path);
         }
       });
+  files_->set_session_id(session->public_id);
+  // The write policy is read live so flipping the settings switch takes
+  // effect for the next offer without restarting the host.
+  files_->set_write_policy([weak]() {
+    file_transfer::write_policy policy;
+    if (auto self = weak.lock()) {
+      if (self->options_.auth) {
+        const app_settings settings = self->options_.auth->settings();
+        policy.enabled = settings.file_sandbox;
+        if (!settings.file_sandbox_roots.empty()) {
+          policy.roots.push_back(settings.file_sandbox_roots);
+        }
+      }
+    }
+    return policy;
+  });
   transport->set_handlers(
       [weak](const std::string& text) {
         if (auto self = weak.lock()) self->on_text(text);
@@ -4171,6 +4187,16 @@ void session_controller::on_text(const std::string& text) {
           it != j.end() && it->is_number()) {
         size = it->get<uint64_t>();
       }
+      // Resume hint: how much the viewer already sent, an optional SHA-256 of
+      // that prefix, and an opaque key that keeps two sessions of the same
+      // logical upload pointing at one `.part`. Old viewers send none.
+      uint64_t offset = 0;
+      if (const auto it = j.find("offset");
+          it != j.end() && it->is_number_unsigned()) {
+        offset = it->get<uint64_t>();
+      }
+      const std::string digest = string_field(j, "digest");
+      const std::string resume = string_field(j, "resume");
       // The delayed clipboard path tags the upload it asked for. An ordinary
       // offer carries no tag and the listener ignores it.
       int tag = -1;
@@ -4180,11 +4206,13 @@ void session_controller::on_text(const std::string& text) {
       }
       diag().log(diag_level::info, "file.offer", std::string(),
                  {{"peer", peer_ip},
+                  {"session_id", session->public_id},
                   {"name", string_field(j, "name")},
                   {"bytes", std::to_string(size)},
-                  {"dest", string_field(j, "dest")}});
+                  {"dest", string_field(j, "dest")},
+                  {"offset", std::to_string(offset)}});
       files_->offer(string_field(j, "name"), size, string_field(j, "dest"),
-                    tag);
+                    tag, offset, digest, resume);
       update_file_retry_timer();
     } else if (action == "clipboard-offer") {
       // The viewer copied files on its own machine. Register the descriptors
@@ -4338,12 +4366,16 @@ void session_controller::on_text(const std::string& text) {
       files_->mkdir(string_field(j, "path"), string_field(j, "dest"));
     } else if (action == "complete") {
       diag().log(diag_level::info, "file.complete", std::string(),
-                 {{"peer", peer_ip}, {"id", std::to_string(id)}});
+                 {{"peer", peer_ip},
+                  {"session_id", session->public_id},
+                  {"id", std::to_string(id)}});
       files_->complete(id);
       update_file_retry_timer();
     } else if (action == "cancel") {
       diag().log(diag_level::info, "file.cancel", std::string(),
-                 {{"peer", peer_ip}, {"id", std::to_string(id)}});
+                 {{"peer", peer_ip},
+                  {"session_id", session->public_id},
+                  {"id", std::to_string(id)}});
       files_->cancel(id);
       update_file_retry_timer();
     } else if (action == "browse") {
@@ -4355,13 +4387,30 @@ void session_controller::on_text(const std::string& text) {
       files_->browse(string_field(j, "path"), roots);
     } else if (action == "request") {
       diag().log(diag_level::info, "file.request", std::string(),
-                 {{"peer", peer_ip}, {"path", string_field(j, "path")}});
+                 {{"peer", peer_ip},
+                  {"session_id", session->public_id},
+                  {"path", string_field(j, "path")}});
       files_->request(string_field(j, "path"));
       update_file_retry_timer();
     } else if (action == "pull") {
+      // Additive: a viewer that reconnected asks for the byte it already
+      // saved. An old viewer omits the field and keeps the legacy behaviour.
+      std::optional<uint64_t> offset;
+      if (const auto it = j.find("offset");
+          it != j.end() && it->is_number_unsigned()) {
+        offset = it->get<uint64_t>();
+      }
       diag().log(diag_level::info, "file.pull", std::string(),
-                 {{"peer", peer_ip}, {"id", std::to_string(id)}});
-      files_->pull(id);
+                 {{"peer", peer_ip},
+                  {"session_id", session->public_id},
+                  {"id", std::to_string(id)},
+                  {"offset", offset ? std::to_string(*offset)
+                                    : std::string("-")}});
+      if (offset) {
+        files_->pull(id, *offset);
+      } else {
+        files_->pull(id);
+      }
       update_file_retry_timer();
     } else if (action == "clipboard-set") {
       // RDP-style paste: put the referenced remote files on the host's
@@ -4383,6 +4432,7 @@ void session_controller::on_text(const std::string& text) {
       diag().log(applied ? diag_level::info : diag_level::warn,
                  "file.clipboard-set", std::string(),
                  {{"peer", peer_ip},
+                  {"session_id", session->public_id},
                   {"ok", applied ? "1" : "0"},
                   {"requested", std::to_string(requested.size())},
                   {"resolved", std::to_string(resolved.size())}});
@@ -4994,6 +5044,10 @@ void session_supervisor::run() {
       std::this_thread::sleep_for(tick);
     }
     if (!running_.load()) break;
+
+    // Retained `.part` files from a dropped session expire even when no new
+    // file action arrives to sweep them lazily.
+    file_transfer::sweep_orphans();
 
     // AV1 patches are only safe when every watching session can decode them:
     // a tile-only viewer would miss the rectangles removed from the base

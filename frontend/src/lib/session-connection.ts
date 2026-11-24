@@ -191,6 +191,12 @@ export class SessionConnection {
   /// "host:port" for the diagnostics buffer; the tab id alone is meaningless
   /// once the tab is closed.
   private target = ''
+
+  /// The `host:port` this session talks to. Used to scope per-device state
+  /// (upload resume offsets) so two hosts never share a key.
+  get targetKey(): string {
+    return this.target
+  }
   /// The last welcome, for the diagnostics export header (host version) and
   /// to know whether the session is live.
   private lastWelcome: Welcome | null = null
@@ -944,6 +950,12 @@ export class SessionConnection {
 
   isLive(): boolean {
     return this.client.isLive()
+  }
+
+  /// The "host:port" this connection is pointed at. Resume bookkeeping keys
+  /// its offsets by the target so two hosts never share one.
+  targetAddress(): string {
+    return this.target
   }
 
   /// The host's version from its welcome, shown in the copied diagnostics.
