@@ -334,12 +334,37 @@ void send_error(session_transport* transport, const char* code,
   send_json(transport, j);
 }
 
+constexpr capability kAllCapabilities[] = {
+    capability::screen,          capability::input,
+    capability::clipboard_read,  capability::clipboard_write,
+    capability::files_read,      capability::files_write,
+    capability::audio,           capability::chat,
+    capability::logs,            capability::restart,
+};
+
+/// Capability mask as the additive booleans the welcome and the toolbar read.
+uvcpp_json capabilities_json(uint32_t mask) {
+  uvcpp_json out;
+  for (capability value : kAllCapabilities) {
+    out[capability_name(value)] = has_capability(mask, value);
+  }
+  return out;
+}
+
+/// Refuses a control message and names the missing capability. This is an
+/// explicit `forbidden` rather than a silent drop: a narrowed viewer must be
+/// able to tell "the host ignored me" from "the host does not allow that".
+void send_forbidden(session_transport* transport, capability value) {
+  send_error(transport, "forbidden",
+             std::string("this session is not allowed to use ") +
+                 capability_name(value));
+}
+
 /// Tells the viewer that a frame was dropped by the host's local send queue.
 /// This is deliberately not an `error`: the path is healthy and the host is
 /// already rebuilding the reference chain, so the client must not report a
 /// session error or fall back from P2P on it.
-void send_stream_gap(session_transport* transport) {
-  uvcpp_json j;
+void send_stream_gap(session_transport* transport) {  uvcpp_json j;
   j["type"] = "stream-gap";
   j["reason"] = "backpressure";
   send_json(transport, j);
@@ -1402,6 +1427,10 @@ void send_welcome(session_transport* transport, const session_info& session,
   j["type"] = "welcome";
   j["session"] = session.public_id;
   j["session_id"] = session.id;
+  // What this viewer may do, as additive booleans. Old clients ignore the
+  // object; the same bits gate the controls they already know.
+  j["capabilities"] = capabilities_json(session.capabilities);
+  j["capabilities_mask"] = session.capabilities;
   if (!resume_token.empty()) j["session_token"] = resume_token;
   j["protocol"] = protocol::kProtocolVersion;
   j["service"] = MOLINK_CORE_SERVICE;
@@ -1600,10 +1629,13 @@ void send_welcome(session_transport* transport, const session_info& session,
   // Clients use this to offer the resolution menu only where it can work.
   j["tiles"]["can_set_display_mode"] =
       opt.capture && opt.capture->supports_display_mode();
-  j["input"] = opt.input != nullptr && opt.input->available();
+  j["input"] = opt.input != nullptr && opt.input->available() &&
+               has_capability(session.capabilities, capability::input);
   j["input_backend"] = opt.input ? opt.input->backend() : "none";
-  j["call"] = opt.voice != nullptr;
-  if (opt.audio && opt.audio->available()) {
+  j["call"] = opt.voice != nullptr &&
+              has_capability(session.capabilities, capability::audio);
+  if (opt.audio && opt.audio->available() &&
+      has_capability(session.capabilities, capability::audio)) {
     const audio_format format = opt.audio->format();
     j["audio"] = true;
     j["audio_format"]["sample_rate"] = format.sample_rate;
@@ -1612,26 +1644,42 @@ void send_welcome(session_transport* transport, const session_info& session,
   } else {
     j["audio"] = false;
   }
-  j["clipboard"] = opt.clipboard != nullptr && opt.clipboard->available();
+  const bool clipboard_allowed =
+      has_capability(session.capabilities, capability::clipboard_read) ||
+      has_capability(session.capabilities, capability::clipboard_write);
+  const bool clipboard_ready = opt.clipboard != nullptr &&
+                               opt.clipboard->available() && clipboard_allowed;
+  j["clipboard"] = clipboard_ready;
   j["clipboard_backend"] = opt.clipboard ? opt.clipboard->backend() : "none";
   // The host can serve a viewer's `clipboard-pull` range requests: files the
   // host user copied can be pasted on the viewer's machine without staging
   // them there first.
-  j["clipboard_pull"] = opt.clipboard != nullptr && opt.clipboard->available();
+  j["clipboard_pull"] = clipboard_ready &&
+                        has_capability(session.capabilities,
+                                       capability::clipboard_read);
   const bool nested_rdp = opt.clipboard != nullptr && opt.clipboard->nested_rdp();
   j["clipboard_nested_rdp"] = nested_rdp;
   // Delayed file rendering: the viewer may send descriptors and let the host
   // fetch the bytes on the first paste. Clients that do not ask keep uploading
   // eagerly. The limits are advisory; the host enforces them too.
-  j["clipboard_lazy"] =
-      opt.clipboard != nullptr && opt.clipboard->supports_lazy_files();
+  j["clipboard_lazy"] = clipboard_ready &&
+                        opt.clipboard != nullptr &&
+                        opt.clipboard->supports_lazy_files();
   j["clipboard_lazy_files"] = static_cast<uint64_t>(kMaxLazyFiles);
   j["clipboard_lazy_bytes"] = static_cast<uint64_t>(kMaxLazyBytes);
   // Negotiated, not merely supported: both sides must be able to stream. A
   // client that did not advertise it in hello keeps the eager upload path.
-  j["clipboard_stream"] = opt.clipboard != nullptr &&
+  j["clipboard_stream"] = clipboard_ready &&
+                          opt.clipboard != nullptr &&
                           opt.clipboard->supports_lazy_files() &&
                           session.clipboard_stream;
+  // Capability-gated feature switches the newer clients use to hide controls
+  // instead of discovering the refusal by clicking.
+  j["chat"] = has_capability(session.capabilities, capability::chat);
+  j["logs"] = has_capability(session.capabilities, capability::logs);
+  j["files"] =
+      has_capability(session.capabilities, capability::files_read) ||
+      has_capability(session.capabilities, capability::files_write);
   j["device_id"] = opt.device_id;
   if (!opt.cert_fingerprint.empty()) {
     j["tls_fingerprint"] = opt.cert_fingerprint;
@@ -1911,9 +1959,37 @@ bool session_controller::start(const std::string* initial_token) {
     }
   }
 
-  const std::shared_ptr<session_info> session = registry_->add(transport);
+  session_registry::add_status add_status = session_registry::add_status::ok;
+  const std::shared_ptr<session_info> session =
+      registry_->add(transport, &add_status);
+  if (!session) {
+    const char* scope =
+        add_status == session_registry::add_status::global_unauthenticated_limit
+            ? "global"
+            : "ip";
+    diag().log(diag_level::warn, "session.reject",
+               "unauthenticated connection limit reached",
+               {{"reason", "limit"},
+                {"scope", scope},
+                {"peer", peer_ip},
+                {"limit",
+                 add_status ==
+                         session_registry::add_status::per_ip_unauthenticated_limit
+                     ? std::to_string(session_registry::kMaxUnauthenticatedPerIp)
+                     : std::to_string(session_registry::kMaxUnauthenticated)}});
+    send_error(transport.get(), "connection_limit",
+               "too many pending connections; try again later");
+    transport->close(transport_close::policy, "connection limit");
+    return false;
+  }
   session_ = session;
   session->controller = shared_from_this();
+  // The host-wide policy is the starting point. An access request approved
+  // with a specific preset replaces this mask for that one session.
+  const std::string access_policy =
+      options_.auth ? options_.auth->settings().access_policy : "full";
+  registry_->set_capabilities(session->id,
+                              capabilities_for_policy(access_policy));
 
   // Install handlers before the first message so a fast client cannot race its
   // hello. The weak capture keeps the controller from owning its transport.
@@ -1953,17 +2029,50 @@ bool session_controller::start(const std::string* initial_token) {
     // error and close frame are actually delivered.
     const bool locked = options_.lock && options_.lock->locked() &&
                         !is_loopback_peer(peer_ip);
-    if (!locked && options_.auth && options_.auth->authenticate(
-                                         *initial_token, /*consume=*/true)) {
+    bool token_ok = false;
+    bool session_token = false;
+    bool totp_pending = false;
+    if (!locked && options_.auth) {
+      // With two-factor on, a bare code in the query string cannot carry the
+      // second factor. Verify the first one without consuming it and let the
+      // hello message (which has a `totp` field) finish the login.
+      const bool totp_on = options_.auth->totp_required();
+      const login_result result = options_.auth->login(
+          *initial_token, std::string(), /*consume=*/!totp_on);
+      if (result.ok) {
+        token_ok = true;
+        session_token = result.session_token;
+      } else if (result.totp_required) {
+        totp_pending = true;
+      }
+    }
+    if (!locked && token_ok) {
       diag().log(diag_level::info, "session.auth", "token accepted",
-                 {{"peer", peer_ip}, {"method", "token"}, {"ok", "1"}});
-      registry_->set_authenticated(session);
-      if (options_.auth->valid_session(*initial_token)) {
+                 {{"peer", peer_ip},
+                  {"method", session_token ? "session" : "token"},
+                  {"ok", "1"}});
+      if (!registry_->set_authenticated(session)) {
+        diag().log(diag_level::warn, "session.reject",
+                   "authenticated session limit reached",
+                   {{"reason", "limit"},
+                    {"scope", "authenticated"},
+                    {"peer", peer_ip},
+                    {"limit",
+                     std::to_string(session_registry::kMaxAuthenticated)}});
+        send_error(transport.get(), "session_limit",
+                   "the host has reached its authenticated session limit");
+        transport->close(transport_close::policy, "session limit");
+        return false;
+      }
+      if (session_token) {
         resume_token_ = *initial_token;
       } else {
         issue_resume_token();
       }
       if (options_.lock) options_.lock->record_success(peer_ip);
+    } else if (!locked && totp_pending) {
+      // Keep the connection alive until the hello carries the six-digit code.
+      // This is not a failed attempt: the first factor was correct.
     } else if (!locked) {
       diag().log(diag_level::warn, "session.auth", "token rejected",
                  {{"peer", peer_ip}, {"method", "token"}, {"ok", "0"}});
@@ -2444,13 +2553,29 @@ void session_controller::chat_history() {
   send_json_string(uvcpp_json_dump(j));
 }
 
-void session_controller::approve_access_request() {
+void session_controller::approve_access_request(const std::string& policy) {
   std::shared_ptr<session_transport> transport = transport_.lock();
   std::shared_ptr<session_info> session = session_.lock();
   if (!transport || !session) return;
   session->access_request_id = 0;
   registry_->set_awaiting_approval(session, false);
-  registry_->set_authenticated(session);
+  if (!registry_->set_authenticated(session)) {
+    diag().log(diag_level::warn, "session.reject",
+               "authenticated session limit reached",
+               {{"reason", "limit"},
+                {"scope", "authenticated"},
+                {"peer", session->peer_ip},
+                {"limit", std::to_string(session_registry::kMaxAuthenticated)}});
+    send_error(transport.get(), "session_limit",
+               "the host has reached its authenticated session limit");
+    transport->close(transport_close::policy, "session limit");
+    return;
+  }
+  // The local user can narrow this one connection while approving it. An
+  // empty policy keeps the host-wide default chosen in Security settings.
+  if (!policy.empty() && valid_access_policy(policy)) {
+    registry_->set_capabilities(session->id, capabilities_for_policy(policy));
+  }
   registry_->touch(*session);
   issue_resume_token();
   if (options_.capture) {
@@ -2480,6 +2605,25 @@ void session_controller::on_text(const std::string& text) {
   session->last_seen_ms = now_ms();
   if (options_.lock) options_.lock->touch(!is_loopback_peer(peer_ip));
 
+  // A connection that has not authenticated yet has no business sending bulk
+  // control documents. The transport allows 1 MiB for authenticated traffic;
+  // the pending stage is capped much lower so 64 waiting connections cannot
+  // buffer a megabyte each.
+  constexpr std::size_t kUnauthenticatedMessageBytes = 128u * 1024u;
+  if (!session->authenticated &&
+      text.size() > kUnauthenticatedMessageBytes) {
+    diag().log(diag_level::warn, "session.reject",
+               "unauthenticated message too large",
+               {{"reason", "message_too_large"},
+                {"peer", peer_ip},
+                {"bytes", std::to_string(text.size())}});
+    send_error(transport.get(), "message_too_large",
+               "messages from an unauthenticated connection are limited to "
+               "128 KiB");
+    transport->close(transport_close::policy, "message too large");
+    return;
+  }
+
   uvcpp_json j;
   const uvcpp::json_status status = uvcpp::uvcpp_json_parse(text, j);
   if (status != uvcpp::json_status::OK || !j.is_object()) {
@@ -2496,11 +2640,20 @@ void session_controller::on_text(const std::string& text) {
     return false;
   };
 
+  /// A narrowed session must name the capability it lacks rather than have the
+  /// host silently discard its message.
+  auto require_cap = [&](capability value) -> bool {
+    if (registry_->has_capability(session->id, value)) return true;
+    send_forbidden(transport.get(), value);
+    return false;
+  };
+
   if (type == "logs") {
     // Reading the host's diagnostics is a privileged operation: the tail can
     // name peers and paths, even though credentials and clipboard content are
     // stripped before they are ever written.
     if (!require_auth()) return;
+    if (!require_cap(capability::logs)) return;
     const std::string action = string_field(j, "action");
     if (action == "tail") {
       int lines = 500;
@@ -2639,11 +2792,55 @@ void session_controller::on_text(const std::string& text) {
       authenticated = true;
       resume_token_ = resume;
       options_.auth->touch_session(resume);
-    } else if (options_.auth && options_.auth->authenticate(
-                                   string_field(j, "token"),
-                                   /*consume=*/true)) {
-      authenticated = true;
-      issue_resume_token();
+    } else if (options_.auth) {
+      // A session token is accepted directly; a verification code additionally
+      // needs `totp` when two-factor is enabled. The temporary code is only
+      // spent after both factors pass, so a typo does not burn a single-use
+      // code.
+      const login_result result = options_.auth->login(
+          string_field(j, "token"), string_field(j, "totp"),
+          /*consume=*/true);
+      if (result.ok) {
+        authenticated = true;
+        issue_resume_token();
+      } else if (result.totp_required) {
+        // Keep the connection open: the page sends another hello with the
+        // six-digit code. This is not a failed attempt.
+        diag().log(diag_level::info, "session.auth",
+                   "hello needs the second factor",
+                   {{"peer", peer_ip}, {"method", "totp"}, {"ok", "0"}});
+        send_error(transport.get(), "totp_required",
+                   "a six-digit two-factor code is required");
+        return;
+      } else if (result.totp_invalid) {
+        diag().log(diag_level::warn, "session.auth", "hello rejected",
+                   {{"peer", peer_ip},
+                    {"method", "totp"},
+                    {"ok", "0"},
+                    {"locked", locked_for_peer ? "1" : "0"}});
+        if (options_.lock) {
+          // A wrong second factor has its own budget: it must not consume the
+          // password/code budget and vice versa.
+          const int delay =
+              options_.lock->record_failure(peer_ip, "totp");
+          if (delay != 0) {
+            const bool banned = delay < 0;
+            send_error(transport.get(),
+                       banned ? "ip_banned" : "too_many_attempts",
+                       banned
+                           ? "this address is blocked"
+                           : "too many failed attempts; wait before trying again");
+            transport->close(transport_close::policy,
+                             banned ? "ip banned" : "too many attempts");
+            return;
+          }
+        }
+        send_error(transport.get(), "invalid_totp",
+                   "the six-digit code is not valid");
+        transport->close(transport_close::policy,
+                         "invalid two-factor code");
+        return;
+      }
     }
     if (!authenticated) {
       diag().log(diag_level::warn, "session.auth", "hello rejected",
@@ -2699,12 +2896,26 @@ void session_controller::on_text(const std::string& text) {
                    session->vp9_stream ? 1 : 0,
                    session->vp8_stream ? 1 : 0);
     }
-    registry_->set_authenticated(session);
+    if (!registry_->set_authenticated(session)) {
+      diag().log(diag_level::warn, "session.reject",
+                 "authenticated session limit reached",
+                 {{"reason", "limit"},
+                  {"scope", "authenticated"},
+                  {"peer", peer_ip},
+                  {"limit", std::to_string(session_registry::kMaxAuthenticated)}});
+      send_error(transport.get(), "session_limit",
+                 "the host has reached its authenticated session limit");
+      transport->close(transport_close::policy, "session limit");
+      return;
+    }
     // A session without AV1 must stop patches immediately; the supervisor
     // turns them back on once every session can decode them again.
     if (!session->av1 && options_.capture) options_.capture->set_av1_allowed(false);
     if (locked_for_peer) options_.lock->unlock();
-    if (options_.lock) options_.lock->record_success(peer_ip);
+    if (options_.lock) {
+      options_.lock->record_success(peer_ip);
+      options_.lock->record_success(peer_ip, "totp");
+    }
     if (options_.capture) {
       options_.capture->set_active(true);
       // A viewer that just joined starts on the stream, not on tiles.
@@ -2775,8 +2986,8 @@ void session_controller::on_text(const std::string& text) {
     const std::weak_ptr<session_controller> weak = weak_from_this();
     const uint32_t id = options_.access_requests->add(
         info,
-        [weak] {
-          if (auto self = weak.lock()) self->approve_access_request();
+        [weak](const std::string& policy) {
+          if (auto self = weak.lock()) self->approve_access_request(policy);
         },
         [weak] {
           if (auto self = weak.lock()) self->deny_access_request();
@@ -2843,6 +3054,7 @@ void session_controller::on_text(const std::string& text) {
   }
 
   if (type == "capture-fps") {
+    if (!require_cap(capability::screen)) return;
     if (!options_.capture) {
       send_error(transport.get(), "not_implemented", "capture is unavailable");
       return;
@@ -2866,6 +3078,7 @@ void session_controller::on_text(const std::string& text) {
   // written to auth settings and not broadcast to other viewers: the capture
   // is shared, but each viewer's selector stays its own.
   if (type == "session-preset") {
+    if (!require_cap(capability::screen)) return;
     if (!options_.capture) {
       send_error(transport.get(), "not_implemented", "capture is unavailable");
       return;
@@ -3034,6 +3247,7 @@ void session_controller::on_text(const std::string& text) {
   // into a concrete preset, so the core only has to apply encoding knobs.
   // Both are global to the host, like the capture rate.
   if (type == "quality") {
+    if (!require_cap(capability::screen)) return;
     if (!options_.capture) {
       send_error(transport.get(), "not_implemented", "capture is unavailable");
       return;
@@ -3165,6 +3379,7 @@ void session_controller::on_text(const std::string& text) {
   }
 
   if (type == "display") {
+    if (!require_cap(capability::screen)) return;
     if (!options_.capture) {
       send_error(transport.get(), "not_implemented", "capture is unavailable");
       return;
@@ -3202,6 +3417,7 @@ void session_controller::on_text(const std::string& text) {
       transport->close(transport_close::policy, "not authenticated");
       return;
     }
+    if (!require_cap(capability::clipboard_write)) return;
     const std::string text = string_field(j, "text");
     if (text.empty() || text.size() > 192 * 1024) return;
     const std::string hash = clipboard_hash(text);
@@ -3274,6 +3490,7 @@ void session_controller::on_text(const std::string& text) {
   }
 
   if (type == "display-mode") {
+    if (!require_cap(capability::screen)) return;
     if (!options_.capture) {
       send_error(transport.get(), "not_implemented", "capture is unavailable");
       return;
@@ -3329,6 +3546,13 @@ void session_controller::on_text(const std::string& text) {
       return;
     }
     const std::string action = string_field(j, "action");
+    if ((action == "files" || action == "get") &&
+        !require_cap(capability::clipboard_read)) {
+      return;
+    }
+    if (action == "set" && !require_cap(capability::clipboard_write)) {
+      return;
+    }
     if (action == "files") {
       // Current Explorer file list. Clients use the transfer channel to pull
       // the contents; this only describes what is on the clipboard.
@@ -3408,6 +3632,7 @@ void session_controller::on_text(const std::string& text) {
   }
 
   if (type == "request-frame") {
+    if (!require_cap(capability::screen)) return;
     // A polling client is proof that someone is watching. Ensure the capture
     // thread is awake even if the periodic registry check has not run yet;
     // otherwise the first request can be answered with empty frames only.
@@ -3419,6 +3644,7 @@ void session_controller::on_text(const std::string& text) {
   }
 
   if (type == "request-tiles") {
+    if (!require_cap(capability::screen)) return;
     std::vector<refresh_rect> rects;
     const auto tiles = j.find("tiles");
     if (tiles != j.end() && tiles->is_array()) {
@@ -3450,6 +3676,7 @@ void session_controller::on_text(const std::string& text) {
 
   if (type == "rtc-answer") {
     if (!require_auth()) return;
+    if (!require_cap(capability::screen)) return;
 #if MOLINK_HAVE_WEBRTC
     if (session->rtc) {
       std::string rtc_error;
@@ -3465,6 +3692,7 @@ void session_controller::on_text(const std::string& text) {
 
   if (type == "rtc-ice") {
     if (!require_auth()) return;
+    if (!require_cap(capability::screen)) return;
 #if MOLINK_HAVE_WEBRTC
     if (session->rtc) {
       session->rtc->add_remote_candidate(string_field(j, "candidate"),
@@ -3480,6 +3708,7 @@ void session_controller::on_text(const std::string& text) {
   // picture does.
   if (type == "video-mode") {
     if (!require_auth()) return;
+    if (!require_cap(capability::screen)) return;
     const std::string value = string_field(j, "value");
     if (!options_.auth || !options_.auth->set_video_mode(value)) {
       send_error(transport.get(), "bad_video_mode",
@@ -3512,6 +3741,7 @@ void session_controller::on_text(const std::string& text) {
 
   if (type == "stream-codec") {
     if (!require_auth()) return;
+    if (!require_cap(capability::screen)) return;
     const std::string value = string_field(j, "value");
     // Only codecs this host can actually encode are accepted, plus "auto"
     // and the explicit "tiles" (never stream).
@@ -3569,6 +3799,7 @@ void session_controller::on_text(const std::string& text) {
   }
 
   if (type == "request-keyframe") {
+    if (!require_cap(capability::screen)) return;
     // MOLINK_STREAM_LOG=1: a viewer whose decoder works asks for a keyframe a
     // few times per session; one that cannot decode asks every throttle tick
     // (300 ms), which is a very different rate.
@@ -3595,6 +3826,7 @@ void session_controller::on_text(const std::string& text) {
   // back on. Without this a hidden tab keeps receiving full-rate frames.
   if (type == "video-push") {
     if (!require_auth()) return;
+    if (!require_cap(capability::screen)) return;
     // Frames the viewer skipped while it was pulling are repaired by the
     // sequence map and tile clock like any other gap, so turning the clock
     // back on does not need a keyframe.
@@ -3621,6 +3853,7 @@ void session_controller::on_text(const std::string& text) {
 
   if (type == "call") {
     if (!require_auth()) return;
+    if (!require_cap(capability::audio)) return;
     if (!options_.call) {
       send_error(transport.get(), "call_unavailable",
                  "voice calls are unavailable on this host");
@@ -3640,6 +3873,7 @@ void session_controller::on_text(const std::string& text) {
 
   if (type == "audio") {
     if (!require_auth()) return;
+    if (!require_cap(capability::audio)) return;
     const std::string action = string_field(j, "action");
     if (!options_.audio || !options_.audio->available()) {
       send_error(transport.get(), "audio_unavailable",
@@ -3690,6 +3924,7 @@ void session_controller::on_text(const std::string& text) {
 
   if (type == "chat") {
     if (!require_auth()) return;
+    if (!require_cap(capability::chat)) return;
     const std::string action = string_field(j, "action");
     if (action == "history") {
       chat_history();
@@ -3714,6 +3949,20 @@ void session_controller::on_text(const std::string& text) {
     if (!require_auth()) return;
     if (!files_) return;
     const std::string action = string_field(j, "action");
+    // File browsing/downloading and uploading are separate grants: a "view
+    // only" session may do neither, and "assist" may only use the keyboard.
+    const bool file_write =
+        action == "offer" || action == "mkdir" || action == "complete" ||
+        action == "cancel";
+    const bool file_read =
+        action == "browse" || action == "request" || action == "pull" ||
+        action == "clipboard-pull" || action == "clipboard-fetch-failed";
+    if (file_write && !require_cap(capability::files_write)) return;
+    if (file_read && !require_cap(capability::files_read)) return;
+    if ((action == "clipboard-offer" || action == "clipboard-set") &&
+        !require_cap(capability::clipboard_write)) {
+      return;
+    }
     uint32_t id = 0;
     if (const auto it = j.find("id");
         it != j.end() && it->is_number()) {
@@ -4162,6 +4411,7 @@ void session_controller::on_text(const std::string& text) {
   }
 
   if (type == "input") {
+    if (!require_cap(capability::input)) return;
     // A viewer that sent input is the one the user is working in. With no
     // `video-push` foreground signal (legacy clients), this is what makes the
     // clipboard route to the right session.
@@ -4322,6 +4572,20 @@ void session_controller::on_binary(const uint8_t* data, std::size_t len) {
   if (options_.lock) {
     options_.lock->touch(!is_loopback_peer(transport->peer_ip()));
   }
+  constexpr std::size_t kUnauthenticatedPacketBytes = 128u * 1024u;
+  if (!session->authenticated &&
+      len > kUnauthenticatedPacketBytes) {
+    diag().log(diag_level::warn, "session.reject",
+               "unauthenticated packet too large",
+               {{"reason", "message_too_large"},
+                {"peer", transport->peer_ip()},
+                {"bytes", std::to_string(len)}});
+    send_error(transport.get(), "message_too_large",
+               "packets from an unauthenticated connection are limited to "
+               "128 KiB");
+    transport->close(transport_close::policy, "packet too large");
+    return;
+  }
   protocol::packet pkt;
   std::string err;
   if (!protocol::decode_packet(data, len, pkt, err)) {
@@ -4344,6 +4608,10 @@ void session_controller::on_binary(const uint8_t* data, std::size_t len) {
     }
     case protocol::packet_type::voice: {
       if (!session->authenticated || !voice_active_ || !options_.voice) break;
+      if (!registry_->has_capability(session->id, capability::audio)) {
+        send_forbidden(transport.get(), capability::audio);
+        break;
+      }
       options_.voice->play(pkt.payload.data(), pkt.payload.size());
       break;
     }
@@ -4351,6 +4619,10 @@ void session_controller::on_binary(const uint8_t* data, std::size_t len) {
       if (!session->authenticated || !files_) {
         send_error(transport.get(), "unauthorized",
                    "send a hello message with a valid token");
+        break;
+      }
+      if (!registry_->has_capability(session->id, capability::files_write)) {
+        send_forbidden(transport.get(), capability::files_write);
         break;
       }
       if (pkt.payload.size() < 16) {
@@ -4373,6 +4645,10 @@ void session_controller::on_binary(const uint8_t* data, std::size_t len) {
       if (!session->authenticated) {
         send_error(transport.get(), "unauthorized",
                    "send a hello message with a valid token");
+        break;
+      }
+      if (!registry_->has_capability(session->id, capability::files_read)) {
+        send_forbidden(transport.get(), capability::files_read);
         break;
       }
       if (pkt.payload.size() < 16) {

@@ -495,6 +495,43 @@ export interface SecuritySettings {
   restart_required: boolean
 }
 
+export interface TwoFactorStatus {
+  enabled: boolean
+  /// `otpauth://` URI for the authenticator app, present while a secret is
+  /// waiting to be confirmed.
+  uri: string
+  issuer: string
+  account: string
+}
+
+export function fetchTwoFactor(token: string): Promise<TwoFactorStatus> {
+  return request<TwoFactorStatus>('/api/2fa', {}, token)
+}
+
+/// Confirms the secret with a code from the authenticator app.
+export function enableTwoFactor(
+  token: string,
+  code: string,
+): Promise<{ ok: boolean; enabled: boolean }> {
+  return request('/api/2fa/enable', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ code }),
+  }, token)
+}
+
+/// Turning it off needs a current code or the long-term password.
+export function disableTwoFactor(
+  token: string,
+  credential: string,
+): Promise<{ ok: boolean }> {
+  return request('/api/2fa/disable', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ credential }),
+  }, token)
+}
+
 export function fetchSettings(token: string): Promise<SecuritySettings> {
   return request<SecuritySettings>('/api/settings', {}, token)
 }

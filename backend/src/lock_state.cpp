@@ -134,12 +134,23 @@ std::string lock_state::normalize_peer(const std::string& peer) {
   return peer;
 }
 
+std::string lock_state::attempt_key(const std::string& peer_ip,
+                                    const std::string& scope) {
+  // The unit separator cannot appear in an address or a scope name.
+  return scope + '\x1f' + peer_ip;
+}
+
 int lock_state::attempt_delay(const std::string& peer_ip) const {
+  return attempt_delay(peer_ip, "auth");
+}
+
+int lock_state::attempt_delay(const std::string& peer_ip,
+                              const std::string& scope) const {
   const std::string ip = normalize_peer(peer_ip);
   if (ip.empty() || is_loopback_peer(ip)) return 0;
   std::lock_guard<std::mutex> lock(mutex_);
   if (banned_.count(ip) != 0) return -1;
-  const auto it = attempts_.find(ip);
+  const auto it = attempts_.find(attempt_key(ip, scope));
   if (it == attempts_.end()) return 0;
   const uint64_t now = now_ms();
   if (now >= it->second.blocked_until_ms) return 0;
@@ -149,13 +160,18 @@ int lock_state::attempt_delay(const std::string& peer_ip) const {
 }
 
 int lock_state::record_failure(const std::string& peer_ip) {
+  return record_failure(peer_ip, "auth");
+}
+
+int lock_state::record_failure(const std::string& peer_ip,
+                               const std::string& scope) {
   const std::string ip = normalize_peer(peer_ip);
   if (ip.empty() || is_loopback_peer(ip)) return 0;
   std::lock_guard<std::mutex> lock(mutex_);
   if (banned_.count(ip) != 0) return -1;
 
   const uint64_t now = now_ms();
-  attempt_record& record = attempts_[ip];
+  attempt_record& record = attempts_[attempt_key(ip, scope)];
   if (record.last_failure_ms != 0 && now > record.last_failure_ms &&
       now - record.last_failure_ms > kStrikeResetMs) {
     record = attempt_record{};
@@ -174,7 +190,16 @@ int lock_state::record_failure(const std::string& peer_ip) {
   ++record.strikes;
   if (record.strikes >= kBanishAfterStrikes) {
     banned_.insert(ip);
-    attempts_.erase(ip);
+    // The ban is address-wide; the other factor's budget disappears with it.
+    for (auto it = attempts_.begin(); it != attempts_.end();) {
+      if (it->first.size() > ip.size() &&
+          it->first.compare(it->first.size() - ip.size(), ip.size(), ip) ==
+              0) {
+        it = attempts_.erase(it);
+      } else {
+        ++it;
+      }
+    }
     save_bans();
     return -1;
   }
@@ -185,10 +210,15 @@ int lock_state::record_failure(const std::string& peer_ip) {
 }
 
 void lock_state::record_success(const std::string& peer_ip) {
+  record_success(peer_ip, "auth");
+}
+
+void lock_state::record_success(const std::string& peer_ip,
+                                const std::string& scope) {
   const std::string ip = normalize_peer(peer_ip);
   if (ip.empty() || is_loopback_peer(ip)) return;
   std::lock_guard<std::mutex> lock(mutex_);
-  attempts_.erase(ip);
+  attempts_.erase(attempt_key(ip, scope));
 }
 
 void lock_state::save_bans() const {

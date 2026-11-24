@@ -6,10 +6,39 @@
 #include "util.h"
 
 namespace molink {
+namespace {
+
+/// IPv4-mapped IPv6 peers count as the same address as the plain IPv4 form.
+std::string normalize_peer(std::string peer) {
+  if (peer.compare(0, 7, "::ffff:") == 0) peer = peer.substr(7);
+  return peer;
+}
+
+}  // namespace
 
 std::shared_ptr<session_info> session_registry::add(
-    std::shared_ptr<session_transport> transport) {
+    std::shared_ptr<session_transport> transport, add_status* status) {
   std::lock_guard<std::mutex> lock(mu_);
+  const std::string peer =
+      normalize_peer(transport ? transport->peer_ip() : std::string());
+  std::size_t unauthenticated = 0;
+  std::size_t from_peer = 0;
+  for (const auto& existing : sessions_) {
+    if (existing->authenticated) continue;
+    ++unauthenticated;
+    if (!peer.empty() && normalize_peer(existing->peer_ip) == peer) {
+      ++from_peer;
+    }
+  }
+  if (unauthenticated >= kMaxUnauthenticated) {
+    if (status != nullptr) *status = add_status::global_unauthenticated_limit;
+    return nullptr;
+  }
+  if (!peer.empty() && from_peer >= kMaxUnauthenticatedPerIp) {
+    if (status != nullptr) *status = add_status::per_ip_unauthenticated_limit;
+    return nullptr;
+  }
+  if (status != nullptr) *status = add_status::ok;
   auto s = std::make_shared<session_info>();
   s->id = next_id_++;
   if (next_id_ == 0) next_id_ = 1;
@@ -72,11 +101,18 @@ bool session_registry::has_authenticated() const {
   return false;
 }
 
-void session_registry::set_authenticated(
+bool session_registry::set_authenticated(
     const std::shared_ptr<session_info>& s) {
-  if (!s) return;
+  if (!s) return false;
   std::lock_guard<std::mutex> lock(mu_);
+  if (s->authenticated) return true;
+  std::size_t authenticated = 0;
+  for (const auto& existing : sessions_) {
+    if (existing->authenticated) ++authenticated;
+  }
+  if (authenticated >= kMaxAuthenticated) return false;
   s->authenticated = true;
+  return true;
 }
 
 void session_registry::set_awaiting_approval(
@@ -84,6 +120,35 @@ void session_registry::set_awaiting_approval(
   if (!s) return;
   std::lock_guard<std::mutex> lock(mu_);
   s->awaiting_approval = awaiting;
+}
+
+bool session_registry::set_capabilities(uint32_t id, uint32_t capabilities) {
+  std::lock_guard<std::mutex> lock(mu_);
+  for (const auto& session : sessions_) {
+    if (session->id != id) continue;
+    session->capabilities = capabilities;
+    return true;
+  }
+  return false;
+}
+
+bool session_registry::has_capability(uint32_t id,
+                                      capability value) const {
+  std::lock_guard<std::mutex> lock(mu_);
+  for (const auto& session : sessions_) {
+    if (session->id == id) {
+      return molink::has_capability(session->capabilities, value);
+    }
+  }
+  return false;
+}
+
+uint32_t session_registry::capabilities(uint32_t id) const {
+  std::lock_guard<std::mutex> lock(mu_);
+  for (const auto& session : sessions_) {
+    if (session->id == id) return session->capabilities;
+  }
+  return 0;
 }
 
 void session_registry::set_clipboard_offer(

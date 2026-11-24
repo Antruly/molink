@@ -63,6 +63,8 @@ export function HomeView() {
   const localMode = useAppStore((state) => state.localMode)
   const server = useAppStore((state) => state.server)
   const authToken = useAppStore((state) => state.token)
+  const twoFactorCode = useAppStore((state) => state.twoFactorCode)
+  const setTwoFactorCode = useAppStore((state) => state.setTwoFactorCode)
   const stateError = useAppStore((state) => state.stateError)
   const refreshState = useAppStore((state) => state.refreshState)
   const createSession = useAppStore((state) => state.createSession)
@@ -845,6 +847,29 @@ export function HomeView() {
                   {showCode ? <EyeOff size={14} /> : <Eye size={14} />}
                 </button>
               </div>
+            </label>
+
+            {/* Only needed when the host turned on two-factor; a host without
+                it ignores the field, so this stays optional and unexplained
+                for everyone else. */}
+            <label className="block">
+              <span className="mb-1.5 block text-[10px] uppercase tracking-[0.16em] text-muted">
+                {t('home.twoFactor')}
+              </span>
+              <input
+                value={twoFactorCode}
+                onChange={(event) => {
+                  const value = event.target.value
+                    .replace(/[^0-9]/g, '')
+                    .slice(0, 6)
+                  setTwoFactorCode(value)
+                }}
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                className="field font-mono"
+                placeholder="123456"
+                spellCheck={false}
+              />
             </label>
 
             <div>

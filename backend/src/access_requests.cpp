@@ -5,9 +5,10 @@
 
 namespace molink {
 
-uint32_t access_request_registry::add(const access_request_info& info,
-                                      std::function<void()> approve,
-                                      std::function<void()> deny) {
+uint32_t access_request_registry::add(
+    const access_request_info& info,
+    std::function<void(const std::string& policy)> approve,
+    std::function<void()> deny) {
   std::lock_guard<std::mutex> lock(mutex_);
   // One outstanding request per peer: a retry should not fill the queue.
   for (auto it = pending_.begin(); it != pending_.end();) {
@@ -40,8 +41,9 @@ std::vector<access_request_info> access_request_registry::list() const {
   return out;
 }
 
-bool access_request_registry::approve(uint32_t id) {
-  std::function<void()> callback;
+bool access_request_registry::approve(uint32_t id,
+                                      const std::string& policy) {
+  std::function<void(const std::string&)> callback;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = pending_.find(id);
@@ -49,7 +51,7 @@ bool access_request_registry::approve(uint32_t id) {
     callback = std::move(it->second.approve);
     pending_.erase(it);
   }
-  if (callback) callback();
+  if (callback) callback(policy);
   return true;
 }
 

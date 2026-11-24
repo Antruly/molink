@@ -24,20 +24,22 @@ class access_request_registry {
   static constexpr std::size_t kMaxPending = 8;
 
   /// Returns the new request id, or 0 when the queue is full. A second
-  /// request from the same peer replaces the earlier one.
+  /// request from the same peer replaces the earlier one. The approve
+  /// callback receives the access policy chosen by the local user (empty
+  /// means "use the host default").
   uint32_t add(const access_request_info& info,
-               std::function<void()> approve,
+               std::function<void(const std::string& policy)> approve,
                std::function<void()> deny);
 
   std::vector<access_request_info> list() const;
-  bool approve(uint32_t id);
+  bool approve(uint32_t id, const std::string& policy = std::string());
   bool deny(uint32_t id);
   void remove(uint32_t id);
 
  private:
   struct entry {
     access_request_info info;
-    std::function<void()> approve;
+    std::function<void(const std::string& policy)> approve;
     std::function<void()> deny;
   };
 

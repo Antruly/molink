@@ -240,6 +240,7 @@ set(MOLINK_CORE_SOURCES
   src/diag_log.cpp
   src/discovery.cpp
   src/settings.cpp
+  src/totp.cpp
   src/ui_store.cpp
   src/input/x11_input.cpp
   src/input/windows_input.cpp
@@ -1068,6 +1069,42 @@ target_include_directories(molink-core-tile-scale-test PRIVATE src)
 set_target_properties(molink-core-tile-scale-test PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 add_test(NAME tile_scale COMMAND molink-core-tile-scale-test)
+
+# RFC 6238 vectors and the sealed-at-rest secret: pure crypto, no libuvcpp.
+add_executable(molink-core-totp-test
+  tests/totp_test.cpp
+  src/totp.cpp
+)
+target_include_directories(molink-core-totp-test PRIVATE src)
+set_target_properties(molink-core-totp-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME totp COMMAND molink-core-totp-test)
+
+# The capability presets are pure data, so the refusal matrix is checked
+# without a transport.
+add_executable(molink-core-capability-test
+  tests/capability_test.cpp
+)
+target_include_directories(molink-core-capability-test PRIVATE src)
+set_target_properties(molink-core-capability-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME capability COMMAND molink-core-capability-test)
+
+# Connection budgets and per-session capability overrides. The fake transport
+# keeps this independent of libuvcpp; util.cpp supplies the session id.
+add_executable(molink-core-session-registry-test
+  tests/session_registry_test.cpp
+  src/session_registry.cpp
+  src/util.cpp
+)
+target_include_directories(molink-core-session-registry-test PRIVATE src)
+if(WIN32)
+  target_link_libraries(molink-core-session-registry-test PRIVATE
+    ws2_32 iphlpapi)
+endif()
+set_target_properties(molink-core-session-registry-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME session_registry COMMAND molink-core-session-registry-test)
 
 # The tile <-> AV1 stream hand-over is pure state machine.
 add_executable(molink-core-stream-policy-test
