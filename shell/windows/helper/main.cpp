@@ -353,16 +353,29 @@ bool capture(std::vector<uint8_t>& out, int& width, int& height,
   return ok;
 }
 
-void send_key(WORD vk, bool down, bool extended) {
+void send_key(WORD vk, WORD scan, bool down, bool extended) {
   INPUT input{};
   input.type = INPUT_KEYBOARD;
-  input.ki.wVk = vk;
-  if (!down) input.ki.dwFlags = KEYEVENTF_KEYUP;
+  if (scan != 0) {
+    // Physical injection: the scan code selects the key position, so the
+    // host layout decides only which character it produces. wVk is filled
+    // for applications that read it.
+    input.ki.wVk =
+        static_cast<WORD>(MapVirtualKeyW(scan, MAPVK_VSC_TO_VK_EX));
+    input.ki.wScan = scan;
+    input.ki.dwFlags |= KEYEVENTF_SCANCODE;
+  } else {
+    input.ki.wVk = vk;
+    input.ki.wScan =
+        static_cast<WORD>(MapVirtualKeyW(vk, MAPVK_VK_TO_VSC));
+  }
+  if (!down) input.ki.dwFlags |= KEYEVENTF_KEYUP;
   // Numpad Enter/Divide and the navigation-block keys are E0-prefixed; without
   // this the target sees the main Enter or the wrong editing key.
   if (extended) input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
   if (SendInput(1, &input, sizeof(input)) != 1) {
-    log_line("SendInput key " + std::to_string(vk) + " failed: " +
+    log_line("SendInput key " + std::to_string(vk) + "/" +
+             std::to_string(scan) + " failed: " +
              std::to_string(GetLastError()));
   }
 }
@@ -479,9 +492,11 @@ std::string handle_line(const std::string& line, std::vector<uint8_t>& frame,
     int vk = 0;
     int down = 1;
     int extended = 0;
-    // An older core sends two fields; keep accepting that form.
-    std::sscanf(line.c_str(), "key %d %d %d", &vk, &down, &extended);
-    send_key(static_cast<WORD>(vk), down != 0, extended != 0);
+    int scan = 0;
+    // An older core sends three fields; keep accepting that form.
+    std::sscanf(line.c_str(), "key %d %d %d %d", &vk, &down, &extended, &scan);
+    send_key(static_cast<WORD>(vk), static_cast<WORD>(scan), down != 0,
+             extended != 0);
     return R"({"ok":true})";
   }
   if (line.rfind("text ", 0) == 0) {

@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <set>
 #include <string>
@@ -18,6 +19,7 @@
 
 #include "util.h"
 #include "input/keymap.h"
+#include "input/text_encoding.h"
 
 namespace molink {
 namespace {
@@ -119,17 +121,25 @@ class x11_input final : public input_injector {
     const key_lookup mapping = lookup_key(keymap_platform::x11, code);
     // Unknown and explicitly unsupported codes both reject, so the host can
     // name the key in its `bad_input` reply instead of dropping it.
-    if (!mapping.found || mapping.unsupported || mapping.keysym.empty()) {
-      return status::rejected;
+    if (!mapping.found || mapping.unsupported) return status::rejected;
+
+    KeyCode keycode = 0;
+    if (layout_keymap_) {
+      // Compatibility path: resolve the character through the host layout.
+      if (mapping.keysym.empty()) return status::rejected;
+      const KeySym symbol = XStringToKeysym(mapping.keysym.c_str());
+      if (symbol == NoSymbol) return status::rejected;
+      keycode = XKeysymToKeycode(display_, symbol);
+    } else {
+      // Physical path: evdev + 8 is the position in the X server's keymap,
+      // so a German or AZERTY layout does not move the key.
+      keycode = static_cast<KeyCode>(mapping.keycode);
     }
-    const KeySym symbol = XStringToKeysym(mapping.keysym.c_str());
-    if (symbol == NoSymbol) return status::rejected;
-    const KeyCode keycode = XKeysymToKeycode(display_, symbol);
     if (keycode == 0) return status::rejected;
 
     const bool numlock_sensitive = key_depends_on_numlock(code);
     // An explicit NumLock press owns the state from here on.
-    if (mapping.keysym == "Num_Lock") {
+    if (keycode == numlock_keycode_) {
       numlock_forced_ = false;
       numlock_held_.clear();
     }
@@ -178,14 +188,7 @@ class x11_input final : public input_injector {
     KeySym* original = XGetKeyboardMapping(display_, spare, 1, &per_keycode);
 
     for (uint32_t cp : codepoints) {
-      KeySym symbol = NoSymbol;
-      if (cp == '\n' || cp == '\r') symbol = XK_Return;
-      else if (cp == '\t') symbol = XK_Tab;
-      else if (cp == 0x08) symbol = XK_BackSpace;
-      else {
-        symbol = cp < 0x100 ? static_cast<KeySym>(cp)
-                            : (0x01000000u | static_cast<KeySym>(cp));
-      }
+      const KeySym symbol = x11_unicode_keysym(cp);
       if (symbol == NoSymbol) continue;
       KeySym symbols[2] = {symbol, symbol};
       XChangeKeyboardMapping(display_, spare, 2, symbols, 1);
@@ -231,6 +234,50 @@ class x11_input final : public input_injector {
 
  private:
   x11_input() = default;
+
+  /// One-time check that the server's keymap really uses the evdev positions.
+  /// Only the keys every desktop has are checked: a server that remaps them
+  /// would make physical injection type the wrong characters, so it keeps the
+  /// old layout lookup instead. Media/extra keys are not a reason to abandon
+  /// physical mapping.
+  bool validate_static_keymap() {
+    int min_keycode = 0;
+    int max_keycode = 0;
+    XDisplayKeycodes(display_, &min_keycode, &max_keycode);
+    if (max_keycode < min_keycode) return false;
+    int per_keycode = 0;
+    KeySym* map = XGetKeyboardMapping(
+        display_, static_cast<KeyCode>(min_keycode),
+        max_keycode - min_keycode + 1, &per_keycode);
+    if (map == nullptr || per_keycode <= 0) {
+      if (map != nullptr) XFree(map);
+      return false;
+    }
+    static const char* const kCoreCodes[] = {
+        "KeyA",   "KeyM",    "KeyY",       "KeyZ",     "Digit1",
+        "Digit0", "Escape",  "Enter",      "Tab",      "Space",
+        "ShiftLeft", "ControlLeft", "AltLeft", "ArrowLeft", "Backslash",
+        "Semicolon", "IntlBackslash"};
+    bool valid = true;
+    for (const char* code : kCoreCodes) {
+      const key_lookup mapping = lookup_key(keymap_platform::x11, code);
+      if (!mapping.found || mapping.unsupported ||
+          mapping.keycode < static_cast<unsigned int>(min_keycode) ||
+          mapping.keycode > static_cast<unsigned int>(max_keycode)) {
+        valid = false;
+        break;
+      }
+      const KeySym first =
+          map[(mapping.keycode - static_cast<unsigned int>(min_keycode)) *
+              static_cast<unsigned int>(per_keycode)];
+      if (first == NoSymbol) {
+        valid = false;
+        break;
+      }
+    }
+    XFree(map);
+    return valid;
+  }
 
   /// NumLock is a server lock modifier. Find the modifier bit it occupies so
   /// the state can be queried without assuming Mod2 (layouts differ).
@@ -284,7 +331,24 @@ class x11_input final : public input_injector {
     }
     screen_ = DefaultScreen(display_);
 
-    numlock_keycode_ = XKeysymToKeycode(display_, XK_Num_Lock);
+    // The default path injects physical X key codes (evdev + 8), which do not
+    // move when the host layout changes. `MOLINK_KEYMAP=layout` restores the
+    // old character-based lookup through the host's current layout.
+    const char* keymap_mode = std::getenv("MOLINK_KEYMAP");
+    layout_keymap_ =
+        keymap_mode != nullptr && std::strcmp(keymap_mode, "layout") == 0;
+    if (!layout_keymap_ && !validate_static_keymap()) {
+      layout_keymap_ = true;
+      std::fprintf(stderr,
+                   "input: X server key codes do not match the evdev layout; "
+                   "falling back to layout lookup\n");
+    }
+
+    numlock_keycode_ =
+        layout_keymap_
+            ? XKeysymToKeycode(display_, XK_Num_Lock)
+            : static_cast<KeyCode>(
+                  lookup_key(keymap_platform::x11, "NumLock").keycode);
     if (numlock_keycode_ != 0) {
       if (XModifierKeymap* map = XGetModifierMapping(display_)) {
         for (int mod = 0; mod < 8; ++mod) {
@@ -325,6 +389,7 @@ class x11_input final : public input_injector {
   std::set<unsigned> held_keys_;
   KeyCode numlock_keycode_ = 0;
   unsigned int numlock_mask_ = 0;
+  bool layout_keymap_ = false;
   std::set<KeyCode> numlock_held_;
   bool numlock_forced_ = false;
 };

@@ -152,6 +152,8 @@ export interface UiPreferences {
   /// ui.json so the native shell (whose origin changes every launch) does not
   /// ask again.
   comboForwardAsked?: 'enabled' | 'declined'
+  /// Whether the hidden input may use the local IME and send committed text.
+  localIme?: boolean
   /// Default picture preset for a new session (viewer-side only).
   defaultPreset?: string
   /// Viewer-owned presets keyed by `molink.preset.<host>:<port>`. Written by

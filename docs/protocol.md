@@ -336,15 +336,21 @@ QUIC 会话（`transport=quic`）在一条双向 QUIC 流上复用完全相同�
 
 | 字段 | 说明 |
 |---|---|
-| `k` | `move` / `button` / `wheel` / `key` |
+| `k` | `move` / `button` / `wheel` / `key` / `text` |
 | `x`, `y` | 归一化到 `[0,1]` 的屏幕坐标；越界事件被拒绝 |
 | `button` | X11 按钮号：1 左、2 中、3 右（4–7 为滚轮，由服务端使用） |
 | `dx`, `dy` | 滚轮格数；`dy > 0` 向下滚动 |
 | `code` | 浏览器 `KeyboardEvent.code`，如 `KeyA`、`Digit1`、`ArrowLeft`、`ShiftLeft` |
+| `text` | UTF-8 文本，1–4096 字节（`k:"text"`，用于输入法上屏与移动端虚拟键盘） |
 | `down` | 按下/抬起，默认 `true` |
 
 - 单条消息最多 64 个事件。
 - `events` 缺失时，消息顶层对象本身按一个事件解析。
+- `key` 按**物理键位**注入：Windows 用扫描码（`KEYEVENTF_SCANCODE`），X11 用
+  `evdev + 8` 的 X keycode。宿主布局只决定该键位输出什么字符，不改变键位本身。
+  设置环境变量 `MOLINK_KEYMAP=layout` 可退回按宿主当前布局查字符的旧行为。
+- 超过 4096 字节的输入法上屏文本由客户端**分片**成多条 `text` 事件；服务端不接收
+  单条超限消息。
 - 组合键由客户端分别发送修饰键与主键的按下/抬起，X 服务器负责产生大写与符号。
 - 会话断开且没有其它已鉴权会话时，服务端释放所有按下的键与按钮。
 - 输入不可用时返回 `not_implemented`。

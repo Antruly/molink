@@ -14,46 +14,59 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <set>
 #include <string>
 #include <vector>
 
 #include "util.h"
+#include "input/key_alias.h"
+#include "input/text_encoding.h"
 
 namespace molink {
 namespace {
 
-// The table lives in keymap.cpp so the same data can be unit-tested on every
-// platform (the Windows table is checked against the real VK_ constants when
-// compiled with windows.h).
+// A held key is identified by its physical position (scan code + E0 bit).
+// Keys without a scan code fall back to the virtual key, which is the only
+// thing that can describe them.
 struct held_key {
-  unsigned int value;
-  bool scan_code;
+  unsigned int scan;
+  unsigned int vk;
   bool extended;
   bool operator<(const held_key& other) const {
-    if (value != other.value) return value < other.value;
-    if (scan_code != other.scan_code) return scan_code < other.scan_code;
+    if (scan != other.scan) return scan < other.scan;
+    if (vk != other.vk) return vk < other.vk;
     return extended < other.extended;
   }
 };
 
-INPUT key_input(unsigned int value, bool scan_code, bool extended, bool down) {
+INPUT key_input(unsigned int vk, unsigned int scan, bool extended, bool down) {
   INPUT input{};
   input.type = INPUT_KEYBOARD;
-  if (scan_code) {
-    // Power/WakeUp have no virtual key; their E0 scan code is the only way to
-    // send them. KEYEVENTF_EXTENDEDKEY writes the E0 prefix.
-    input.ki.wVk = 0;
-    input.ki.wScan = static_cast<WORD>(value);
+  if (scan != 0) {
+    // The scan code is the physical key. wVk is filled from it only so the
+    // applications that read the virtual key see a consistent value; the
+    // layout still decides which character the key produces.
+    input.ki.wVk =
+        static_cast<WORD>(MapVirtualKeyW(scan, MAPVK_VSC_TO_VK_EX));
+    input.ki.wScan = static_cast<WORD>(scan);
     input.ki.dwFlags |= KEYEVENTF_SCANCODE;
   } else {
-    input.ki.wVk = static_cast<WORD>(value);
+    input.ki.wVk = static_cast<WORD>(vk);
     input.ki.wScan = static_cast<WORD>(
-        MapVirtualKeyW(static_cast<UINT>(value), MAPVK_VK_TO_VSC));
+        MapVirtualKeyW(static_cast<UINT>(vk), MAPVK_VK_TO_VSC));
   }
   if (extended) input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
   if (!down) input.ki.dwFlags |= KEYEVENTF_KEYUP;
   return input;
+}
+
+/// `MOLINK_KEYMAP=layout` restores the old virtual-key path, where the host
+/// layout decides what a code means.
+bool layout_keymap_mode() {
+  const char* mode = std::getenv("MOLINK_KEYMAP");
+  return mode != nullptr && std::strcmp(mode, "layout") == 0;
 }
 
 /// NumLock toggle of the console session.
@@ -176,10 +189,15 @@ class windows_input final : public input_injector {
     // both reject: the host names the key in `bad_input`, it never drops it.
     if (!mapping.found || mapping.unsupported) return status::rejected;
 
-    const held_key id{mapping.value, mapping.scan_code, mapping.extended};
-    const bool numlock_sensitive =
-        !mapping.scan_code && key_depends_on_numlock(code);
-    const bool numlock_event = !mapping.scan_code && mapping.value == VK_NUMLOCK;
+    // Physical injection uses the scan code. The compatibility switch and
+    // the few keys with no portable scan code go through the virtual key.
+    const unsigned int scan =
+        layout_keymap_ ? (mapping.value == 0 ? mapping.scan : 0) : mapping.scan;
+    const unsigned int vk = mapping.value;
+    const held_key id{scan != 0 ? scan : vk, vk, mapping.extended};
+    const bool numlock_sensitive = key_depends_on_numlock(code);
+    const bool numlock_event =
+        canonical_key_code(code) == "NumLock";
     // Read before the key-down: an explicit NumLock press toggles whatever the
     // state was. The key-up does not toggle again.
     const bool numlock_before =
@@ -205,12 +223,11 @@ class windows_input final : public input_injector {
       }
     }
     if (numlock_sensitive) {
-      if (down) numlock_held_.insert(static_cast<WORD>(mapping.value));
-      else numlock_held_.erase(static_cast<WORD>(mapping.value));
+      if (down) numlock_held_.insert(static_cast<WORD>(id.scan));
+      else numlock_held_.erase(static_cast<WORD>(id.scan));
     }
 
-    INPUT input =
-        key_input(mapping.value, mapping.scan_code, mapping.extended, down);
+    INPUT input = key_input(vk, scan, mapping.extended, down);
     if (SendInput(1, &input, sizeof(input)) != 1) return status::unavailable;
     if (down) held_keys_.insert(id);
     else held_keys_.erase(id);
@@ -236,17 +253,9 @@ class windows_input final : public input_injector {
   status text(const std::string& utf8) override {
     const std::vector<uint32_t> codepoints = utf8_codepoints(utf8);
     if (codepoints.empty()) return status::rejected;
-    std::u16string utf16;
-    utf16.reserve(codepoints.size());
-    for (uint32_t cp : codepoints) {
-      if (cp <= 0xffff) {
-        utf16.push_back(static_cast<char16_t>(cp));
-      } else {
-        cp -= 0x10000;
-        utf16.push_back(static_cast<char16_t>(0xd800 + (cp >> 10)));
-        utf16.push_back(static_cast<char16_t>(0xdc00 + (cp & 0x3ff)));
-      }
-    }
+    // KEYEVENTF_UNICODE sends UTF-16 code units, so astral characters (emoji,
+    // some CJK extensions) are split into a surrogate pair.
+    const std::u16string utf16 = utf16_units(codepoints);
     for (char16_t unit : utf16) {
       INPUT input{};
       input.type = INPUT_KEYBOARD;
@@ -280,7 +289,7 @@ class windows_input final : public input_injector {
     }
     held_buttons_.clear();
     for (const held_key& key : held_keys_) {
-      INPUT input = key_input(key.value, key.scan_code, key.extended, false);
+      INPUT input = key_input(key.vk, key.scan, key.extended, false);
       SendInput(1, &input, sizeof(input));
     }
     held_keys_.clear();
@@ -315,8 +324,8 @@ class windows_input final : public input_injector {
 
   /// Tap NumLock so the host ends in @p target_on, then remember that result.
   bool tap_numlock(bool target_on) {
-    INPUT inputs[2] = {key_input(VK_NUMLOCK, false, true, true),
-                       key_input(VK_NUMLOCK, false, true, false)};
+    INPUT inputs[2] = {key_input(VK_NUMLOCK, 0x45, true, true),
+                       key_input(VK_NUMLOCK, 0x45, true, false)};
     if (SendInput(2, inputs, sizeof(INPUT)) != 2) return false;
     numlock_shadow_ = target_on;
     numlock_shadow_valid_ = true;
@@ -335,6 +344,7 @@ class windows_input final : public input_injector {
   ULONGLONG numlock_changed_at_ = 0;
   RECT display_{};
   bool has_display_ = false;
+  bool layout_keymap_ = layout_keymap_mode();
 };
 
 }  // namespace

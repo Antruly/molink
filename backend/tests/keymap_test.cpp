@@ -5,9 +5,14 @@
 // KeyboardEvent.code must resolve to a native key or be explicitly marked
 // unsupported; a missing entry is the "the keypad does nothing" bug this test
 // exists to prevent.
+//
+// The Windows and X11 values are physical positions (scan code, evdev + 8).
+// A layout decides which character a position produces; it never changes the
+// number, which is what the layout-independence checks pin down.
 #include <cstdio>
 #include <initializer_list>
 #include <string>
+#include <vector>
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -17,6 +22,7 @@
 #endif
 
 #include "input/keymap.h"
+#include "input/text_encoding.h"
 
 namespace {
 
@@ -51,12 +57,20 @@ void check_platform(keymap_platform platform) {
     expect(resolved.found, "code is known to the platform",
            name + " " + code);
     if (!resolved.found) continue;
-    expect(resolved.found && (resolved.unsupported || resolved.value != 0 ||
-                              resolved.scan_code ||
-                              (platform == keymap_platform::x11) ||
-                              (platform == keymap_platform::macos &&
-                               code == "KeyA")),
-           "a supported key carries a native value",
+    bool has_native = resolved.unsupported;
+    switch (platform) {
+      case keymap_platform::windows:
+        has_native = has_native || resolved.value != 0 || resolved.scan != 0;
+        break;
+      case keymap_platform::x11:
+        has_native = has_native || resolved.keycode != 0;
+        break;
+      case keymap_platform::macos:
+        // KeyA is key code 0, which is a valid macOS value.
+        has_native = has_native || resolved.value != 0 || code == "KeyA";
+        break;
+    }
+    expect(has_native, "a supported key carries a native value",
            name + " " + code);
     if (platform == keymap_platform::x11 && !resolved.unsupported) {
       expect(!resolved.keysym.empty(), "X11 key has a keysym",
@@ -70,12 +84,13 @@ void spot_checks() {
   const key_lookup win_numpad1 =
       molink::lookup_key(keymap_platform::windows, "Numpad1");
   expect(win_numpad1.found && !win_numpad1.unsupported &&
-             win_numpad1.value == 0x61 && !win_numpad1.extended,
-         "Windows Numpad1 is VK_NUMPAD1 without the E0 prefix", "0x61");
+             win_numpad1.value == 0x61 && win_numpad1.scan == 0x4F &&
+             !win_numpad1.extended,
+         "Windows Numpad1 is scan 4F (VK_NUMPAD1, no E0)", "0x4F");
   const key_lookup x11_numpad1 =
       molink::lookup_key(keymap_platform::x11, "Numpad1");
-  expect(x11_numpad1.keysym == "KP_1", "X11 Numpad1 is KP_1",
-         x11_numpad1.keysym);
+  expect(x11_numpad1.keysym == "KP_1" && x11_numpad1.keycode == 87,
+         "X11 Numpad1 is KP_1 on key code 87", "87");
   const key_lookup mac_numpad1 =
       molink::lookup_key(keymap_platform::macos, "Numpad1");
   expect(mac_numpad1.value == 83, "macOS Numpad1 is CGKeyCode 83", "83");
@@ -83,48 +98,57 @@ void spot_checks() {
   // The two extended keypad keys, plus the navigation block.
   const key_lookup numpad_enter =
       molink::lookup_key(keymap_platform::windows, "NumpadEnter");
-  expect(numpad_enter.value == 0x0D && numpad_enter.extended,
-         "Windows NumpadEnter is extended VK_RETURN", "0x0D/E0");
+  expect(numpad_enter.value == 0x0D && numpad_enter.scan == 0x1C &&
+             numpad_enter.extended,
+         "Windows NumpadEnter is extended scan 1C", "0x1C/E0");
   const key_lookup numpad_divide =
       molink::lookup_key(keymap_platform::windows, "NumpadDivide");
-  expect(numpad_divide.value == 0x6F && numpad_divide.extended,
-         "Windows NumpadDivide is extended VK_DIVIDE", "0x6F/E0");
+  expect(numpad_divide.value == 0x6F && numpad_divide.scan == 0x35 &&
+             numpad_divide.extended,
+         "Windows NumpadDivide is extended scan 35", "0x35/E0");
   const key_lookup numpad_equal =
       molink::lookup_key(keymap_platform::windows, "NumpadEqual");
-  expect(numpad_equal.value == 0x92 && !numpad_equal.extended,
-         "Windows NumpadEqual is VK_OEM_NEC_EQUAL", "0x92");
+  expect(numpad_equal.value == 0x92 && numpad_equal.scan == 0x59,
+         "Windows NumpadEqual is scan 59", "0x59");
   const key_lookup numpad_add =
       molink::lookup_key(keymap_platform::x11, "NumpadAdd");
-  expect(numpad_add.keysym == "KP_Add", "X11 NumpadAdd is KP_Add",
-         numpad_add.keysym);
+  expect(numpad_add.keysym == "KP_Add" && numpad_add.keycode == 86,
+         "X11 NumpadAdd is KP_Add on key code 86", "86");
 
   // Function keys past F12, an international key and the media/browser block.
   const key_lookup f13 = molink::lookup_key(keymap_platform::windows, "F13");
-  expect(f13.value == 0x7C, "Windows F13 is VK_F13", "0x7C");
+  expect(f13.value == 0x7C && f13.scan == 0x64,
+         "Windows F13 is scan 64 (VK_F13)", "0x64");
   const key_lookup intl =
       molink::lookup_key(keymap_platform::windows, "IntlBackslash");
-  expect(intl.value == 0xE2, "Windows IntlBackslash is VK_OEM_102", "0xE2");
+  expect(intl.value == 0xE2 && intl.scan == 0x56,
+         "Windows IntlBackslash is scan 56 (VK_OEM_102)", "0x56");
   const key_lookup volume =
       molink::lookup_key(keymap_platform::windows, "AudioVolumeUp");
-  expect(volume.value == 0xAF && volume.extended,
-         "Windows AudioVolumeUp is extended VK_VOLUME_UP", "0xAF");
+  expect(volume.value == 0xAF && volume.scan == 0x30 && volume.extended,
+         "Windows AudioVolumeUp is extended scan 30", "0x30/E0");
   const key_lookup browser =
       molink::lookup_key(keymap_platform::windows, "BrowserBack");
-  expect(browser.value == 0xA6 && browser.extended,
-         "Windows BrowserBack is extended VK_BROWSER_BACK", "0xA6");
+  expect(browser.value == 0xA6 && browser.scan == 0x6A && browser.extended,
+         "Windows BrowserBack is extended scan 6A", "0x6A/E0");
 
-  // Power/WakeUp have no virtual key; they must be sent as E0 scan codes.
+  // Power/WakeUp have no virtual key; their E0 scan code is the only way to
+  // send them.
   const key_lookup power = molink::lookup_key(keymap_platform::windows, "Power");
-  expect(power.scan_code && power.value == 0x5E && power.extended,
+  expect(power.scan == 0x5E && power.value == 0 && power.extended,
          "Windows Power is the E0 5E scan code", "0x5E");
   const key_lookup wake = molink::lookup_key(keymap_platform::windows, "WakeUp");
-  expect(wake.scan_code && wake.value == 0x63 && wake.extended,
+  expect(wake.scan == 0x63 && wake.value == 0 && wake.extended,
          "Windows WakeUp is the E0 63 scan code", "0x63");
 
   // Codes with no physical key on an OS are explicit, not silently dropped.
   const key_lookup again = molink::lookup_key(keymap_platform::windows, "Again");
   expect(again.found && again.unsupported,
          "Windows Again is explicitly unsupported", "no VK");
+  const key_lookup x11_select =
+      molink::lookup_key(keymap_platform::x11, "Select");
+  expect(x11_select.found && x11_select.unsupported,
+         "X11 Select is explicitly unsupported", "no evdev key");
   const key_lookup mac_print =
       molink::lookup_key(keymap_platform::macos, "PrintScreen");
   expect(mac_print.found && mac_print.unsupported,
@@ -163,6 +187,66 @@ void spot_checks() {
          "the main digit row does not need NumLock", "Digit1");
 }
 
+void layout_independence() {
+  // A US and a German host disagree about the character typed at these
+  // positions (Y/Z swap, punctuation moves), but they agree about the
+  // position. lookup_key has no layout input on purpose: these numbers are
+  // the same in both cases.
+  struct physical_expectation {
+    const char* code;
+    unsigned int scan;
+    unsigned int keycode;
+  };
+  const physical_expectation expected[] = {
+      {"KeyY", 0x15, 29},        // German: this position types 'z'
+      {"KeyZ", 0x2C, 52},        // German: this position types 'y'
+      {"Semicolon", 0x27, 47},   // German: Ö
+      {"IntlBackslash", 0x56, 94},
+      {"Backquote", 0x29, 49},
+      {"Digit1", 0x02, 10},
+      {"F1", 0x3B, 67},
+      {"Numpad1", 0x4F, 87},
+  };
+  for (const physical_expectation& item : expected) {
+    const key_lookup win =
+        molink::lookup_key(keymap_platform::windows, item.code);
+    expect(win.scan == item.scan, "Windows scan code is position-based",
+           std::string(item.code) + " " + std::to_string(win.scan));
+    const key_lookup x =
+        molink::lookup_key(keymap_platform::x11, item.code);
+    expect(x.keycode == item.keycode, "X11 key code is evdev + 8",
+           std::string(item.code) + " " + std::to_string(x.keycode));
+  }
+}
+
+void text_encoding_checks() {
+  // Latin-1 maps to itself; everything else uses the 0x01000000 Unicode
+  // keysym range. Chinese and emoji must reach the X host unchanged.
+  expect(molink::x11_unicode_keysym('A') == 'A', "X11 Latin-1 keysym",
+         "A");
+  expect(molink::x11_unicode_keysym(0x4E2D) == 0x01004E2D,
+         "X11 Chinese keysym", "0x01004E2D");
+  expect(molink::x11_unicode_keysym(0x1F600) == 0x0101F600,
+         "X11 emoji keysym", "0x0101F600");
+  expect(molink::x11_unicode_keysym('\n') == molink::kX11ReturnKeysym,
+         "X11 newline is Return", "0xff0d");
+  expect(molink::x11_unicode_keysym('\t') == molink::kX11TabKeysym,
+         "X11 tab is Tab", "0xff09");
+  expect(molink::x11_unicode_keysym(0x7F) == 0,
+         "X11 DEL has no printable keysym", "0");
+
+  // Windows sends UTF-16 code units, with a surrogate pair for an astral
+  // code point.
+  const std::u16string units =
+      molink::utf16_units({0x4E2D, 0x1F600, 'A'});
+  expect(units.size() == 4, "UTF-16 has four units for CJK + emoji + A",
+         std::to_string(units.size()));
+  expect(units[0] == 0x4E2D, "CJK unit", "0x4E2D");
+  expect(units[1] == 0xD83D && units[2] == 0xDE00, "emoji surrogate pair",
+         "0xD83D 0xDE00");
+  expect(units[3] == 'A', "ASCII unit", "A");
+}
+
 }  // namespace
 
 int main() {
@@ -183,6 +267,8 @@ int main() {
   check_platform(keymap_platform::x11);
   check_platform(keymap_platform::macos);
   spot_checks();
+  layout_independence();
+  text_encoding_checks();
 
 #if defined(_WIN32)
   // The named VK expectations are already static_asserts in keymap.cpp; this

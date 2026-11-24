@@ -227,6 +227,10 @@ interface AppState {
   /// desktop's Super/Alt shortcuts reach the remote. Off by default because it
   /// also takes Alt+Tab and friends away from the local desktop.
   keyboardGrab: boolean
+  /// Type through the local IME and send the committed text as `{k:"text"}`.
+  /// On by default; off makes every device, desktop included, forward key
+  /// positions only (the touch virtual keyboard keeps using text).
+  localIme: boolean
   /// The remembered answer to the first-use "enable combo forwarding?"
   /// dialog. null = never answered with "remember"; the dialog asks again on
   /// a later launch.
@@ -301,6 +305,7 @@ interface AppState {
   pushToast: (id: string, message: string, tone?: ToastTone) => void
   setRememberDevice: (enabled: boolean) => void
   setKeyboardGrab: (enabled: boolean) => void
+  setLocalIme: (enabled: boolean) => void
   /// Stores the remembered first-use answer (`null` clears it).
   setComboForwardAsked: (choice: ComboForwardChoice | null) => void
   /// Marks the dialog answered for this page session; never persisted.
@@ -414,6 +419,7 @@ const CONNECT_DRAFT_KEY = 'molink.connectDraft'
 /// never disagree about the default.
 const REMEMBER_DEVICE_KEY = kRememberDeviceKey
 const KEYBOARD_GRAB_KEY = 'molink.keyboardGrab'
+const LOCAL_IME_KEY = 'molink.localIme'
 const COMBO_FORWARD_KEY = 'molink.comboForwardAsked'
 const EMPTY_STATS: Stats = {
   fps: 0,
@@ -771,6 +777,7 @@ export const useAppStore = create<AppState>((set, get) => {
     connectDraft: get().connectDraft,
     rememberDevice: get().rememberDevice,
     comboForwardAsked: get().comboForwardAsked ?? undefined,
+    localIme: get().localIme,
     defaultPreset: get().defaultPreset,
     presets: get().presets,
     advancedQuality: get().advancedQuality,
@@ -874,6 +881,9 @@ export const useAppStore = create<AppState>((set, get) => {
     keyboardGrab:
       readStorage(KEYBOARD_GRAB_KEY) === '1' ||
       readCookie('molink_keyboardGrab') === '1',
+    // On by default: a desktop browser needs the hidden input for IME
+    // composition. Turning it off returns to position-only key forwarding.
+    localIme: readStorage(LOCAL_IME_KEY) !== '0',
     comboForwardAsked: normalizeComboForwardAsked(
       readStorage(COMBO_FORWARD_KEY),
     ),
@@ -981,6 +991,14 @@ export const useAppStore = create<AppState>((set, get) => {
       writeStorage(KEYBOARD_GRAB_KEY, enabled ? '1' : '0')
       writeCookie('molink_keyboardGrab', enabled ? '1' : '0')
       set({ keyboardGrab: enabled })
+    },
+
+    setLocalIme: (enabled) => {
+      writeStorage(LOCAL_IME_KEY, enabled ? '1' : '0')
+      set({ localIme: enabled })
+      // The native shell's origin changes on every launch; ui.json is the
+      // copy that survives it.
+      schedulePersist()
     },
 
     setComboForwardAsked: (choice) => {
@@ -1211,6 +1229,10 @@ export const useAppStore = create<AppState>((set, get) => {
         if (comboAsked !== null) {
           next.comboForwardAsked = comboAsked
           writeStorage(COMBO_FORWARD_KEY, comboAsked)
+        }
+        if (typeof prefs.localIme === 'boolean') {
+          next.localIme = prefs.localIme
+          writeStorage(LOCAL_IME_KEY, prefs.localIme ? '1' : '0')
         }
         // The core is the source of truth for remember_device and the session
         // tokens in ui.json. Apply both together so turning the switch off on

@@ -5,6 +5,7 @@ import {
   Focus,
   Gauge,
   KeyRound,
+  Keyboard,
   Languages,
   Moon,
   Network,
@@ -592,6 +593,8 @@ export function PreferencesControls({
   const setRememberDevice = useAppStore((state) => state.setRememberDevice)
   const keyboardGrab = useAppStore((state) => state.keyboardGrab)
   const setKeyboardGrab = useAppStore((state) => state.setKeyboardGrab)
+  const localIme = useAppStore((state) => state.localIme)
+  const setLocalIme = useAppStore((state) => state.setLocalIme)
   const comboForwardAsked = useAppStore((state) => state.comboForwardAsked)
   const grabApplicable = keyboardGrabApplicable()
   const [grabAvailable, setGrabAvailable] = useState(() =>
@@ -729,6 +732,23 @@ export function PreferencesControls({
               />
             </div>
           ) : null}
+
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <div className="flex items-center gap-2 text-[12px] font-medium text-ink">
+                <Keyboard size={14} className="text-accent" />
+                {t('settings.localIme')}
+              </div>
+              <div className="mt-1 text-[11px] leading-relaxed text-muted">
+                {t('settings.localImeHint')}
+              </div>
+            </div>
+            <Toggle
+              checked={localIme}
+              onChange={setLocalIme}
+              label={t('settings.localIme')}
+            />
+          </div>
         </>
       ) : null}
 

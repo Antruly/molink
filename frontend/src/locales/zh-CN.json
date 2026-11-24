@@ -275,6 +275,8 @@
     "keyboardGrab": "抓取键盘（X11）",
     "keyboardGrabHint": "让 Win 组合键直达远端：远程画面获得焦点时由应用接管键盘，Win、Alt+Tab 等系统快捷键会直接发到远端，此时本地快捷键不再生效；离开画面、切换窗口或按 Ctrl+Alt+Shift+Esc 后恢复。",
     "keyboardGrabUnsupported": "当前桌面会话不支持 X11 键盘抓取（Wayland 或无 X11 后端），请改用工具栏的组合键菜单。",
+    "localIme": "使用本地输入法输入文本（IME）",
+    "localImeHint": "远程画面获得焦点时，浏览器在本地完成输入法组字，再把上屏文字发给远端，中文、日文、韩文输入需要它。关闭后只转发键位；触屏虚拟键盘仍使用文本输入。",
     "comboForwardRememberedOn": "已记住：首次询问时选择了启用。可随时用上面的开关关闭。",
     "comboForwardRememberedOff": "已记住：首次询问时选择了暂不启用。组合键菜单仍可发送普通按键序列，只是不抓取键盘；可随时用上面的开关开启。",
     "codePolicy": "验证码开关",

@@ -5481,16 +5481,18 @@ void send_key_events(const std::vector<molink::input::key_event>& events) {
   }
 }
 
-/// A physical key. `lparam` supplies the extended bit (24) and Windows'
-/// auto-repeat flag (30); the shared state machine drops the repeat and
-/// records what the host now holds.
+/// A physical key. `lparam` supplies the scan code (bits 16-23), the extended
+/// bit (24) and Windows' auto-repeat flag (30). The shared state machine names
+/// the key by its position and records what the host now holds. The VK is only
+/// a fallback for keys with no portable scan code.
 void send_remote_key(WPARAM vk, LPARAM lparam, bool down) {
   const ULONG_PTR bits = static_cast<ULONG_PTR>(lparam);
+  const int scan = static_cast<int>((bits >> 16) & 0xFFu);
   const bool extended = (bits & (1u << 24)) != 0;
   const bool repeat = down && (bits & (1u << 30)) != 0;
   const bool numlock_on = (GetKeyState(VK_NUMLOCK) & 1) != 0;
-  send_key_events(g.pressed_keys.key(static_cast<int>(vk), extended,
-                                     numlock_on, repeat, down));
+  send_key_events(g.pressed_keys.key(scan, extended, numlock_on, repeat, down,
+                                     static_cast<int>(vk)));
 }
 
 /// Releases everything the host still thinks is held. Called on focus loss,
