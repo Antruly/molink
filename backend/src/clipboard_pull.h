@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -18,6 +19,11 @@ struct clipboard_offer_entry {
   std::string rel;
   uint64_t size = 0;
   bool is_dir = false;
+  /// Non-null for a clipboard image announced with `clipboard-sync.image`.
+  /// The PNG snapshot is served by the pull path without asking the platform
+  /// clipboard again (which may already have changed). Shared between every
+  /// viewer that received the same announcement.
+  std::shared_ptr<const std::vector<uint8_t>> image;
 };
 
 /// One `clipboard-sync.files` message carries at most this many descriptors.

@@ -745,6 +745,66 @@ export interface ClipboardFilesResult {
   files: ClipboardFileInfo[]
 }
 
+/// The PNG currently on the *local* core's clipboard (loopback only).
+/// `size` is zero when the clipboard holds no image. `echo` is true for an
+/// image this core just wrote while applying a remote clipboard.
+export interface ClipboardImageInfo {
+  version: number
+  size: number
+  hash?: string
+  echo?: boolean
+  too_large?: boolean
+}
+
+export function fetchClipboardImageInfo(
+  token: string,
+): Promise<ClipboardImageInfo> {
+  return request<ClipboardImageInfo>('/api/clipboard-image-info', {}, token)
+}
+
+/// The PNG bytes of the local clipboard image.
+export async function fetchClipboardImage(
+  token: string,
+): Promise<ArrayBuffer> {
+  const headers = new Headers()
+  if (token) headers.set('Authorization', `Bearer ${token}`)
+  if (clientToken) headers.set('X-MoLink-Client', clientToken)
+  const response = await fetch(`${coreBaseUrl()}/api/clipboard-image`, {
+    headers,
+    cache: 'no-store',
+  })
+  if (!response.ok) {
+    let code = ''
+    try {
+      const body = (await response.json()) as { code?: string }
+      code = body.code ?? ''
+    } catch {
+      // Ignore malformed error bodies.
+    }
+    throw new ApiError(response.status, code || 'clipboard_image_failed')
+  }
+  return response.arrayBuffer()
+}
+
+/// Put a downloaded PNG on the local clipboard. `text` is the text copied
+/// with the same image, if any: both formats are written in one operation so
+/// the later one does not clear the earlier one.
+export function applyClipboardImage(
+  token: string,
+  id: string,
+  text?: string,
+): Promise<{ ok: boolean; count: number }> {
+  return request<{ ok: boolean; count: number }>(
+    '/api/clipboard-image-apply',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(text ? { ids: [id], text } : { ids: [id] }),
+    },
+    token,
+  )
+}
+
 /// Files currently on the *local* core's clipboard (loopback only).
 export function fetchClipboardFiles(
   token: string,

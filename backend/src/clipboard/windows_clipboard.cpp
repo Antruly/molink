@@ -36,6 +36,8 @@
 #include <vector>
 
 #include "clipboard/clipboard_files.h"
+#include "clipboard/clipboard_image.h"
+#include "clipboard/clipboard_image_win.h"
 #include "clipboard/windows_data_object.h"
 #include "clipboard/windows_virtual_clipboard.h"
 #include "clipboard_lazy.h"
@@ -169,6 +171,25 @@ bool clipboard_may_hold_files() {
   CloseClipboard();
   return files;
 }
+
+/// Chrome, Edge and most screenshot tools publish raw PNG bytes under this
+/// private format. CF_DIB is the fallback every other application writes.
+UINT png_clipboard_format() {
+  static const UINT format = RegisterClipboardFormatW(L"PNG");
+  return format;
+}
+
+bool clipboard_may_hold_image() {
+  const UINT png = png_clipboard_format();
+  return (png != 0 && IsClipboardFormatAvailable(png)) ||
+         IsClipboardFormatAvailable(CF_DIB) ||
+         IsClipboardFormatAvailable(CF_DIBV5);
+}
+
+/// A CF_DIB is uncompressed: a 4K screenshot is ~33 MiB before the PNG
+/// encoder makes it a few megabytes. This ceiling only stops a crafted or
+/// corrupt clipboard from allocating without bound.
+constexpr SIZE_T kMaxClipboardDibBytes = 256ull * 1024 * 1024;
 
 /// mstsc's main window class. Its presence means an inner Windows session is
 /// connected; the viewer is told so it can show an "inner RDP" badge.
@@ -1473,11 +1494,31 @@ class windows_clipboard final : public clipboard_service {
       stop_watch();
       return;
     }
-    std::lock_guard<std::mutex> lock(watch_mutex_);
-    watch_callback_ = std::move(callback);
+    {
+      std::lock_guard<std::mutex> lock(watch_mutex_);
+      watch_callback_ = std::move(callback);
+    }
+    start_watch();
+  }
+
+  void watch_images(image_watcher callback) override {
+    if (callback == nullptr) return;
+    {
+      std::lock_guard<std::mutex> lock(watch_mutex_);
+      image_callback_ = std::move(callback);
+    }
+    start_watch();
+  }
+
+  /// One polling thread serves text, file lists and images: they all change
+  /// with the same clipboard sequence number.
+  void start_watch() {
     if (running_.exchange(true)) return;
-    // Already holding watch_mutex_ here: locking it again is undefined.
-    sequence_ = GetClipboardSequenceNumber();
+    {
+      std::lock_guard<std::mutex> lock(watch_mutex_);
+      sequence_ = GetClipboardSequenceNumber();
+      last_image_hash_.clear();
+    }
     watcher_ = std::thread([this] {
       while (running_.load()) {
         Sleep(400);
@@ -1503,10 +1544,41 @@ class windows_clipboard final : public clipboard_service {
           if (watch_callback_) watch_callback_(text, owner);
         }
 
-        // A copy may carry files, text, or both. A text-only copy skips the
-        // OLE describe (it can take seconds); a copy with CF_HDROP or a file
-        // descriptor is inspected even when it also has text, so both formats
-        // reach the viewer.
+        // A copy may carry text, an image, files, or a combination (a word
+        // processor puts text and an image on the clipboard together). Each
+        // format is reported independently so neither hides the other.
+        //
+        // Never decode our own write back: `set_image` runs on the viewer's
+        // behalf and its bytes came from that viewer.
+        if (owner == clipboard_owner::self) {
+          std::lock_guard<std::mutex> lock(watch_mutex_);
+          if (image_callback_) image_callback_(clipboard_image{}, owner);
+        } else if (!clipboard_may_hold_image()) {
+          // Keep the hash so copying the same image again after clearing the
+          // clipboard is a fresh copy.
+          std::lock_guard<std::mutex> lock(watch_mutex_);
+          last_image_hash_.clear();
+        } else {
+          clipboard_image image;
+          request_image([&image](clipboard_image value) {
+            image = std::move(value);
+          });
+          bool report = image.too_large;
+          if (!image.empty()) {
+            const std::string hash = clipboard_image_hash(image.png);
+            std::lock_guard<std::mutex> lock(watch_mutex_);
+            report = hash != last_image_hash_;
+            if (report) last_image_hash_ = hash;
+          }
+          if (report) {
+            std::lock_guard<std::mutex> lock(watch_mutex_);
+            if (image_callback_) image_callback_(std::move(image), owner);
+          }
+        }
+
+        // A text-only copy skips the OLE describe (it can take seconds); a
+        // copy with CF_HDROP or a file descriptor is inspected even when it
+        // also has text, so both formats reach the viewer.
         if (!text.empty() && !clipboard_may_hold_files()) continue;
         std::vector<clipboard_file> files;
         request_files([&files](std::vector<clipboard_file> value) {
@@ -1538,8 +1610,11 @@ class windows_clipboard final : public clipboard_service {
   }
 
   void watch_files(files_watcher callback) override {
-    std::lock_guard<std::mutex> lock(watch_mutex_);
-    files_callback_ = std::move(callback);
+    {
+      std::lock_guard<std::mutex> lock(watch_mutex_);
+      files_callback_ = std::move(callback);
+    }
+    if (callback != nullptr) start_watch();
   }
 
   void stop_watch() {
@@ -1547,6 +1622,7 @@ class windows_clipboard final : public clipboard_service {
     if (watcher_.joinable()) watcher_.join();
     std::lock_guard<std::mutex> lock(watch_mutex_);
     watch_callback_ = nullptr;
+    image_callback_ = nullptr;
   }
 
   void set_text(std::string text) override {
@@ -1614,6 +1690,169 @@ class windows_clipboard final : public clipboard_service {
       break;
     }
     if (callback) callback(std::move(text));
+  }
+
+  /// Read the image currently on the clipboard, normalised to PNG.
+  ///
+  /// Browsers write a private `PNG` format; most other applications write an
+  /// uncompressed CF_DIB (or CF_DIBV5). Prefer the already-compressed PNG so a
+  /// screenshot is not decoded and re-encoded for no reason.
+  void request_image(image_callback callback) override {
+    if (lazy_hiding_or_lost()) {
+      if (callback) callback(clipboard_image{});
+      return;
+    }
+    std::vector<uint8_t> png;
+    uint64_t source_bytes = 0;
+    bool too_large = false;
+    const UINT png_format = png_clipboard_format();
+    for (int attempt = 0; attempt < 5; ++attempt) {
+      if (!OpenClipboard(nullptr)) {
+        Sleep(10);
+        continue;
+      }
+      if (png_format != 0 && IsClipboardFormatAvailable(png_format)) {
+        HANDLE data = GetClipboardData(png_format);
+        if (data != nullptr) {
+          const SIZE_T size = GlobalSize(data);
+          const void* bytes = GlobalLock(data);
+          if (bytes != nullptr) {
+            source_bytes = size;
+            if (size <= kClipboardImageMaxBytes) {
+              png.assign(static_cast<const uint8_t*>(bytes),
+                         static_cast<const uint8_t*>(bytes) + size);
+            } else {
+              too_large = true;
+            }
+            GlobalUnlock(data);
+          }
+        }
+      } else if (IsClipboardFormatAvailable(CF_DIB) ||
+                 IsClipboardFormatAvailable(CF_DIBV5)) {
+        const UINT format = IsClipboardFormatAvailable(CF_DIB) ? CF_DIB
+                                                               : CF_DIBV5;
+        HANDLE data = GetClipboardData(format);
+        if (data != nullptr) {
+          const SIZE_T size = GlobalSize(data);
+          const void* bytes = GlobalLock(data);
+          if (bytes != nullptr && size >= 40 && size <= kMaxClipboardDibBytes) {
+            std::vector<uint8_t> dib(static_cast<const uint8_t*>(bytes),
+                                     static_cast<const uint8_t*>(bytes) + size);
+            GlobalUnlock(data);
+            data = nullptr;
+            std::vector<uint8_t> encoded;
+            if (clipboard_dib_to_png(dib, encoded)) {
+              png = std::move(encoded);
+              source_bytes = png.size();
+              if (png.size() > kClipboardImageMaxBytes) {
+                too_large = true;
+                png.clear();
+              }
+            }
+          }
+          if (data != nullptr) GlobalUnlock(data);
+        }
+      }
+      CloseClipboard();
+      break;
+    }
+    clipboard_image image;
+    image.png = std::move(png);
+    image.source_bytes = source_bytes;
+    image.too_large = too_large;
+    if (callback) callback(std::move(image));
+  }
+
+  /// Publish a PNG image (and, when the same copy had text, that text) as one
+  /// clipboard snapshot. CF_DIB and the registered PNG format are both
+  /// written: Office and classic Win32 apps read CF_DIB, browsers read PNG.
+  bool set_image(std::vector<uint8_t> png, std::string text) override {
+    if (png.empty() || png.size() > kClipboardImageMaxBytes) return false;
+    // The image replaces any delayed file offer this process owned.
+    clear_lazy_registry("image clipboard replaced the file offer");
+    stop_lazy();
+
+    constexpr std::size_t kMaxText = 192 * 1024;
+    if (text.size() > kMaxText) text.resize(kMaxText);
+    const std::wstring wide = to_wide(text);
+    std::vector<uint8_t> dib;
+    const bool have_dib = clipboard_png_to_dib(png, dib);
+    const UINT png_format = png_clipboard_format();
+
+    for (int attempt = 0; attempt < 5; ++attempt) {
+      if (!OpenClipboard(owner_window_)) {
+        Sleep(10);
+        continue;
+      }
+      EmptyClipboard();
+      bool wrote = false;
+
+      if (!wide.empty()) {
+        const std::size_t bytes = (wide.size() + 1) * sizeof(wchar_t);
+        HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, bytes);
+        if (memory != nullptr) {
+          void* target = GlobalLock(memory);
+          if (target != nullptr) {
+            std::memcpy(target, wide.c_str(), bytes);
+            GlobalUnlock(memory);
+            if (SetClipboardData(CF_UNICODETEXT, memory) != nullptr) {
+              wrote = true;
+            } else {
+              GlobalFree(memory);
+            }
+          } else {
+            GlobalFree(memory);
+          }
+        }
+      }
+
+      if (have_dib && !dib.empty()) {
+        HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, dib.size());
+        if (memory != nullptr) {
+          void* target = GlobalLock(memory);
+          if (target != nullptr) {
+            std::memcpy(target, dib.data(), dib.size());
+            GlobalUnlock(memory);
+            if (SetClipboardData(CF_DIB, memory) != nullptr) {
+              wrote = true;
+            } else {
+              GlobalFree(memory);
+            }
+          } else {
+            GlobalFree(memory);
+          }
+        }
+      }
+
+      if (png_format != 0) {
+        HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, png.size());
+        if (memory != nullptr) {
+          void* target = GlobalLock(memory);
+          if (target != nullptr) {
+            std::memcpy(target, png.data(), png.size());
+            GlobalUnlock(memory);
+            if (SetClipboardData(png_format, memory) != nullptr) {
+              wrote = true;
+            } else {
+              GlobalFree(memory);
+            }
+          } else {
+            GlobalFree(memory);
+          }
+        }
+      }
+
+      {
+        // The watcher polls the sequence number and would otherwise decode
+        // this write back; the hash also keeps a later identical external copy
+        // from being mistaken for it during the same poll tick.
+        std::lock_guard<std::mutex> lock(watch_mutex_);
+        last_image_hash_ = clipboard_image_hash(png);
+      }
+      CloseClipboard();
+      return wrote;
+    }
+    return false;
   }
 
   void request_files(files_callback callback) override {
@@ -1942,7 +2181,11 @@ class windows_clipboard final : public clipboard_service {
   std::mutex watch_mutex_;
   text_watcher watch_callback_;
   files_watcher files_callback_;
+  image_watcher image_callback_;
   std::string last_files_;
+  /// Hash of the last image reported or written. Keeps a text copy that leaves
+  /// an unchanged image on the clipboard from re-announcing it.
+  std::string last_image_hash_;
   DWORD sequence_ = 0;
   std::atomic<bool> running_{false};
   std::thread watcher_;

@@ -228,6 +228,8 @@ set(MOLINK_CORE_SOURCES
   src/clipboard/windows_virtual_clipboard.cpp
   src/clipboard/virtual_file_stream.cpp
   src/clipboard/clipboard_files.cpp
+  src/clipboard/clipboard_image.cpp
+  src/clipboard/clipboard_image_win.cpp
   src/clipboard/clipboard_route.cpp
   src/clipboard/x11_clipboard_fuse.cpp
   src/clipboard_stage.cpp
@@ -597,7 +599,7 @@ if(MOLINK_BUILD_CORE)
     # store APIs directly (MinGW builds against a static OpenSSL need it).
     target_link_libraries(molink-core PRIVATE
       d3d11 dxgi dxguid gdi32 user32 ole32 uuid ws2_32 iphlpapi advapi32
-      shell32 crypt32)
+      shell32 crypt32 windowscodecs)
     if(MINGW)
       # WASAPI format GUIDs (KSDATAFORMAT_SUBTYPE_*) live in ksguid on MinGW;
       # MSVC pulls them in through the SDK's default libraries.
@@ -970,6 +972,7 @@ if(MOLINK_HAVE_X11)
     tests/x11_clipboard_files_test.cpp
     src/clipboard/x11_clipboard.cpp
     src/clipboard/clipboard_files.cpp
+    src/clipboard/clipboard_image.cpp
     src/clipboard/clipboard_route.cpp
     src/diag_log.cpp
     src/util.cpp
@@ -995,18 +998,36 @@ if(WIN32)
     src/clipboard/windows_virtual_clipboard.cpp
     src/clipboard/virtual_file_stream.cpp
     src/clipboard/clipboard_files.cpp
+    src/clipboard/clipboard_image.cpp
+    src/clipboard/clipboard_image_win.cpp
     src/clipboard_lazy.cpp
   )
   target_include_directories(molink-core-windows-clipboard-stream-test
     PRIVATE src)
   target_link_libraries(molink-core-windows-clipboard-stream-test
-    PRIVATE ole32 oleaut32 uuid shell32 user32)
+    PRIVATE ole32 oleaut32 uuid shell32 user32 gdi32 windowscodecs)
   set_target_properties(molink-core-windows-clipboard-stream-test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
   add_test(NAME windows_clipboard_stream
     COMMAND molink-core-windows-clipboard-stream-test)
   set_tests_properties(windows_clipboard_stream PROPERTIES
     SKIP_RETURN_CODE 77)
+
+  # CF_DIB <-> PNG behind the image clipboard. WIC is a system component, and
+  # this test never opens the real clipboard, so it runs unconditionally.
+  add_executable(molink-core-windows-clipboard-image-test
+    tests/windows_clipboard_image_test.cpp
+    src/clipboard/clipboard_image.cpp
+    src/clipboard/clipboard_image_win.cpp
+  )
+  target_include_directories(molink-core-windows-clipboard-image-test
+    PRIVATE src)
+  target_link_libraries(molink-core-windows-clipboard-image-test
+    PRIVATE ole32 uuid windowscodecs)
+  set_target_properties(molink-core-windows-clipboard-image-test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+  add_test(NAME windows_clipboard_image
+    COMMAND molink-core-windows-clipboard-image-test)
 
   # Reads a fake IDataObject exactly the way the host reads mstsc's nested-RDP
   # offer: FileGroupDescriptorW first, FileContents streams second, and
@@ -1220,6 +1241,18 @@ foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
     "RUNTIME_OUTPUT_DIRECTORY_${uvp_config_upper}" "${CMAKE_BINARY_DIR}")
 endforeach()
 add_test(NAME clipboard_route COMMAND molink-core-clipboard-route-test)
+
+# Clipboard image rules: the 8 MiB compressed cap, the de-duplication hash and
+# the owner decision that keeps a self-written image from being announced as a
+# fresh local copy. Pure data; platform conversions live in their own tests.
+add_executable(molink-core-clipboard-image-test
+  tests/clipboard_image_test.cpp
+  src/clipboard/clipboard_image.cpp
+)
+target_include_directories(molink-core-clipboard-image-test PRIVATE src)
+set_target_properties(molink-core-clipboard-image-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME clipboard_image COMMAND molink-core-clipboard-image-test)
 
 # Clipboard *files* without Win32: the 8 / 1 TiB / 4 TiB pull caps and
 # omitted count, the 256 KiB range boundaries, the staging path, the retry

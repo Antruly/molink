@@ -1,4 +1,5 @@
 #include "clipboard/clipboard.h"
+#include "clipboard/clipboard_image.h"
 
 #if MOLINK_HAVE_X11
 
@@ -177,6 +178,24 @@ class x11_clipboard final : public clipboard_service {
     wake();
   }
 
+  void request_image(image_callback callback) override {
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    pending_image_gets_.push_back(std::move(callback));
+    wake();
+  }
+
+  /// Own CLIPBOARD for a PNG image. When `text` is non-empty the same owner
+  /// also serves UTF8_STRING, so pasting into an editor still finds the text
+  /// that was copied together with the picture.
+  bool set_image(std::vector<uint8_t> png, std::string text) override {
+    if (png.empty() || png.size() > kClipboardImageMaxBytes) return false;
+    if (text.size() > kMaxClipboardBytes) text.resize(kMaxClipboardBytes);
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    pending_image_sets_.push_back({std::move(png), std::move(text)});
+    wake();
+    return true;
+  }
+
   /// X11 has no change counter that is portable enough, so the owner is asked
   /// for the text now and then. The round trip runs on this thread with a
   /// short timeout; the callback fires only when the text actually changed.
@@ -201,12 +220,28 @@ class x11_clipboard final : public clipboard_service {
     start_watch_thread();
   }
 
+  /// X11 has no change counter, so the watcher asks for image/png only when
+  /// the selection serial (XFixes, or the owner fallback) reports a new copy.
+  /// Requesting an 8 MiB INCR transfer on every poll would be wasteful.
+  void watch_images(image_watcher callback) override {
+    if (callback == nullptr) return;
+    {
+      std::lock_guard<std::mutex> lock(watch_mutex_);
+      image_callback_ = std::move(callback);
+    }
+    start_watch_thread();
+  }
+
   void start_watch_thread() {
     if (watch_running_.exchange(true)) return;
     watch_thread_ = std::thread([this] {
       // A selection event delivered between watch() and this thread would
       // otherwise look like a fresh copy on the first poll.
       uint64_t last_serial = selection_serial_.load();
+      // Ask for image/png once on the first poll and then only when a new copy
+      // is reported; unlike text/uri-list this may be a multi-megabyte INCR
+      // transfer.
+      bool image_checked = false;
       while (watch_running_.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(800));
         if (!watch_running_.load()) break;
@@ -244,6 +279,52 @@ class x11_clipboard final : public clipboard_service {
             }
           }
         }
+        // Text and an image can coexist on one selection (LibreOffice puts
+        // both there). Report the image independently so the viewer gets both
+        // formats, and never report our own write as a fresh copy.
+        if (new_selection || !image_checked) {
+          image_checked = true;
+          auto image_promise =
+              std::make_shared<std::promise<clipboard_image>>();
+          std::future<clipboard_image> image_future =
+              image_promise->get_future();
+          request_image([image_promise](clipboard_image value) {
+            try {
+              image_promise->set_value(std::move(value));
+            } catch (...) {
+              // Already satisfied or abandoned.
+            }
+          });
+          if (image_future.wait_for(std::chrono::milliseconds(3000)) ==
+              std::future_status::ready) {
+            clipboard_image image = image_future.get();
+            const clipboard_owner owner = owner_snapshot();
+            bool report = false;
+            if (owner == clipboard_owner::self) {
+              std::lock_guard<std::mutex> lock(watch_mutex_);
+              if (image_callback_) {
+                image_callback_(clipboard_image{}, owner);
+              }
+            } else if (image.too_large) {
+              report = true;
+            } else if (image.empty()) {
+              std::lock_guard<std::mutex> lock(watch_mutex_);
+              last_image_hash_.clear();
+            } else {
+              const std::string hash = clipboard_image_hash(image.png);
+              std::lock_guard<std::mutex> lock(watch_mutex_);
+              report = hash != last_image_hash_;
+              if (report) last_image_hash_ = hash;
+            }
+            if (report) {
+              std::lock_guard<std::mutex> lock(watch_mutex_);
+              if (image_callback_) {
+                image_callback_(std::move(image), owner);
+              }
+            }
+          }
+        }
+
         // The file list and the text share the one CLIPBOARD selection, but
         // asking for text/uri-list when the clipboard holds text is cheap:
         // the owner answers with no target.
@@ -379,6 +460,7 @@ class x11_clipboard final : public clipboard_service {
     uri_list_ = XInternAtom(display_, "text/uri-list", False);
     gnome_copied_ =
         XInternAtom(display_, "x-special/gnome-copied-files", False);
+    png_ = XInternAtom(display_, "image/png", False);
     init_xfixes();
 
     // Clipboard commands are queued from other threads. Without a wakeup the
@@ -488,19 +570,26 @@ class x11_clipboard final : public clipboard_service {
   void pump_commands() {
     std::deque<std::string> sets;
     std::deque<std::vector<std::string>> file_sets;
+    std::deque<image_set> image_sets;
     std::deque<text_callback> gets;
     std::deque<files_callback> file_gets;
+    std::deque<image_callback> image_gets;
     {
       std::lock_guard<std::mutex> lock(queue_mutex_);
       sets.swap(pending_sets_);
       file_sets.swap(pending_file_sets_);
+      image_sets.swap(pending_image_sets_);
       gets.swap(pending_gets_);
       file_gets.swap(pending_file_gets_);
+      image_gets.swap(pending_image_gets_);
     }
 
     for (std::string& text : sets) take_text_ownership(std::move(text));
     for (const std::vector<std::string>& paths : file_sets) {
       take_file_ownership(paths);
+    }
+    for (image_set& image : image_sets) {
+      take_image_ownership(std::move(image.png), std::move(image.text));
     }
 
     // One selection transfer at a time. When one is already running, requeue
@@ -539,6 +628,22 @@ class x11_clipboard final : public clipboard_service {
         deferred_file_gets.pop_back();
       }
     }
+    std::deque<image_callback> deferred_image_gets;
+    for (image_callback& callback : image_gets) {
+      if (getting_) {
+        deferred_image_gets.push_back(std::move(callback));
+        continue;
+      }
+      start_image_get(std::move(callback));
+    }
+    if (!deferred_image_gets.empty()) {
+      std::lock_guard<std::mutex> lock(queue_mutex_);
+      while (!deferred_image_gets.empty()) {
+        pending_image_gets_.push_front(
+            std::move(deferred_image_gets.back()));
+        deferred_image_gets.pop_back();
+      }
+    }
   }
 
   void claim_ownership() {
@@ -548,12 +653,22 @@ class x11_clipboard final : public clipboard_service {
     owner_state_.store(owns_ ? 1 : 0, std::memory_order_relaxed);
     if (!owns_) {
       owned_text_.clear();
+      owned_png_.clear();
       owned_uri_list_.clear();
       owned_gnome_.clear();
     }
   }
 
   void take_text_ownership(std::string text) {
+    owned_text_ = std::move(text);
+    owned_png_.clear();
+    owned_uri_list_.clear();
+    owned_gnome_.clear();
+    claim_ownership();
+  }
+
+  void take_image_ownership(std::vector<uint8_t> png, std::string text) {
+    owned_png_ = std::move(png);
     owned_text_ = std::move(text);
     owned_uri_list_.clear();
     owned_gnome_.clear();
@@ -562,6 +677,7 @@ class x11_clipboard final : public clipboard_service {
 
   void take_file_ownership(const std::vector<std::string>& paths) {
     owned_text_.clear();
+    owned_png_.clear();
     owned_uri_list_.clear();
     owned_gnome_.clear();
     std::string list;
@@ -585,10 +701,15 @@ class x11_clipboard final : public clipboard_service {
     }
     getting_ = true;
     getting_files_ = false;
+    getting_image_ = false;
+    transfer_max_bytes_ = kMaxClipboardBytes;
+    transfer_total_bytes_ = 0;
+    transfer_overflow_ = false;
     incremental_ = false;
     get_buffer_.clear();
     get_callback_ = std::move(callback);
     file_get_callback_ = nullptr;
+    image_get_callback_ = nullptr;
     get_deadline_ = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     XDeleteProperty(display_, window_, prop_);
     XConvertSelection(display_, clipboard_, utf8_, prop_, window_, CurrentTime);
@@ -602,15 +723,44 @@ class x11_clipboard final : public clipboard_service {
     }
     getting_ = true;
     getting_files_ = true;
+    getting_image_ = false;
+    transfer_max_bytes_ = kMaxClipboardBytes;
+    transfer_total_bytes_ = 0;
+    transfer_overflow_ = false;
     file_stage_ = 0;
     incremental_ = false;
     get_buffer_.clear();
     get_callback_ = nullptr;
     file_get_callback_ = std::move(callback);
+    image_get_callback_ = nullptr;
     get_deadline_ = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     XDeleteProperty(display_, window_, prop_);
     XConvertSelection(display_, clipboard_, uri_list_, prop_, window_,
                       CurrentTime);
+    XFlush(display_);
+  }
+
+  void start_image_get(image_callback callback) {
+    if (XGetSelectionOwner(display_, clipboard_) == None) {
+      if (callback) callback(clipboard_image{});
+      return;
+    }
+    getting_ = true;
+    getting_files_ = false;
+    getting_image_ = true;
+    transfer_max_bytes_ = kClipboardImageMaxBytes;
+    transfer_total_bytes_ = 0;
+    transfer_overflow_ = false;
+    incremental_ = false;
+    get_buffer_.clear();
+    get_callback_ = nullptr;
+    file_get_callback_ = nullptr;
+    image_get_callback_ = std::move(callback);
+    // An INCR screenshot is several megabytes; the owner is a local
+    // application, so allow more time than a text copy.
+    get_deadline_ = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    XDeleteProperty(display_, window_, prop_);
+    XConvertSelection(display_, clipboard_, png_, prop_, window_, CurrentTime);
     XFlush(display_);
   }
 
@@ -635,6 +785,8 @@ class x11_clipboard final : public clipboard_service {
     if (files.empty() && file_stage_ == 0) {
       file_stage_ = 1;
       getting_ = true;
+      transfer_total_bytes_ = 0;
+      transfer_overflow_ = false;
       incremental_ = false;
       get_deadline_ = std::chrono::steady_clock::now() +
                       std::chrono::seconds(2);
@@ -650,10 +802,35 @@ class x11_clipboard final : public clipboard_service {
     if (callback) callback(std::move(files));
   }
 
-  /// Common end-of-transfer hook: text and file lists share the buffer and
-  /// the INCR machinery.
+  void finish_image_get() {
+    getting_ = false;
+    getting_image_ = false;
+    incremental_ = false;
+    const std::string data = std::move(get_buffer_);
+    get_buffer_.clear();
+    image_callback callback = std::move(image_get_callback_);
+    image_get_callback_ = nullptr;
+    if (!callback) return;
+    if (transfer_overflow_) {
+      // The PNG is larger than the 8 MiB cap. Keep the size (a lower bound is
+      // still useful in the diagnostic) but never hand a truncated image on.
+      clipboard_image image;
+      image.too_large = true;
+      image.source_bytes = transfer_total_bytes_;
+      callback(std::move(image));
+      return;
+    }
+    std::vector<uint8_t> png(data.begin(), data.end());
+    callback(clipboard_image_clamped(std::move(png)));
+  }
+
+  /// Common end-of-transfer hook: text, file lists and images share the
+  /// buffer and the INCR machinery.
   void finish_transfer(const std::string& text) {
-    if (getting_files_) {
+    if (getting_image_) {
+      if (!text.empty() && get_buffer_.empty()) get_buffer_ = text;
+      finish_image_get();
+    } else if (getting_files_) {
       if (!text.empty()) get_buffer_ = text;
       finish_file_get();
     } else {
@@ -677,10 +854,20 @@ class x11_clipboard final : public clipboard_service {
           request.property != None ? request.property : request.target;
       const bool has_files = !owned_uri_list_.empty();
       if (request.target == targets_) {
-        const Atom text_targets[] = {targets_, utf8_, text_, XA_STRING};
-        const Atom file_targets[] = {targets_, uri_list_, gnome_copied_};
-        const Atom* supported = has_files ? file_targets : text_targets;
-        const int count = has_files ? 3 : 4;
+        // An image and its text are published together; TARGETS lists both so
+        // an editor still finds UTF8_STRING and a viewer finds image/png.
+        Atom supported[5];
+        int count = 0;
+        supported[count++] = targets_;
+        if (has_files) {
+          supported[count++] = uri_list_;
+          supported[count++] = gnome_copied_;
+        } else {
+          supported[count++] = utf8_;
+          supported[count++] = text_;
+          supported[count++] = XA_STRING;
+          if (!owned_png_.empty()) supported[count++] = png_;
+        }
         XChangeProperty(display_, request.requestor, property, XA_ATOM, 32,
                         PropModeReplace,
                         reinterpret_cast<const unsigned char*>(supported),
@@ -698,7 +885,14 @@ class x11_clipboard final : public clipboard_service {
             reinterpret_cast<const unsigned char*>(payload.data()),
             static_cast<int>(payload.size()));
         notify.property = property;
-      } else if (!has_files &&
+      } else if (!has_files && request.target == png_ &&
+                 !owned_png_.empty()) {
+        XChangeProperty(
+            display_, request.requestor, property, png_, 8, PropModeReplace,
+            reinterpret_cast<const unsigned char*>(owned_png_.data()),
+            static_cast<int>(owned_png_.size()));
+        notify.property = property;
+      } else if (!has_files && !owned_text_.empty() &&
                  (request.target == utf8_ || request.target == text_ ||
                   request.target == XA_STRING)) {
         const Atom type =
@@ -767,8 +961,13 @@ class x11_clipboard final : public clipboard_service {
       return;
     }
 
-    if (get_buffer_.size() + items <= kMaxClipboardBytes) {
+    transfer_total_bytes_ += items;
+    if (get_buffer_.size() + items <= transfer_max_bytes_) {
       get_buffer_.append(reinterpret_cast<const char*>(data), items);
+    } else {
+      // Keep draining an INCR transfer so the owner is not left blocked, but
+      // remember that the value did not fit and must be reported as too large.
+      transfer_overflow_ = true;
     }
     XFree(data);
     XDeleteProperty(display_, window_, property);
@@ -786,6 +985,12 @@ class x11_clipboard final : public clipboard_service {
   Atom prop_ = None;
   Atom uri_list_ = None;
   Atom gnome_copied_ = None;
+  Atom png_ = None;
+
+  struct image_set {
+    std::vector<uint8_t> png;
+    std::string text;
+  };
 
   /// XFixes (loaded at runtime): each XSetSelectionOwner is one event, which
   /// is what makes "copy the same text again" visible. -1 when unavailable.
@@ -802,8 +1007,10 @@ class x11_clipboard final : public clipboard_service {
   std::mutex watch_mutex_;
   text_watcher watch_callback_;
   files_watcher files_callback_;
+  image_watcher image_callback_;
   std::string last_text_;
   std::string last_files_;
+  std::string last_image_hash_;
   std::atomic<bool> watch_running_{false};
   std::thread watch_thread_;
   std::atomic<bool> running_{false};
@@ -812,10 +1019,13 @@ class x11_clipboard final : public clipboard_service {
   std::mutex queue_mutex_;
   std::deque<std::string> pending_sets_;
   std::deque<std::vector<std::string>> pending_file_sets_;
+  std::deque<image_set> pending_image_sets_;
   std::deque<text_callback> pending_gets_;
   std::deque<files_callback> pending_file_gets_;
+  std::deque<image_callback> pending_image_gets_;
 
   std::string owned_text_;
+  std::vector<uint8_t> owned_png_;
   std::string owned_uri_list_;
   std::string owned_gnome_;
   bool owns_ = false;
@@ -825,12 +1035,20 @@ class x11_clipboard final : public clipboard_service {
 
   bool getting_ = false;
   bool getting_files_ = false;
+  bool getting_image_ = false;
   int file_stage_ = 0;  // 0 = text/uri-list, 1 = gnome-copied-files
   bool incremental_ = false;
+  /// Buffer ceiling for the current transfer: 192 KiB for text/file lists,
+  /// 8 MiB for PNG. `transfer_total_bytes_` keeps counting past the ceiling so
+  /// an oversized image is reported with its real size.
+  std::size_t transfer_max_bytes_ = kMaxClipboardBytes;
+  uint64_t transfer_total_bytes_ = 0;
+  bool transfer_overflow_ = false;
   std::string get_buffer_;
   std::chrono::steady_clock::time_point get_deadline_{};
   text_callback get_callback_;
   files_callback file_get_callback_;
+  image_callback image_get_callback_;
 };
 
 }  // namespace

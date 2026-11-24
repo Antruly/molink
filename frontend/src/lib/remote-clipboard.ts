@@ -2,6 +2,7 @@ import {
   ApiError,
   abortClipboardStage,
   appendClipboardStage,
+  applyClipboardImage,
   applyClipboardStage,
   clearVirtualClipboard,
   offerVirtualClipboard,
@@ -22,7 +23,11 @@ import {
   type ClipboardBatchState,
   type PullFile,
 } from './clipboard-pull'
-import type { ClipboardFileEntry, FileMessage } from './client'
+import type {
+  ClipboardFileEntry,
+  ClipboardSyncImage,
+  FileMessage,
+} from './client'
 import {
   acceptDownloadChunk,
   downloadComplete,
@@ -132,6 +137,11 @@ export class RemoteClipboardSync {
   private offerBatch: ClipboardBatchState | null = null
   private offerBatchOmitted = 0
   private readonly usePull: () => boolean
+
+  // Clipboard image path: the PNG is pulled like a file and then handed to
+  // the local core's native image writer instead of the file applier.
+  private imageApply: { text: string } | null = null
+  private imageLastKey = ''
 
   // Virtual clipboard path: the local core publishes the host's files (FUSE
   // mount on Linux, an OLE data object on Windows) and this class relays the
@@ -262,12 +272,14 @@ export class RemoteClipboardSync {
     rawFiles: unknown,
     hostOmitted = 0,
     batch?: { token?: unknown; index?: unknown; count?: unknown },
+    image?: ClipboardSyncImage,
   ): void {
     if (!this.usePull()) return;
     // The host splits a large selection into 64-entry messages. Accumulate
     // them here: each piece alone is not the clipboard the user copied, and
     // the existing "a new selection cancels the old transfer" rule must only
-    // run once the whole list is present.
+    // run once the whole list is present. An image always arrives whole, so it
+    // is carried through to the merged call.
     const merged = mergeClipboardBatch(
       this.offerBatch,
       batch ?? {},
@@ -281,10 +293,14 @@ export class RemoteClipboardSync {
     this.offerBatch = null;
     const omitted = this.offerBatchOmitted;
     this.offerBatchOmitted = 0;
-    this.processOffer(merged.files, omitted);
+    this.processOffer(merged.files, omitted, image);
   }
 
-  private processOffer(rawFiles: unknown, hostOmitted: number): void {
+  private processOffer(
+    rawFiles: unknown,
+    hostOmitted: number,
+    image?: ClipboardSyncImage,
+  ): void {
     if (!this.enabled || this.paused || this.pendingCancel) return
     if (this.token() === '') return
     const plan = planVirtualFiles(rawFiles)
@@ -293,6 +309,19 @@ export class RemoteClipboardSync {
         this.onError('remote_clipboard_truncated')
       }
       return
+    }
+    // An image is never mounted or written as a file: pull the PNG and put it
+    // on the image clipboard. The echo table is not applied here — the host
+    // is the source, and the reverse poll is guarded by the core's image echo
+    // mark instead.
+    if (image !== undefined) {
+      const entry = plan.files.find(
+        (file) => file.id === image.id && file.size === image.size,
+      )
+      if (entry !== undefined) {
+        this.startImagePull(entry, image, hostOmitted)
+        return
+      }
     }
     // Skip descriptors this machine just put on the remote clipboard.
     const fresh = plan.files.filter(
@@ -439,20 +468,52 @@ export class RemoteClipboardSync {
     this.startPull(fresh, hostOmitted, note)
   }
 
+  /// Pull a PNG the host copied and apply it to the image clipboard. Images
+  /// are small (8 MiB compressed), so there is no mount/over-limit path; the
+  /// ordinary range download is reused and only the final apply differs.
+  private startImagePull(
+    entry: PullFile,
+    image: ClipboardSyncImage,
+    hostOmitted: number,
+  ): void {
+    const key = `image:${image.hash ?? ''}:${entry.id}:${entry.size}`
+    if (key === this.imageLastKey) return
+    if (
+      this.busy || this.pullActive.size > 0 || this.pullStarting ||
+      this.virtualStarting
+    ) {
+      // The remote clipboard changed while a transfer or mount was running.
+      this.virtualGeneration += 1
+      this.virtualStarting = false
+      this.cancelDownloads()
+      this.clearVirtual()
+      this.setPrompt(null)
+    }
+    this.imageLastKey = key
+    this.startPull([entry], hostOmitted, undefined, {
+      text: image.text ?? '',
+    })
+  }
+
   /// The download path, shared by the automatic fallback and the explicit
   /// button. Runs in the background, one 256 KiB range at a time.
   private startPull(
     fresh: PullFile[],
     hostOmitted: number,
     note?: 'virtual_unavailable',
+    image?: { text: string },
   ): void {
     const key = fresh
       .map((file) => `${file.id}:${file.rel ?? file.name}:${file.size}:${file.isDir ? 1 : 0}`)
       .join('|')
     if (key === this.pullLastKey) return
     this.pullLastKey = key
+    this.imageApply = image ?? null
     // Keep the selection so a failed attempt can be retried from the banner.
-    this.explicitOffer = { files: fresh.slice(), omitted: hostOmitted }
+    this.explicitOffer = null
+    if (image === undefined) {
+      this.explicitOffer = { files: fresh.slice(), omitted: hostOmitted }
+    }
     if (hostOmitted > 0) {
       this.onError('remote_clipboard_truncated')
     }
@@ -469,14 +530,19 @@ export class RemoteClipboardSync {
     // available, shows progress and a cancel action. Writing into the staging
     // folder silently and only surfacing a failure at paste time is what made
     // the file manager show its own "skip/cancel" dialog over a half copy.
-    this.setPrompt({
-      count: fresh.length,
-      bytes: this.pullTotal,
-      omitted: hostOmitted,
-      phase: 'downloading',
-      received: 0,
-      note,
-    })
+    // An 8 MiB image is fast enough that a progress banner would only flash.
+    if (image === undefined) {
+      this.setPrompt({
+        count: fresh.length,
+        bytes: this.pullTotal,
+        omitted: hostOmitted,
+        phase: 'downloading',
+        received: 0,
+        note,
+      })
+    } else {
+      this.setPrompt(null)
+    }
     const nonce = `${Date.now().toString(36)}` +
       `${Math.random().toString(36).slice(2)}`
     void clipboardBatchId(fresh, nonce).then((batch) => {
@@ -564,6 +630,8 @@ export class RemoteClipboardSync {
     }
     this.explicitOffer = null
     this.pullLastKey = ''
+    this.imageApply = null
+    this.imageLastKey = ''
     this.setPrompt(null)
   }
 
@@ -758,6 +826,28 @@ export class RemoteClipboardSync {
       this.failPull('remote_clipboard_incomplete')
       return
     }
+    if (this.imageApply !== null) {
+      try {
+        await applyClipboardImage(
+          this.token(), ids[0], this.imageApply.text,
+        )
+        if (this.pullCancelled) return
+        // The local core records the image's own echo mark, so the reverse
+        // poll skips it without any page-side bookkeeping.
+        this.imageApply = null
+        this.onApplied?.(1)
+        this.emitDownloadProgress(true)
+        this.explicitOffer = null
+        this.setPrompt(null)
+        this.busy = false
+        this.pullStages = []
+        this.pullPaths = []
+        this.pullBatch = ''
+      } catch (error) {
+        this.failPull(failureCode(error))
+      }
+      return
+    }
     const paths = this.pullPaths.filter(
       (path): path is string => typeof path === 'string' && path !== '',
     )
@@ -783,6 +873,8 @@ export class RemoteClipboardSync {
 
   private failPull(code: string): void {
     this.pullCancelled = true
+    this.imageApply = null
+    this.imageLastKey = ''
     this.abortStaged(this.pullStages)
     for (const active of this.pullActive.values()) {
       window.clearTimeout(active.timer)
@@ -843,6 +935,8 @@ export class RemoteClipboardSync {
     this.stagingIds = []
     this.busy = false
     this.lastKey = ''
+    this.imageApply = null
+    this.imageLastKey = ''
     if (
       this.pullActive.size === 0 && this.pullQueue.length === 0 &&
       !this.pullStarting
@@ -980,6 +1074,8 @@ export class RemoteClipboardSync {
     this.pendingCancel = false
     this.lastKey = ''
     this.pullLastKey = ''
+    this.imageApply = null
+    this.imageLastKey = ''
   }
 
   private startNext(): void {

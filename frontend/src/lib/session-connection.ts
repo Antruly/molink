@@ -587,6 +587,7 @@ export class SessionConnection {
               index: event.batchIndex,
               count: event.batchCount,
             },
+            event.image,
           )
           // The files panel still needs the path list, which the host sends
           // as the legacy `clipboard` message. Nothing to forward here.

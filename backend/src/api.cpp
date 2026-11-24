@@ -39,6 +39,7 @@
 #include "capture/nvenc_av1_encoder.h"
 #endif
 
+#include "clipboard/clipboard_image.h"
 #include "clipboard_stage.h"
 #include "clipboard_virtual.h"
 #include "clipboard/virtual_mount.h"
@@ -74,6 +75,74 @@ struct clipboard_files_snapshot {
 std::shared_ptr<clipboard_files_snapshot> clipboard_snapshot() {
   static auto snapshot = std::make_shared<clipboard_files_snapshot>();
   return snapshot;
+}
+
+/// Same asynchronous snapshot for the clipboard image. Encoding a CF_DIB to
+/// PNG can take milliseconds, so the poll must not run it on the HTTP loop.
+struct clipboard_image_snapshot {
+  std::mutex mutex;
+  std::vector<uint8_t> png;
+  std::string hash;
+  uint64_t version = 0;
+  uint64_t source_bytes = 0;
+  bool too_large = false;
+  std::atomic<bool> fetching{false};
+};
+
+std::shared_ptr<clipboard_image_snapshot> clipboard_image_state() {
+  static auto snapshot = std::make_shared<clipboard_image_snapshot>();
+  return snapshot;
+}
+
+void refresh_clipboard_image(const std::shared_ptr<clipboard_service>& service) {
+  if (!service) return;
+  const auto snapshot = clipboard_image_state();
+  bool expected = false;
+  if (!snapshot->fetching.compare_exchange_strong(expected, true)) return;
+  service->request_image([snapshot](clipboard_image image) {
+    {
+      std::lock_guard<std::mutex> lock(snapshot->mutex);
+      snapshot->png = std::move(image.png);
+      snapshot->hash = snapshot->png.empty()
+                           ? std::string()
+                           : clipboard_image_hash(snapshot->png);
+      snapshot->source_bytes = image.source_bytes;
+      snapshot->too_large = image.too_large;
+      ++snapshot->version;
+    }
+    snapshot->fetching.store(false);
+  });
+}
+
+/// The image this core just applied from a remote clipboard. The page's
+/// image poll skips it, exactly like the file echo table.
+struct clipboard_image_echo {
+  std::mutex mutex;
+  std::string hash;
+  uint64_t at = 0;
+};
+
+std::shared_ptr<clipboard_image_echo> clipboard_image_echoes() {
+  static auto echo = std::make_shared<clipboard_image_echo>();
+  return echo;
+}
+
+void remember_clipboard_image_echo(const std::string& hash) {
+  if (hash.empty()) return;
+  const auto echo = clipboard_image_echoes();
+  std::lock_guard<std::mutex> lock(echo->mutex);
+  echo->hash = hash;
+  echo->at = now_ms();
+}
+
+bool clipboard_image_is_echo(const std::string& hash) {
+  if (hash.empty()) return false;
+  constexpr uint64_t kImageEchoTtlMs = 2ull * 60 * 1000;
+  const auto echo = clipboard_image_echoes();
+  const uint64_t now = now_ms();
+  std::lock_guard<std::mutex> lock(echo->mutex);
+  if (echo->hash != hash) return false;
+  return now >= echo->at && now - echo->at < kImageEchoTtlMs;
 }
 
 /// Paths this core has just written to its own clipboard by applying a staged
@@ -1751,6 +1820,65 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
                 .end();
           });
 
+  // The local shell's picture clipboard. The page cannot read image/png from
+  // the OS clipboard, so it polls this snapshot and uploads a new image to the
+  // remote session through the ordinary file channel. Loopback only, like the
+  // file list: a remote browser must never read this machine's clipboard.
+  app.get("/api/clipboard-image-info",
+          [deps](uvcpp_web_request& req, uvcpp_web_response& resp,
+                 uvcpp_web_next) {
+            if (!is_loopback_peer(req.peer_ip()) || !deps.clipboard) {
+              resp.status(403).json_str(R"({"code":"loopback_only"})");
+              resp.end();
+              return;
+            }
+            refresh_clipboard_image(deps.clipboard);
+            const auto snapshot = clipboard_image_state();
+            uvcpp_json j;
+            std::string hash;
+            {
+              std::lock_guard<std::mutex> lock(snapshot->mutex);
+              j["version"] = snapshot->version;
+              j["size"] = snapshot->png.size();
+              j["too_large"] = snapshot->too_large;
+              if (!snapshot->png.empty()) {
+                hash = snapshot->hash;
+                j["hash"] = hash;
+              }
+            }
+            // True when this core just wrote the image while applying a
+            // remote clipboard; the reverse sync must not offer it back.
+            j["echo"] = clipboard_image_is_echo(hash);
+            resp.set_header("Cache-Control", "no-store").json(j);
+            resp.end();
+          });
+
+  app.get("/api/clipboard-image",
+          [deps](uvcpp_web_request& req, uvcpp_web_response& resp,
+                 uvcpp_web_next) {
+            if (!is_loopback_peer(req.peer_ip()) || !deps.clipboard) {
+              resp.status(403).json_str(R"({"code":"loopback_only"})");
+              resp.end();
+              return;
+            }
+            const auto snapshot = clipboard_image_state();
+            std::vector<uint8_t> png;
+            {
+              std::lock_guard<std::mutex> lock(snapshot->mutex);
+              png = snapshot->png;
+            }
+            if (png.empty()) {
+              resp.status(404).json_str(R"({"code":"no_image"})");
+              resp.end();
+              return;
+            }
+            resp.set_header("Cache-Control", "no-store")
+                .body(std::string(reinterpret_cast<const char*>(png.data()),
+                                  png.size()),
+                      "image/png")
+                .end();
+          });
+
   // ---- Remote clipboard files -> this machine's clipboard ---------------
   // Three loopback-only steps: declare a file, append its bytes in order, then
   // apply the completed set. A remote web page cannot use these routes; its
@@ -1930,6 +2058,70 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
              uvcpp_json out;
              out["ok"] = true;
              out["count"] = count;
+             resp.set_header("Cache-Control", "no-store").json(out);
+             resp.end();
+           });
+
+  // Remote clipboard image -> this machine's OS clipboard. The PNG was
+  // downloaded into the staging folder like a file; here it becomes CF_DIB +
+  // PNG / image/png / NSPasteboardTypePNG. `text` is included when the same
+  // copy also carried text, so the native write publishes both formats.
+  app.post("/api/clipboard-image-apply",
+           [staging, clipboard = deps.clipboard](
+               uvcpp_web_request& req, uvcpp_web_response& resp,
+               uvcpp_web_next) {
+             if (!is_loopback_peer(req.peer_ip())) {
+               resp.status(403).json_str(R"({"code":"loopback_only"})");
+               resp.end();
+               return;
+             }
+             if (!clipboard || !clipboard->available()) {
+               resp.status(503).json_str(
+                   R"({"code":"clipboard_unavailable"})");
+               resp.end();
+               return;
+             }
+             uvcpp_json body;
+             try {
+               body = uvcpp_json::parse(req.body_str());
+             } catch (...) {
+               resp.status(400).json_str(
+                   R"({"code":"bad_stage_request"})");
+               resp.end();
+               return;
+             }
+             if (!body.is_object() || !body.contains("ids") ||
+                 !body["ids"].is_array() || body["ids"].size() != 1 ||
+                 !body["ids"][0].is_string()) {
+               resp.status(400).json_str(
+                   R"({"code":"bad_stage_request"})");
+               resp.end();
+               return;
+             }
+             std::string text;
+             if (body.contains("text") && body["text"].is_string()) {
+               text = body["text"].get<std::string>();
+               if (text.size() > 192 * 1024) text.resize(192 * 1024);
+             }
+             std::string applied_hash;
+             const std::string id = body["ids"][0].get<std::string>();
+             const stage_error error = staging->apply_image(
+                 id, [clipboard, &text, &applied_hash](
+                         const std::vector<uint8_t>& bytes) {
+                   if (bytes.empty()) return false;
+                   applied_hash = clipboard_image_hash(bytes);
+                   return clipboard->set_image(bytes, text);
+                 });
+             if (error != stage_error::none) {
+               send_stage_error(resp, error);
+               return;
+             }
+             // The reverse sync polls /api/clipboard-image; this mark stops it
+             // from offering the image straight back to the remote.
+             remember_clipboard_image_echo(applied_hash);
+             uvcpp_json out;
+             out["ok"] = true;
+             out["count"] = 1;
              resp.set_header("Cache-Control", "no-store").json(out);
              resp.end();
            });

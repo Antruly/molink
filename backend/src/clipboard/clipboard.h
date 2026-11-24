@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "clipboard/clipboard_image.h"
 #include "clipboard/clipboard_route.h"
 
 namespace molink {
@@ -100,6 +101,33 @@ class clipboard_service {
     if (callback) callback({});
   }
   virtual bool set_files(const std::vector<std::string>&) { return false; }
+
+  /// Image clipboard, always carried as PNG bytes.
+  ///
+  /// The 8 MiB cap applies to the compressed PNG. A backend reports an
+  /// over-limit image through `clipboard_image::too_large` instead of
+  /// pretending the clipboard is empty, so the caller can log
+  /// `clipboard.image too_large=1`.
+  using image_callback = std::function<void(clipboard_image)>;
+  virtual void request_image(image_callback callback) {
+    if (callback) callback(clipboard_image{});
+  }
+
+  /// Takes ownership of the clipboard and publishes both formats when `text`
+  /// is non-empty. Image and text are not alternatives: a copy in a word
+  /// processor has both, and pasting into an editor must still find the text.
+  /// Returns false when the backend has no image support.
+  virtual bool set_image(std::vector<uint8_t> png, std::string text = {}) {
+    (void)png;
+    (void)text;
+    return false;
+  }
+
+  /// Called when the local clipboard's image changes. Same owner rules as
+  /// `watch`: `self` is reported once and dropped by the caller.
+  using image_watcher =
+      std::function<void(clipboard_image, clipboard_owner)>;
+  virtual void watch_images(image_watcher callback) { (void)callback; }
 
   /// Result of one virtual-file range read. `status` uses the clipboard-pull
   /// wire codes: 0 ok, 1 read error, 2 clipboard changed / entry gone.
