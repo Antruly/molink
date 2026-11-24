@@ -87,8 +87,11 @@ export class ClipboardFileSync {
     this.onNestedRdp = options.onNestedRdp ?? null
   }
 
-  /// Called once a second by the session. Cheap when nothing changed.
-  async poll(): Promise<void> {
+  /// Called once a second by the foreground session. Cheap when nothing
+  /// changed. `force` is the tab-switch path: offer the current selection even
+  /// when this session already offered it, so selecting a session gives it
+  /// the clipboard as it is now.
+  async poll(force = false): Promise<void> {
     if (this.busy || this.processing) return
     const connection = this.connection()
     const token = this.token()
@@ -110,12 +113,18 @@ export class ClipboardFileSync {
         .map((file) => `${file.id}:${file.size}`)
         .sort()
         .join('|')
-      if (key === this.lastKey) return
-      if (Date.now() - this.lastAttempt < RETRY_DELAY_MS) return
-      this.lastAttempt = Date.now()
-
       const capability = this.capability()
       const mode = clipboardFileMode(files, capability)
+      // A forced sync exists so a newly selected tab gets the current
+      // selection. Only the descriptor paths can repeat that cheaply; an
+      // eager host would re-upload every byte, so it keeps the dedupe.
+      const descriptors = mode === 'stream' || mode === 'lazy'
+      if (key === this.lastKey && (!force || !descriptors)) return
+      if (Date.now() - this.lastAttempt < RETRY_DELAY_MS &&
+          !(force && descriptors)) {
+        return
+      }
+      this.lastAttempt = Date.now()
       if (mode === 'stream' || mode === 'lazy') {
         // Descriptors only. In `stream` mode not a single byte is read here:
         // the host fetches ranges when (and where) the user pastes.

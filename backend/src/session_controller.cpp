@@ -53,27 +53,26 @@ namespace {
 
 struct clipboard_sync_state {
   std::mutex mutex;
-  std::unordered_set<std::string> seen;
-  std::deque<std::string> order;
   std::atomic<bool> fetch_pending{false};
   std::atomic<bool> files_pending{false};
-  /// File-list signatures (path per line) announced or written recently.
-  /// Suppressing a signature for two minutes is what stops a selection this
-  /// machine just put on the clipboard from travelling back to the viewer that
-  /// supplied it (`file (1)(2)` ping-pong).
-  std::unordered_map<std::string, uint64_t> files_recent;
   /// The list most recently announced (or written for a viewer). Unlike the
-  /// two-minute echo window this is not time bounded: the periodic poll must
+  /// per-session echo window this is not time bounded: the periodic poll must
   /// not re-announce an unchanged clipboard every two minutes, which would
   /// make a viewer download its own files back.
   std::string last_files_signature;
   bool has_last_files = false;
+  /// Same guard for the periodic text poll.
+  std::string last_text_key;
+  bool has_last_text = false;
 };
 
 clipboard_sync_state g_clipboard_sync;
 
-constexpr uint64_t kClipboardFileEchoMs = 2ull * 60 * 1000;
-constexpr std::size_t kClipboardFileEchoMax = 64;
+/// Echo/dedup entries keyed by session. A host-wide hash set dropped viewer
+/// B's genuine copy when viewer A had just copied the same text, and could
+/// suppress a value that was only ever delivered to A.
+clipboard_echo_table g_clipboard_echoes;
+
 /// One clipboard-pull range is at most this many bytes. The viewer uses the
 /// same size, so a normal download is one packet per request.
 constexpr uint64_t kClipboardPullChunkBytes = 256ull * 1024;
@@ -108,11 +107,11 @@ std::string clipboard_files_signature(
   return signature;
 }
 
-/// False when this exact file list was published (or written by a viewer)
-/// within the echo window. Marks a new list as seen.
+/// True the first time this exact file list is seen; the signature is also
+/// remembered so the periodic poll does not announce an unchanged clipboard
+/// every two minutes.
 bool clipboard_take_files_signature(const std::string& signature) {
   if (signature.empty()) return false;
-  const uint64_t now = now_ms();
   std::lock_guard<std::mutex> lock(g_clipboard_sync.mutex);
   if (g_clipboard_sync.has_last_files &&
       g_clipboard_sync.last_files_signature == signature) {
@@ -120,23 +119,6 @@ bool clipboard_take_files_signature(const std::string& signature) {
   }
   g_clipboard_sync.last_files_signature = signature;
   g_clipboard_sync.has_last_files = true;
-  auto& recent = g_clipboard_sync.files_recent;
-  const auto it = recent.find(signature);
-  if (it != recent.end() && now >= it->second &&
-      now - it->second < kClipboardFileEchoMs) {
-    return false;
-  }
-  // Bound the table: drop expired entries when it grows.
-  if (recent.size() >= kClipboardFileEchoMax) {
-    for (auto entry = recent.begin(); entry != recent.end();) {
-      if (now < entry->second || now - entry->second >= kClipboardFileEchoMs) {
-        entry = recent.erase(entry);
-      } else {
-        ++entry;
-      }
-    }
-  }
-  recent[signature] = now;
   return true;
 }
 
@@ -149,8 +131,10 @@ void clipboard_reset_files_signature() {
 }
 
 /// Remembers files the host just materialised for a viewer so the clipboard
-/// watcher does not publish them straight back.
-void clipboard_mark_files_written(const std::vector<std::string>& paths) {
+/// watcher does not publish them straight back to that viewer. Other viewers
+/// remain eligible; the route decides who is active.
+void clipboard_mark_files_written(uint32_t session_id,
+                                  const std::vector<std::string>& paths) {
   std::vector<clipboard_file> files;
   files.reserve(paths.size());
   for (const std::string& path : paths) {
@@ -160,7 +144,10 @@ void clipboard_mark_files_written(const std::vector<std::string>& paths) {
     files.push_back(std::move(file));
   }
   const std::string signature = clipboard_files_signature(files);
-  if (!signature.empty()) clipboard_take_files_signature(signature);
+  if (signature.empty()) return;
+  clipboard_take_files_signature(signature);
+  g_clipboard_echoes.remember(session_id, clipboard_files_key(signature),
+                              clipboard_echo_direction::received, now_ms());
 }
 
 std::string clipboard_hash(const std::string& text) {
@@ -174,18 +161,65 @@ std::string clipboard_hash(const std::string& text) {
   return buffer;
 }
 
-/// Returns true the first time a hash is seen; the bounded set keeps the
-/// echo suppression window small (the last 256 clipboard values).
-bool clipboard_take_hash(const std::string& hash) {
+/// The periodic text poll should not re-announce a value the watcher (or a
+/// connect/switch sync) already processed.
+bool clipboard_same_as_last_text(const std::string& key) {
   std::lock_guard<std::mutex> lock(g_clipboard_sync.mutex);
-  if (g_clipboard_sync.seen.count(hash) != 0) return false;
-  g_clipboard_sync.seen.insert(hash);
-  g_clipboard_sync.order.push_back(hash);
-  while (g_clipboard_sync.order.size() > 256) {
-    g_clipboard_sync.seen.erase(g_clipboard_sync.order.front());
-    g_clipboard_sync.order.pop_front();
+  return g_clipboard_sync.has_last_text &&
+         g_clipboard_sync.last_text_key == key;
+}
+
+void clipboard_note_last_text(std::string key) {
+  std::lock_guard<std::mutex> lock(g_clipboard_sync.mutex);
+  g_clipboard_sync.last_text_key = std::move(key);
+  g_clipboard_sync.has_last_text = true;
+}
+
+/// One `clipboard.owner` line. Only the source and the boolean are logged;
+/// the clipboard content never is.
+void log_clipboard_owner(clipboard_owner owner, const char* direction) {
+  const bool self = owner == clipboard_owner::self;
+  diag().log(diag_level::info, "clipboard.owner", std::string(),
+             {{"self", self ? "1" : "0"},
+              {"source", clipboard_owner_name(owner)},
+              {"direction", direction}});
+}
+
+std::vector<clipboard_route_session> clipboard_route_view(
+    const std::vector<session_info>& sessions) {
+  std::vector<clipboard_route_session> out;
+  out.reserve(sessions.size());
+  for (const session_info& session : sessions) {
+    clipboard_route_session route;
+    route.id = session.id;
+    route.authenticated = session.authenticated;
+    route.connected = session.transport != nullptr;
+    route.foreground = session.video_push;
+    route.last_input_ms = session.last_input_ms;
+    route.connected_ms = session.connected_ms;
+    out.push_back(route);
   }
-  return true;
+  return out;
+}
+
+clipboard_route clipboard_active_route(
+    const std::shared_ptr<session_registry>& registry) {
+  if (!registry) return {};
+  return select_clipboard_targets(
+      clipboard_route_view(registry->snapshot()), now_ms());
+}
+
+void log_clipboard_route(const clipboard_route& route, const char* direction,
+                         const std::string& extra_key,
+                         const std::string& extra_value) {
+  std::vector<diag_field> fields;
+  fields.push_back({"direction", direction});
+  fields.push_back({"active", std::to_string(route.active)});
+  fields.push_back({"targets", std::to_string(route.targets.size())});
+  fields.push_back({"reason", clipboard_route_reason_name(route.reason)});
+  if (!extra_key.empty()) fields.push_back({extra_key, extra_value});
+  diag().log(diag_level::info, "clipboard.route", std::string(),
+             std::move(fields));
 }
 
 }  // namespace
@@ -421,10 +455,27 @@ void publish_clipboard_files(
   if (files.empty()) return;
   const std::string signature = clipboard_files_signature(files);
   if (!clipboard_take_files_signature(signature)) return;
+  const std::string echo_key = clipboard_files_key(signature);
 
-  auto deliver = [registry, files = std::move(files), nested_rdp] {
-    for (const session_info& peer : registry->snapshot()) {
-      send_clipboard_files_to(registry, peer, files, nested_rdp);
+  auto deliver = [registry, files = std::move(files), nested_rdp, echo_key] {
+    const clipboard_route route = clipboard_active_route(registry);
+    log_clipboard_route(route, "local", "kind", "files");
+    for (uint32_t id : route.targets) {
+      const std::shared_ptr<session_info> peer = registry->find(id);
+      if (!peer || !peer->authenticated || !peer->transport) continue;
+      const uint64_t now = now_ms();
+      if (g_clipboard_echoes.suppress(id, echo_key, now)) {
+        std::vector<diag_field> fields;
+        fields.push_back({"target", std::to_string(id)});
+        fields.push_back({"direction", "echo"});
+        fields.push_back({"kind", "files"});
+        diag().log(diag_level::debug, "clipboard.announce", std::string(),
+                   std::move(fields));
+        continue;
+      }
+      g_clipboard_echoes.remember(id, echo_key,
+                                  clipboard_echo_direction::delivered, now);
+      send_clipboard_files_to(registry, *peer, files, nested_rdp);
     }
   };
   if (post) {
@@ -1725,8 +1776,12 @@ void session_controller::on_upload_event(int tag,
                   {"path", path}});
       source->note_done(static_cast<std::size_t>(index), path);
       // The host is about to put a real path on CF_HDROP for this viewer.
-      // Suppress the clipboard watcher so it is not announced straight back.
-      if (!path.empty()) clipboard_mark_files_written({path});
+      // Suppress the watcher for this session so the list is not announced
+      // straight back; another active viewer may still receive it.
+      if (!path.empty()) {
+        const std::shared_ptr<session_info> owner = session_.lock();
+        if (owner) clipboard_mark_files_written(owner->id, {path});
+      }
       // Tell the originating viewer which host paths were materialised, so
       // its reverse clipboard sync suppresses the echo instead of downloading
       // its own files back (the source of the (1)(2) loop).
@@ -1872,50 +1927,100 @@ void session_controller::send_welcome_message() {
     send_welcome(transport.get(), *session, options_, resume_token_);
     if (!announced_initial_files_) {
       announced_initial_files_ = true;
-      announce_current_clipboard_files();
+      announce_current_clipboard("connect");
     }
     attach_chat();
     attach_call();
   }
 }
 
-void session_controller::announce_current_clipboard_files() {
+/// Push the host's current clipboard to this one session.
+///
+/// Called once after authentication (`reason=connect`) and whenever the viewer
+/// names this session as the visible tab (`reason=switch`). Both formats are
+/// announced from the same snapshot; the files travel as zero-byte virtual
+/// descriptors, so selecting a tab never uploads anything by itself. A
+/// duplicate value is still delivered: the point of a switch is that this
+/// viewer did not necessarily see the value the previous active one did.
+void session_controller::announce_current_clipboard(const char* reason) {
   if (!options_.clipboard || !options_.clipboard->available()) return;
   const std::shared_ptr<session_info> session = session_.lock();
-  if (!session || !session->authenticated) return;
+  if (!session || !session->authenticated || !session->transport) return;
   const uint32_t session_id = session->id;
+  const std::string reason_text = reason != nullptr ? reason : "connect";
   std::shared_ptr<session_registry> registry = registry_;
   auto post = options_.post;
   std::shared_ptr<clipboard_service> clipboard = options_.clipboard;
-  options_.clipboard->request_files(
-      [registry, post, clipboard, session_id](
-          std::vector<clipboard_file> files) {
-        files.erase(std::remove_if(files.begin(), files.end(),
-                                   [](const clipboard_file& file) {
-                                     return !clipboard_file_has_bytes(file) ||
-                                            file.name.empty();
-                                   }),
-                    files.end());
-        if (files.empty()) return;
-        // This session gets the list directly, but the periodic watcher must
-        // not announce the same unchanged list a moment later. Mark it as
-        // published here; `send_clipboard_files_to` still runs even when it
-        // was already published (a late joiner needs its own copy).
-        clipboard_take_files_signature(clipboard_files_signature(files));
-        const bool nested = clipboard && clipboard->nested_rdp();
-        auto deliver = [registry, session_id, files = std::move(files),
-                        nested] {
-          const std::shared_ptr<session_info> live =
-              registry->find(session_id);
-          if (!live) return;
-          send_clipboard_files_to(registry, *live, files, nested);
-        };
-        if (post) {
-          post(std::move(deliver));
-        } else {
-          deliver();
-        }
-      });
+  const std::string device = options_.device_id;
+
+  clipboard->request_text([registry, post, device, session_id, reason_text](
+                              std::string text) {
+    if (text.empty() || text.size() > 192 * 1024) return;
+    const std::string hash = clipboard_hash(text);
+    const std::string key = clipboard_text_key(hash, text.size());
+    // The periodic poll must not re-announce what the switch just sent.
+    clipboard_note_last_text(key);
+    auto deliver = [registry, session_id, text = std::move(text), hash, key,
+                   device, reason_text] {
+      const std::shared_ptr<session_info> live = registry->find(session_id);
+      if (!live || !live->authenticated || !live->transport) return;
+      g_clipboard_echoes.remember(session_id, key,
+                                  clipboard_echo_direction::delivered,
+                                  now_ms());
+      uvcpp_json out;
+      out["type"] = "clipboard-sync";
+      out["text"] = text;
+      out["hash"] = hash;
+      out["chain"] = device;
+      send_json(live->transport.get(), out);
+      diag().log(diag_level::info, "clipboard.announce", std::string(),
+                 {{"target", std::to_string(session_id)},
+                  {"direction", reason_text},
+                  {"kind", "text"},
+                  {"bytes", std::to_string(text.size())}});
+    };
+    if (post) {
+      post(std::move(deliver));
+    } else {
+      deliver();
+    }
+  });
+
+  clipboard->request_files([registry, post, clipboard, session_id,
+                            reason_text](std::vector<clipboard_file> files) {
+    files.erase(std::remove_if(files.begin(), files.end(),
+                               [](const clipboard_file& file) {
+                                 return !clipboard_file_has_bytes(file) ||
+                                        file.name.empty();
+                               }),
+                files.end());
+    if (files.empty()) return;
+    // This session gets the list directly; the periodic poll must not send it
+    // again a moment later.
+    const std::string signature = clipboard_files_signature(files);
+    clipboard_take_files_signature(signature);
+    const bool nested = clipboard && clipboard->nested_rdp();
+    const std::string key = clipboard_files_key(signature);
+    auto deliver = [registry, session_id, files = std::move(files), nested,
+                    key, reason_text] {
+      const std::shared_ptr<session_info> live = registry->find(session_id);
+      if (!live || !live->authenticated || !live->transport) return;
+      g_clipboard_echoes.remember(session_id, key,
+                                  clipboard_echo_direction::delivered,
+                                  now_ms());
+      send_clipboard_files_to(registry, *live, files, nested);
+      diag().log(diag_level::info, "clipboard.announce", std::string(),
+                 {{"target", std::to_string(session_id)},
+                  {"direction", reason_text},
+                  {"kind", "files"},
+                  {"files", std::to_string(files.size())}});
+    };
+    if (post) {
+      post(std::move(deliver));
+    } else {
+      deliver();
+    }
+  });
 }
 
 void session_controller::issue_resume_token() {
@@ -2999,8 +3104,8 @@ void session_controller::on_text(const std::string& text) {
   }
 
   // Real-time clipboard sync. The core applies the text to the host
-  // clipboard and forwards it to every other authenticated session, keeping
-  // the origin chain so nested sessions cannot echo it back.
+  // clipboard and relays it to the active session, keeping the origin chain
+  // so nested sessions cannot echo it back.
   if (type == "clipboard-sync") {
     if (!require_auth()) {
       transport->close(transport_close::policy, "not authenticated");
@@ -3009,7 +3114,18 @@ void session_controller::on_text(const std::string& text) {
     const std::string text = string_field(j, "text");
     if (text.empty() || text.size() > 192 * 1024) return;
     const std::string hash = clipboard_hash(text);
-    if (!clipboard_take_hash(hash)) return;
+    const std::string key = clipboard_text_key(hash, text.size());
+    const uint64_t now = now_ms();
+    if (g_clipboard_echoes.suppress(session->id, key, now)) {
+      // We delivered this value to this viewer; its poll is echoing it. Drop
+      // it here, per session, so the other viewer's identical copy still
+      // travels.
+      diag().log(diag_level::info, "clipboard.sync", std::string(),
+                 {{"peer", peer_ip},
+                  {"direction", "echo"},
+                  {"bytes", std::to_string(text.size())}});
+      return;
+    }
 
     std::string chain = string_field(j, "chain");
     const std::string& device = options_.device_id;
@@ -3023,23 +3139,41 @@ void session_controller::on_text(const std::string& text) {
 
     if (options_.clipboard) options_.clipboard->set_text(text);
     clipboard_reset_files_signature();
+    g_clipboard_echoes.remember(session->id, key,
+                                clipboard_echo_direction::received, now);
+    // The watcher this write triggers may not be synchronous (X11 polls), so
+    // stop the periodic path from announcing the same value as a local copy.
+    clipboard_note_last_text(key);
     {
       // Length only: the text itself never reaches the log.
       std::vector<diag_field> fields;
       fields.push_back({"peer", peer_ip});
+      fields.push_back({"direction", "in"});
       fields.push_back({"bytes", std::to_string(text.size())});
       diag().log(diag_level::info, "clipboard.sync", std::string(), fields);
     }
-    for (const session_info& peer : registry_->snapshot()) {
-      if (peer.id == session->id || !peer.authenticated || !peer.transport) {
+
+    const clipboard_route route = clipboard_active_route(registry_);
+    log_clipboard_route(route, "relay", "kind", "text");
+    for (uint32_t id : route.targets) {
+      if (id == session->id) continue;
+      const std::shared_ptr<session_info> peer = registry_->find(id);
+      if (!peer || !peer->authenticated || !peer->transport) continue;
+      if (g_clipboard_echoes.suppress(id, key, now)) {
+        diag().log(diag_level::debug, "clipboard.announce", std::string(),
+                   {{"target", std::to_string(id)},
+                    {"direction", "echo"},
+                    {"kind", "text"}});
         continue;
       }
+      g_clipboard_echoes.remember(id, key,
+                                  clipboard_echo_direction::delivered, now);
       uvcpp_json out;
       out["type"] = "clipboard-sync";
       out["text"] = text;
       out["hash"] = hash;
       out["chain"] = chain;
-      send_json(peer.transport.get(), out);
+      send_json(peer->transport.get(), out);
     }
     return;
   }
@@ -3140,7 +3274,15 @@ void session_controller::on_text(const std::string& text) {
       }
       diag().log(diag_level::info, "clipboard.set", std::string(),
                  {{"peer", peer_ip},
+                  {"direction", "in"},
                   {"bytes", std::to_string(text_value.size())}});
+      const std::string stored_hash = clipboard_hash(text_value);
+      const std::string key =
+          clipboard_text_key(stored_hash, text_value.size());
+      g_clipboard_echoes.remember(session->id, key,
+                                  clipboard_echo_direction::received,
+                                  now_ms());
+      clipboard_note_last_text(key);
       options_.clipboard->set_text(std::move(text_value));
       clipboard_reset_files_signature();
       return;
@@ -3361,7 +3503,16 @@ void session_controller::on_text(const std::string& text) {
     // Frames the viewer skipped while it was pulling are repaired by the
     // sequence map and tile clock like any other gap, so turning the clock
     // back on does not need a keyframe.
-    session->video_push = bool_field(j, "on", false);
+    const bool foreground = bool_field(j, "on", false);
+    const bool was_foreground = session->video_push;
+    session->video_push = foreground;
+    if (foreground) {
+      session->last_input_ms = now_ms();
+      // The viewer just named this tab/window as the one on screen. Push the
+      // current host clipboard once, so a copy made while another tab was
+      // active is available immediately instead of after the next copy.
+      if (!was_foreground) announce_current_clipboard("switch");
+    }
     return;
   }
 
@@ -3871,9 +4022,9 @@ void session_controller::on_text(const std::string& text) {
         }
       }
       const std::vector<std::string> resolved = files_->resolve_files(requested);
-      // These files came from a viewer. Mark them before touching the
-      // clipboard so the watcher cannot announce our own reply back.
-      clipboard_mark_files_written(resolved);
+      // These files came from this viewer. Mark them before touching the
+      // clipboard so the watcher cannot announce our own reply back to it.
+      clipboard_mark_files_written(session->id, resolved);
       const bool applied =
           options_.clipboard && options_.clipboard->available() &&
           !resolved.empty() && options_.clipboard->set_files(resolved);
@@ -3908,6 +4059,10 @@ void session_controller::on_text(const std::string& text) {
   }
 
   if (type == "input") {
+    // A viewer that sent input is the one the user is working in. With no
+    // `video-push` foreground signal (legacy clients), this is what makes the
+    // clipboard route to the right session.
+    session->last_input_ms = now_ms();
     // Record the arrival for the pipeline diagnostic before doing any work:
     // the gap from this instant to the next grab is what the viewer feels as
     // "the picture waited for me". It is not (yet) a capture request.
@@ -4188,6 +4343,7 @@ void session_controller::on_close(int code, const std::string& reason) {
     options_.access_requests->remove(session->access_request_id);
   }
   registry_->remove(session->id);
+  g_clipboard_echoes.forget_session(session->id);
   // Stop grabbing the screen once nobody is watching.
   if (options_.capture && !registry_->has_authenticated()) {
     options_.capture->set_active(false);
@@ -4237,44 +4393,70 @@ void session_supervisor::start() {
     const std::shared_ptr<session_registry> registry = registry_;
     const auto post = options_.post;
     const std::string device = options_.device_id;
-    options_.clipboard->watch([registry, post, device](std::string text) {
-      if (text.empty() || text.size() > 192 * 1024) return;
-      // The clipboard is text now; a later copy of the same file list is a
-      // new action and must be announced again.
-      clipboard_reset_files_signature();
-      const std::string hash = clipboard_hash(text);
-      if (!clipboard_take_hash(hash)) return;
-      auto deliver = [registry, text = std::move(text), hash, device] {
-        std::size_t sent = 0;
-        for (const session_info& peer : registry->snapshot()) {
-          if (!peer.authenticated || !peer.transport) continue;
-          ++sent;
-          uvcpp_json out;
-          out["type"] = "clipboard-sync";
-          out["text"] = text;
-          out["hash"] = hash;
-          out["chain"] = device;
-          send_json(peer.transport.get(), out);
-        }
-        // Bytes and viewer count only: never the text itself.
-        diag().log(diag_level::info, "clipboard.announce",
-                   "host text copied",
-                   {{"bytes", std::to_string(text.size())},
-                    {"viewers", std::to_string(sent)}});
-      };
-      if (post) {
-        post(deliver);
-      } else {
-        deliver();
-      }
-    });
-    // Files copied on the host (Explorer Ctrl+C) are announced to every viewer
-    // as session-scoped ids, plus the legacy path list for the files panel.
-    // Publish only on a real change; the signature table also stops a list
-    // this machine just materialised for a viewer from echoing back.
+    options_.clipboard->watch(
+        [registry, post, device](std::string text, clipboard_owner owner) {
+          log_clipboard_owner(owner, "in");
+          if (owner == clipboard_owner::self) return;
+          if (text.empty() || text.size() > 192 * 1024) return;
+          // The clipboard is text now; a later copy of the same file list is
+          // a new action and must be announced again.
+          clipboard_reset_files_signature();
+          const std::string hash = clipboard_hash(text);
+          const std::string key = clipboard_text_key(hash, text.size());
+          clipboard_note_last_text(key);
+          auto deliver = [registry, text = std::move(text), hash, key,
+                          device] {
+            const clipboard_route route = clipboard_active_route(registry);
+            log_clipboard_route(route, "local", "kind", "text");
+            std::size_t sent = 0;
+            for (uint32_t id : route.targets) {
+              const std::shared_ptr<session_info> live = registry->find(id);
+              if (!live || !live->authenticated || !live->transport) continue;
+              const uint64_t now = now_ms();
+              if (g_clipboard_echoes.suppress(id, key, now)) {
+                diag().log(diag_level::debug, "clipboard.announce",
+                           std::string(),
+                           {{"target", std::to_string(id)},
+                            {"direction", "echo"},
+                            {"kind", "text"}});
+                continue;
+              }
+              g_clipboard_echoes.remember(
+                  id, key, clipboard_echo_direction::delivered, now);
+              ++sent;
+              uvcpp_json out;
+              out["type"] = "clipboard-sync";
+              out["text"] = text;
+              out["hash"] = hash;
+              out["chain"] = device;
+              send_json(live->transport.get(), out);
+            }
+            // Bytes and viewer count only: never the text itself.
+            diag().log(diag_level::info, "clipboard.announce",
+                       "host text copied",
+                       {{"bytes", std::to_string(text.size())},
+                        {"viewers", std::to_string(sent)},
+                        {"active", std::to_string(route.active)},
+                        {"reason",
+                         clipboard_route_reason_name(route.reason)}});
+          };
+          if (post) {
+            post(deliver);
+          } else {
+            deliver();
+          }
+        });
+    // Files copied on the host (Explorer Ctrl+C) are announced to the active
+    // viewer as session-scoped ids, plus the legacy path list for the files
+    // panel. Publish only on a real change; the per-session echo table also
+    // stops a list this machine just materialised for a viewer from echoing
+    // back, while leaving another active viewer eligible.
     const std::shared_ptr<clipboard_service> clipboard = options_.clipboard;
     options_.clipboard->watch_files(
-        [registry, post, clipboard](std::vector<clipboard_file> files) {
+        [registry, post, clipboard](std::vector<clipboard_file> files,
+                                    clipboard_owner owner) {
+          log_clipboard_owner(owner, "in");
+          if (owner == clipboard_owner::self) return;
           if (files.empty()) return;
           publish_clipboard_files(registry, post, std::move(files),
                                   clipboard && clipboard->nested_rdp());
@@ -4823,8 +5005,10 @@ void session_supervisor::run() {
       }
     }
 
-    // Push local (host) clipboard changes to every watching session. Remote
-    // updates already marked their hash before set_text, so they are skipped.
+    // Safety net for a backend whose watcher missed a change. The watcher
+    // normally announces first and records the key, so this poll is a no-op;
+    // when it is not, it uses the same active-session route and per-session
+    // echo table.
     if (options_.clipboard && options_.clipboard->available() &&
         registry_->has_authenticated() &&
         !g_clipboard_sync.fetch_pending.exchange(true)) {
@@ -4835,19 +5019,32 @@ void session_supervisor::run() {
           [registry_ref, post, device](std::string text) {
             g_clipboard_sync.fetch_pending.store(false);
             if (text.empty() || text.size() > 192 * 1024) return;
-            clipboard_reset_files_signature();
             const std::string hash = clipboard_hash(text);
-            if (!clipboard_take_hash(hash)) return;
+            const std::string key = clipboard_text_key(hash, text.size());
+            if (clipboard_same_as_last_text(key)) return;
+            clipboard_reset_files_signature();
+            clipboard_note_last_text(key);
             if (!post) return;
-            post([registry_ref, text, hash, device] {
-              for (const session_info& peer : registry_ref->snapshot()) {
-                if (!peer.authenticated || !peer.transport) continue;
+            post([registry_ref, text, hash, key, device] {
+              const clipboard_route route =
+                  clipboard_active_route(registry_ref);
+              log_clipboard_route(route, "poll", "kind", "text");
+              for (uint32_t id : route.targets) {
+                const std::shared_ptr<session_info> live =
+                    registry_ref->find(id);
+                if (!live || !live->authenticated || !live->transport) {
+                  continue;
+                }
+                const uint64_t now = now_ms();
+                if (g_clipboard_echoes.suppress(id, key, now)) continue;
+                g_clipboard_echoes.remember(
+                    id, key, clipboard_echo_direction::delivered, now);
                 uvcpp_json out;
                 out["type"] = "clipboard-sync";
                 out["text"] = text;
                 out["hash"] = hash;
                 out["chain"] = device;
-                send_json(peer.transport.get(), out);
+                send_json(live->transport.get(), out);
               }
             });
           });

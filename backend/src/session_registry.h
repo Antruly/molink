@@ -91,6 +91,9 @@ struct session_info {
   uint64_t connected_ms = 0;
   uint64_t last_seen_ms = 0;
   uint64_t last_ping_ms = 0;
+  /// Last input message from this viewer. Used to pick the active session for
+  /// clipboard routing when the viewer has no foreground/video-push signal.
+  uint64_t last_input_ms = 0;
   uint64_t frames_sent = 0;
   /// Sequence on the wire (one per frame sent to this session).
   uint32_t out_seq = 0;

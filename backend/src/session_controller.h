@@ -138,10 +138,10 @@ class session_controller final
   void send_lazy_offer_reply(bool ok, bool stream,
                              const std::string& message,
                              bool compat = false);
-  /// Publish the files already on the host clipboard to this session. A viewer
-  /// that connects after the user copied something would otherwise wait for
-  /// the next copy; only the first welcome of a connection does this.
-  void announce_current_clipboard_files();
+  /// Push the host's current clipboard (text and virtual files) to this
+  /// session. Called after authentication and when the viewer switches to
+  /// this tab; `reason` is "connect" or "switch" and goes into the log.
+  void announce_current_clipboard(const char* reason);
   void send_json_string(const std::string& text);
   bool send_file_chunk(uint32_t id, uint64_t offset, const uint8_t* data,
                        std::size_t len);

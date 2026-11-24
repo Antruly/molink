@@ -3320,11 +3320,34 @@ std::vector<std::string> local_clipboard_files() {
   return paths;
 }
 
+/// Who set the clipboard: this process, another application (TeamViewer,
+/// Sunlogin, RustDesk, an RDP client) or an owner Windows cannot name.
+/// Anything except `self` is a normal local copy and must be accepted.
+const wchar_t* clipboard_change_source() {
+  HWND owner = GetClipboardOwner();
+  if (owner == nullptr) owner = GetOpenClipboardWindow();
+  if (owner == nullptr) return L"unknown";
+  DWORD process_id = 0;
+  GetWindowThreadProcessId(owner, &process_id);
+  if (process_id != 0 && process_id == GetCurrentProcessId()) return L"self";
+  return L"external";
+}
+
 /// Read the new local clipboard and decide whether it goes to the host.
 /// Called from WM_CLIPBOARDUPDATE: the listener fires only when the content
 /// changes, so no polling is involved.
 void clipboard_local_changed() {
   if (!g.clipboard_on) return;
+  // A write this process made (a host-pushed value, a received file list, or
+  // the diagnostics copy) is an echo. Log it once so "why was this not sent?"
+  // has an answer, then drop it.
+  const wchar_t* source = clipboard_change_source();
+  native_log(L"clipboard.owner self=" +
+             std::wstring(source == nullptr || wcscmp(source, L"self") != 0
+                              ? L"0"
+                              : L"1") +
+             L" source=" + (source != nullptr ? source : L"unknown"));
+  if (source != nullptr && wcscmp(source, L"self") == 0) return;
   // The host accepts clipboard-sync only after authentication. Before that
   // there is nothing to send, and remembering the value here would swallow
   // the first real copy after the connection comes up.
@@ -3332,20 +3355,20 @@ void clipboard_local_changed() {
       !g.session->authenticated()) {
     return;
   }
-  // Files win over text, like the Web: Explorer's Ctrl+C lists CF_HDROP and
-  // the delayed-render offer is what makes a remote paste work without
-  // sending a byte until the user pastes.
+  // A copy can carry files, text or both. Files are announced as descriptors
+  // (the host fetches ranges only when the user pastes), text is sent
+  // alongside when the clipboard also exposes a text format.
   const std::vector<std::string> files = local_clipboard_files();
   if (!files.empty()) {
     const bool offered = g.session->clipboard_files_changed(files);
     native_log(L"clipboard.files direction=out files=" +
                std::to_wstring(files.size()) +
                (offered ? L" result=offered" : L" result=skipped"));
-    return;
+  } else {
+    // No files on the clipboard: a later copy of the same files is a fresh
+    // offer, even when the host's lazy clipboard was replaced by the text.
+    g.session->clipboard_files_cleared();
   }
-  // No files on the clipboard: a later copy of the same files is a fresh
-  // offer, even when the host's lazy clipboard was replaced by the text.
-  g.session->clipboard_files_cleared();
   const std::wstring wide = local_clipboard_text();
   const std::u16string text = u16_of(wide);
   const molink::clipboard::decision result =

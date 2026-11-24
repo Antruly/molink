@@ -121,6 +121,20 @@ test('a malformed storage record is ignored instead of throwing', () => {
   assert.equal(echo.suppressPath('C:\\a.txt'), true)
 })
 
+test('session scopes keep echo records apart', () => {
+  const storage = new MemoryStorage()
+  const clock1 = clock()
+  const sessionA = new ClipboardEcho(storage, clock1.now, 'tab-a')
+  const sessionB = new ClipboardEcho(storage, clock1.now, 'tab-b')
+  sessionA.rememberFiles([{ name: 'a.txt', size: 12 }])
+  // Session B must still be able to offer the same name/size: that is a
+  // genuine local selection for B, not an echo of A's remote clipboard.
+  assert.equal(sessionB.suppressFiles([{ name: 'a.txt', size: 12 }]), false)
+  assert.equal(sessionA.suppressFiles([{ name: 'a.txt', size: 12 }]), true)
+  assert.ok(storage.getItem(ECHO_STORAGE_KEY + '.tab-a'))
+  assert.equal(storage.getItem(ECHO_STORAGE_KEY + '.tab-b'), null)
+})
+
 test('offers and paths use distinct keys', () => {
   assert.notEqual(echoOfferKey('a.txt', 3), echoPathKey('a.txt'))
 })

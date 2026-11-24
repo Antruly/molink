@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 
+#include "clipboard/clipboard_route.h"
+
 namespace molink {
 
 class lazy_clipboard;
@@ -52,15 +54,21 @@ class clipboard_service {
   /// File clipboard (Explorer Ctrl+C). Backends without it return an empty
   /// list and refuse set_files.
   /// Called on the backend's own thread whenever the local clipboard text
-  /// changes. Used to push what the host user copied to every viewer, which is
-  /// what makes the clipboard behave like RDP's redirection in both
+  /// changes. Used to push what the host user copied to the active viewer,
+  /// which is what makes the clipboard behave like RDP's redirection in both
   /// directions. Implementations poll their platform's change counter.
-  using text_watcher = std::function<void(std::string)>;
+  ///
+  /// `owner` says who set the value. A change this process made itself is
+  /// still reported (once) so the caller can log `clipboard.owner
+  /// self=1 source=self` and drop it; everything else, including `unknown`, is
+  /// a normal local copy and must be accepted.
+  using text_watcher = std::function<void(std::string, clipboard_owner)>;
   virtual void watch(text_watcher callback) { (void)callback; }
 
   /// Called when the local clipboard's *file list* changes (Explorer Ctrl+C).
   /// Viewers show the files the host user copied without a button press.
-  using files_watcher = std::function<void(std::vector<clipboard_file>)>;
+  using files_watcher =
+      std::function<void(std::vector<clipboard_file>, clipboard_owner)>;
   virtual void watch_files(files_watcher callback) { (void)callback; }
 
   using files_callback = std::function<void(std::vector<clipboard_file>)>;

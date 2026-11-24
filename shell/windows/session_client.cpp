@@ -2029,7 +2029,10 @@ bool session_client::set_clipboard_files(
   const std::size_t bytes =
       sizeof(DROPFILES) + characters * sizeof(wchar_t);
   for (int attempt = 0; attempt < 5; ++attempt) {
-    if (!OpenClipboard(nullptr)) {
+    // Own the clipboard with a window from this process so the shell's
+    // WM_CLIPBOARDUPDATE handler can classify the write as self.
+    if (!OpenClipboard(static_cast<HWND>(
+            molink::clipboard_files::clipboard_owner_window()))) {
       Sleep(10);
       continue;
     }

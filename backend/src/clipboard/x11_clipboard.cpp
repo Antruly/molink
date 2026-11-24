@@ -198,7 +198,9 @@ class x11_clipboard final : public clipboard_service {
             if (text != last_text_) {
               last_text_ = text;
               last_files_.clear();
-              if (watch_callback_) watch_callback_(text);
+              if (watch_callback_) {
+                watch_callback_(text, owner_snapshot());
+              }
             }
           }
         }
@@ -235,9 +237,37 @@ class x11_clipboard final : public clipboard_service {
         if (signature == last_files_) continue;
         last_files_ = signature;
         last_text_.clear();
-        if (files_callback_) files_callback_(std::move(files));
+        if (files_callback_) {
+          files_callback_(std::move(files), owner_snapshot());
+        }
       }
     });
+  }
+
+  /// Who owns CLIPBOARD right now. Xlib is not thread-safe, so the event-loop
+  /// thread publishes the answer and the watcher only reads this enum. A value
+  /// of `self` still reaches the callback once: the supervisor logs it and
+  /// drops it, which is what makes "why was this not sent?" answerable.
+  clipboard_owner owner_snapshot() const {
+    switch (owner_state_.load(std::memory_order_relaxed)) {
+      case 1:
+        return clipboard_owner::self;
+      case 2:
+        return clipboard_owner::external;
+      default:
+        return clipboard_owner::unknown;
+    }
+  }
+
+  void update_owner_state() {
+    const Window owner = XGetSelectionOwner(display_, clipboard_);
+    int state = 0;
+    if (owner == window_) {
+      state = 1;
+    } else if (owner != None) {
+      state = 2;
+    }
+    owner_state_.store(state, std::memory_order_relaxed);
   }
 
   bool set_files(const std::vector<std::string>& paths) override {
@@ -318,6 +348,7 @@ class x11_clipboard final : public clipboard_service {
     const int fd = ConnectionNumber(display_);
     while (running_.load()) {
       pump_commands();
+      update_owner_state();
 
       struct pollfd descriptors[2];
       descriptors[0].fd = fd;
@@ -347,7 +378,10 @@ class x11_clipboard final : public clipboard_service {
             handle_property_notify(event.xproperty);
             break;
           case SelectionClear:
-            if (event.xselectionclear.selection == clipboard_) owns_ = false;
+            if (event.xselectionclear.selection == clipboard_) {
+              owns_ = false;
+              owner_state_.store(2, std::memory_order_relaxed);
+            }
             break;
           default:
             break;
@@ -420,6 +454,7 @@ class x11_clipboard final : public clipboard_service {
     XSetSelectionOwner(display_, clipboard_, window_, CurrentTime);
     XFlush(display_);
     owns_ = XGetSelectionOwner(display_, clipboard_) == window_;
+    owner_state_.store(owns_ ? 1 : 0, std::memory_order_relaxed);
     if (!owns_) {
       owned_text_.clear();
       owned_uri_list_.clear();
@@ -684,6 +719,9 @@ class x11_clipboard final : public clipboard_service {
   std::string owned_uri_list_;
   std::string owned_gnome_;
   bool owns_ = false;
+  /// 0 = no owner/unknown, 1 = this process, 2 = another client. Published by
+  /// the event loop (Xlib is not thread-safe) for the watcher thread.
+  std::atomic<int> owner_state_{0};
 
   bool getting_ = false;
   bool getting_files_ = false;
