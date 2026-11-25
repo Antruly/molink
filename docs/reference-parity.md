@@ -1,26 +1,26 @@
-# 与 RustDesk 的功能对照
+# 与参考实现的功能对照
 
-对照基准：RustDesk `51f9439`（浅克隆，只读参考）。
+对照基准：参考实现（`51f9439`，只读对照）。
 我方：0.12.21 之后（#70 #71 #73 #74 #75 #77 #78 #79 #80 #81 #82 #85 #87 #88 已合入）。
 
 这份文档只记录**有代码证据**的结论；没有验证过的项目标「未验证」，不猜。
 
 ## 一、结论
 
-**强于 RustDesk 的地方**
+**强于参考实现的地方**
 
 | 项 | 证据 |
 |---|---|
-| 脏区网格（128 px cell + tile 时钟） | `backend/src/capture/capture.cpp` `update_cell_clock`；RustDesk 整屏编码（`src/server/video_service.rs:818-886`） |
-| 输入后立即采集 | `capture.h` `pending_input_us()` + `wait_until()`；RustDesk 只按帧间隔取帧 |
-| 嵌套 RDP 剪贴板识别 | `windows_clipboard.cpp` 识别 `mstsc.exe` / `TscShellContainerClass` / RDP 临时路径；RustDesk 无专门处理 |
+| 脏区网格（128 px cell + tile 时钟） | `backend/src/capture/capture.cpp` `update_cell_clock`；参考实现整屏编码（`src/server/video_service.rs:818-886`） |
+| 输入后立即采集 | `capture.h` `pending_input_us()` + `wait_until()`；参考实现只按帧间隔取帧 |
+| 嵌套 RDP 剪贴板识别 | `windows_clipboard.cpp` 识别 `mstsc.exe` / `TscShellContainerClass` / RDP 临时路径；参考实现无专门处理 |
 | 平台原生虚拟文件 | Windows OLE `IDataObject`（`windows_virtual_clipboard.cpp`）、Linux FUSE（`x11_clipboard_fuse.cpp`）、`IStream` 按 256 KiB 拉取 |
-| 输入错误可诊断 | `bad_input` 带具体 code + 5 s 限流 + 诊断日志；RustDesk 只写日志 |
-| 路径穿越 / Windows 保留名校验 | `file_transfer.cpp` `parse_relative_path` + `is_reserved_name`；RustDesk 只查 `..` |
+| 输入错误可诊断 | `bad_input` 带具体 code + 5 s 限流 + 诊断日志；参考实现只写日志 |
+| 路径穿越 / Windows 保留名校验 | `file_transfer.cpp` `parse_relative_path` + `is_reserved_name`；参考实现只查 `..` |
 
-**仍落后于 RustDesk 的地方**
+**仍落后于 参考实现的地方**
 
-| 项 | 现状 | RustDesk |
+| 项 | 现状 | 参考实现|
 |---|---|---|
 | Wayland | 无输入注入、无剪贴板后端（README 已注明回退合成帧） | uinput + RemoteDesktop portal，`wayland-data-control` 剪贴板 |
 | 硬件编码 | 只有 NVENC | VAAPI / VideoToolbox / Media Foundation |
@@ -32,7 +32,7 @@
 
 ### 采集与编码
 
-| 能力 | 我方 | RustDesk | 判定 |
+| 能力 | 我方 | 参考实现| 判定 |
 |---|---|---|---|
 | X11 采集 | XDamage + XShm | `libs/scrap` X11 | 对等 |
 | Windows 采集 | DXGI Desktop Duplication + GDI 回退 | DXGI + GDI 回退 | 对等（HDR tonemap 仍缺） |
@@ -47,7 +47,7 @@
 
 ### 传输
 
-| 能力 | 我方 | RustDesk | 判定 |
+| 能力 | 我方 | 参考实现| 判定 |
 |---|---|---|---|
 | 视频队列 | **丢最旧 delta**（#71） | 队列深度 1 | 对等 |
 | TCP 背压 | 只丢视频，不断链（#71） | 阻塞采集 | 对等 |
@@ -57,7 +57,7 @@
 
 ### 输入
 
-| 能力 | 我方 | RustDesk | 判定 |
+| 能力 | 我方 | 参考实现| 判定 |
 |---|---|---|---|
 | 键位映射 | **物理位**（evdev+8 / scan code，#73） | Map / Translate / Legacy 三模式 | 对等（模式切换仍缺） |
 | 桌面 IME | 有（#73） | Unicode / 序列输入 | 对等 |
@@ -72,7 +72,7 @@
 
 ### 剪贴板
 
-| 能力 | 我方 | RustDesk | 判定 |
+| 能力 | 我方 | 参考实现| 判定 |
 |---|---|---|---|
 | 文本 | 双向（#74 按复制事件判定） | 双向 + owner 标记 | 对等 |
 | 图片 | PNG 双向（#79） | 支持 PNG/SVG | 对等 |
@@ -88,7 +88,7 @@
 
 ### 文件传输
 
-| 能力 | 我方 | RustDesk | 判定 |
+| 能力 | 我方 | 参考实现| 判定 |
 |---|---|---|---|
 | 断点续传 | 有（#78） | 有（`.download` + digest） | 对等 |
 | 丢块恢复 | ack 信用窗口（#70） | per-file digest + confirm | 对等 |
@@ -102,7 +102,7 @@
 
 ### 安全
 
-| 能力 | 我方 | RustDesk | 判定 |
+| 能力 | 我方 | 参考实现| 判定 |
 |---|---|---|---|
 | 验证码 | 6 位、单次/多次、20 天轮换 | 6 位 | 对等 |
 | 失败限流 | 5 次起 30s→21600s，第 6 轮永久 | 同级别 | 对等 |
@@ -114,7 +114,7 @@
 
 ### 音频与其它
 
-| 能力 | 我方 | RustDesk | 判定 |
+| 能力 | 我方 | 参考实现| 判定 |
 |---|---|---|---|
 | 音频编码 | 裸 PCM（默认 24 kHz 单声道 ≈384 kbps；可选 48k 立体声 / 16k 单声道） | Opus ~64 kbps | 部分追平（静音门已做，编码器仍未压缩） |
 | 静音门 | 有（-60 dBFS 连续 5 包停发，#88） | 有 | 对等 |

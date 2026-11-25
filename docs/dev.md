@@ -442,7 +442,7 @@ React vs Vue3	选择 React。Tauri 对两者无感知，但 React + Zustand + sh
 Linux Arm64 AppImage	使用 arm-runner-action 模拟 Arm 环境编译；一阶段可标记实验性。
 壳层孤儿进程	双向心跳 + IPC 管道 EOF 检测；壳层强制死亡时 molink-core 超时自退出。
 编码输出格式是唯一契约	自定义 UDP 和 WebRTC RTCDataChannel 共享同一套瓦片帧包，只改变承载方式。
-GPL/AGPL 污染	libuvcpp、Zstd、LZ4、Tauri 均为宽松许可；不复制 RustDesk 代码，仅参照公开架构思想独立实现。
+GPL/AGPL 污染	libuvcpp、Zstd、LZ4、Tauri 均为宽松许可；不复制任何第三方代码，仅按公开架构思想独立实现。
 MIT 合规	所有分发资产附带 LICENSE；molink-core 和壳层二进制均保留版权声明。
 text
 
