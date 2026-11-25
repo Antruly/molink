@@ -187,6 +187,8 @@ app_settings load_settings() {
       settings.file_sandbox = parse_bool(value, false);
     } else if (key == "file_sandbox_roots") {
       settings.file_sandbox_roots = value;
+    } else if (key == "terminal_enabled") {
+      settings.terminal_enabled = parse_bool(value, false);
     } else if (key == "ip_allowlist") {
       settings.ip_allowlist = value;
     } else if (key == "av1_enabled") {
@@ -326,6 +328,8 @@ void save_settings(const app_settings& settings) {
          << "\n";
   stream << "file_sandbox=" << (settings.file_sandbox ? 1 : 0) << "\n";
   stream << "file_sandbox_roots=" << settings.file_sandbox_roots << "\n";
+  stream << "terminal_enabled="
+         << (settings.terminal_enabled ? 1 : 0) << "\n";
   // The settings file is line-oriented; a textarea's newlines become spaces.
   stream << "ip_allowlist=" << single_line(settings.ip_allowlist) << "\n";
   stream << "av1_enabled=" << (settings.av1_enabled ? 1 : 0) << "\n";

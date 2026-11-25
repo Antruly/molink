@@ -16,6 +16,7 @@
 #include <thread>
 
 #include <net/uvcpp_tcp_client.h>
+#include <handle/uvcpp_timer.h>
 #include <uvcpp/uvcpp_config.h>
 #include <webapp/uvcpp_web_app.h>
 #include <webapp/uvcpp_web_json.h>
@@ -57,6 +58,8 @@
 #include "version.h"
 #include "service_control.h"
 #include "session_controller.h"
+#include "terminal/terminal_service.h"
+#include "terminal/terminal_ws.h"
 #include "transport/web_ws_transport.h"
 #include "transport/ws_transport.h"
 
@@ -1096,6 +1099,20 @@ int main(int argc, char** argv) {
       app.loop(),
       [&app](std::function<void()> fn) { app.post(std::move(fn)); },
       server_client_state, registry, session_opts);
+
+  // Remote terminal. The manager is host-global so a viewer disconnect only
+  // detaches: the PTY keeps running and its output keeps filling the ring for
+  // `term-attach`. The timer drains every session even with no viewer, which
+  // is also what prevents a full PTY from blocking the child.
+  auto terminal = std::make_shared<terminal_service>();
+  auto terminal_timer = std::make_unique<uvcpp::uvcpp_timer>(app.loop());
+  if (terminal_timer->init() == 0) {
+    terminal_timer->start(
+        [terminal](uvcpp::uvcpp_timer*) { terminal->poll(); }, 8, 8);
+  } else {
+    terminal_timer.reset();
+  }
+
   register_http_routes(app, deps);
   app.websocket("/ws/session", make_ws_handler(registry, session_opts));
 #if MOLINK_HAVE_H2_WS
@@ -1125,6 +1142,10 @@ int main(int argc, char** argv) {
   app.websocket("/ws/direct", make_direct_handler(
       [&app](std::function<void()> fn) { app.post(std::move(fn)); },
       app.loop()));
+  // Host terminal. Registered even when the setting is off: the handler
+  // answers `terminal_disabled` and logs the rejection, which tells a client
+  // apart from a missing endpoint.
+  app.websocket("/ws/terminal", make_terminal_handler(terminal, auth));
 
   if (!web_root.empty()) {
     uvcpp::uvcpp_web_static_options static_options;
