@@ -66,8 +66,20 @@ test('control messages survive a JSON round trip', () => {
     { type: 'term-opened', id: 7 },
   )
   assert.deepEqual(
+    roundTrip({ type: 'term-attached', id: 7, seq: 4096, truncated: false }),
+    { type: 'term-attached', id: 7, seq: 4096, truncated: false },
+  )
+  assert.deepEqual(
+    roundTrip({ type: 'term-attached', id: 7, seq: 912, truncated: true }),
+    { type: 'term-attached', id: 7, seq: 912, truncated: true },
+  )
+  assert.deepEqual(
     roundTrip({ type: 'error', code: 'terminal_disabled', message: 'off' }),
     { type: 'error', code: 'terminal_disabled', message: 'off' },
+  )
+  assert.deepEqual(
+    roundTrip({ type: 'error', code: 'term_not_found', id: 9 }),
+    { type: 'error', code: 'term_not_found', id: 9 },
   )
 })
 
@@ -84,6 +96,30 @@ test('unknown or malformed control messages decode to null', () => {
   assert.equal(decodeControl('{"type":"term-resize","id":1,"cols":80}'), null)
   assert.equal(decodeControl('{"type":"term-exit","id":1}'), null)
   assert.equal(decodeControl('{"type":"error"}'), null)
+  // term-attached needs a boolean truncated flag, not just an id and seq.
+  assert.equal(decodeControl('{"type":"term-attached","id":1,"seq":2}'), null)
+  assert.equal(
+    decodeControl('{"type":"term-attached","id":1,"seq":2,"truncated":"yes"}'),
+    null,
+  )
+})
+
+test('errors name the terminal they belong to', () => {
+  // The host puts the id on term_not_found (and resolve failures) so the page
+  // can flag the matching tab instead of guessing from attach order.
+  const named = decodeControl(
+    '{"type":"error","code":"term_not_found","message":"terminal not found","id":9}',
+  )
+  assert.deepEqual(named, {
+    type: 'error',
+    code: 'term_not_found',
+    message: 'terminal not found',
+    id: 9,
+  })
+  // Handshake errors are not tied to a terminal and carry no id.
+  const unnamed = decodeControl('{"type":"error","code":"terminal_disabled"}')
+  assert.deepEqual(unnamed, { type: 'error', code: 'terminal_disabled' })
+  assert.equal('id' in unnamed, false)
 })
 
 test('input frames carry kind 0x02, a little-endian u64 id and raw bytes', () => {

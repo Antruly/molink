@@ -1,6 +1,6 @@
-// Host PTY, the output ring and the session bookkeeping. POSIX-only: the
-// Windows build compiles the stub backend and skips the tests until ConPTY
-// lands in the next batch.
+// Host PTY, the output ring and the session bookkeeping. The runtime tests are
+// POSIX-only; the Windows build has its own ConPTY backend (checked by
+// compiling) and does not register this test.
 #include <cstdio>
 
 #if !defined(_WIN32)
@@ -18,6 +18,7 @@
 #include <thread>
 #include <vector>
 
+#include "diag_log.h"
 #include "terminal/pty.h"
 #include "terminal/terminal_service.h"
 
@@ -210,6 +211,70 @@ void test_ring_buffer() {
          "small ring keeps the newest bytes in order");
 }
 
+/// A viewer that goes away must not leave the PTYs it opened behind. A
+/// background (`std::chrono::hours(1)`) idle timeout keeps the reclaim path
+/// honest: nothing but release_viewer() may close this session.
+void test_viewer_disconnect_reclaims() {
+  using namespace std::chrono;
+  molink::terminal_service service(molink::terminal_service::kDefaultRingBytes,
+                                   hours(1));
+  const uint64_t viewer = service.register_viewer();
+  std::string error;
+  const uint64_t id =
+      service.open(viewer, "/bin/sh -c 'sleep 30'", 80, 24, error);
+  expect(id != 0, "viewer opens a terminal");
+  if (id == 0) {
+    std::fprintf(stderr, "  open error: %s\n", error.c_str());
+    return;
+  }
+  expect(service.session_count() == 1, "the terminal is registered");
+
+  service.release_viewer(viewer);
+
+  expect(service.session_count() == 0,
+         "viewer disconnect reclaims the terminal it created");
+  expect(!service.has_session(id), "the reclaimed terminal id is gone");
+
+  const std::string log = molink::diag().tail(20);
+  expect(log.find("term.reclaim") != std::string::npos,
+         "the reclaim is logged as term.reclaim");
+  expect(log.find("reason=disconnect") != std::string::npos,
+         "the reclaim log carries reason=disconnect");
+  expect(log.find("id=" + std::to_string(id)) != std::string::npos,
+         "the reclaim log names the terminal id");
+}
+
+/// A viewer that only attached to someone else's terminal may leave without
+/// taking the process with it.
+void test_viewer_disconnect_keeps_attached_terminal() {
+  using namespace std::chrono;
+  molink::terminal_service service(molink::terminal_service::kDefaultRingBytes,
+                                   hours(1));
+  const uint64_t owner = service.register_viewer();
+  const uint64_t guest = service.register_viewer();
+  std::string error;
+  const uint64_t id =
+      service.open(owner, "/bin/sh -c 'sleep 30'", 80, 24, error);
+  expect(id != 0, "owner opens a terminal");
+  if (id == 0) {
+    std::fprintf(stderr, "  open error: %s\n", error.c_str());
+    return;
+  }
+  std::vector<uint8_t> replay;
+  uint64_t replay_seq = 0;
+  bool truncated = false;
+  expect(service.attach(guest, id, 0, replay, replay_seq, truncated, error),
+         "a second viewer attaches to it");
+
+  service.release_viewer(guest);
+  expect(service.session_count() == 1,
+         "the guest's disconnect leaves the owner's terminal running");
+
+  service.release_viewer(owner);
+  expect(service.session_count() == 0,
+         "the owner's disconnect reclaims it");
+}
+
 }  // namespace
 
 int main() {
@@ -220,6 +285,8 @@ int main() {
   test_resize();
   test_kill_reaps_process();
   test_ring_buffer();
+  test_viewer_disconnect_reclaims();
+  test_viewer_disconnect_keeps_attached_terminal();
   std::printf("%d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;
 }

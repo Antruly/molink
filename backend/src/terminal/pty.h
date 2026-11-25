@@ -1,21 +1,34 @@
 #pragma once
 
 #include <cstddef>
+#include <memory>
 #include <string>
 
 namespace molink {
 
+/// Platform-private backend state (the ConPTY handles on Windows). Defined in
+/// pty.cpp so <windows.h> — and its min()/max() macros — never reaches this
+/// header's other includers.
+struct pty_impl;
+
 /// A spawned pseudo-terminal. `fd` is the master side; `pid` is the child
-/// process that owns the slave side. On Windows the backend is not there yet
-/// (ConPTY is the next batch), so pty_spawn() reports an explicit error and
-/// pty_valid() stays false.
+/// process that owns the slave side. On Windows `fd` stays -1 and the ConPTY
+/// handles live in `impl`; use pty_valid() instead of inspecting `fd`.
+///
+/// The handle is copyable (terminal_session stores one by value). On Windows
+/// the copies share `impl`, whose destructor releases the handles, so a stray
+/// copy cannot leak pipes or a pseudoconsole.
 struct pty_handle {
   int fd = -1;
   int pid = -1;
   /// Set once waitpid() has collected the child; exit_code is valid then.
   bool reaped = false;
   int exit_code = -1;
+  std::shared_ptr<pty_impl> impl;
 };
+
+/// Whether this handle refers to a live PTY (spawn succeeded, not killed yet).
+bool pty_valid(const pty_handle& handle);
 
 /// Whether this build has a usable PTY backend.
 bool pty_supported();

@@ -18,9 +18,10 @@ class auth_state;
 /// can re-attach with `term-attach` and replay from where it left off. Nothing
 /// is base64-encoded.
 ///
-/// The host-global terminal_service keeps sessions alive across viewer
-/// disconnects; this handler only owns the connection-scoped viewer identity,
-/// its listener subscription and the set of ids it is currently attached to.
+/// This handler owns the connection-scoped viewer identity, its listener
+/// subscription and the set of ids it is currently attached to. When the
+/// socket closes, the service reclaims the terminals this viewer opened
+/// (`term.reclaim`), so a dropped page cannot leave orphan PTYs behind.
 uvcpp::uvcpp_web_ws_handler make_terminal_handler(
     std::shared_ptr<terminal_service> service,
     std::shared_ptr<auth_state> auth);

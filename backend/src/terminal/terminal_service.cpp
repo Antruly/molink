@@ -114,6 +114,9 @@ class terminal_session {
 
 struct terminal_service::entry {
   std::unique_ptr<terminal_session> session;
+  /// Viewer that opened the terminal. A viewer disconnect reclaims exactly
+  /// the sessions it created; terminals it merely attached to keep running.
+  uint64_t owner = 0;
   std::set<uint64_t> viewers;
   std::chrono::steady_clock::time_point last_active;
 };
@@ -145,7 +148,28 @@ const terminal_service::entry* terminal_service::find(uint64_t id) const {
 uint64_t terminal_service::register_viewer() { return next_viewer_++; }
 
 void terminal_service::release_viewer(uint64_t viewer) {
-  for (auto& item : sessions_) item.second->viewers.erase(viewer);
+  // A viewer that goes away (WS closed, page reloaded) must not leave the
+  // processes it opened behind. Sessions it merely attached to belong to
+  // another viewer and keep running; a host-side disconnect is covered by the
+  // idle timeout instead.
+  for (auto it = sessions_.begin(); it != sessions_.end();) {
+    entry& value = *it->second;
+    value.viewers.erase(viewer);
+    if (value.owner != viewer) {
+      ++it;
+      continue;
+    }
+    const uint64_t id = it->first;
+    if (value.session && !value.session->exited()) {
+      pty_kill(value.session->handle());
+    }
+    std::vector<diag_field> fields;
+    fields.push_back({"id", std::to_string(id)});
+    fields.push_back({"reason", "disconnect"});
+    diag().log(diag_level::info, "term.reclaim",
+               "viewer disconnected; terminal reclaimed", fields);
+    it = sessions_.erase(it);
+  }
 }
 
 std::size_t terminal_service::live_count(uint64_t viewer) const {
@@ -176,7 +200,7 @@ uint64_t terminal_service::open(uint64_t viewer, const std::string& shell,
   const std::string command = shell.empty() ? pty_default_shell() : shell;
   std::string spawn_error;
   pty_handle handle = pty_spawn(command, cols, rows, spawn_error);
-  if (handle.fd < 0) {
+  if (!pty_valid(handle)) {
     err = spawn_error.empty() ? "failed to spawn terminal" : spawn_error;
     diag().log(diag_level::warn, "term.rejected",
                "terminal spawn failed",
@@ -191,6 +215,7 @@ uint64_t terminal_service::open(uint64_t viewer, const std::string& shell,
   auto entry = std::make_unique<terminal_service::entry>();
   entry->session = std::make_unique<terminal_session>(
       id, handle, command, cols, rows, ring_bytes_);
+  entry->owner = viewer;
   entry->viewers.insert(viewer);
   entry->last_active = std::chrono::steady_clock::now();
   sessions_[id] = std::move(entry);
