@@ -22,7 +22,10 @@ namespace molink {
 /// `/ws/session` WebSocket this proxy has always used. `loop` owns the QUIC
 /// client's UDP socket, so it must be the app loop. Local-only: the page is
 /// served by this core.
+/// `host_only` is read per connection. In host_only mode only a loopback
+/// target is accepted; anything else is closed with `host_only_mode`.
 uvcpp::uvcpp_web_ws_handler make_direct_handler(
-    std::function<void(std::function<void()>)> post, uvcpp::uvcpp_loop* loop);
+    std::function<void(std::function<void()>)> post, uvcpp::uvcpp_loop* loop,
+    std::function<bool()> host_only = {});
 
 }  // namespace molink

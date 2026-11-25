@@ -203,6 +203,9 @@ export interface ServerState {
   avatar?: string
   platform?: string
   allow_remote_access?: boolean
+  /// This core refuses every outbound session except a loopback
+  /// self-connection. Optional so an older core (no field) renders normally.
+  host_only?: boolean
   server?: ServerInfo
 }
 

@@ -45,6 +45,7 @@
 #include "capture/av1_frame.h"
 #include "capture/pipeline_stats.h"
 #include "diag_log.h"
+#include "net/outbound_policy.h"
 #include "surface/frame_surface.h"
 #include "compression.h"
 #include "protocol/frame_packet.h"
@@ -1181,8 +1182,10 @@ class direct_proxy final : public std::enable_shared_from_this<direct_proxy> {
 }  // namespace
 
 uvcpp::uvcpp_web_ws_handler make_direct_handler(
-    std::function<void(std::function<void()>)> post, uvcpp::uvcpp_loop* loop) {
-  return [post = std::move(post), loop](uvcpp::uvcpp_web_ws_request& request) {
+    std::function<void(std::function<void()>)> post, uvcpp::uvcpp_loop* loop,
+    std::function<bool()> host_only) {
+  return [post = std::move(post), loop, host_only = std::move(host_only)](
+             uvcpp::uvcpp_web_ws_request& request) {
     uvcpp::uvcpp_ws_connection* conn = request.connection();
     if (conn == nullptr) return;
     if (!is_loopback_peer(request.peer_ip())) {
@@ -1201,6 +1204,14 @@ uvcpp::uvcpp_web_ws_handler make_direct_handler(
     if (port_number <= 0 || port_number > 65535) {
       conn->close(uvcpp::ws_close_code::POLICY_VIOLATION,
                   "port must be 1..65535");
+      return;
+    }
+    // Check the address this core is about to dial, never a caller-supplied
+    // "source": only loopback survives host_only mode.
+    if (gate_outbound_session(host_only ? host_only() : false, *host) ==
+        outbound_verdict::host_only) {
+      conn->close(uvcpp::ws_close_code::POLICY_VIOLATION,
+                  kHostOnlyErrorCode);
       return;
     }
     auto proxy =

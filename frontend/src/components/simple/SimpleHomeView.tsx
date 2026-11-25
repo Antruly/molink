@@ -2,6 +2,7 @@ import { Monitor } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { ApiError, lookupDevice } from '../../lib/api'
+import { homeLayout } from '../../lib/host-only'
 import { parseTarget } from '../../lib/target'
 import { useAppStore, type SessionIntent } from '../../store/app'
 import { ServiceNotice } from '../ServiceNotice'
@@ -31,6 +32,13 @@ export function SimpleHomeView() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
+
+  // Host-only: every outbound target is hidden and the only action is the
+  // loopback self-connection. The core enforces the same rule.
+  const layout = homeLayout(
+    server?.host_only,
+    server?.bound_port ?? server?.port,
+  )
 
   const flash = (message: string) => {
     setNotice(message)
@@ -145,6 +153,40 @@ export function SimpleHomeView() {
     } finally {
       setBusy(false)
     }
+  }
+
+  if (layout.hostOnly) {
+    const target = layout.localScreen
+    return (
+      <div className="mx-auto w-full max-w-2xl px-4 py-10 sm:px-6">
+        <section className="card flex flex-col items-center gap-3 p-6 text-center">
+          <Monitor size={28} className="text-accent" />
+          <p className="max-w-md text-[13px] leading-relaxed text-muted">
+            {t('simple.hostOnlyNotice')}
+          </p>
+          <button
+            type="button"
+            className="btn btn-primary h-10 gap-2 px-4 text-[12px]"
+            disabled={target === null}
+            onClick={() => {
+              if (!target) return
+              createSession(
+                target.host,
+                target.port,
+                token,
+                t('simple.viewLocalScreen'),
+                false,
+                token === '',
+                preferredMode,
+              )
+            }}
+          >
+            <Monitor size={15} />
+            {t('simple.viewLocalScreen')}
+          </button>
+        </section>
+      </div>
+    )
   }
 
   return (

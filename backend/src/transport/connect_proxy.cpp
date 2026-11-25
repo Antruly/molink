@@ -20,6 +20,7 @@
 #include "capture/av1_frame.h"
 #include "surface/frame_surface.h"
 #include "compression.h"
+#include "net/outbound_policy.h"
 #include "protocol/frame_packet.h"
 #include "transport/switchable_transport.h"
 
@@ -582,14 +583,22 @@ class connect_proxy final
 
 uvcpp::uvcpp_web_ws_handler make_connect_handler(
     std::shared_ptr<p2p_manager> manager,
-    std::function<void(std::function<void()>)> post) {
-  return [manager, post = std::move(post)](uvcpp::uvcpp_web_ws_request& request) {
+    std::function<void(std::function<void()>)> post,
+    std::function<bool()> host_only) {
+  return [manager, post = std::move(post), host_only = std::move(host_only)](
+             uvcpp::uvcpp_web_ws_request& request) {
     uvcpp::uvcpp_ws_connection* conn = request.connection();
     if (conn == nullptr) return;
     const std::string* target = request.query("target");
     if (target == nullptr || target->empty()) {
       conn->close(uvcpp::ws_close_code::POLICY_VIOLATION,
                   "target device id is required");
+      return;
+    }
+    if (gate_outbound_session(host_only ? host_only() : false, *target) ==
+        outbound_verdict::host_only) {
+      conn->close(uvcpp::ws_close_code::POLICY_VIOLATION,
+                  kHostOnlyErrorCode);
       return;
     }
     const std::string* relay = request.query("relay");

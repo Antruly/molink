@@ -1172,6 +1172,21 @@ export class MolinkClient {
       // frame and the close can race, and the proxy may only deliver the
       // close.
       const closeReason = event.reason ?? ''
+      // The local core refused an outbound session because this machine is a
+      // host-only target. Terminal: falling back to the direct socket or the
+      // device's own socket would undo the policy the core just applied.
+      if (closeReason === 'host_only_mode' ||
+          this.lastErrorCode === 'host_only_mode') {
+        this.lastErrorCode = 'host_only_mode'
+        this.lastErrorMessage = 'host_only_mode'
+        logDiag('error', 'session.rejected', 'host_only_mode', {
+          target: `${host}:${port}`,
+          code: 'host_only_mode',
+        })
+        this.handlers.onError?.('host_only_mode', 'host_only_mode')
+        this.handlers.onPhase?.('error', 'host_only_mode')
+        return
+      }
       const reasonAuth = /invalid token|unauthorized|locked|too many|banned|access denied/i
           .test(closeReason)
       const policyError = reasonAuth ||
