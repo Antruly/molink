@@ -11,6 +11,7 @@ import {
   localEntriesAt,
   normalizeRelativePath,
   relativeUnder,
+  remoteEntryPath,
   safeTargetSegments,
   sourceFromInputFiles,
   summarizeTask,
@@ -311,6 +312,27 @@ test('remote names are sanitized into safe local path segments', () => {
     'a_b', 'c_.txt',
   ])
   assert.deepEqual(safeTargetSegments('', 'file'), ['file'])
+})
+
+test('a pathless listing row is rebuilt from its folder, never unknown.bin', () => {
+  // Regular listings stop sending absolute paths; the displayed folder is
+  // still an absolute host path, so the entry can be reconstructed exactly.
+  assert.equal(
+    remoteEntryPath('/home/u/docs', { name: 'a.txt' }),
+    '/home/u/docs/a.txt',
+  )
+  assert.equal(
+    remoteEntryPath('C:\\Users\\u\\docs', { name: 'a.txt' }),
+    'C:\\Users\\u\\docs\\a.txt',
+  )
+  // A roots row carries its own path, which wins over the synthetic join.
+  assert.equal(
+    remoteEntryPath('', { name: 'C:', path: 'C:\\' }),
+    'C:\\',
+  )
+  // No invented fallback name: an unusable row yields '' so the caller can
+  // report the path problem instead of writing a file called unknown.bin.
+  assert.equal(remoteEntryPath('/home/u', { name: '  ' }), '')
 })
 
 test('a webkitdirectory FileList becomes a rooted flat tree', () => {
