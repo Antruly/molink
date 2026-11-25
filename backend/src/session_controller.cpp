@@ -1781,6 +1781,9 @@ void send_welcome(session_transport* transport, const session_info& session,
     const audio_format format = opt.audio->format();
     j["audio"] = true;
     j["audio_format"]["sample_rate"] = format.sample_rate;
+    // `rate` is the name the page reads first; sample_rate stays for older
+    // clients that already know the field.
+    j["audio_format"]["rate"] = format.sample_rate;
     j["audio_format"]["channels"] = format.channels;
     j["audio_format"]["bits"] = format.bits;
   } else {
@@ -2661,14 +2664,30 @@ void session_controller::send_clipboard_file_reply(uint32_t id,
   }
 }
 
-void session_controller::send_audio(std::vector<uint8_t> pcm) {
+void session_controller::send_audio(audio_pcm_ptr pcm, bool resume) {
   std::shared_ptr<session_transport> transport = transport_.lock();
-  if (!transport || !transport->is_open() || pcm.empty()) return;
+  if (!transport || !transport->is_open() || !pcm || pcm->empty()) return;
+  if (resume) {
+    // Announce the new format before the first packet. The same packet also
+    // carries the resume flag, so a WebRTC audio channel (which is unordered
+    // relative to this control message) still resets the viewer's buffer.
+    const audio_format format =
+        options_.audio ? options_.audio->format() : audio_format{};
+    uvcpp_json marker;
+    marker["type"] = "audio";
+    marker["action"] = "resume";
+    marker["rate"] = format.sample_rate;
+    marker["channels"] = format.channels;
+    send_json(transport.get(), marker);
+  }
+  const uint16_t flags =
+      resume ? protocol::kPacketFlagAudioResume : 0;
   std::vector<uint8_t> out;
   std::string err;
   if (protocol::encode_packet_into(
-          out, static_cast<uint8_t>(protocol::packet_type::audio), 0, 0, 0,
-          epoch_us(), pcm.data(), pcm.size(), err)) {
+          out, static_cast<uint8_t>(protocol::packet_type::audio), flags, 0,
+          0, epoch_us(), reinterpret_cast<const uint8_t*>(pcm->data()),
+          pcm->size() * sizeof(int16_t), err)) {
     if (send_realtime_audio(session_, out)) return;
     transport->send_binary(transport_channel::audio, out.data(), out.size());
   }
@@ -4060,9 +4079,11 @@ void session_controller::on_text(const std::string& text) {
       auto post = options_.post;
       std::string audio_error;
       audio_subscription_ = options_.audio->subscribe(
-          [weak, post](std::vector<uint8_t> pcm) {
-            auto deliver = [weak, pcm = std::move(pcm)]() mutable {
-              if (auto self = weak.lock()) self->send_audio(std::move(pcm));
+          [weak, post](audio_pcm_ptr pcm, bool resume) {
+            auto deliver = [weak, pcm = std::move(pcm), resume]() mutable {
+              if (auto self = weak.lock()) {
+                self->send_audio(std::move(pcm), resume);
+              }
             };
             if (post) {
               post(std::move(deliver));
@@ -4080,6 +4101,7 @@ void session_controller::on_text(const std::string& text) {
       reply["type"] = "audio";
       reply["action"] = "started";
       reply["sample_rate"] = format.sample_rate;
+      reply["rate"] = format.sample_rate;
       reply["channels"] = format.channels;
       reply["bits"] = format.bits;
       send_json(transport.get(), reply);
@@ -5801,6 +5823,31 @@ void session_supervisor::run() {
         fields.push_back(
             {"window_ms", std::to_string(stats.window_us / 1000)});
         diag().log(diag_level::info, "video.pipeline", std::string(), fields);
+      }
+    }
+
+    // Audio bandwidth: sent and gate-muted packets, the window rate, and the
+    // format that was actually on the wire. A silent stretch reports
+    // sent_packets=0 with kbps near zero; the ratio between quality tiers is
+    // visible with one viewer.
+    if (options_.audio) {
+      const auto now = std::chrono::steady_clock::now();
+      if (last_audio_stats_at_.time_since_epoch().count() == 0) {
+        last_audio_stats_at_ = now;
+      } else if (now - last_audio_stats_at_ >= std::chrono::seconds(5)) {
+        last_audio_stats_at_ = now;
+        const audio_hub_stats stats = options_.audio->take_stats();
+        if (stats.listeners > 0) {
+          char kbps[32] = {};
+          std::snprintf(kbps, sizeof(kbps), "%.1f", stats.kbps);
+          diag().log(
+              diag_level::info, "audio.stats", std::string(),
+              {{"sent_packets", std::to_string(stats.sent_packets)},
+               {"muted_packets", std::to_string(stats.muted_packets)},
+               {"kbps", kbps},
+               {"rate", std::to_string(stats.sample_rate)},
+               {"channels", std::to_string(stats.channels)}});
+        }
       }
     }
 

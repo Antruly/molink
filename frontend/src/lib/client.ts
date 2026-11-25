@@ -149,6 +149,9 @@ export interface Welcome {
   audio?: boolean
   audio_format?: {
     sample_rate: number
+    /// The current name for the sample rate. Older hosts only send
+    /// sample_rate; a client that sees neither falls back to 48 kHz.
+    rate?: number
     channels: number
     bits: number
   }
@@ -325,6 +328,10 @@ export type SessionEvent =
       data: Uint8Array
     }
   | { kind: 'audio'; data: Uint8Array }
+  /// The host's silence gate just reopened (or the audio format changed):
+  /// flush scheduled silence and reset the jitter buffer. `rate`/`channels`
+  /// are absent on the packet-flag path.
+  | { kind: 'audio-resume'; rate?: number; channels?: number }
   | {
       kind: 'call'
       action: string
@@ -467,6 +474,9 @@ interface ControlMessage {
   /// Host capture rate and encoder build time in a `capture-stats` message.
   fps?: number
   build_ms?: number
+  /// `audio` resume marker: the PCM format of the packet that follows.
+  rate?: number
+  channels?: number
   /// `session-preset` reply: the host acknowledged and reports the actual
   /// encoder values. `preset` is informational only.
   applied?: boolean
@@ -2140,6 +2150,23 @@ export class MolinkClient {
           message: message.message,
         })
         break
+      case 'audio':
+        // The marker precedes the resumed packet on the control channel; the
+        // packet flag is the same signal when they travel apart (WebRTC).
+        if (message.action === 'resume') {
+          this.handlers.onSessionEvent?.({
+            kind: 'audio-resume',
+            rate:
+              typeof message.rate === 'number' && message.rate > 0
+                ? message.rate
+                : undefined,
+            channels:
+              typeof message.channels === 'number' && message.channels > 0
+                ? message.channels
+                : undefined,
+          })
+        }
+        break
       case 'capture-stats':
         this.handlers.onCaptureStats?.({
           fps: typeof message.fps === 'number' ? message.fps : 0,
@@ -2432,6 +2459,9 @@ export class MolinkClient {
     try {
       const packet = decodePacket(buffer)
       if (packet.type === PacketType.audio) {
+        if ((packet.flags & PacketFlag.audioResume) !== 0) {
+          this.handlers.onSessionEvent?.({ kind: 'audio-resume' })
+        }
         this.handlers.onSessionEvent?.({
           kind: 'audio',
           data: packet.payload,

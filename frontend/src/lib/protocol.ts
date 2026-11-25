@@ -53,6 +53,12 @@ export const PacketFlag = {
   last: 4,
   /** A tile patch answering request-tiles; replaces the named rectangles. */
   tileRefresh: 8,
+  /**
+   * First audio packet after the host's silence gate muted the stream (or
+   * after a quality change): reset the jitter buffer instead of treating the
+   * gap as lost audio.
+   */
+  audioResume: 16,
 } as const
 
 export const Codec = {

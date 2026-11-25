@@ -855,6 +855,23 @@ set_target_properties(molink-core-frame-schedule-test PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 add_test(NAME frame_schedule COMMAND molink-core-frame-schedule-test)
 
+# Audio hub: silence gate, integer downmix and the shared per-packet buffer.
+# A fake source and an injected clock keep this independent of libuvcpp and of
+# a real WASAPI device.
+add_executable(molink-core-audio-test
+  tests/audio_test.cpp
+  src/audio/audio.cpp
+)
+target_include_directories(molink-core-audio-test PRIVATE src)
+set_target_properties(molink-core-audio-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
+  string(TOUPPER "${uvp_config}" uvp_config_upper)
+  set_target_properties(molink-core-audio-test PROPERTIES
+    "RUNTIME_OUTPUT_DIRECTORY_${uvp_config_upper}" "${CMAKE_BINARY_DIR}")
+endforeach()
+add_test(NAME audio COMMAND molink-core-audio-test)
+
 # The media pipeline window: injected clock, fake samples, and the exact
 # percentiles/counters the video.pipeline line reports.
 add_executable(molink-core-pipeline-stats-test

@@ -7,6 +7,7 @@
 #include <string>
 
 #include "access_requests.h"
+#include "audio/audio.h"
 #include "call_hub.h"
 #include "server_client.h"
 #include "capture/capture.h"
@@ -46,6 +47,9 @@ struct api_deps {
   std::shared_ptr<auth_state> auth;
   std::shared_ptr<access_request_registry> access_requests;
   std::shared_ptr<chat_hub> chat;
+  /// Host loopback audio, so the settings route can apply a quality change
+  /// without waiting for a core restart.
+  std::shared_ptr<audio_hub> audio;
   std::shared_ptr<call_hub> call;
   std::shared_ptr<server_client> server;
   std::shared_ptr<discovery_service> discovery;

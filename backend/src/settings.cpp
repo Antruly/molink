@@ -208,6 +208,10 @@ app_settings load_settings() {
       settings.av1_threads = parse_int(value, 0);
     } else if (key == "keyframe_interval_seconds") {
       settings.keyframe_interval_seconds = parse_int(value, 0);
+    } else if (key == "audio_quality") {
+      if (value == "high" || value == "balanced" || value == "low") {
+        settings.audio_quality = value;
+      }
     } else if (key == "device_name") {
       if (!value.empty()) settings.device_name = value;
     } else if (key == "server_enabled") {
@@ -333,6 +337,7 @@ void save_settings(const app_settings& settings) {
   stream << "av1_threads=" << settings.av1_threads << "\n";
   stream << "keyframe_interval_seconds="
          << settings.keyframe_interval_seconds << "\n";
+  stream << "audio_quality=" << settings.audio_quality << "\n";
   stream << "device_name=" << settings.device_name << "\n";
   stream << "avatar=" << settings.avatar << "\n";
   stream << "server_enabled=" << (settings.server_enabled ? 1 : 0) << "\n";

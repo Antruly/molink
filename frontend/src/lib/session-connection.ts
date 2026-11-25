@@ -305,7 +305,10 @@ export class SessionConnection {
         this.audioFormat =
           format !== undefined && format !== null
             ? {
-                sampleRate: format.sample_rate || 48000,
+                // `rate` is the current name; older hosts only send
+                // sample_rate. A missing format falls back to 48 kHz stereo,
+                // which is what those hosts always sent.
+                sampleRate: format.rate || format.sample_rate || 48000,
                 channels: format.channels || 2,
               }
             : null
@@ -624,6 +627,35 @@ export class SessionConnection {
           ) === true) {
             return
           }
+        }
+        if (event.kind === 'audio-resume') {
+          // The host stopped sending during a silent stretch and is about to
+          // resume. A new rate/channels means the audio quality setting
+          // changed, and the existing player would play the next packet at
+          // the wrong pitch: rebuild it with the advertised format.
+          if (event.rate !== undefined && event.channels !== undefined) {
+            const current = this.audioFormat
+            if (
+              current === null ||
+              current.sampleRate !== event.rate ||
+              current.channels !== event.channels
+            ) {
+              this.audioFormat = {
+                sampleRate: event.rate,
+                channels: event.channels,
+              }
+              if (this.player !== null) {
+                this.player.stop()
+                this.player = new PcmPlayer(
+                  event.rate,
+                  event.channels,
+                  this.audioVolume,
+                )
+                void this.player.start()
+              }
+            }
+          }
+          this.player?.reset()
         }
         if (event.kind === 'audio') {
           this.lastAudioAt = performance.now()
