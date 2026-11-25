@@ -957,6 +957,11 @@ int main(int argc, char** argv) {
   deps.http2_available = app.h2c_enabled();
   deps.tile_size = capture_opts.tile_size;
   deps.change_threshold = capture_opts.change_threshold;
+  // Port forwarding is a host capability: off unless the local user enabled
+  // it. Read live so the next forward-open sees a settings change.
+  session_opts.port_forward_enabled = [auth] {
+    return auth->settings().port_forward_enabled;
+  };
   session_opts.network = network;
   session_opts.chat = chat;
   session_opts.audio = audio;

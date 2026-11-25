@@ -284,6 +284,72 @@ uvcpp_json display_json(const display_info& display) {
   return item;
 }
 
+/// Adapts one session transport to the port-forward host. Worker threads call
+/// send_text/send_data, so everything is hopped onto the app loop where the
+/// transport lives. Control messages and bytes share the file channel, which
+/// keeps `forward-open` ahead of the first `forward_data` even on transports
+/// with independent channels.
+class session_forward_link final : public port_forward_link {
+ public:
+  session_forward_link(std::weak_ptr<session_transport> transport,
+                       std::function<void(std::function<void()>)> post)
+      : transport_(std::move(transport)), post_(std::move(post)) {}
+
+  /// Relay workers call this from their own threads, so it must never touch
+  /// the loop-affine transport. on_close() latches the flag through
+  /// mark_closed().
+  bool is_open() const override { return open_.load(); }
+
+  void mark_closed() override { open_.store(false); }
+
+  bool send_text(const std::string& text) override {
+    if (!open_.load()) return false;
+    auto transport = transport_.lock();
+    if (!transport) return false;
+    if (post_) {
+      post_([transport, text] {
+        if (transport->is_open()) {
+          transport->send_text(transport_channel::file, text);
+        }
+      });
+      return true;
+    }
+    return transport->send_text(transport_channel::file, text);
+  }
+
+  bool send_data(uint16_t stream, const uint8_t* data,
+                 std::size_t len) override {
+    if (!open_.load()) return false;
+    auto transport = transport_.lock();
+    if (!transport) return false;
+    const std::vector<uint8_t> payload =
+        encode_port_forward_payload(stream, data, len);
+    std::vector<uint8_t> packet;
+    std::string error;
+    if (!protocol::encode_packet_into(
+            packet, static_cast<uint8_t>(protocol::packet_type::forward_data),
+            0, 0, 0, 0, payload.data(), payload.size(), error)) {
+      return false;
+    }
+    if (post_) {
+      post_([transport, packet = std::move(packet)] {
+        if (transport->is_open()) {
+          transport->send_binary(transport_channel::file, packet.data(),
+                                 packet.size());
+        }
+      });
+      return true;
+    }
+    return transport->send_binary(transport_channel::file, packet.data(),
+                                  packet.size());
+  }
+
+ private:
+  std::weak_ptr<session_transport> transport_;
+  std::function<void(std::function<void()>)> post_;
+  std::atomic<bool> open_{true};
+};
+
 }  // namespace
 
 uint64_t epoch_us() {
@@ -2175,6 +2241,11 @@ bool session_controller::start(const std::string* initial_token) {
         }
       });
   files_->set_session_id(session->public_id);
+  // Target-side port forwarding. The capability switch is read per open, so
+  // turning it off stops new forwards without dropping the session.
+  forward_host_ = std::make_unique<port_forward_host>(
+      std::make_shared<session_forward_link>(transport, options_.post),
+      options_.port_forward_enabled);
   // The write policy is read live so flipping the settings switch takes
   // effect for the next offer without restarting the host.
   files_->set_write_policy([weak]() {
@@ -4141,6 +4212,14 @@ void session_controller::on_text(const std::string& text) {
     return;
   }
 
+  if (type == "forward-open" || type == "forward-close") {
+    if (!require_auth()) return;
+    // The host object checks `port_forward_enabled` for every open and
+    // answers a disabled request with forward-open-fail.
+    if (forward_host_) forward_host_->on_control(text);
+    return;
+  }
+
   if (type == "file") {
     if (!require_auth()) return;
     if (!files_) return;
@@ -4924,6 +5003,26 @@ void session_controller::on_binary(const uint8_t* data, std::size_t len) {
       options_.voice->play(pkt.payload.data(), pkt.payload.size());
       break;
     }
+    case protocol::packet_type::forward_data: {
+      if (!session->authenticated) {
+        send_error(transport.get(), "unauthorized",
+                   "send a hello message with a valid token");
+        break;
+      }
+      uint16_t stream = 0;
+      const uint8_t* payload = nullptr;
+      std::size_t payload_len = 0;
+      if (!decode_port_forward_payload(pkt.payload.data(), pkt.payload.size(),
+                                       stream, payload, payload_len)) {
+        send_error(transport.get(), "bad_packet",
+                   "forward data frame is truncated");
+        break;
+      }
+      if (forward_host_) {
+        forward_host_->on_data(stream, payload, payload_len);
+      }
+      break;
+    }
     case protocol::packet_type::file_data: {
       if (!session->authenticated || !files_) {
         send_error(transport.get(), "unauthorized",
@@ -5053,6 +5152,10 @@ void session_controller::on_close(int code, const std::string& reason) {
     options_.clipboard->uninstall_lazy();
   }
   if (files_) files_->close_all();
+  if (forward_host_) {
+    forward_host_->stop();
+    forward_host_.reset();
+  }
   if (session->access_request_id != 0 && options_.access_requests) {
     options_.access_requests->remove(session->access_request_id);
   }

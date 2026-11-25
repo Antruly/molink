@@ -56,11 +56,28 @@
 | `0x16` | `TILE_SEQ` | 每格已应用序列映射 |
 | `0x17` | `CLIPBOARD_RANGE` | 虚拟文件范围回复（客户端→主机）：`u32 id` + `u32 错误码` + `u64 offset` + 字节 |
 | `0x18` | `CLIPBOARD_FILE` | 剪贴板文件范围回复（主机→客户端）：`u32 id` + `u32 状态` + `u64 offset` + 字节 |
+| `0x19` | `FORWARD_DATA` | 端口映射字节：`u16 stream`（网络序）+ 原始字节；控制消息见 §2.3 |
 | `0x7F` | `CONTROL` | 会话级 JSON 控制 |
 | `0x80` | `PING` | 空 |
 | `0x81` | `PONG` | 空 |
 
 未知类型必须被忽略或回错，**不得**按已知类型解析。
+
+### 2.3 端口映射控制消息
+
+控制平面用 JSON 文本，数据平面用 `FORWARD_DATA`。stream id 只在端口映射内
+有效，与文件传输的 id 互不相干。
+
+| `type` | 方向 | 字段 |
+|---|---|---|
+| `forward-open` | 主控端 → 被控端 | `stream`, `host`, `port` |
+| `forward-open-ok` | 被控端 → 主控端 | `stream` |
+| `forward-open-fail` | 被控端 → 主控端 | `stream`, `error`（如 `port_forward_disabled`） |
+| `forward-close` | 双向 | `stream` |
+
+被控端的 `port_forward_enabled` 默认关闭；关闭时拒绝 `forward-open` 并回
+`forward-open-fail`、`error=port_forward_disabled`。会话断开时主控端关闭所有
+stream，但保留本地监听，重连后新的 TCP 连接照常建立。
 
 ---
 

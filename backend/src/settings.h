@@ -43,6 +43,12 @@ struct app_settings {
   /// the in-memory ring buffer, stops writing files and does not delete the
   /// files that already exist.
   bool diag_logs_enabled = true;
+  /// Allow this host to be the target of TCP port forwards. Off by default:
+  /// a viewer that knows the verification code still cannot make this core
+  /// open arbitrary outbound TCP connections. The controller-side mappings
+  /// live in the same settings file (`port_mapping=` lines) and are refused
+  /// while this is false.
+  bool port_forward_enabled = false;
   /// Restrict incoming uploads and `mkdir` to explicit roots. Off by default:
   /// "write any folder the host user can write" is an existing feature, not a
   /// defect, so the sandbox is an opt-in hardening switch.

@@ -5,6 +5,7 @@
 #include <fstream>
 #include <iterator>
 #include <string>
+#include <vector>
 
 #if !defined(_WIN32)
 #include <sys/stat.h>
@@ -185,6 +186,8 @@ app_settings load_settings() {
       settings.service_desired_running = parse_bool(value, true);
     } else if (key == "diag_logs_enabled") {
       settings.diag_logs_enabled = parse_bool(value, true);
+    } else if (key == "port_forward_enabled") {
+      settings.port_forward_enabled = parse_bool(value, false);
     } else if (key == "file_sandbox") {
       settings.file_sandbox = parse_bool(value, false);
     } else if (key == "file_sandbox_roots") {
@@ -307,6 +310,23 @@ void save_settings(const app_settings& settings) {
   const fs::path path = fs::path(dir) / "settings";
   const fs::path tmp = fs::path(dir) / "settings.tmp";
 
+  // The port-forward manager persists its rows as `port_mapping=` lines in
+  // this same file. They are not part of app_settings, so carry them across a
+  // settings rewrite instead of dropping the user's mappings whenever an
+  // unrelated setting changes.
+  std::vector<std::string> port_mapping_lines;
+  {
+    std::ifstream existing(path, std::ios::binary);
+    std::string line;
+    while (std::getline(existing, line)) {
+      if (!line.empty() && line.back() == '\r') line.pop_back();
+      const std::string trimmed = trim(line);
+      if (trimmed.rfind("port_mapping=", 0) == 0) {
+        port_mapping_lines.push_back(trimmed);
+      }
+    }
+  }
+
   std::ofstream stream(tmp, std::ios::binary | std::ios::trunc);
   if (!stream) return;
   stream << "# moLink settings. Contains secrets; keep this file private.\n";
@@ -327,6 +347,8 @@ void save_settings(const app_settings& settings) {
          << (settings.service_desired_running ? 1 : 0) << "\n";
   stream << "diag_logs_enabled=" << (settings.diag_logs_enabled ? 1 : 0)
          << "\n";
+  stream << "port_forward_enabled="
+         << (settings.port_forward_enabled ? 1 : 0) << "\n";
   stream << "file_sandbox=" << (settings.file_sandbox ? 1 : 0) << "\n";
   stream << "file_sandbox_roots=" << settings.file_sandbox_roots << "\n";
   // The settings file is line-oriented; a textarea's newlines become spaces.
@@ -366,6 +388,9 @@ void save_settings(const app_settings& settings) {
   stream << "multi_code_enabled=" << (settings.multi_code_enabled ? 1 : 0)
          << "\n";
   stream << "temp_rotated_day=" << settings.temp_rotated_day << "\n";
+  for (const std::string& line : port_mapping_lines) {
+    stream << line << "\n";
+  }
   stream.close();
 
 #if !defined(_WIN32)
