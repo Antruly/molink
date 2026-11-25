@@ -136,9 +136,9 @@
 - `uvcpp_ws_bus`（Redis 跨进程广播）、`uvcpp_db_job_store`：当前单机单 core 用不上，先不接。
 
 ### 现状
-- CI 与打包：默认 `1.9.1`（`packaging/fetch-uvcpp.sh msvc-x64 1.9.1`，可用仓库变量 `UVCPP_VERSION` 覆盖）
+- CI 与打包：默认 `1.11.0`（`packaging/fetch-uvcpp.sh msvc-x64 1.11.0`，可用仓库变量 `UVCPP_VERSION` 覆盖）
 - Win7 x86 那条线还钉在 **1.8.5** 的 mingw32 kit
-- 本机开发环境 1.9.1
+- 本机开发环境 1.11.0
 
 ### 分三步
 1. **U1 只升构建**：`UVCPP_VERSION` 1.9.1 → 1.11.0，六个平台的包按官方资产名接入（msvc-x64 / mingw-x64 / linux-x64；Win7 x86 维持 1.8.5 或确认 1.11.0 有 mingw32 包再切）。**不改任何代码**，先把 61 项 ctest 和发布流程跑绿，验证脱敏后的 API 兼容性。
