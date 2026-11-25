@@ -837,6 +837,7 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
     j["version"] = MOLINK_VERSION;
     j["protocol"] = 1;
     j["pid"] = current_pid();
+    j["session_id"] = current_session_id();
     j["uptime_ms"] = uptime_ms(deps.started_ms);
     j["sessions"] = deps.registry->size();
     resp.set_header("Cache-Control", "no-store").json(j);
@@ -2533,6 +2534,7 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
             j["version"] = MOLINK_VERSION;
             j["protocol"] = 1;
             j["pid"] = current_pid();
+    j["session_id"] = current_session_id();
             j["tls"] = deps.tls_enabled;
             j["token"] = deps.auth ? deps.auth->local_session_token()
                                    : std::string();
@@ -3556,6 +3558,7 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
             j["version"] = MOLINK_VERSION;
             j["protocol"] = 1;
             j["pid"] = current_pid();
+    j["session_id"] = current_session_id();
             j["uptime_ms"] = uptime_ms(deps.started_ms);
             j["bind"]["host"] = deps.config.host;
             j["bind"]["port"] = effective_port(deps);
