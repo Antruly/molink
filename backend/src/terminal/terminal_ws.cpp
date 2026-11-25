@@ -122,7 +122,9 @@ class terminal_connection final
                    const std::vector<uint8_t>& data) {
     std::size_t offset = 0;
     while (offset < data.size()) {
-      const std::size_t chunk = std::min(kReplayChunk, data.size() - offset);
+      // Parenthesised: windows.h defines min()/max() as macros, and MSVC then
+      // rejects `std::min` with C2589.
+      const std::size_t chunk = (std::min)(kReplayChunk, data.size() - offset);
       send_output(id, seq + offset, data.data() + offset, chunk);
       offset += chunk;
     }
