@@ -22,7 +22,12 @@ import { isInputErrorCode, redactDiagnosticText } from './input-errors'
 import { H264StreamDecoder, h264StreamSupported } from './h264-stream'
 import {
   VpxStreamDecoder,
-  streamCodecDecodes,
+  kCodecProbeRetryDelayMs,
+  parseForcedCodec,
+  probeStreamCodec,
+  probeWithRetry,
+  type CodecProbeOutcome,
+  type StreamCodec,
   type VpxCodec,
 } from './vpx-stream'
 import { WtTransport, fingerprintBytes, webTransportSupported } from './webtransport'
@@ -672,6 +677,8 @@ export class MolinkClient {
   private h264 = new H264StreamDecoder()
   /** This browser can decode the H.264 stream (probed once, before hello). */
   private h264Capable = false
+  /** `?codec=vp9` and friends: declared capable without a probe. */
+  private forcedStreamCodec: StreamCodec | null = null
   /// The UI has already been told this session is on the H.264 stream.
   private streamCodecNotified = false
   private hostStreamCodecs: string[] = []
@@ -862,40 +869,60 @@ export class MolinkClient {
 
   constructor() {
     // One probe, up front: hello goes out on the first connect, and the host
-    // only streams H.264 to viewers that asked for it.
-    void h264StreamSupported().then((supported) => {
-      if (supported === this.h264Capable) return
-      this.h264Capable = supported
-      // A hello may already have gone out without the flag. Sending it again
-      // makes the host re-evaluate which stream codec every viewer can take.
-      this.emitCodecOptions()
-      if (supported && this.isLive() && this.helloPayload !== null) {
-        this.sendHello(false)
-      }
-    })
-    // VP8/VP9 are decoded through WebCodecs too; the host only uses them when
-    // every viewer says it can.
-    const announce = (codec: VpxCodec, capable: boolean) => {
-      if (!capable) return
-      if (codec === 'vp8') {
-        if (this.vp8Capable) return
-        this.vp8Capable = true
-      } else if (codec === 'vp9') {
-        if (this.vp9Capable) return
-        this.vp9Capable = true
-      } else {
-        if (this.av1NativeCapable) return
-        this.av1NativeCapable = true
-      }
-      this.emitCodecOptions()
-      if (this.isLive() && this.helloPayload !== null) this.sendHello(false)
+    // only streams H.264 to viewers that asked for it. `?codec=vp9` (or vp8 /
+    // av1 / h264) skips the probe for that one codec while debugging, so the
+    // host's own choice can be tested without the page's capability check.
+    this.forcedStreamCodec = parseForcedCodec(
+      typeof window === 'undefined' ? '' : window.location.search,
+    )
+    if (this.forcedStreamCodec !== null) {
+      logDiag('info', 'video.codec', undefined, {
+        forced: 1,
+        codec: this.forcedStreamCodec,
+      })
     }
-    // A WebKit that merely accepts the configuration is not enough: several
-    // versions fail every frame (see streamCodecDecodes), so each flag
-    // follows a real decode of a probe keyframe.
-    void streamCodecDecodes('vp9').then((ok) => announce('vp9', ok))
-    void streamCodecDecodes('vp8').then((ok) => announce('vp8', ok))
-    void streamCodecDecodes('av1').then((ok) => announce('av1', ok))
+    if (this.forcedStreamCodec === 'h264') {
+      this.setStreamCodecCapable('h264', true)
+    } else {
+      void probeWithRetry(
+        () =>
+          h264StreamSupported().then(
+            (ok): CodecProbeOutcome =>
+              ok
+                ? { ok: true }
+                : {
+                    ok: false,
+                    reason: 'h264 isConfigSupported returned false',
+                  },
+          ),
+        {
+          onFailure: (attempt, reason) =>
+            this.logCodecProbeFailure('h264', attempt, reason),
+        },
+      ).then((run) => {
+        if (run.ok) this.logCodecProbeOk('h264')
+        this.setStreamCodecCapable('h264', run.ok)
+      })
+    }
+    // VP8/VP9 are decoded through WebCodecs too; the host only uses them when
+    // every viewer says it can. A WebKit that merely accepts the configuration
+    // is not enough: several versions fail every frame (see
+    // probeStreamCodec), so each flag follows a real decode of a probe
+    // keyframe. One failure is retried (kCodecProbeAttempts, 30 s apart)
+    // before the codec is considered undecodable for this session.
+    for (const codec of ['vp9', 'vp8', 'av1'] as const) {
+      if (this.forcedStreamCodec === codec) {
+        this.setStreamCodecCapable(codec, true)
+        continue
+      }
+      void probeWithRetry(() => probeStreamCodec(codec), {
+        onFailure: (attempt, reason) =>
+          this.logCodecProbeFailure(codec, attempt, reason),
+      }).then((run) => {
+        if (run.ok) this.logCodecProbeOk(codec)
+        this.setStreamCodecCapable(codec, run.ok)
+      })
+    }
   }
 
   setHandlers(handlers: Partial<ClientHandlers>): void {
@@ -3148,6 +3175,48 @@ export class MolinkClient {
     this.sendJson({ type: 'stream-codec', value })
   }
 
+  /// Records the probe result in the same format everywhere, including the
+  /// reason a codec was rejected. The reason is capped at 80 characters so a
+  /// long decoder stack does not fill the ring buffer.
+  private logCodecProbeFailure(
+    codec: StreamCodec,
+    attempt: number,
+    reason: string,
+  ): void {
+    logDiag('warn', 'video.codec', undefined, {
+      result: 'unsupported',
+      codec,
+      attempt,
+      reason: reason.length > 80 ? reason.slice(0, 80) : reason,
+    })
+  }
+
+  private logCodecProbeOk(codec: StreamCodec): void {
+    logDiag('info', 'video.codec', undefined, { result: 'ok', codec })
+  }
+
+  /// Sets one codec's capability flag and tells the host again when it
+  /// changed. A hello may already have gone out without the flag (or with a
+  /// stale one), so the host has to re-evaluate which stream codec every
+  /// viewer can take.
+  private setStreamCodecCapable(codec: StreamCodec, capable: boolean): void {
+    if (codec === 'h264') {
+      if (this.h264Capable === capable) return
+      this.h264Capable = capable
+    } else if (codec === 'vp8') {
+      if (this.vp8Capable === capable) return
+      this.vp8Capable = capable
+    } else if (codec === 'vp9') {
+      if (this.vp9Capable === capable) return
+      this.vp9Capable = capable
+    } else {
+      if (this.av1NativeCapable === capable) return
+      this.av1NativeCapable = capable
+    }
+    this.emitCodecOptions()
+    if (this.isLive() && this.helloPayload !== null) this.sendHello(false)
+  }
+
   /// Narrows the host's list to what this page can actually decode. AV1 is
   /// decoded by the page itself through WebCodecs, so it needs the real
   /// decode probe, not just the host's list.
@@ -3192,9 +3261,12 @@ export class MolinkClient {
     return decoder
   }
 
-  /// This WebView cannot decode `codec` (see streamCodecDecodes): drop the
+  /// This WebView cannot decode `codec` (see probeStreamCodec): drop the
   /// claim, tell the host again, and stop the decoder from asking for
-  /// keyframes that can never be shown.
+  /// keyframes that can never be shown. The codec is not written off for the
+  /// session: a desktop switch (lock screen, UAC) hands the decoder a few
+  /// frames it cannot use, so the probe runs again with the same retry budget
+  /// as the initial one. Only a final failure keeps it off.
   private disableStreamCodec(codec: VpxCodec): void {
     if (this.disabledStreamCodecs.has(codec)) return
     this.disabledStreamCodecs.add(codec)
@@ -3203,30 +3275,25 @@ export class MolinkClient {
       failures: this.streamDecodeFailures.get(codec) ?? 0,
     })
     this.streamDecodeFailures.delete(codec)
-    if (codec === 'av1') this.av1NativeCapable = false
-    else if (codec === 'vp9') this.vp9Capable = false
-    else if (codec === 'vp8') this.vp8Capable = false
     this.vpxDecoders[codec]?.close()
-    this.emitCodecOptions()
-    if (this.isLive() && this.helloPayload !== null) this.sendHello(false)
-    // A desktop switch (lock screen, UAC) hands the decoder a few frames it
-    // cannot use, and three of them used to disable the codec for the rest of
-    // the session -- the picture then stayed on the last tiles with no way
-    // back. Re-probe a little later instead of giving up for good.
+    this.setStreamCodecCapable(codec, false)
+    // Wait one retry interval before the first re-probe: the desktop may
+    // still be switching, and an immediate probe used to fail for that
+    // reason alone.
     window.setTimeout(() => {
       if (!this.disabledStreamCodecs.has(codec)) return
-      void streamCodecDecodes(codec).then((ok) => {
-        if (!ok || !this.disabledStreamCodecs.has(codec)) return
+      void probeWithRetry(() => probeStreamCodec(codec), {
+        onFailure: (attempt, reason) =>
+          this.logCodecProbeFailure(codec, attempt, reason),
+      }).then((run) => {
+        if (!run.ok || !this.disabledStreamCodecs.has(codec)) return
         this.disabledStreamCodecs.delete(codec)
         this.streamDecodeFailures.delete(codec)
+        this.logCodecProbeOk(codec)
         logDiag('info', 'stream.codec-enabled', 'probe passed again', { codec })
-        if (codec === 'av1') this.av1NativeCapable = true
-        else if (codec === 'vp9') this.vp9Capable = true
-        else if (codec === 'vp8') this.vp8Capable = true
-        this.emitCodecOptions()
-        if (this.isLive() && this.helloPayload !== null) this.sendHello(false)
+        this.setStreamCodecCapable(codec, true)
       })
-    }, 15000)
+    }, kCodecProbeRetryDelayMs)
   }
 
   /// Diagnostic: a picture that suddenly turns (nearly) black. Reported once

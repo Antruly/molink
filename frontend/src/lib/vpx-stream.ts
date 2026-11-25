@@ -18,10 +18,42 @@ const kMaxQueuedDeltas = 4
 
 export type VpxCodec = 'vp8' | 'vp9' | 'av1'
 
-function codecString(codec: VpxCodec): string {
+/// A codec whose capability the page announces to the host.
+export type StreamCodec = 'h264' | VpxCodec
+
+/// VP9 profiles this page knows how to name. The host's libvpx encoder runs
+/// the default configuration, which is profile 0; a 10-bit host would send
+/// profile 2 instead.
+export type Vp9Profile = 0 | 2
+
+/// The WebCodecs VP9 codec string, `vp09.<profile>.<level>.<bit-depth>`.
+///
+/// - `profile`: `00` = profile 0 (8-bit 4:2:0), `02` = profile 2 (10-bit 4:2:0).
+///   Probe and stream decoder both name the profile that is actually in the
+///   frames: some decoders infer it from the bitstream, but a decoder that
+///   trusts the string would reject pictures sent under the other profile.
+/// - `level`: `10` = level 1.0.
+/// - `bit-depth`: `08` = 8 bits per sample, `10` = 10 bits. This is the field
+///   that differs between the two profiles, not the level.
+export function vp9CodecString(profile: Vp9Profile): string {
+  return profile === 2 ? 'vp09.02.10.10' : 'vp09.00.10.08'
+}
+
+/// Reads the profile out of a raw VP9 uncompressed frame header. Bits 7..6
+/// are the frame marker (`0b10`), bit 5 is `profile_low_bit` and bit 4 is
+/// `profile_high_bit`. Returns null for anything that is not one of the two
+/// profiles above, so the caller can keep its current configuration.
+export function vp9ProfileFromFrame(bytes: Uint8Array): Vp9Profile | null {
+  if (bytes.length === 0) return null
+  const header = bytes[0]!
+  if ((header >> 6) !== 0b10) return null
+  const profile = ((header >> 4) & 1) * 2 + ((header >> 5) & 1)
+  return profile === 0 || profile === 2 ? profile : null
+}
+
+function codecString(codec: VpxCodec, vp9Profile: Vp9Profile = 0): string {
   if (codec === 'vp8') return 'vp8'
-  // VP9 profile 0, level 1.0, 8-bit: what libvpx emits for our stream.
-  if (codec === 'vp9') return 'vp09.00.10.08'
+  if (codec === 'vp9') return vp9CodecString(vp9Profile)
   // AV1 main profile, level 3.1: what NVENC/libaom emit for the AV1 stream.
   return 'av01.0.05M.08'
 }
@@ -44,7 +76,11 @@ function base64ToBytes(text: string): Uint8Array {
   return bytes
 }
 
-/// True when this WebView decodes an actual frame of `codec`.
+/// The outcome of one capability probe. A failure carries the decoder's own
+/// message so the diagnostics can say *why* a codec was dropped.
+export type CodecProbeOutcome = { ok: true } | { ok: false; reason: string }
+
+/// Decodes one keyframe of `codec` and reports whether it really worked.
 ///
 /// `isConfigSupported` is not enough: WebKitGTK before 2.54 accepts the AV1
 /// configuration but pushes the AV1 caps straight into the decoder without an
@@ -53,16 +89,30 @@ function base64ToBytes(text: string): Uint8Array {
 /// freezes after the first second. Decode one keyframe before claiming a
 /// codec, so a WebView that cannot really decode it never asks the host for
 /// it.
-export function streamCodecDecodes(codec: VpxCodec): Promise<boolean> {
-  if (typeof VideoDecoder === 'undefined') return Promise.resolve(false)
-  return VideoDecoder.isConfigSupported({ codec: codecString(codec) })
+export function probeStreamCodec(
+  codec: VpxCodec,
+  vp9Profile: Vp9Profile = 0,
+): Promise<CodecProbeOutcome> {
+  if (typeof VideoDecoder === 'undefined') {
+    return Promise.resolve({ ok: false, reason: 'VideoDecoder is unavailable' })
+  }
+  const frame = base64ToBytes(kProbeFrames[codec])
+  // Name the profile the probe frame actually carries, with the same source
+  // the stream decoder uses (vp9CodecString). The probe keyframe is profile 0,
+  // but reading it from the header keeps the two paths from drifting apart.
+  const profile =
+    codec === 'vp9' ? (vp9ProfileFromFrame(frame) ?? vp9Profile) : vp9Profile
+  const probeCodec = codecString(codec, profile)
+  return VideoDecoder.isConfigSupported({ codec: probeCodec })
     .then((result) => {
-      if (result.supported !== true) return false
-      return new Promise<boolean>((resolve) => {
+      if (result.supported !== true) {
+        return { ok: false, reason: `isConfigSupported rejected ${probeCodec}` }
+      }
+      return new Promise<CodecProbeOutcome>((resolve) => {
         let done = false
         let decoder: VideoDecoder | null = null
         let timer = 0
-        const finish = (ok: boolean) => {
+        const finish = (outcome: CodecProbeOutcome) => {
           if (done) return
           done = true
           window.clearTimeout(timer)
@@ -73,7 +123,7 @@ export function streamCodecDecodes(codec: VpxCodec): Promise<boolean> {
               // Already failed and closed by the error path.
             }
           }
-          resolve(ok)
+          resolve(outcome)
         }
         // A WebKit decoder emits a picture when the next chunk arrives, not
         // when the chunk it already has is decoded. A probe that ends on a
@@ -81,20 +131,27 @@ export function streamCodecDecodes(codec: VpxCodec): Promise<boolean> {
         // decoder error does. AV1's failure is the known WebKit bug 327481,
         // so there a timeout still means "cannot decode".
         const timeoutMeansBroken = codec === 'av1'
-        timer = window.setTimeout(() => finish(timeoutMeansBroken ? false : true), 2000)
+        timer = window.setTimeout(
+          () =>
+            finish(
+              timeoutMeansBroken
+                ? { ok: false, reason: 'probe timed out' }
+                : { ok: true },
+            ),
+          2000,
+        )
         try {
           decoder = new VideoDecoder({
-            output: (frame) => {
-              frame.close()
-              finish(true)
+            output: (picture) => {
+              picture.close()
+              finish({ ok: true })
             },
-            error: () => finish(false),
+            error: (error) => finish({ ok: false, reason: describe(error) }),
           })
           decoder.configure({
-            codec: codecString(codec),
+            codec: probeCodec,
             optimizeForLatency: true,
           })
-          const frame = base64ToBytes(kProbeFrames[codec])
           // The same keyframe twice: the second chunk is what makes WebKit
           // emit the picture for the first.
           decoder.decode(
@@ -104,15 +161,96 @@ export function streamCodecDecodes(codec: VpxCodec): Promise<boolean> {
             new EncodedVideoChunk({ type: 'key', timestamp: 1, data: frame }),
           )
           decoder.flush().then(
-            () => finish(timeoutMeansBroken ? false : true),
-            () => finish(false),
+            () =>
+              finish(
+                timeoutMeansBroken
+                  ? { ok: false, reason: 'flush ended without a picture' }
+                  : { ok: true },
+              ),
+            (error) => finish({ ok: false, reason: describe(error) }),
           )
-        } catch {
-          finish(false)
+        } catch (error) {
+          finish({ ok: false, reason: describe(error) })
         }
       })
     })
-    .catch(() => false)
+    .catch((error: unknown) => ({ ok: false, reason: describe(error) }))
+}
+
+/// Boolean form of `probeStreamCodec`, kept for callers that only care whether
+/// the codec works.
+export function streamCodecDecodes(
+  codec: VpxCodec,
+  vp9Profile: Vp9Profile = 0,
+): Promise<boolean> {
+  return probeStreamCodec(codec, vp9Profile).then((outcome) => outcome.ok)
+}
+
+/// A single lost frame or a decoder that is still warming up must not cost
+/// the viewer a whole session, so a failed probe is retried before the codec
+/// is given up. This is the total number of attempts, not the number of
+/// retries: attempts 1 and 2 pause, attempt 3 decides.
+export const kCodecProbeAttempts = 3
+export const kCodecProbeRetryDelayMs = 30_000
+
+export interface CodecProbeRun {
+  ok: boolean
+  /// Total attempts made (1 when the first probe succeeded).
+  attempts: number
+  /// Reason from the last failed attempt; empty on success.
+  reason: string
+}
+
+export interface CodecProbeRunOptions {
+  maxAttempts?: number
+  retryDelayMs?: number
+  /// Injected by tests so a run does not wait on a real clock.
+  sleep?: (ms: number) => Promise<void>
+  /// Called after each failed attempt, before the next delay.
+  onFailure?: (attempt: number, reason: string) => void
+}
+
+const defaultSleep = (ms: number) =>
+  new Promise<void>((resolve) => {
+    globalThis.setTimeout(resolve, ms)
+  })
+
+/// Runs `probe` up to `maxAttempts` times, pausing between failures. The
+/// caller decides what a final failure means (usually: stop claiming the
+/// codec for this session).
+export async function probeWithRetry(
+  probe: () => Promise<CodecProbeOutcome>,
+  options: CodecProbeRunOptions = {},
+): Promise<CodecProbeRun> {
+  const maxAttempts = Math.max(1, options.maxAttempts ?? kCodecProbeAttempts)
+  const retryDelayMs = options.retryDelayMs ?? kCodecProbeRetryDelayMs
+  const sleep = options.sleep ?? defaultSleep
+  let reason = ''
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    let outcome: CodecProbeOutcome
+    try {
+      outcome = await probe()
+    } catch (error) {
+      outcome = { ok: false, reason: describe(error) }
+    }
+    if (outcome.ok) return { ok: true, attempts: attempt, reason: '' }
+    reason = outcome.reason
+    options.onFailure?.(attempt, reason)
+    if (attempt < maxAttempts) await sleep(retryDelayMs)
+  }
+  return { ok: false, attempts: maxAttempts, reason }
+}
+
+const kStreamCodecs: readonly StreamCodec[] = ['h264', 'vp9', 'vp8', 'av1']
+
+/// `?codec=vp9` declares that codec capable without probing it, so the host's
+/// own choice can be debugged without the page's probe getting in the way.
+/// Anything other than one of the known codecs is ignored.
+export function parseForcedCodec(search: string): StreamCodec | null {
+  const value = new URLSearchParams(search).get('codec')
+  return value !== null && (kStreamCodecs as readonly string[]).includes(value)
+    ? (value as StreamCodec)
+    : null
 }
 
 /// A short, log-safe description of a decoder failure.
@@ -134,8 +272,19 @@ export class VpxStreamDecoder {
   /// decoder stays idle (and the caller asks for a keyframe) instead.
   private needsKeyframe = false
   private dropped = 0
+  private readonly codec: VpxCodec
+  /// Profile named in the decoder's codec string. VP9 frames carry the real
+  /// profile in their header, so the first keyframe can correct the default
+  /// before the decoder is configured.
+  private vp9Profile: Vp9Profile
 
-  constructor(private readonly codec: VpxCodec) {}
+  // Written out instead of a TypeScript parameter property: Node's type
+  // stripping cannot load parameter properties, and the unit tests import
+  // this module directly.
+  constructor(codec: VpxCodec, vp9Profile: Vp9Profile = 0) {
+    this.codec = codec
+    this.vp9Profile = vp9Profile
+  }
 
   get active(): boolean {
     return this.decoder !== null && !this.broken
@@ -155,6 +304,16 @@ export class VpxStreamDecoder {
       // may survive into the new one.
       this.close()
     }
+    if (this.codec === 'vp9' && keyframe) {
+      const profile = vp9ProfileFromFrame(bytes)
+      if (profile !== null && profile !== this.vp9Profile) {
+        // The host switched bit depth. A decoder configured for the other
+        // profile rejects these pictures, so rebuild it under the right
+        // codec string.
+        if (this.decoder !== null) this.close()
+        this.vp9Profile = profile
+      }
+    }
     if (this.decoder === null) {
       if (!keyframe) return null
       const decoder = new VideoDecoder({
@@ -169,14 +328,15 @@ export class VpxStreamDecoder {
           this.close()
         },
       })
+      const configuredCodec = codecString(this.codec, this.vp9Profile)
       try {
         decoder.configure({
-          codec: codecString(this.codec),
+          codec: configuredCodec,
           optimizeForLatency: true,
         })
       } catch (error) {
         this.onError?.(
-          `${this.codec} configure rejected for ${codecString(this.codec)}: ` +
+          `${this.codec} configure rejected for ${configuredCodec}: ` +
             describe(error),
         )
         this.close()
