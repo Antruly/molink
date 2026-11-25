@@ -8,9 +8,11 @@
 #include <random>
 
 #if defined(_WIN32)
-#include <windows.h>
+// winsock2.h must come first: windows.h otherwise pulls the old winsock.h and
+// sockaddr is defined twice.
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <windows.h>
 #include <iphlpapi.h>
 #else
 #include <arpa/inet.h>
