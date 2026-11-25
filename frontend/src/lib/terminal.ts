@@ -21,10 +21,15 @@ export type TerminalControl =
   | { type: 'term-open'; cols: number; rows: number; shell?: string }
   | { type: 'term-opened'; id: number }
   | { type: 'term-attach'; id: number; seq: number }
+  /// Receipt for `term-attach`. `seq` is the first replayed byte; `truncated`
+  /// means the requested offset was already evicted from the host ring.
+  | { type: 'term-attached'; id: number; seq: number; truncated: boolean }
   | { type: 'term-resize'; id: number; cols: number; rows: number }
   | { type: 'term-close'; id: number }
   | { type: 'term-exit'; id: number; code: number }
-  | { type: 'error'; code: string; message?: string }
+  /// `id` is present when the error belongs to one terminal, so the page can
+  /// mark that tab instead of showing a detached error.
+  | { type: 'error'; code: string; message?: string; id?: number }
 
 export interface TerminalOutputFrame {
   id: number
@@ -110,6 +115,20 @@ export function decodeControl(text: string): TerminalControl | null {
     case 'term-attach':
       if (!isInteger(message.id) || !isInteger(message.seq)) return null
       return { type, id: message.id, seq: message.seq }
+    case 'term-attached':
+      if (
+        !isInteger(message.id) ||
+        !isInteger(message.seq) ||
+        typeof message.truncated !== 'boolean'
+      ) {
+        return null
+      }
+      return {
+        type,
+        id: message.id,
+        seq: message.seq,
+        truncated: message.truncated,
+      }
     case 'term-resize':
       if (
         !isInteger(message.id) ||
@@ -134,6 +153,7 @@ export function decodeControl(text: string): TerminalControl | null {
       if (typeof message.code !== 'string') return null
       const error: TerminalControl = { type, code: message.code }
       if (typeof message.message === 'string') error.message = message.message
+      if (isInteger(message.id)) error.id = message.id
       return error
     }
     default:

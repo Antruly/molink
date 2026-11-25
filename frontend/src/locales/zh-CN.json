@@ -643,7 +643,8 @@
     "empty": "尚未打开终端。",
     "exit": "进程已退出（code {{code}}）。",
     "lost": "此终端已失效（主机上不存在了）。请关闭标签后重新打开。",
-    "error": "终端错误：{{message}}"
+    "error": "终端错误：{{message}}",
+    "truncated": "（早期输出已截断）"
   },
   "files": {
     "title": "文件传输",
