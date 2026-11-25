@@ -1,14 +1,11 @@
 import { formatHost } from './net'
 import { clipboardRangeQuery } from './clipboard-lazy'
-<<<<<<< HEAD
 import type {
   PortMapping,
   PortmapCreateInput,
   PortmapPreset,
 } from './portmap'
-=======
 import type { SessionType } from './session-type'
->>>>>>> origin/main
 
 export interface DeviceCapabilities {
   screen_capture: boolean
