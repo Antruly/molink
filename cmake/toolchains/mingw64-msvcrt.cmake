@@ -6,7 +6,7 @@
 #   MOLINK_MINGW64_PREFIX=/c/msys64/mingw64 \
 #     cmake -S backend -B build-mingw64 -G Ninja \
 #       -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/mingw64-msvcrt.cmake \
-#       -DMOLINK_UVCPP_PREFIX=/path/to/libuvcpp-1.9.1-mingw-x64
+#       -DMOLINK_UVCPP_PREFIX=/path/to/libuvcpp-1.11.0-mingw-x64
 #
 # MOLINK_MINGW64_PREFIX must contain the compiler and the dependency
 # libraries as installed by MSYS2:
