@@ -53,7 +53,35 @@ bool g_controls_switching = false;
 /// picks "switch user" or logs back in.
 DWORD g_helper_session = 0xFFFFFFFF;
 std::atomic<bool> g_running{true};
-constexpr wchar_t kServiceName[] = L"moLinkSession";
+// The full product installs "moLinkSession"; the host-only product passes
+// `--name moLinkHost`. Keeping moLinkSession as the default means existing
+// installers and the backend's service_control keep working unchanged.
+constexpr wchar_t kDefaultServiceName[] = L"moLinkSession";
+std::wstring g_service_name = kDefaultServiceName;
+
+const wchar_t* service_name() { return g_service_name.c_str(); }
+
+/// Scan all arguments so `--install --name X` and `--name X --install` both
+/// work. The service's own binPath carries `--name X`, which is how the
+/// dispatcher learns the name after SCM starts it.
+void parse_service_name(int argc, wchar_t** argv) {
+  for (int i = 1; i < argc; ++i) {
+    if (wcscmp(argv[i], L"--name") == 0) {
+      if (i + 1 < argc && argv[i + 1][0] != L'\0') {
+        g_service_name = argv[++i];
+      }
+    } else if (wcsncmp(argv[i], L"--name=", 7) == 0 &&
+               argv[i][7] != L'\0') {
+      g_service_name = argv[i] + 7;
+    }
+  }
+}
+
+const wchar_t* service_display_name() {
+  return g_service_name == kDefaultServiceName ? L"moLink session helper"
+                                               : L"moLink host helper";
+}
+
 constexpr wchar_t kHelperStopEventName[] = L"Global\\moLinkHelperStop";
 constexpr wchar_t kHelperDetachEventName[] = L"Global\\moLinkHelperDetach";
 constexpr wchar_t kLogPath[] = L"C:\\ProgramData\\moLink\\service\\service.log";
@@ -563,7 +591,7 @@ void pipe_server() {
 }
 
 void WINAPI service_main(DWORD, wchar_t**) {
-  g_status = RegisterServiceCtrlHandlerExW(kServiceName, control_handler, nullptr);
+  g_status = RegisterServiceCtrlHandlerExW(service_name(), control_handler, nullptr);
   if (g_status == nullptr) return;
   g_service_status.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
   g_service_status.dwCurrentState = SERVICE_START_PENDING;
@@ -730,7 +758,7 @@ bool install_service() {
     SC_HANDLE manager =
         OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
     if (manager != nullptr) {
-      SC_HANDLE existing = OpenServiceW(manager, kServiceName,
+      SC_HANDLE existing = OpenServiceW(manager, service_name(),
                                         SERVICE_STOP | SERVICE_QUERY_STATUS);
       if (existing != nullptr) {
         stop_service_handle(existing);
@@ -745,6 +773,13 @@ bool install_service() {
   }
   CreateDirectoryW(install_dir.c_str(), nullptr);
   const std::wstring target = install_dir + L"\\molink-service.exe";
+  // SCM passes this command line to the binary when it starts the service;
+  // without the argument the dispatcher would register the default name and
+  // a moLinkHost service would fail with ERROR_FAILED_SERVICE_CONTROLLER_CONNECT.
+  const std::wstring binary_path =
+      g_service_name == kDefaultServiceName
+          ? target
+          : L"\"" + target + L"\" --name " + g_service_name;
   if (_wcsicmp(source.c_str(), target.c_str()) != 0) {
     if (!CopyFileW(source.c_str(), target.c_str(), FALSE)) {
       install_error(L"CopyFile", GetLastError());
@@ -775,10 +810,10 @@ bool install_service() {
     return false;
   }
   SC_HANDLE service = CreateServiceW(
-      manager, kServiceName, L"moLink session helper",
+      manager, service_name(), service_display_name(),
       SERVICE_ALL_ACCESS, SERVICE_WIN32_OWN_PROCESS, SERVICE_DEMAND_START,
-      SERVICE_ERROR_NORMAL, target.c_str(), nullptr, nullptr, nullptr, nullptr,
-      nullptr);
+      SERVICE_ERROR_NORMAL, binary_path.c_str(), nullptr, nullptr, nullptr,
+      nullptr, nullptr);
   bool update_config = true;
   if (service == nullptr) {
     const DWORD create_error = GetLastError();
@@ -790,11 +825,11 @@ bool install_service() {
       // and even SERVICE_CHANGE_CONFIG are denied. Ask for the full set
       // first, then fall back to the rights those installs grant. The binary
       // path is fixed, so skipping the config rewrite is harmless.
-      service = OpenServiceW(manager, kServiceName,
+      service = OpenServiceW(manager, service_name(),
                              SERVICE_CHANGE_CONFIG | SERVICE_START |
                                  SERVICE_QUERY_STATUS);
       if (service == nullptr) {
-        service = OpenServiceW(manager, kServiceName,
+        service = OpenServiceW(manager, service_name(),
                                SERVICE_START | SERVICE_QUERY_STATUS);
         update_config = false;
       }
@@ -809,8 +844,9 @@ bool install_service() {
   }
   if (update_config) {
     ChangeServiceConfigW(service, SERVICE_NO_CHANGE, SERVICE_DEMAND_START,
-                         SERVICE_NO_CHANGE, target.c_str(), nullptr, nullptr,
-                         nullptr, nullptr, nullptr, L"moLink session helper");
+                         SERVICE_NO_CHANGE, binary_path.c_str(), nullptr,
+                         nullptr, nullptr, nullptr, nullptr,
+                         service_display_name());
   }
   // Allow services (this one and no other caller class) to generate the
   // secure attention sequence, which is how the app's Ctrl+Alt+Del button
@@ -861,7 +897,7 @@ bool install_service() {
 bool uninstall_service() {
   SC_HANDLE manager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
   if (manager == nullptr) return false;
-  SC_HANDLE service = OpenServiceW(manager, kServiceName,
+  SC_HANDLE service = OpenServiceW(manager, service_name(),
                                    DELETE | SERVICE_STOP |
                                        SERVICE_QUERY_STATUS);
   if (service == nullptr) {
@@ -884,14 +920,17 @@ bool uninstall_service() {
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
-  if (argc > 1 && wcscmp(argv[1], L"--install") == 0) {
-    return install_service() ? 0 : 1;
+  parse_service_name(argc, argv);
+  bool install = false;
+  bool uninstall = false;
+  for (int i = 1; i < argc; ++i) {
+    if (wcscmp(argv[i], L"--install") == 0) install = true;
+    if (wcscmp(argv[i], L"--uninstall") == 0) uninstall = true;
   }
-  if (argc > 1 && wcscmp(argv[1], L"--uninstall") == 0) {
-    return uninstall_service() ? 0 : 1;
-  }
+  if (install) return install_service() ? 0 : 1;
+  if (uninstall) return uninstall_service() ? 0 : 1;
   SERVICE_TABLE_ENTRYW table[] = {
-      {const_cast<wchar_t*>(kServiceName), service_main},
+      {const_cast<wchar_t*>(service_name()), service_main},
       {nullptr, nullptr},
   };
   return StartServiceCtrlDispatcherW(table) ? 0 : 1;
