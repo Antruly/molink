@@ -781,6 +781,38 @@ foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
 endforeach()
 add_test(NAME outbound_policy COMMAND molink-core-outbound-policy-test)
 
+# Settings persistence: the host-side port-forward opt-in starts off, reaches
+# the live auth_state value the /api/settings GET reads, and round-trips through
+# the settings file without disturbing neighbouring flags.
+add_executable(molink-core-settings-test
+  tests/settings_test.cpp
+  src/settings.cpp
+  src/auth_state.cpp
+  src/config.cpp
+  src/identity.cpp
+  src/totp.cpp
+  src/util.cpp
+)
+target_include_directories(molink-core-settings-test PRIVATE src)
+if(WIN32)
+  # identity.cpp resolves the config directory through the shell API;
+  # util.cpp enumerates interfaces through Winsock/IP Helper.
+  target_link_libraries(molink-core-settings-test PRIVATE
+    shell32 ole32 ws2_32 iphlpapi)
+endif()
+if(MINGW AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
+   CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)
+  target_link_libraries(molink-core-settings-test PRIVATE stdc++fs)
+endif()
+set_target_properties(molink-core-settings-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
+  string(TOUPPER "${uvp_config}" uvp_config_upper)
+  set_target_properties(molink-core-settings-test PROPERTIES
+    "RUNTIME_OUTPUT_DIRECTORY_${uvp_config_upper}" "${CMAKE_BINARY_DIR}")
+endforeach()
+add_test(NAME settings COMMAND molink-core-settings-test)
+
 # TCP port forwarding: mapping persistence, a real local listener paired with a
 # fake session bridge, byte counters, port release and the capability gate.
 # The module uses plain BSD/Winsock sockets, so this target does not need

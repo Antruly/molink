@@ -509,6 +509,9 @@ export interface SecuritySettings {
   long_term_code: string
   /// Host audio send quality: 48 kHz stereo, 24 kHz mono or 16 kHz mono.
   audio_quality?: 'high' | 'balanced' | 'low'
+  /// Allow this host to open port-mapping tunnels for a viewer. Off by
+  /// default; the core reads it on every forward-open.
+  port_forward_enabled?: boolean
   restart_required: boolean
 }
 
@@ -567,6 +570,9 @@ export function postSettings(
     stunServer?: string
     ipAllowlist?: string
     audioQuality?: 'high' | 'balanced' | 'low'
+    /// Only sent when the caller changes it, so the other settings keep their
+    /// current values.
+    portForwardEnabled?: boolean
   },
 ): Promise<SecuritySettings> {
   const query = new URLSearchParams({
@@ -591,6 +597,12 @@ export function postSettings(
   }
   if (values.audioQuality !== undefined) {
     query.set('audio_quality', values.audioQuality)
+  }
+  if (values.portForwardEnabled !== undefined) {
+    query.set(
+      'port_forward_enabled',
+      values.portForwardEnabled ? '1' : '0',
+    )
   }
   return request<SecuritySettings>(
     `/api/settings?${query.toString()}`,

@@ -15,6 +15,8 @@ import {
   buildPortmapInput,
   formatPortmapBytes,
   mappingStatus,
+  portForwardEnabled,
+  portForwardSaveValues,
   portmapErrorKey,
   type PortMapping,
   type PortmapForm,
@@ -42,10 +44,12 @@ function StatusDot({ status }: { status: ReturnType<typeof mappingStatus> }) {
 
 function MappingSwitch({
   enabled,
+  disabled,
   label,
   onChange,
 }: {
   enabled: boolean
+  disabled?: boolean
   label: string
   onChange: (next: boolean) => void
 }) {
@@ -55,12 +59,14 @@ function MappingSwitch({
       role="switch"
       aria-checked={enabled}
       aria-label={label}
+      disabled={disabled}
       onClick={() => onChange(!enabled)}
       className={
         'relative h-5 w-9 shrink-0 rounded-full border transition ' +
         (enabled
           ? 'border-accent/50 bg-accent/80'
-          : 'border-line bg-panel')
+          : 'border-line bg-panel') +
+        (disabled ? ' opacity-40' : '')
       }
     >
       <span
@@ -80,11 +86,17 @@ function MappingSwitch({
 export function PortMapPanel() {
   const { t } = useTranslation()
   const token = useAppStore((state) => state.token)
+  const security = useAppStore((state) => state.security)
+  const saveSecurity = useAppStore((state) => state.saveSecurity)
+  const refreshSecurity = useAppStore((state) => state.refreshSecurity)
   const [mappings, setMappings] = useState<PortMapping[]>([])
   const [form, setForm] = useState<PortmapForm>(EMPTY_PORTMAP_FORM)
   const [loadError, setLoadError] = useState('')
   const [actionError, setActionError] = useState('')
   const [busy, setBusy] = useState(false)
+  const [savingHost, setSavingHost] = useState(false)
+  const [hostError, setHostError] = useState(false)
+  const hostAllowed = portForwardEnabled(security)
 
   const refresh = useCallback(async () => {
     if (!token) return
@@ -173,10 +185,48 @@ export function PortMapPanel() {
     }
   }
 
+  // The host-side opt-in. The panel keeps the other settings from the last
+  // GET so this save only changes this flag.
+  const toggleHost = async (next: boolean) => {
+    if (!security || savingHost) return
+    setSavingHost(true)
+    setHostError(false)
+    const saved = await saveSecurity(portForwardSaveValues(security, next))
+    if (saved) {
+      // The POST reply omits a few GET-only fields (the long-term code), so
+      // reload the full object before the Security tab renders from it.
+      await refreshSecurity()
+    } else {
+      setHostError(true)
+    }
+    setSavingHost(false)
+  }
+
   const visibleError = actionError || loadError
 
   return (
     <div className="space-y-5">
+      <div className="rounded-lg border border-line-soft bg-panel/30 px-3 py-2">
+        <div className="flex items-center gap-3">
+          <div className="min-w-0 flex-1">
+            <div className="text-[12px] font-medium">
+              {t('portmap.hostToggle')}
+            </div>
+          </div>
+          <MappingSwitch
+            enabled={hostAllowed}
+            disabled={!security || savingHost}
+            label={t('portmap.hostToggle')}
+            onChange={(next) => void toggleHost(next)}
+          />
+        </div>
+        {hostError ? (
+          <p className="mt-1 text-[10px] text-red-500" role="alert">
+            {t('portmap.hostSaveFailed')}
+          </p>
+        ) : null}
+      </div>
+
       <div>
         <h3 className="flex items-center gap-2 text-sm font-medium">
           <ArrowLeftRight size={15} className="text-accent" />

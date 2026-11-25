@@ -134,6 +134,68 @@ export function portmapErrorKey(
   }
 }
 
+/// The subset of /api/settings the port-map panel needs. The panel only owns
+/// the host-side opt-in, so every other field is carried through unchanged
+/// when it saves.
+export interface PortForwardSecuritySettings {
+  allow_remote_access: boolean
+  allow_web_client: boolean
+  discovery_enabled: boolean
+  allow_access_requests: boolean
+  device_name: string
+  allow_sync_between_sessions?: boolean
+  encrypt_remote?: boolean
+  encrypt_lan?: boolean
+  stun_server?: string
+  ip_allowlist?: string
+  port_forward_enabled?: boolean
+}
+
+/// The value object `postSettings` accepts. Kept here so the switch's submit
+/// path is testable without React.
+export interface PortForwardSaveValues {
+  allowRemote: boolean
+  allowWeb: boolean
+  discovery: boolean
+  allowAccessRequests: boolean
+  syncBetweenSessions: boolean
+  encryptRemote: boolean
+  encryptLan: boolean
+  name: string
+  stunServer?: string
+  ipAllowlist?: string
+  portForwardEnabled: boolean
+}
+
+/// Missing or older cores default to off, matching the backend.
+export function portForwardEnabled(
+  settings: PortForwardSecuritySettings | null | undefined,
+): boolean {
+  return settings?.port_forward_enabled === true
+}
+
+/// Builds a full settings save for the host-side toggle. The other values
+/// come from the last GET so flipping this switch cannot reset access,
+/// transport security, or the device name.
+export function portForwardSaveValues(
+  settings: PortForwardSecuritySettings,
+  enabled: boolean,
+): PortForwardSaveValues {
+  return {
+    allowRemote: settings.allow_remote_access,
+    allowWeb: settings.allow_web_client,
+    discovery: settings.discovery_enabled,
+    allowAccessRequests: settings.allow_access_requests,
+    syncBetweenSessions: settings.allow_sync_between_sessions === true,
+    encryptRemote: settings.encrypt_remote !== false,
+    encryptLan: settings.encrypt_lan === true,
+    name: settings.device_name ?? '',
+    stunServer: settings.stun_server,
+    ipAllowlist: settings.ip_allowlist,
+    portForwardEnabled: enabled,
+  }
+}
+
 export type PortmapStatus = 'listening' | 'error' | 'disabled' | 'stopped'
 
 export function mappingStatus(mapping: PortMapping): PortmapStatus {

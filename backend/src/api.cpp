@@ -3101,6 +3101,7 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
             j["file_sandbox"] = settings.file_sandbox;
             j["file_sandbox_roots"] = settings.file_sandbox_roots;
             j["terminal_enabled"] = settings.terminal_enabled;
+            j["port_forward_enabled"] = settings.port_forward_enabled;
             j["ip_allowlist"] = settings.ip_allowlist;
             j["device_name"] = settings.device_name;
             j["avatar"] = settings.avatar;
@@ -3149,6 +3150,8 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
                  flag("file_sandbox", before.file_sandbox);
              const bool terminal_enabled =
                  flag("terminal_enabled", before.terminal_enabled);
+             const bool port_forward_enabled = flag(
+                 "port_forward_enabled", before.port_forward_enabled);
              const std::string* sandbox_roots =
                  req.query("file_sandbox_roots");
              // Validate the allowlist before applying any other change, so an
@@ -3215,6 +3218,9 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
                  sandbox_roots != nullptr ? *sandbox_roots
                                           : before.file_sandbox_roots);
              deps.auth->set_terminal_enabled(terminal_enabled);
+             // The session controller reads this through a live callback, so
+             // the next forward-open is refused or allowed without a restart.
+             deps.auth->set_port_forward_enabled(port_forward_enabled);
              if (allowlist_text != nullptr) {
                deps.auth->set_ip_allowlist(*allowlist_text);
              }
@@ -3255,6 +3261,7 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
              j["file_sandbox"] = after.file_sandbox;
              j["file_sandbox_roots"] = after.file_sandbox_roots;
              j["terminal_enabled"] = after.terminal_enabled;
+             j["port_forward_enabled"] = after.port_forward_enabled;
              j["ip_allowlist"] = after.ip_allowlist;
              j["stun_server"] = after.stun_server;
              j["device_name"] = after.device_name;
