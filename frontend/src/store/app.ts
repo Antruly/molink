@@ -372,6 +372,7 @@ interface AppState {
     name: string
     stunServer?: string
     ipAllowlist?: string
+    portForwardEnabled?: boolean
   }) => Promise<boolean>
   decideAccessRequest: (id: number, allow: boolean) => Promise<void>
   setLongTermCode: (value: string) => Promise<boolean>

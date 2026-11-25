@@ -652,6 +652,12 @@ void auth_state::set_terminal_enabled(bool enabled) {
   persist_locked();
 }
 
+void auth_state::set_port_forward_enabled(bool enabled) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  settings_.port_forward_enabled = enabled;
+  persist_locked();
+}
+
 void auth_state::set_ip_allowlist(std::string value) {
   std::lock_guard<std::mutex> lock(mutex_);
   settings_.ip_allowlist = std::move(value);

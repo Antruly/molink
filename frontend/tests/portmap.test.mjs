@@ -8,11 +8,16 @@ import {
   buildPortmapInput,
   formatPortmapBytes,
   mappingStatus,
+  portForwardEnabled,
+  portForwardSaveValues,
   portmapErrorKey,
 } from '../src/lib/portmap.ts'
 
 const zh = JSON.parse(
   readFileSync(new URL('../src/locales/zh-CN.json', import.meta.url)),
+)
+const en = JSON.parse(
+  readFileSync(new URL('../src/locales/en.json', import.meta.url)),
 )
 
 function translate(key) {
@@ -149,6 +154,63 @@ test('list rows choose the right status light and traffic text', () => {
   assert.equal(formatPortmapBytes(1536), '1.5 KB')
   assert.equal(formatPortmapBytes(2 * 1024 * 1024), '2.0 MB')
   assert.equal(formatPortmapBytes(Number.NaN), '0 B')
+})
+
+test('the host switch reads /api/settings and preserves every other field', () => {
+  // Older cores omit the field; the backend default is off.
+  assert.equal(portForwardEnabled(null), false)
+  assert.equal(portForwardEnabled({}), false)
+  assert.equal(portForwardEnabled({ port_forward_enabled: false }), false)
+  assert.equal(portForwardEnabled({ port_forward_enabled: true }), true)
+
+  const security = {
+    allow_remote_access: true,
+    allow_web_client: false,
+    discovery_enabled: true,
+    allow_access_requests: false,
+    device_name: 'studio',
+    allow_sync_between_sessions: true,
+    encrypt_remote: false,
+    encrypt_lan: true,
+    stun_server: 'stun.example:3478',
+    ip_allowlist: '192.168.0.0/24',
+    port_forward_enabled: false,
+  }
+  assert.deepEqual(portForwardSaveValues(security, true), {
+    allowRemote: true,
+    allowWeb: false,
+    discovery: true,
+    allowAccessRequests: false,
+    syncBetweenSessions: true,
+    encryptRemote: false,
+    encryptLan: true,
+    name: 'studio',
+    stunServer: 'stun.example:3478',
+    ipAllowlist: '192.168.0.0/24',
+    portForwardEnabled: true,
+  })
+
+  // Turning it off again changes only the flag; every access/transport value
+  // still comes from the last GET.
+  const off = portForwardSaveValues(security, false)
+  assert.equal(off.portForwardEnabled, false)
+  assert.deepEqual(
+    { ...off, portForwardEnabled: true },
+    portForwardSaveValues(security, true),
+  )
+})
+
+test('the port-map host toggle copy ships in both languages', () => {
+  assert.equal(
+    translate('portmap.hostToggle'),
+    '允许本机为对方建立端口映射隧道',
+  )
+  assert.equal(
+    en.portmap.hostToggle,
+    'Allow this host to open port-mapping tunnels for the peer',
+  )
+  assert.ok(translate('portmap.hostSaveFailed'))
+  assert.ok(en.portmap.hostSaveFailed)
 })
 
 test('error codes map to the Chinese messages shipped in the locale', () => {

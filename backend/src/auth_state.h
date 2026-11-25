@@ -136,6 +136,9 @@ class auth_state {
   void set_file_sandbox(bool enabled, std::string roots);
   /// Remote terminal opt-in. Off by default.
   void set_terminal_enabled(bool enabled);
+  /// Port-forward opt-in: allow a viewer to open TCP tunnels to targets on
+  /// this host. Off by default; the per-open gate reads it live.
+  void set_port_forward_enabled(bool enabled);
   /// Replacement CIDR allowlist text. The caller has already validated it;
   /// an empty string clears the restriction.
   void set_ip_allowlist(std::string value);

@@ -987,6 +987,8 @@
   },
   "portmap": {
     "title": "Port mapping",
+    "hostToggle": "Allow this host to open port-mapping tunnels for the peer",
+    "hostSaveFailed": "Could not save this setting; check the local core.",
     "intro": "Listen on a local port and carry each connection through the current remote session to a target port on the peer. Listeners survive a disconnect and resume automatically after reconnecting.",
     "presets": "Quick presets",
     "empty": "No port mappings yet.",
