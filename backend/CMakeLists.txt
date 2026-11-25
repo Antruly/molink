@@ -201,6 +201,7 @@ set(MOLINK_CORE_SOURCES
   src/chat_hub.cpp
   src/directory_listing.cpp
   src/file_transfer.cpp
+  src/port_forward.cpp
   src/call_hub.cpp
   src/server_client.cpp
   src/audio/audio.cpp
@@ -777,6 +778,33 @@ foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
     "RUNTIME_OUTPUT_DIRECTORY_${uvp_config_upper}" "${CMAKE_BINARY_DIR}")
 endforeach()
 add_test(NAME outbound_policy COMMAND molink-core-outbound-policy-test)
+
+# TCP port forwarding: mapping persistence, a real local listener paired with a
+# fake session bridge, byte counters, port release and the capability gate.
+# The module uses plain BSD/Winsock sockets, so this target does not need
+# libuvcpp.
+add_executable(molink-core-port-forward-test
+  tests/port_forward_test.cpp
+  src/port_forward.cpp
+  src/protocol/frame_packet.cpp
+  src/diag_log.cpp
+)
+target_include_directories(molink-core-port-forward-test PRIVATE src)
+if(WIN32)
+  target_link_libraries(molink-core-port-forward-test PRIVATE ws2_32 iphlpapi)
+endif()
+if(MINGW AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
+   CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)
+  target_link_libraries(molink-core-port-forward-test PRIVATE stdc++fs)
+endif()
+set_target_properties(molink-core-port-forward-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
+  string(TOUPPER "${uvp_config}" uvp_config_upper)
+  set_target_properties(molink-core-port-forward-test PROPERTIES
+    "RUNTIME_OUTPUT_DIRECTORY_${uvp_config_upper}" "${CMAKE_BINARY_DIR}")
+endforeach()
+add_test(NAME port_forward COMMAND molink-core-port-forward-test)
 
 # Diagnostic log rotation, retention, tailing and redaction. Pure filesystem
 # plus a fake clock, so it builds without libuvcpp.
@@ -1424,6 +1452,22 @@ foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
     "RUNTIME_OUTPUT_DIRECTORY_${uvp_config_upper}" "${CMAKE_BINARY_DIR}")
 endforeach()
 add_test(NAME display_layout COMMAND molink-core-display-layout-test)
+
+# Linux desktop session classification. Pure environment parsing: a Wayland
+# host can state that only XWayland applications are reachable instead of
+# silently degrading, and every variable combination is covered here.
+add_executable(molink-core-session-type-test
+  tests/session_type_test.cpp
+)
+target_include_directories(molink-core-session-type-test PRIVATE src)
+set_target_properties(molink-core-session-type-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
+  string(TOUPPER ${uvp_config} uvp_config_upper)
+  set_target_properties(molink-core-session-type-test PROPERTIES
+    "RUNTIME_OUTPUT_DIRECTORY_${uvp_config_upper}" "${CMAKE_BINARY_DIR}")
+endforeach()
+add_test(NAME session_type COMMAND molink-core-session-type-test)
 
 # Relative (trackpad / virtual mouse) movement and sensitivity conversion.
 add_executable(molink-core-trackpad-mouse-test
