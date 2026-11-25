@@ -643,7 +643,8 @@
     "empty": "No terminal is open.",
     "exit": "Process exited (code {{code}}).",
     "lost": "This terminal is gone (the host no longer has it). Close the tab and open a new one.",
-    "error": "Terminal error: {{message}}"
+    "error": "Terminal error: {{message}}",
+    "truncated": "Earlier output was truncated."
   },
   "files": {
     "title": "File transfer",

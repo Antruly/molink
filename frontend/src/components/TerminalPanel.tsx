@@ -396,6 +396,24 @@ export function TerminalPanel({
           )
           return
         }
+        case 'term-attached': {
+          // The attach is answered; stop treating a later id-less
+          // term_not_found as this tab's.
+          const index = attachingRef.current.indexOf(message.id)
+          if (index >= 0) attachingRef.current.splice(index, 1)
+          // The tab may have been closed while the attach was in flight; its
+          // writer is gone and no notice belongs anywhere.
+          if (
+            message.truncated &&
+            tabsRef.current.some((tab) => tab.id === message.id)
+          ) {
+            // The host's ring no longer held every byte this page asked for.
+            // Say so on the terminal itself, before the replay frames arrive.
+            const line = `\r\n${tRef.current('terminal.truncated')}\r\n`
+            writeToTerminal(message.id, encoder.encode(line))
+          }
+          return
+        }
         case 'term-exit':
           handleExit(message.id, message.code)
           return
@@ -416,17 +434,34 @@ export function TerminalPanel({
             wsRef.current?.close()
             return
           }
-          if (message.code === 'term_not_found' && attachingRef.current.length > 0) {
-            const lost = attachingRef.current.shift()
+          // A newer host names the terminal in the error. Older hosts sent
+          // no id; fall back to the order attaches were issued in.
+          let errorId = message.id
+          if (errorId !== undefined) {
+            const index = attachingRef.current.indexOf(errorId)
+            if (index >= 0) attachingRef.current.splice(index, 1)
+          } else if (
+            message.code === 'term_not_found' &&
+            attachingRef.current.length > 0
+          ) {
+            errorId = attachingRef.current.shift()
+          }
+          if (message.code === 'term_not_found' && errorId !== undefined) {
+            const lost = tabsRef.current.find((tab) => tab.id === errorId)
             if (lost !== undefined) {
+              selectTab(lost.key)
               commitTabs(
                 tabsRef.current.map((tab) =>
-                  tab.id === lost ? { ...tab, phase: 'lost' } : tab,
+                  tab.id === errorId ? { ...tab, phase: 'lost' } : tab,
                 ),
               )
               setNotice(tRef.current('terminal.lost'))
               return
             }
+          }
+          if (errorId !== undefined) {
+            const tab = tabsRef.current.find((item) => item.id === errorId)
+            if (tab !== undefined) selectTab(tab.key)
           }
           const detail = message.message ?? message.code
           if (message.code === 'term_limit' ||
@@ -450,7 +485,7 @@ export function TerminalPanel({
           return
       }
     },
-    [commitTabs, handleExit, sendControl],
+    [commitTabs, handleExit, selectTab, sendControl, writeToTerminal],
   )
 
   const handleMessage = useCallback(

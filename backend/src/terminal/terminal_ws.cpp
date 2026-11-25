@@ -98,11 +98,15 @@ class terminal_connection final
     conn_->send_text(body.data(), body.size());
   }
 
-  void send_error(const char* code, const std::string& message) {
+  /// `id` names the terminal the error belongs to, when there is one. The
+  /// page uses it to flag that tab instead of showing a detached error.
+  void send_error(const char* code, const std::string& message,
+                  uint64_t id = 0) {
     uvcpp::uvcpp_json json;
     json["type"] = "error";
     json["code"] = code;
     if (!message.empty()) json["message"] = message;
+    if (id != 0) json["id"] = id;
     send_json(json);
   }
 
@@ -234,10 +238,20 @@ class terminal_connection final
     if (!service_->attach(viewer_, id, from_seq, replay, replay_seq, truncated,
                           err)) {
       send_error(err == "terminal not found" ? "term_not_found" : "term_limit",
-                 err);
+                 err, id);
       return;
     }
     attached_.insert(id);
+    // Receipt for the attach: `seq` is the first replayed byte and
+    // `truncated` says the requested offset was already evicted from the
+    // 1 MiB ring, so the replay starts at the oldest retained byte. It goes
+    // before the replay frames so the page can show the gap notice first.
+    uvcpp::uvcpp_json receipt;
+    receipt["type"] = "term-attached";
+    receipt["id"] = id;
+    receipt["seq"] = replay_seq;
+    receipt["truncated"] = truncated;
+    send_json(receipt);
     send_replay(id, replay_seq, replay);
     int code = 0;
     if (service_->exit_code(id, code)) {
@@ -256,7 +270,7 @@ class terminal_connection final
     const int cols = read_dimension(request, "cols", 80);
     const int rows = read_dimension(request, "rows", 24);
     if (attached_.count(id) == 0 || !service_->resize(id, cols, rows)) {
-      send_error("term_not_found", "terminal is not open");
+      send_error("term_not_found", "terminal is not open", id);
     }
   }
 
@@ -264,7 +278,7 @@ class terminal_connection final
     uint64_t id = 0;
     if (!read_id(request, id)) return;
     if (attached_.erase(id) == 0) {
-      send_error("term_not_found", "terminal is not open");
+      send_error("term_not_found", "terminal is not open", id);
       return;
     }
     service_->close(id, "viewer");

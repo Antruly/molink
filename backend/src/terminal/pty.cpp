@@ -1,5 +1,6 @@
 #include "terminal/pty.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
@@ -105,6 +106,8 @@ int status_exit_code(int status) {
 }  // namespace
 
 bool pty_supported() { return true; }
+
+bool pty_valid(const pty_handle& handle) { return handle.fd >= 0; }
 
 pty_handle pty_spawn(const std::string& command, int cols, int rows,
                      std::string& err) {
@@ -325,24 +328,372 @@ std::string pty_default_shell() {
 
 #else  // _WIN32
 
+// windows.h must stay out of terminal/pty.h: it defines min()/max() as macros
+// and MSVC then rejects std::min with C2589. NOMINMAX keeps this TU safe too.
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+// ConPTY is a Windows 10 1809 (NTDDI_WIN10_RS5) API. Defining the target in
+// this TU keeps the declarations and import available with MSVC, whose SDK
+// otherwise defaults to an older minimum. A toolchain that passes its own
+// _WIN32_WINNT (the Win7 x86 build passes 0x0601) wins, so that binary does
+// not grow an import Win7 cannot resolve; pty_supported() is false there and
+// the UI keeps its "unsupported" message.
+#if !defined(_WIN32_WINNT)
+#define _WIN32_WINNT 0x0A00
+#endif
+#if (_WIN32_WINNT >= 0x0A00) && !defined(NTDDI_VERSION)
+// The pseudoconsole declarations are gated on the RS5 service sub-version,
+// which _WIN32_WINNT alone does not carry.
+#define NTDDI_VERSION 0x0A000006  // NTDDI_WIN10_RS5
+#endif
+#include <windows.h>
+
+#if defined(NTDDI_VERSION) && (NTDDI_VERSION >= 0x0A000006)
+#define MOLINK_HAS_CONPTY 1
+#else
+#define MOLINK_HAS_CONPTY 0
+#endif
+
 namespace molink {
+namespace {
 
-bool pty_supported() { return false; }
-
-pty_handle pty_spawn(const std::string&, int, int, std::string& err) {
-  err = "terminal is not supported on this platform yet (ConPTY pending)";
-  return pty_handle{};
+int clamp_dimension(int value, int fallback) {
+  if (value <= 0) return fallback;
+  if (value > 1000) return 1000;
+  return value;
 }
 
-bool pty_resize(pty_handle&, int, int) { return false; }
+#if MOLINK_HAS_CONPTY
+std::wstring widen_utf8(const std::string& text) {
+  if (text.empty()) return std::wstring();
+  const int length = static_cast<int>(text.size());
+  const int needed =
+      ::MultiByteToWideChar(CP_UTF8, 0, text.data(), length, nullptr, 0);
+  if (needed <= 0) return std::wstring();
+  std::wstring out(static_cast<std::size_t>(needed), L'\0');
+  if (::MultiByteToWideChar(CP_UTF8, 0, text.data(), length, out.data(),
+                            needed) <= 0) {
+    return std::wstring();
+  }
+  return out;
+}
 
-int pty_write(pty_handle&, const void*, std::size_t) { return -1; }
+std::string win_error(const char* call, DWORD code) {
+  return std::string(call) + " failed (win32 error " + std::to_string(code) +
+         ")";
+}
+#endif  // MOLINK_HAS_CONPTY
 
-int pty_read(pty_handle&, void*, std::size_t) { return -1; }
+}  // namespace
 
-bool pty_poll_exit(pty_handle&, int&) { return false; }
+#if MOLINK_HAS_CONPTY
 
-void pty_kill(pty_handle&) {}
+/// One ConPTY session. Shared by every copy of a pty_handle so a copied handle
+/// cannot double-close the same pipes or leak them when the last copy dies.
+struct pty_impl {
+  HPCON pc = nullptr;
+  HANDLE in_write = nullptr;  // viewer -> child (the child's stdin)
+  HANDLE out_read = nullptr;  // child -> viewer (the child's stdout/stderr)
+  HANDLE process = nullptr;
+  bool killed = false;
+
+  ~pty_impl() { release(); }
+
+  void release() {
+    if (process != nullptr) {
+      // A process that was already reaped still has an open handle;
+      // TerminateProcess on it simply fails.
+      ::TerminateProcess(process, 1);
+      ::WaitForSingleObject(process, 500);
+      ::CloseHandle(process);
+      process = nullptr;
+    }
+    if (pc != nullptr) {
+      ::ClosePseudoConsole(pc);
+      pc = nullptr;
+    }
+    if (in_write != nullptr) {
+      ::CloseHandle(in_write);
+      in_write = nullptr;
+    }
+    if (out_read != nullptr) {
+      ::CloseHandle(out_read);
+      out_read = nullptr;
+    }
+  }
+};
+
+#endif  // MOLINK_HAS_CONPTY
+
+bool pty_supported() {
+#if MOLINK_HAS_CONPTY
+  return true;
+#else
+  return false;
+#endif
+}
+
+bool pty_valid(const pty_handle& handle) {
+#if MOLINK_HAS_CONPTY
+  return handle.impl != nullptr && handle.impl->pc != nullptr;
+#else
+  (void)handle;
+  return false;
+#endif
+}
+
+pty_handle pty_spawn(const std::string& command, int cols, int rows,
+                     std::string& err) {
+  pty_handle handle;
+  err.clear();
+  cols = clamp_dimension(cols, 80);
+  rows = clamp_dimension(rows, 24);
+#if !MOLINK_HAS_CONPTY
+  (void)command;
+  err =
+      "terminal is not supported on this Windows version (ConPTY requires "
+      "Windows 10 1809 or newer)";
+  return handle;
+#else
+  const std::string line = command.empty() ? pty_default_shell() : command;
+  if (line.empty()) {
+    err = "empty terminal command";
+    return handle;
+  }
+  std::wstring command_line = widen_utf8(line);
+  if (command_line.empty()) {
+    err = "terminal command is not valid UTF-8";
+    return handle;
+  }
+  // A default shell is a bare executable path and may contain spaces, so pass
+  // it as lpApplicationName. A caller-supplied command line is parsed by
+  // CreateProcess like any other.
+  std::wstring application = command.empty() ? command_line : std::wstring();
+
+  HANDLE in_read = nullptr;
+  HANDLE in_write = nullptr;
+  HANDLE out_read = nullptr;
+  HANDLE out_write = nullptr;
+  auto close_handle = [](HANDLE& value) {
+    if (value != nullptr) {
+      ::CloseHandle(value);
+      value = nullptr;
+    }
+  };
+  if (!::CreatePipe(&in_read, &in_write, nullptr, 0) ||
+      !::CreatePipe(&out_read, &out_write, nullptr, 0)) {
+    err = win_error("CreatePipe", ::GetLastError());
+    close_handle(in_read);
+    close_handle(in_write);
+    close_handle(out_read);
+    close_handle(out_write);
+    return handle;
+  }
+
+  HPCON pc = nullptr;
+  const COORD size = {static_cast<SHORT>(cols), static_cast<SHORT>(rows)};
+  const HRESULT console_created =
+      ::CreatePseudoConsole(size, in_read, out_write, 0, &pc);
+  if (FAILED(console_created) || pc == nullptr) {
+    err = "CreatePseudoConsole failed (hr=" +
+          std::to_string(static_cast<long long>(console_created)) + ")";
+    if (pc != nullptr) ::ClosePseudoConsole(pc);
+    close_handle(in_read);
+    close_handle(in_write);
+    close_handle(out_read);
+    close_handle(out_write);
+    return handle;
+  }
+  // The pseudoconsole holds its own references to these two; the viewer keeps
+  // the other ends.
+  close_handle(in_read);
+  close_handle(out_write);
+
+  auto impl = std::make_shared<pty_impl>();
+  impl->pc = pc;
+  impl->in_write = in_write;
+  impl->out_read = out_read;
+
+  SIZE_T attribute_bytes = 0;
+  ::InitializeProcThreadAttributeList(nullptr, 1, 0, &attribute_bytes);
+  std::vector<unsigned char> attribute_storage(attribute_bytes);
+  auto* attributes = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(
+      attribute_storage.data());
+  if (attribute_bytes == 0 ||
+      !::InitializeProcThreadAttributeList(attributes, 1, 0,
+                                           &attribute_bytes)) {
+    err = win_error("InitializeProcThreadAttributeList", ::GetLastError());
+    impl->release();
+    return handle;
+  }
+  if (!::UpdateProcThreadAttribute(attributes, 0,
+                                   PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, pc,
+                                   sizeof(pc), nullptr, nullptr)) {
+    err = win_error("UpdateProcThreadAttribute", ::GetLastError());
+    ::DeleteProcThreadAttributeList(attributes);
+    impl->release();
+    return handle;
+  }
+
+  STARTUPINFOEXW startup = {};
+  startup.StartupInfo.cb = sizeof(startup);
+  startup.lpAttributeList = attributes;
+  PROCESS_INFORMATION process_info = {};
+  // EXTENDED_STARTUPINFO_PRESENT is required for lpAttributeList to be read.
+  const BOOL spawned = ::CreateProcessW(
+      application.empty() ? nullptr : application.data(), command_line.data(),
+      nullptr, nullptr, FALSE, EXTENDED_STARTUPINFO_PRESENT, nullptr, nullptr,
+      &startup.StartupInfo, &process_info);
+  const DWORD spawn_error = ::GetLastError();
+  ::DeleteProcThreadAttributeList(attributes);
+  if (!spawned) {
+    err = win_error("CreateProcess", spawn_error);
+    impl->release();
+    return handle;
+  }
+  ::CloseHandle(process_info.hThread);
+  impl->process = process_info.hProcess;
+  handle.impl = impl;
+  handle.pid = static_cast<int>(process_info.dwProcessId);
+  return handle;
+#endif
+}
+
+bool pty_resize(pty_handle& handle, int cols, int rows) {
+#if !MOLINK_HAS_CONPTY
+  (void)handle;
+  (void)cols;
+  (void)rows;
+  return false;
+#else
+  if (handle.impl == nullptr || handle.impl->pc == nullptr) return false;
+  cols = clamp_dimension(cols, 80);
+  rows = clamp_dimension(rows, 24);
+  const COORD size = {static_cast<SHORT>(cols), static_cast<SHORT>(rows)};
+  return SUCCEEDED(::ResizePseudoConsole(handle.impl->pc, size));
+#endif
+}
+
+int pty_write(pty_handle& handle, const void* data, std::size_t len) {
+#if !MOLINK_HAS_CONPTY
+  (void)handle;
+  (void)data;
+  (void)len;
+  return -1;
+#else
+  if (handle.impl == nullptr || handle.impl->in_write == nullptr) return -1;
+  const char* bytes = static_cast<const char*>(data);
+  std::size_t written = 0;
+  while (written < len) {
+    // Anonymous pipes have no O_NONBLOCK; a full input buffer blocks this
+    // write. Terminal input is keystrokes and bounded pastes, so the event
+    // loop does not sit here for long.
+    const DWORD chunk = static_cast<DWORD>((std::min)(
+        len - written, static_cast<std::size_t>(64u * 1024u)));
+    DWORD count = 0;
+    if (!::WriteFile(handle.impl->in_write, bytes + written, chunk, &count,
+                     nullptr)) {
+      const DWORD code = ::GetLastError();
+      if (code == ERROR_BROKEN_PIPE || code == ERROR_NO_DATA) {
+        return written > 0 ? static_cast<int>(written) : -1;
+      }
+      if (written > 0) return static_cast<int>(written);
+      errno = EIO;
+      return -1;
+    }
+    if (count == 0) break;
+    written += count;
+  }
+  return static_cast<int>(written);
+#endif
+}
+
+int pty_read(pty_handle& handle, void* buffer, std::size_t len) {
+#if !MOLINK_HAS_CONPTY
+  (void)handle;
+  (void)buffer;
+  (void)len;
+  errno = ENOSYS;
+  return -1;
+#else
+  if (handle.impl == nullptr || handle.impl->out_read == nullptr) return -1;
+  if (len == 0) return 0;
+  DWORD available = 0;
+  if (!::PeekNamedPipe(handle.impl->out_read, nullptr, 0, nullptr, &available,
+                       nullptr)) {
+    const DWORD code = ::GetLastError();
+    if (code == ERROR_BROKEN_PIPE || code == ERROR_INVALID_HANDLE) return 0;
+    errno = EIO;
+    return -1;
+  }
+  if (available == 0) {
+    // Same contract as the POSIX master side: nothing right now.
+    errno = EAGAIN;
+    return -1;
+  }
+  const DWORD chunk = static_cast<DWORD>(
+      (std::min)(len, static_cast<std::size_t>(available)));
+  DWORD count = 0;
+  if (!::ReadFile(handle.impl->out_read, buffer, chunk, &count, nullptr)) {
+    const DWORD code = ::GetLastError();
+    if (code == ERROR_BROKEN_PIPE) return 0;
+    errno = EIO;
+    return -1;
+  }
+  if (count == 0) return 0;
+  return static_cast<int>(count);
+#endif
+}
+
+bool pty_poll_exit(pty_handle& handle, int& exit_code) {
+#if !MOLINK_HAS_CONPTY
+  (void)handle;
+  (void)exit_code;
+  return false;
+#else
+  if (handle.impl == nullptr) return false;
+  if (handle.reaped) {
+    exit_code = handle.exit_code;
+    return handle.pid > 0;
+  }
+  if (handle.impl->process == nullptr) return false;
+  if (::WaitForSingleObject(handle.impl->process, 0) != WAIT_OBJECT_0) {
+    return false;
+  }
+  DWORD code = 0;
+  if (!::GetExitCodeProcess(handle.impl->process, &code)) {
+    code = static_cast<DWORD>(-1);
+  }
+  handle.reaped = true;
+  handle.exit_code = static_cast<int>(code);
+  exit_code = handle.exit_code;
+  return true;
+#endif
+}
+
+void pty_kill(pty_handle& handle) {
+#if !MOLINK_HAS_CONPTY
+  (void)handle;
+#else
+  if (handle.impl == nullptr || handle.impl->killed) return;
+  handle.impl->killed = true;
+  if (handle.impl->process != nullptr) {
+    if (::WaitForSingleObject(handle.impl->process, 0) == WAIT_TIMEOUT) {
+      ::TerminateProcess(handle.impl->process, 1);
+      ::WaitForSingleObject(handle.impl->process, 1000);
+    }
+    int code = -1;
+    pty_poll_exit(handle, code);
+    ::CloseHandle(handle.impl->process);
+    handle.impl->process = nullptr;
+  }
+  handle.impl->release();
+#endif
+}
 
 std::string pty_default_shell() {
   const char* shell = std::getenv("COMSPEC");

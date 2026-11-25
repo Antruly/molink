@@ -55,10 +55,10 @@ class terminal_ring_buffer {
 
 class terminal_session;
 
-/// Host-side terminal sessions. A session owns its PTY and output ring and is
-/// deliberately independent from the WebSocket that opened it: a viewer
-/// disconnecting only detaches, so the process keeps running (and its output
-/// keeps filling the ring) until it exits or the idle timeout reaps it.
+/// Host-side terminal sessions. A session owns its PTY and output ring. A
+/// viewer disconnect reclaims the terminals that viewer opened (see
+/// release_viewer); terminals another viewer opened are only detached and keep
+/// running until they exit or the idle timeout reaps them.
 ///
 /// Single-threaded by design: open/attach/write/resize/close and poll() are
 /// all expected on the core's event-loop thread.
@@ -82,7 +82,10 @@ class terminal_service {
   /// A connection-scoped viewer identity. Sessions remember their viewers by
   /// this value, which is how the four-terminal cap is enforced.
   uint64_t register_viewer();
-  /// Drop this viewer from every session without killing the processes.
+  /// The viewer's connection went away. Detach it from every session and
+  /// reclaim (kill and forget) the terminals it created — a viewer that
+  /// cannot come back must not leave orphan PTYs behind. Terminals another
+  /// viewer created are only detached. Logs `term.reclaim` per session.
   void release_viewer(uint64_t viewer);
 
   /// Spawn a new terminal and attach `viewer`. Returns 0 and fills `err` when
