@@ -22,6 +22,7 @@
 #include "compression.h"
 #include "net/outbound_policy.h"
 #include "protocol/frame_packet.h"
+#include "transport/port_forward_bridge.h"
 #include "transport/switchable_transport.h"
 
 namespace molink {
@@ -33,10 +34,11 @@ class connect_proxy final
   connect_proxy(uvcpp::uvcpp_ws_connection* browser,
                 std::shared_ptr<p2p_manager> manager, std::string target,
                 bool relay_only,
-                std::function<void(std::function<void()>)> post)
+                std::function<void(std::function<void()>)> post,
+                std::shared_ptr<port_forward_manager> port_forward)
       : browser_(browser), manager_(std::move(manager)),
         target_(std::move(target)), relay_only_(relay_only),
-        post_(std::move(post)) {}
+        post_(std::move(post)), forward_manager_(std::move(port_forward)) {}
 
   ~connect_proxy() { stop_worker(); }
 
@@ -162,11 +164,19 @@ class connect_proxy final
     transport_->send_binary(data, len);
   }
 
+  void detach_forward() {
+    if (forward_bridge_) {
+      forward_bridge_->detach();
+      forward_bridge_.reset();
+    }
+  }
+
   void on_browser_close(uvcpp::ws_close_code code, const std::string& reason) {
     (void)code;
     (void)reason;
     browser_ = nullptr;
     closed_ = true;
+    detach_forward();
     stop_worker();
     pending_text_.clear();
     pending_binary_.clear();
@@ -248,6 +258,10 @@ class connect_proxy final
               self->transport_->send_text(self->hello_text_);
               self->hello_resent_ = true;
             }
+            if (self->forward_bridge_ &&
+                self->forward_bridge_->handle_text(text)) {
+              return;
+            }
             if (self->browser_ != nullptr) {
               self->browser_->send_text(text.data(), text.size());
             }
@@ -262,6 +276,7 @@ class connect_proxy final
         [weak](int code, const std::string& reason) {
           if (auto self = weak.lock()) {
             self->closed_ = true;
+            self->detach_forward();
             self->stop_worker();
             if (self->browser_ != nullptr) {
               self->browser_->close(static_cast<uvcpp::ws_close_code>(code),
@@ -270,6 +285,14 @@ class connect_proxy final
             self->browser_ = nullptr;
           }
         });
+    // This core opened the session as the viewer, so every enabled mapping
+    // now has a channel. Listeners were already bound independently of the
+    // session and keep running across reconnects.
+    if (forward_manager_) {
+      forward_bridge_ = std::make_unique<port_forward_bridge>(
+          forward_manager_, transport_, post_);
+      forward_bridge_->attach();
+    }
     // The target controller is created as soon as its ICE pair completes and
     // is already waiting for hello, so send the buffered hello now.
     flush_pending();
@@ -311,6 +334,9 @@ class connect_proxy final
 
   void deliver_binary(const uint8_t* data, std::size_t len) {
     if (closed_ || browser_ == nullptr || data == nullptr) return;
+    // FORWARD_DATA is the controller's tunnel to the target, not picture data
+    // or input the page knows how to parse.
+    if (forward_bridge_ && forward_bridge_->handle_binary(data, len)) return;
     // The native surface mirrors the picture the page receives (tile codecs
     // only for now; the streams wait for the core-side decoder).
     surface_ingest_packet(compositor_, data, len);
@@ -571,6 +597,8 @@ class connect_proxy final
   int frame_count_ = 0;
   std::chrono::steady_clock::time_point last_frame_log_{};
   std::shared_ptr<session_transport> transport_;
+  std::unique_ptr<port_forward_bridge> forward_bridge_;
+  std::shared_ptr<port_forward_manager> forward_manager_;
   std::deque<std::string> pending_text_;
   std::deque<std::vector<uint8_t>> pending_binary_;
   std::string hello_text_;
@@ -584,8 +612,10 @@ class connect_proxy final
 uvcpp::uvcpp_web_ws_handler make_connect_handler(
     std::shared_ptr<p2p_manager> manager,
     std::function<void(std::function<void()>)> post,
-    std::function<bool()> host_only) {
-  return [manager, post = std::move(post), host_only = std::move(host_only)](
+    std::function<bool()> host_only,
+    std::shared_ptr<port_forward_manager> port_forward) {
+  return [manager, post = std::move(post), host_only = std::move(host_only),
+          port_forward = std::move(port_forward)](
              uvcpp::uvcpp_web_ws_request& request) {
     uvcpp::uvcpp_ws_connection* conn = request.connection();
     if (conn == nullptr) return;
@@ -605,7 +635,8 @@ uvcpp::uvcpp_web_ws_handler make_connect_handler(
     const bool relay_only =
         relay != nullptr && (*relay == "only" || *relay == "1");
     auto proxy = std::make_shared<connect_proxy>(conn, manager, *target,
-                                                 relay_only, post);
+                                                 relay_only, post,
+                                                 port_forward);
     proxy->start();
   };
 }

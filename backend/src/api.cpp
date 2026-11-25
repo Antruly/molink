@@ -48,6 +48,7 @@
 #include "discovery.h"
 #include "identity.h"
 #include "net/ip_allowlist.h"
+#include "portmap_api.h"
 #include "ui_store.h"
 #include "util.h"
 #include "version.h"
@@ -531,6 +532,65 @@ std::string host_header_name(const std::string& host) {
 bool loopback_host_header(const uvcpp_web_request& req) {
   const std::string host = req.header("Host");
   return !host.empty() && is_loopback_host(host_header_name(host));
+}
+
+// ---- Controller-side port mapping API helpers ---------------------------
+// The routes below are thin: parsing and vocabulary live here, and the
+// library-free decisions are in portmap_api.{h,cpp} so the core tests can
+// cover them without starting a web server.
+uvcpp_json port_mapping_json(const port_mapping& mapping) {
+  uvcpp_json item;
+  item["id"] = mapping.id;
+  item["listen_host"] = mapping.listen_host;
+  item["listen_port"] = mapping.listen_port;
+  item["target_host"] = mapping.target_host;
+  item["target_port"] = mapping.target_port;
+  item["enabled"] = mapping.enabled;
+  item["listening"] = mapping.listening;
+  item["bytes_in"] = mapping.bytes_in;
+  item["bytes_out"] = mapping.bytes_out;
+  item["last_error"] = mapping.last_error;
+  return item;
+}
+
+void send_portmap_error(uvcpp_web_response& resp, portmap_error error) {
+  uvcpp_json body;
+  body["code"] = portmap_error_code(error);
+  body["message"] = portmap_error_message(error);
+  resp.status(portmap_error_http_status(error)).json(body);
+  resp.end();
+}
+
+/// Integral JSON number in `long long` range. Ports arrive as JSON numbers,
+/// but a client that sends 3306.0 is accepted while 3306.5 is not.
+bool json_integral(const uvcpp_json& body, const char* key, long long& out) {
+  const auto it = body.find(key);
+  if (it == body.end() || !it->is_number()) return false;
+  const double value = it->get<double>();
+  if (value < -9.0e15 || value > 9.0e15) return false;
+  const long long integer = static_cast<long long>(value);
+  if (static_cast<double>(integer) != value) return false;
+  out = integer;
+  return true;
+}
+
+bool json_host(const uvcpp_json& body, const char* key, std::string& out,
+               bool& present) {
+  const auto it = body.find(key);
+  present = it != body.end();
+  if (!present) return true;
+  if (!it->is_string()) return false;
+  out = it->get<std::string>();
+  return true;
+}
+
+bool parse_mapping_id(const std::string* text, uint64_t& id) {
+  if (text == nullptr || text->empty()) return false;
+  char* end = nullptr;
+  const unsigned long long value = std::strtoull(text->c_str(), &end, 10);
+  if (end == nullptr || *end != '\0' || value == 0) return false;
+  id = static_cast<uint64_t>(value);
+  return true;
 }
 
 }  // namespace
@@ -3208,6 +3268,281 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
   // local UI posts a small JSON object.
   // UI preferences (UI mode, saved devices, recents) live in ui.json because
   // the core port changes every launch and localStorage is origin-scoped.
+  // ---- Port mapping (controller side) ---------------------------------
+  // The local listener belongs to this machine, so these routes share the
+  // loopback-only rule of /api/fs/*. The bearer-token guard above still runs
+  // first; a remote page cannot reach them.
+  app.get("/api/portmap",
+          [deps](uvcpp_web_request& req, uvcpp_web_response& resp,
+                 uvcpp_web_next) {
+            if (!is_loopback_peer(req.peer_ip())) {
+              resp.status(403).json_str(R"({"code":"loopback_only"})");
+              resp.end();
+              return;
+            }
+            if (!deps.port_forward) {
+              send_portmap_error(resp, portmap_error::port_forward_disabled);
+              return;
+            }
+            uvcpp_json out;
+            out["code"] = "ok";
+            uvcpp_json list = uvcpp_json::array();
+            for (const port_mapping& mapping :
+                 deps.port_forward->mappings()) {
+              list.push_back(port_mapping_json(mapping));
+            }
+            out["mappings"] = std::move(list);
+            resp.set_header("Cache-Control", "no-store").json(out);
+            resp.end();
+          });
+
+  app.get("/api/portmap/presets",
+          [](uvcpp_web_request& req, uvcpp_web_response& resp,
+             uvcpp_web_next) {
+            if (!is_loopback_peer(req.peer_ip())) {
+              resp.status(403).json_str(R"({"code":"loopback_only"})");
+              resp.end();
+              return;
+            }
+            std::size_t count = 0;
+            const portmap_preset* presets = portmap_presets(count);
+            uvcpp_json out;
+            out["code"] = "ok";
+            uvcpp_json list = uvcpp_json::array();
+            for (std::size_t i = 0; i < count; ++i) {
+              uvcpp_json preset;
+              preset["id"] = presets[i].id;
+              preset["port"] = presets[i].port;
+              list.push_back(std::move(preset));
+            }
+            out["presets"] = std::move(list);
+            resp.set_header("Cache-Control", "no-store").json(out);
+            resp.end();
+          });
+
+  app.post("/api/portmap",
+           [deps](uvcpp_web_request& req, uvcpp_web_response& resp,
+                  uvcpp_web_next) {
+             if (!is_loopback_peer(req.peer_ip())) {
+               resp.status(403).json_str(R"({"code":"loopback_only"})");
+               resp.end();
+               return;
+             }
+             if (!deps.port_forward) {
+               send_portmap_error(resp, portmap_error::port_forward_disabled);
+               return;
+             }
+             uvcpp_json body;
+             try {
+               body = uvcpp_json::parse(req.body_str());
+             } catch (...) {
+               resp.status(400).json_str(R"({"code":"bad_request"})");
+               resp.end();
+               return;
+             }
+             if (!body.is_object()) {
+               resp.status(400).json_str(R"({"code":"bad_request"})");
+               resp.end();
+               return;
+             }
+             port_mapping mapping;
+             long long listen_port = 0;
+             if (body.contains("listen_port")) {
+               if (!json_integral(body, "listen_port", listen_port) ||
+                   !portmap_valid_port(listen_port, true)) {
+                 send_portmap_error(resp, portmap_error::bad_port);
+                 return;
+               }
+             }
+             mapping.listen_port = static_cast<uint16_t>(listen_port);
+             std::string target_host;
+             bool has_target_host = false;
+             if (!json_host(body, "target_host", target_host,
+                            has_target_host) ||
+                 (has_target_host &&
+                  !portmap_valid_host(target_host))) {
+               send_portmap_error(resp, portmap_error::bad_target);
+               return;
+             }
+             long long target_port = 0;
+             if (!json_integral(body, "target_port", target_port) ||
+                 !portmap_valid_port(target_port, false)) {
+               send_portmap_error(resp, portmap_error::bad_port);
+               return;
+             }
+             // listen_port 0 means "let the system pick"; listen_host is
+             // loopback by default because exposing a tunnel on every
+             // interface should be an explicit choice.
+             std::string listen_host = "127.0.0.1";
+             bool has_listen_host = false;
+             if (!json_host(body, "listen_host", listen_host,
+                            has_listen_host) ||
+                 (has_listen_host && !portmap_valid_host(listen_host))) {
+               send_portmap_error(resp, portmap_error::bad_target);
+               return;
+             }
+             mapping.listen_host = listen_host;
+             mapping.target_host =
+                 has_target_host ? target_host : std::string("127.0.0.1");
+             mapping.target_port = static_cast<uint16_t>(target_port);
+             if (body.contains("enabled")) {
+               const auto it = body.find("enabled");
+               if (!it->is_boolean()) {
+                 resp.status(400).json_str(R"({"code":"bad_request"})");
+                 resp.end();
+                 return;
+               }
+               mapping.enabled = it->get<bool>();
+             }
+             std::string error;
+             if (!deps.port_forward->add(mapping, error)) {
+               send_portmap_error(resp,
+                                  portmap_error_from_manager(error));
+               return;
+             }
+             uvcpp_json out;
+             out["code"] = "ok";
+             out["mapping"] = port_mapping_json(mapping);
+             // Kept top-level for callers that only need the OS-assigned
+             // port after asking for 0.
+             out["listen_port"] = mapping.listen_port;
+             resp.set_header("Cache-Control", "no-store").json(out);
+             resp.end();
+           });
+
+  app.patch("/api/portmap/:id",
+            [deps](uvcpp_web_request& req, uvcpp_web_response& resp,
+                   uvcpp_web_next) {
+              if (!is_loopback_peer(req.peer_ip())) {
+                resp.status(403).json_str(R"({"code":"loopback_only"})");
+                resp.end();
+                return;
+              }
+              if (!deps.port_forward) {
+                send_portmap_error(resp,
+                                   portmap_error::port_forward_disabled);
+                return;
+              }
+              uint64_t id = 0;
+              if (!parse_mapping_id(req.param("id"), id)) {
+                send_portmap_error(resp, portmap_error::not_found);
+                return;
+              }
+              uvcpp_json body;
+              try {
+                body = uvcpp_json::parse(req.body_str());
+              } catch (...) {
+                resp.status(400).json_str(R"({"code":"bad_request"})");
+                resp.end();
+                return;
+              }
+              if (!body.is_object()) {
+                resp.status(400).json_str(R"({"code":"bad_request"})");
+                resp.end();
+                return;
+              }
+              port_mapping current;
+              if (!deps.port_forward->get(id, current)) {
+                send_portmap_error(resp, portmap_error::not_found);
+                return;
+              }
+              bool has_enabled = false;
+              bool enabled = current.enabled;
+              if (body.contains("enabled")) {
+                const auto it = body.find("enabled");
+                if (!it->is_boolean()) {
+                  resp.status(400).json_str(R"({"code":"bad_request"})");
+                  resp.end();
+                  return;
+                }
+                has_enabled = true;
+                enabled = it->get<bool>();
+              }
+              std::string target_host = current.target_host;
+              bool has_target_host = false;
+              if (!json_host(body, "target_host", target_host,
+                             has_target_host) ||
+                  (has_target_host &&
+                   !portmap_valid_host(target_host))) {
+                send_portmap_error(resp, portmap_error::bad_target);
+                return;
+              }
+              long long target_port = current.target_port;
+              bool has_target_port = false;
+              if (body.contains("target_port")) {
+                if (!json_integral(body, "target_port", target_port) ||
+                    !portmap_valid_port(target_port, false)) {
+                  send_portmap_error(resp, portmap_error::bad_port);
+                  return;
+                }
+                has_target_port = true;
+              }
+              if (!has_enabled && !has_target_host && !has_target_port) {
+                resp.status(400).json_str(R"({"code":"bad_request"})");
+                resp.end();
+                return;
+              }
+              std::string error;
+              if (has_enabled && enabled != current.enabled) {
+                if (!deps.port_forward->set_enabled(id, enabled, error)) {
+                  send_portmap_error(resp,
+                                     portmap_error_from_manager(error));
+                  return;
+                }
+              }
+              // A target edit only changes where the *next* accepted
+              // connection goes; the listener and live streams stay put.
+              if (has_target_host || has_target_port) {
+                if (!deps.port_forward->set_target(
+                        id, target_host,
+                        static_cast<uint16_t>(target_port), error)) {
+                  send_portmap_error(resp,
+                                     portmap_error_from_manager(error));
+                  return;
+                }
+              }
+              port_mapping updated;
+              deps.port_forward->get(id, updated);
+              uvcpp_json out;
+              out["code"] = "ok";
+              out["mapping"] = port_mapping_json(updated);
+              resp.set_header("Cache-Control", "no-store").json(out);
+              resp.end();
+            });
+
+  app.del("/api/portmap/:id",
+          [deps](uvcpp_web_request& req, uvcpp_web_response& resp,
+                 uvcpp_web_next) {
+            if (!is_loopback_peer(req.peer_ip())) {
+              resp.status(403).json_str(R"({"code":"loopback_only"})");
+              resp.end();
+              return;
+            }
+            if (!deps.port_forward) {
+              send_portmap_error(resp, portmap_error::port_forward_disabled);
+              return;
+            }
+            uint64_t id = 0;
+            if (!parse_mapping_id(req.param("id"), id)) {
+              send_portmap_error(resp, portmap_error::not_found);
+              return;
+            }
+            port_mapping current;
+            if (!deps.port_forward->get(id, current)) {
+              send_portmap_error(resp, portmap_error::not_found);
+              return;
+            }
+            std::string error;
+            if (!deps.port_forward->remove(id, error)) {
+              send_portmap_error(resp, portmap_error_from_manager(error));
+              return;
+            }
+            uvcpp_json out;
+            out["code"] = "ok";
+            resp.set_header("Cache-Control", "no-store").json(out);
+            resp.end();
+          });
+
   app.get("/api/ui-preferences",
           [deps](uvcpp_web_request& req, uvcpp_web_response& resp,
                  uvcpp_web_next) {

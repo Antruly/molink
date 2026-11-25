@@ -95,6 +95,7 @@
     "tabGeneral": "常规",
     "tabSecurity": "安全",
     "tabNetwork": "网络",
+    "tabPortmap": "端口映射",
     "tabDisplay": "图像",
     "tabService": "服务",
     "tabAbout": "关于",
@@ -982,5 +983,44 @@
     "recordingOn": "已开启记录",
     "recordingOff": "已关闭记录",
     "privacy": "日志只保存在本机，不会上传。不包含验证码、聊天或剪贴板内容。"
+  },
+  "portmap": {
+    "title": "端口映射",
+    "intro": "在本机监听一个端口，把连接经当前远程会话送到对方机器的目标端口。会话断开时监听保留，重连后自动恢复。",
+    "presets": "快捷预设",
+    "empty": "还没有端口映射。",
+    "localPort": "本地端口",
+    "localPortPlaceholder": "随机",
+    "target": "目标 host:port",
+    "add": "添加",
+    "addHint": "本地端口留空由系统分配；目标端口也可直接点上面的预设。",
+    "statusLabel": "状态",
+    "status": {
+      "listening": "监听中",
+      "error": "错误",
+      "disabled": "已停用",
+      "stopped": "未监听"
+    },
+    "traffic": "入 {{in}} · 出 {{out}}",
+    "toggle": "启用或停用此映射",
+    "delete": "删除映射",
+    "preset": {
+      "rdp": "RDP",
+      "ssh": "SSH",
+      "mysql": "MySQL",
+      "http": "HTTP",
+      "https": "HTTPS",
+      "smb": "SMB"
+    },
+    "errors": {
+      "port_forward_disabled": "端口映射未启用：被控端需要允许端口映射。",
+      "bad_port": "端口号无效，应为 1–65535。",
+      "port_in_use": "端口已被占用或无法监听。",
+      "not_found": "这条映射已不存在。",
+      "bad_target": "目标地址无效，请填写 host:port。",
+      "save_failed": "无法保存映射，请检查本机配置目录。",
+      "bad_request": "请求格式不正确。",
+      "unknown": "操作失败，无法连接本机后台。"
+    }
   }
 }

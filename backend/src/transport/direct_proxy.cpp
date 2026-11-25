@@ -49,6 +49,7 @@
 #include "surface/frame_surface.h"
 #include "compression.h"
 #include "protocol/frame_packet.h"
+#include "transport/port_forward_bridge.h"
 #include "transport/h2_ws_transport.h"
 #include "transport/peer_transports.h"
 #include "transport/relay_transport.h"
@@ -160,12 +161,14 @@ class direct_proxy final : public std::enable_shared_from_this<direct_proxy> {
  public:
   direct_proxy(uvcpp::uvcpp_ws_connection* browser, std::string host, int port,
                uvcpp::uvcpp_loop* loop,
-               std::function<void(std::function<void()>)> post)
+               std::function<void(std::function<void()>)> post,
+               std::shared_ptr<port_forward_manager> port_forward)
       : browser_(browser),
         host_(std::move(host)),
         port_(port),
         loop_(loop),
-        post_(std::move(post)) {}
+        post_(std::move(post)),
+        forward_manager_(std::move(port_forward)) {}
 
   ~direct_proxy() { stop_worker(); }
 
@@ -410,6 +413,10 @@ class direct_proxy final : public std::enable_shared_from_this<direct_proxy> {
               self->transport_->send_text(self->hello_text_);
               self->hello_resent_ = true;
             }
+            if (self->forward_bridge_ &&
+                self->forward_bridge_->handle_text(text)) {
+              return;
+            }
             if (self->browser_ != nullptr) {
               self->browser_->send_text(text.data(), text.size());
             }
@@ -424,6 +431,7 @@ class direct_proxy final : public std::enable_shared_from_this<direct_proxy> {
         [weak](int code, const std::string& reason) {
           if (auto self = weak.lock()) {
             self->closed_ = true;
+            self->detach_forward();
             self->stop_worker();
             if (self->browser_ != nullptr) {
               self->browser_->close(static_cast<uvcpp::ws_close_code>(code),
@@ -432,6 +440,21 @@ class direct_proxy final : public std::enable_shared_from_this<direct_proxy> {
             self->browser_ = nullptr;
           }
         });
+    // This proxy only exists for an outbound session, i.e. this core is the
+    // viewer. Attach the controller-side forward link as soon as the upstream
+    // session is usable; listeners themselves predate the session.
+    if (forward_manager_) {
+      forward_bridge_ = std::make_unique<port_forward_bridge>(
+          forward_manager_, transport_, post_);
+      forward_bridge_->attach();
+    }
+  }
+
+  void detach_forward() {
+    if (forward_bridge_) {
+      forward_bridge_->detach();
+      forward_bridge_.reset();
+    }
   }
 
 #if MOLINK_HAVE_H2_WS
@@ -777,6 +800,7 @@ class direct_proxy final : public std::enable_shared_from_this<direct_proxy> {
     (void)reason;
     browser_ = nullptr;
     closed_ = true;
+    detach_forward();
     stop_worker();
     if (file_retry_timer_) file_retry_timer_->stop();
     pending_text_.clear();
@@ -942,6 +966,7 @@ class direct_proxy final : public std::enable_shared_from_this<direct_proxy> {
 
   void deliver_binary(const uint8_t* data, std::size_t len) {
     if (closed_ || browser_ == nullptr || data == nullptr) return;
+    if (forward_bridge_ && forward_bridge_->handle_binary(data, len)) return;
     // The native surface mirrors the picture the page receives (tile codecs
     // only for now; the streams wait for the core-side decoder).
     surface_ingest_packet(compositor_, data, len);
@@ -1118,6 +1143,8 @@ class direct_proxy final : public std::enable_shared_from_this<direct_proxy> {
   uvcpp::uvcpp_loop* loop_ = nullptr;
   std::function<void(std::function<void()>)> post_;
   std::shared_ptr<session_transport> transport_;
+  std::unique_ptr<port_forward_bridge> forward_bridge_;
+  std::shared_ptr<port_forward_manager> forward_manager_;
   int tcp_port_ = 0;
   bool http2_available_ = false;
   std::string pinned_ca_;
@@ -1183,8 +1210,10 @@ class direct_proxy final : public std::enable_shared_from_this<direct_proxy> {
 
 uvcpp::uvcpp_web_ws_handler make_direct_handler(
     std::function<void(std::function<void()>)> post, uvcpp::uvcpp_loop* loop,
-    std::function<bool()> host_only) {
-  return [post = std::move(post), loop, host_only = std::move(host_only)](
+    std::function<bool()> host_only,
+    std::shared_ptr<port_forward_manager> port_forward) {
+  return [post = std::move(post), loop, host_only = std::move(host_only),
+          port_forward = std::move(port_forward)](
              uvcpp::uvcpp_web_ws_request& request) {
     uvcpp::uvcpp_ws_connection* conn = request.connection();
     if (conn == nullptr) return;
@@ -1215,7 +1244,8 @@ uvcpp::uvcpp_web_ws_handler make_direct_handler(
       return;
     }
     auto proxy =
-        std::make_shared<direct_proxy>(conn, *host, port_number, loop, post);
+        std::make_shared<direct_proxy>(conn, *host, port_number, loop, post,
+                                       port_forward);
     proxy->start();
   };
 }

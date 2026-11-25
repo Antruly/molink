@@ -18,6 +18,7 @@
 #include "input/input.h"
 #include "lock_state.h"
 #include "network_settings.h"
+#include "port_forward.h"
 #include "session_registry.h"
 
 namespace uvcpp {
@@ -54,6 +55,9 @@ struct api_deps {
   std::shared_ptr<server_client> server;
   std::shared_ptr<discovery_service> discovery;
   std::shared_ptr<ui_store> ui;
+  /// Controller-side TCP mappings owned by this core. Null when this build
+  /// has no forwarding support.
+  std::shared_ptr<port_forward_manager> port_forward;
   std::shared_ptr<std::atomic<int>> bound_port;
   /// True when the web port is served over TLS. /api/device reports it so a
   /// shell adopting a core it did not spawn can build the right UI URL.

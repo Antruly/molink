@@ -139,6 +139,11 @@ class port_forward_manager {
   bool remove(uint64_t id);
   bool remove(uint64_t id, std::string& error);
   bool set_enabled(uint64_t id, bool enabled, std::string& error);
+  /// Changes only the target endpoint. The listener and every live stream keep
+  /// running; the next accepted connection uses the new target. This is the
+  /// PATCH path for "改目标不影响已建连接".
+  bool set_target(uint64_t id, const std::string& target_host,
+                  uint16_t target_port, std::string& error);
   /// Reads the capability switch again. Disabling it stops every listener;
   /// enabling it starts the persisted enabled mappings again. Returns how many
   /// listeners are running afterwards.
@@ -150,6 +155,9 @@ class port_forward_manager {
   // ---- session attachment ------------------------------------------------
   void attach_link(std::shared_ptr<port_forward_link> link);
   void detach_link();
+  /// Detaches only when @p link is still the attached one. A second browser
+  /// tab that attached later keeps its link when the first one closes.
+  void detach_link_if(const port_forward_link* link);
   bool linked() const;
 
   /// Inbound `forward-open-ok` / `forward-open-fail` / `forward-close`.

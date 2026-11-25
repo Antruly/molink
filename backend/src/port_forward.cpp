@@ -1582,6 +1582,52 @@ bool port_forward_manager::set_enabled(uint64_t id, bool enabled,
   return update(mapping, error);
 }
 
+bool port_forward_manager::set_target(uint64_t id,
+                                      const std::string& target_host,
+                                      uint16_t target_port,
+                                      std::string& error) {
+  std::lock_guard<std::mutex> api(impl_->api_mutex);
+  error.clear();
+  if (target_host.empty() || target_host.size() > 255) {
+    error = "invalid target host";
+    return false;
+  }
+  if (target_port == 0) {
+    error = "invalid target port";
+    return false;
+  }
+  std::string previous_host;
+  uint16_t previous_port = 0;
+  {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    const auto it = impl_->entries.find(id);
+    if (it == impl_->entries.end()) {
+      error = "mapping_not_found";
+      return false;
+    }
+    port_mapping& mapping = it->second.mapping;
+    previous_host = mapping.target_host;
+    previous_port = mapping.target_port;
+    mapping.target_host = target_host;
+    mapping.target_port = target_port;
+    mapping.last_error.clear();
+  }
+  std::string save_error;
+  if (!impl_->persist(save_error)) {
+    // The in-memory rule must not outlive the failed write: a restart would
+    // restore the old target anyway, so show the same thing now.
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    const auto it = impl_->entries.find(id);
+    if (it != impl_->entries.end()) {
+      it->second.mapping.target_host = previous_host;
+      it->second.mapping.target_port = previous_port;
+    }
+    error = save_error;
+    return false;
+  }
+  return true;
+}
+
 std::size_t port_forward_manager::refresh() {
   std::lock_guard<std::mutex> api(impl_->api_mutex);
   const bool allowed = impl_->allowed();
@@ -1645,20 +1691,35 @@ bool port_forward_manager::get(uint64_t id, port_mapping& out) const {
 
 void port_forward_manager::attach_link(
     std::shared_ptr<port_forward_link> link) {
+  std::vector<std::shared_ptr<impl::stream>> live;
   std::shared_ptr<port_forward_link> replaced;
   {
     std::lock_guard<std::mutex> lock(impl_->mutex);
-    if (impl_->link != link) replaced = std::move(impl_->link);
+    if (impl_->link != link) {
+      replaced = std::move(impl_->link);
+      // Streams belong to the old link. Reconnect attaches a fresh one; they
+      // can never be resumed, so close them instead of waiting for a timeout.
+      for (auto& item : impl_->streams) live.push_back(item.second);
+    }
     impl_->link = std::move(link);
   }
-  if (replaced) replaced->mark_closed();
+  if (replaced) {
+    replaced->mark_closed();
+    for (auto& stream : live) impl_->close_stream(stream, "link_replaced");
+  }
 }
 
 void port_forward_manager::detach_link() {
+  detach_link_if(nullptr);
+}
+
+void port_forward_manager::detach_link_if(const port_forward_link* link) {
   std::vector<std::shared_ptr<impl::stream>> live;
   std::shared_ptr<port_forward_link> old_link;
   {
     std::lock_guard<std::mutex> lock(impl_->mutex);
+    if (!impl_->link) return;
+    if (link != nullptr && impl_->link.get() != link) return;
     old_link = std::move(impl_->link);
     for (auto& item : impl_->streams) live.push_back(item.second);
   }
