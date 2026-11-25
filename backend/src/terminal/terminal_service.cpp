@@ -37,7 +37,7 @@ void terminal_ring_buffer::append(const uint8_t* data, std::size_t len) {
     size_ -= drop;
   }
   const std::size_t tail = (head_ + size_) % capacity;
-  const std::size_t first = std::min(len, capacity - tail);
+  const std::size_t first = (std::min)(len, capacity - tail);
   std::memcpy(buffer_.data() + tail, data, first);
   if (len > first) {
     std::memcpy(buffer_.data(), data + first, len - first);
@@ -68,7 +68,7 @@ std::vector<uint8_t> terminal_ring_buffer::replay(uint64_t from_seq,
   if (offset >= size_) return {};
   const std::size_t count = size_ - offset;
   const std::size_t index = (head_ + offset) % capacity;
-  const std::size_t first = std::min(count, capacity - index);
+  const std::size_t first = (std::min)(count, capacity - index);
   std::vector<uint8_t> out(count);
   std::memcpy(out.data(), buffer_.data() + index, first);
   if (count > first) {
