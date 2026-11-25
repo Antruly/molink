@@ -237,6 +237,7 @@ packet_stream packet_stream_of(const uint8_t* data, std::size_t len) {
     case packet_type::voice:
       return packet_stream::audio;
     case packet_type::file_data:
+    case packet_type::forward_data:
       return packet_stream::file;
     default:
       return packet_stream::control;

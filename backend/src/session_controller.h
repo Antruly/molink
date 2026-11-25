@@ -24,6 +24,7 @@
 #include "input/input_event.h"
 #include "lock_state.h"
 #include "network_settings.h"
+#include "port_forward.h"
 #include "session_registry.h"
 #include "transport/session_transport.h"
 
@@ -82,6 +83,9 @@ struct session_options {
   /// Hop a callback onto the app loop (used for clipboard results, which are
   /// produced on the clipboard thread).
   std::function<void(std::function<void()>)> post;
+  /// Live `port_forward_enabled` switch. The target side reads it for every
+  /// `forward-open`; empty means disabled.
+  std::function<bool()> port_forward_enabled;
   uvcpp::uvcpp_loop* loop = nullptr;
 };
 
@@ -179,6 +183,9 @@ class session_controller final
   /// which case the client falls back to its verification code.
   std::string resume_token_;
   std::unique_ptr<file_transfer> files_;
+  /// Target side of TCP port forwarding for this session. Null until start();
+  /// stop() closes every target connection when the session goes away.
+  std::unique_ptr<port_forward_host> forward_host_;
   /// The source behind this session's current lazy offer. Uploads are tagged
   /// with a range owned by one offer, so a stale upload cannot complete a
   /// newer offer's file.

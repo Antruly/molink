@@ -107,6 +107,10 @@ enum class packet_type : uint8_t {
   /// `{"type":"file","action":"clipboard-pull"}`. 0x16 belongs to tile_seq and
   /// 0x17 to the reverse direction, so this takes the next free value.
   clipboard_file = 0x18,
+  /// TCP port-forward bytes: u16 stream id (network order), then raw bytes.
+  /// The matching `forward-open` / `forward-close` control messages travel as
+  /// JSON text with the same stream id.
+  forward_data = 0x19,
   control = 0x7f,    ///< JSON control payload, session-scoped
   ping = 0x80,       ///< empty payload
   pong = 0x81,       ///< empty payload
