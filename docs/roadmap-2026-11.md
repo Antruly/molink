@@ -118,8 +118,12 @@
 | 4 | H3-H5 被控端专用版（D2D 壳 + 安装包） | 依赖 H1/H2 |
 | 5 | T1-T3 远程终端（MVP） | 用户明确要的新模块，独立于其它改动 |
 | 6 | P1-P3 端口映射 | 依赖会话复用，排在终端之后可复用同一套流 |
-| 7 | W7-W9 WebRTC | 收益大但改动最深，放在传输层稳定之后 |
-| 8 | T4-T5、P4 收尾 | 持久化、权限、审计 |
+| 7 | M1-M3 移动端阶段 A（WebView 壳） | 复用现有 Web UI，最快拿到可用 APK |
+| 8 | M4 移动端阶段 B（原生解码） | 低延迟，依赖阶段 A 的会话层 |
+| 9 | Y1-Y2 Wayland（检测提示 + portal 采集） | 先让用户知道现状，再接采集 |
+| 10 | Y3-Y5 Wayland（输入/剪贴板/组合键） | 依赖采集跑通 |
+| 11 | W7-W9 WebRTC | 收益大但改动最深，放在传输层稳定之后 |
+| 12 | T4-T5、P4、M6 收尾 | 持久化、权限、审计、手机被控 |
 
 ## 五、libuvcpp 升级到 1.11.0（计划，不自行编译）
 
@@ -204,7 +208,92 @@
 - 与全功能版并行安装的互斥（端口/服务名/单实例）：服务名用 `moLinkHost`，端口冲突时自动换端口并在 UI 显示实际端口。
 - Win7 的 TLS 能力：core 已有静态 OpenSSL，但 Win7 上需确认 TLS 1.2 套件可用（现有全功能版已在 Win7 出包，风险可控）。
 
-## 七、不做 / 暂缓
+## 七、移动端（先 Android，后续 iOS / 鸿蒙）
+
+**定位**：手机**控制别的机器**（viewer）。被控（手机作为宿主）放到下一阶段，且先只做"看屏幕"。
+
+### 7.1 为什么先做 Android
+- 同样一套通用框架（Kotlin Multiplatform 或 Flutter）里，Android 的构建与分发成本最低（APK 直接装）
+- iOS 需要开发者签名与 TestFlight，鸿蒙需要单独的 SDK，都排在 Android 跑通之后
+- 参考 RustDesk 的移动端交互（触屏手势、悬浮工具条、虚拟键盘/鼠标），但 UI 风格沿用我们自己的（与现有移动 Web 一致）
+
+### 7.2 分两阶段实现
+
+**阶段 A：WebView 壳（能用的 80%）**
+- Kotlin 壳 + WebView 加载现有 Web UI，补齐移动端缺失的功能（文件管理、剪贴板、虚拟鼠标/键盘已经在 Web 里有雏形）
+- 手势：单指拖动=移动指针，双指=滚动，双指捏合=缩放，长按=右键，三指=呼出工具条
+- 系统键盘通过隐藏 input 走 IME 上屏文本（Web 已有 `localIme` 通路）
+- 剪贴板：`ClipboardManager` 读写，走现有 `clipboard-sync`
+- 文件：`ACTION_OPEN_DOCUMENT` / `ACTION_CREATE_DOCUMENT` + 现有文件通道
+- 编码：WebView 的 `VideoDecoder`（Chromium）在较新系统上可用；不可用时退回平铺
+
+**阶段 B：原生渲染 + 硬件解码（低延迟）**
+- `MediaCodec` 解码 H.264 / H.265 / VP8 / VP9 / AV1（按设备能力探测，优先 H.264）
+- `SurfaceView` 直出，避免 WebView 合成开销
+- 与 Web 壳共用会话协议（不新开协议）
+
+**阶段 C（下一阶段，先只做看屏）**
+- 被控：`MediaProjection` 抓屏 + 编码上送；输入注入暂缓（需要无障碍服务，风险与审核都高）
+
+### 7.3 编解码与平铺
+- 与服务端协商：新增 `android_h264` / `android_vp9` / `android_av1` 能力标志（或复用现有 `h264_stream` 等，由壳注入）
+- 服务端编码阶梯：H.264 优先（兼容性最好）→ VP9 → AV1
+- 平铺模式保留（低带宽或解码不可用时），与 PC 端同一套 tile 协议
+- 目标：1080p@30 在中端机上解码延迟 < 40 ms
+
+### 7.4 外设
+- **物理鼠标**：Android 8+ 的 `onGenericMotionEvent` + 指针捕获；右键/滚轮映射
+- **物理键盘**：`onKeyDown/onKeyUp` 的 keyCode 映射到我们的 DOM code 表（`keymap.cpp` 已按物理位）
+- OTG/USB 与蓝牙都走同一套输入事件
+
+### 7.5 任务
+- [ ] M1 Android 壳骨架（Kotlin + WebView + 会话管理 + 权限）
+- [ ] M2 触屏手势与虚拟鼠标/键盘
+- [ ] M3 文件管理与剪贴板同步（复用 Web 逻辑）
+- [ ] M4 原生渲染 + MediaCodec 解码（H.264/VP9/AV1 能力探测）
+- [ ] M5 打包与分发（APK，x86_64/arm64）
+- [ ] M6（下一阶段）MediaProjection 被控看屏
+
+### 7.6 验收
+- 手机连 Windows/Linux 宿主：看画面、触屏操控、虚拟键盘打字、剪贴板双向、传文件
+- 物理鼠标键盘（OTG）可用
+- 弱网下自动退平铺且不崩
+- 1080p 通话级延迟（端到端 < 150 ms 局域网）
+
+### 7.7 风险
+- WebView 的 WebCodecs 可用性因系统版本差异大 → 阶段 B 用 MediaCodec 兜底
+- 厂商省电策略杀后台 → 前台服务 + 电池优化白名单引导
+
+## 八、Linux 新桌面（Wayland）
+
+**现状**：只有 X11（`x11_capture.cpp` + `x11_input.cpp` + X11 剪贴板）。Wayland 会话下只能看到 XWayland 窗口，原生应用抓不到、也注不进去。
+
+### 8.1 三条通路
+| 能力 | Wayland 方案 |
+|---|---|
+| 屏幕采集 | `xdg-desktop-portal` ScreenCast（PipeWire 流）——**唯一通用方案** |
+| 输入注入 | `xdg-desktop-portal` RemoteDesktop（EIS / libei）；`/dev/uinput` 作为无 portal 时的兜底 |
+| 剪贴板 | wlroots 系用 `wlr-data-control`；GNOME/KDE 走 portal 或退回"仅 XWayland" |
+| 组合键 | EIS 能发 keysym，但**受 compositor 限制**：用户已同意"实现不了就先不做" |
+
+### 8.2 分步
+1. **W1 检测与提示**：`XDG_SESSION_TYPE=wayland` 时明确告知"仅 XWayland 应用可同步"，不再静默降级（今天就是这样，用户以为坏了）
+2. **W2 采集**：接入 portal ScreenCast（PipeWire），拿到 dmabuf 或内存帧，喂现有编码器
+3. **W3 输入**：RemoteDesktop portal（EIS）注入指针与键盘；失败退回 uinput
+4. **W4 剪贴板**：`wlr-data-control`（wlroots）优先；GNOME 下走 portal 或标注不支持
+5. **W5 组合键**：能发就发，不能就明确禁用并给提示，不做假动作
+
+### 8.3 验收
+- GNOME Wayland 下能看到整个桌面（不只 XWayland 窗口），鼠标键盘可用
+- KDE Wayland 同上
+- 剪贴板在 wlroots 系（Sway/Hyprland）双向可用；GNOME 下如实提示限制
+- 组合键：能发则发，不能发时 UI 明确禁用
+
+### 8.4 风险
+- portal 需要用户在弹窗里授权，无法静默；每次会话都要选屏幕
+- PipeWire 的 dmabuf 路径与编码器零拷贝对接需要额外工作；先做内存帧（性能差一些但正确）
+
+## 九、不做 / 暂缓
 - 提权执行（sudo / runas / SYSTEM）：与"以当前用户身份"的约定冲突。
 - UDP 端口映射：等 QUIC 数据报通道成型。
 - 移动端 Web 的终端键盘适配：先保证桌面浏览器。
