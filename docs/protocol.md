@@ -604,7 +604,7 @@ X11 的屏幕抓取**不包含鼠标光标**，服务端单独发送形状与位
 |---|---|---|---|
 | GET | `/healthz` | 否 | 健康检查，含 `service: "moLink Core"` |
 | GET | `/api/health` | 否 | 同 `/healthz` |
-| GET | `/api/state` | 否 | 本机/远程、锁定状态、设备 ID、锁定超时、全部端口 |
+| GET | `/api/state` | 否 | 本机/远程、锁定状态、设备 ID、锁定超时、全部端口、桌面会话类型（`session_type`） |
 | GET | `/api/transports` | 否 | 传输协商表：可用性、端口、推荐顺序 |
 | POST | `/api/login` | 否 | 用长期/临时授权码登录/解锁；返回 `session_token`；失败限速 |
 | GET | `/api/device` | 仅回环 | 设备 ID、本机会话 token、临时码状态；锁定时 423 |

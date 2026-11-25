@@ -289,6 +289,9 @@ set(MOLINK_CORE_SOURCES
   src/p2p/p2p_manager.cpp
   src/util.cpp
   src/session_controller.cpp
+  src/terminal/pty.cpp
+  src/terminal/terminal_service.cpp
+  src/terminal/terminal_ws.cpp
   src/protocol/frame_packet.cpp
 )
 
@@ -818,6 +821,30 @@ foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
     "RUNTIME_OUTPUT_DIRECTORY_${uvp_config_upper}" "${CMAKE_BINARY_DIR}")
 endforeach()
 add_test(NAME diag_log COMMAND molink-core-diag-log-test)
+
+# Host PTY, the 1 MiB output ring and the session bookkeeping. The PTY calls
+# are POSIX-only; the Windows stub compiles but the test is not registered
+# there (ConPTY is a later batch).
+add_executable(molink-core-terminal-test
+  tests/terminal_test.cpp
+  src/terminal/pty.cpp
+  src/terminal/terminal_service.cpp
+  src/diag_log.cpp
+)
+target_include_directories(molink-core-terminal-test PRIVATE src)
+if(WIN32)
+  target_link_libraries(molink-core-terminal-test PRIVATE ws2_32 iphlpapi)
+endif()
+set_target_properties(molink-core-terminal-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
+  string(TOUPPER "${uvp_config}" uvp_config_upper)
+  set_target_properties(molink-core-terminal-test PROPERTIES
+    "RUNTIME_OUTPUT_DIRECTORY_${uvp_config_upper}" "${CMAKE_BINARY_DIR}")
+endforeach()
+if(UNIX)
+  add_test(NAME terminal COMMAND molink-core-terminal-test)
+endif()
 
 # The native client's diagnostics keep the same daily file name, retention,
 # 32 MiB roll and redaction as the core, plus the level gate. No Win32: the
@@ -1425,6 +1452,22 @@ foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
     "RUNTIME_OUTPUT_DIRECTORY_${uvp_config_upper}" "${CMAKE_BINARY_DIR}")
 endforeach()
 add_test(NAME display_layout COMMAND molink-core-display-layout-test)
+
+# Linux desktop session classification. Pure environment parsing: a Wayland
+# host can state that only XWayland applications are reachable instead of
+# silently degrading, and every variable combination is covered here.
+add_executable(molink-core-session-type-test
+  tests/session_type_test.cpp
+)
+target_include_directories(molink-core-session-type-test PRIVATE src)
+set_target_properties(molink-core-session-type-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
+  string(TOUPPER ${uvp_config} uvp_config_upper)
+  set_target_properties(molink-core-session-type-test PROPERTIES
+    "RUNTIME_OUTPUT_DIRECTORY_${uvp_config_upper}" "${CMAKE_BINARY_DIR}")
+endforeach()
+add_test(NAME session_type COMMAND molink-core-session-type-test)
 
 # Relative (trackpad / virtual mouse) movement and sensitivity conversion.
 add_executable(molink-core-trackpad-mouse-test

@@ -925,6 +925,11 @@
     "enable": "Enable",
     "decline": "Not now"
   },
+  "wayland": {
+    "title": "Wayland session",
+    "body": "Only XWayland applications can be synced here. Native Wayland applications need portal support, which is not implemented yet.",
+    "dismiss": "Dismiss this notice"
+  },
   "diagnostics": {
     "open": "Activity log",
     "title": "Activity log",
