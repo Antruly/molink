@@ -30,6 +30,7 @@ import {
   Radio,
   Settings2,
   Sun,
+  Terminal as TerminalIcon,
   Volume2,
   VolumeX,
   Wrench,
@@ -103,6 +104,7 @@ import { RemoteCursor } from './RemoteCursor'
 import { TileCanvas, type DisplayMode } from './TileCanvas'
 import { ChatPanel } from './ChatPanel'
 import { FileTransferPanel } from './FileTransferPanel'
+import { TerminalPanel } from './TerminalPanel'
 import type { ChatMessage } from '../lib/client'
 import { VoiceCall } from '../lib/voice'
 
@@ -551,6 +553,14 @@ export function SessionView({
   const [chatUnread, setChatUnread] = useState(0)
   const chatOpenRef = useRef(false)
   const [filesOpen, setFilesOpen] = useState(false)
+  const [terminalOpen, setTerminalOpen] = useState(false)
+  /// The host answered `terminal_disabled`; never show its toolbar entry again
+  /// for this session. Until then the panel itself explains the refusal.
+  const [terminalDisabled, setTerminalDisabled] = useState(false)
+  /// The terminal endpoint authenticates with the host session token, so wait
+  /// for the live welcome. A host that answered `terminal_disabled` never
+  /// shows the entry again in this session.
+  const terminalAvailable = tab.phase === 'live' && !terminalDisabled
   /// The remote folder the file panel is showing, published by the panel. A
   /// drop on the session is uploaded straight into it.
   const [remoteDir, setRemoteDir] = useState('')
@@ -3430,6 +3440,7 @@ export function SessionView({
                       onSelect: () => {
                         setChatUnread(0)
                         setChatOpen(true)
+                        setTerminalOpen(false)
                       },
                     },
                     {
@@ -3440,8 +3451,24 @@ export function SessionView({
                       onSelect: () => {
                         setFilesOpen(true)
                         setChatOpen(false)
+                        setTerminalOpen(false)
                       },
                     },
+                    ...(terminalAvailable
+                      ? [
+                          {
+                            key: 'terminal',
+                            label: t('terminal.title'),
+                            icon: <TerminalIcon size={12} />,
+                            active: terminalOpen,
+                            onSelect: () => {
+                              setChatOpen(false)
+                              setFilesOpen(false)
+                              setTerminalOpen(true)
+                            },
+                          },
+                        ]
+                      : []),
                     ...(inputAvailable
                       ? [
                           {
@@ -3490,6 +3517,7 @@ export function SessionView({
                 onClick={() => {
                   setChatUnread(0)
                   setChatOpen(true)
+                  setTerminalOpen(false)
                 }}
                 className={
                   'relative btn h-7 w-7 shrink-0 !px-0 ' +
@@ -3510,6 +3538,7 @@ export function SessionView({
                 onClick={() => {
                   setFilesOpen(true)
                   setChatOpen(false)
+                  setTerminalOpen(false)
                 }}
                 className={
                   'btn h-7 w-7 shrink-0 !px-0 ' +
@@ -3520,6 +3549,24 @@ export function SessionView({
               >
                 <FolderOpen size={13} />
               </button>
+              {terminalAvailable ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setChatOpen(false)
+                    setFilesOpen(false)
+                    setTerminalOpen(true)
+                  }}
+                  className={
+                    'btn h-7 w-7 shrink-0 !px-0 ' +
+                    (terminalOpen ? 'text-accent' : 'btn-quiet')
+                  }
+                  title={t('terminal.title')}
+                  aria-label={t('terminal.title')}
+                >
+                  <TerminalIcon size={13} />
+                </button>
+              ) : null}
               {inputAvailable ? (
                 <>
                   <button
@@ -3812,6 +3859,17 @@ export function SessionView({
             onRequestOpen={() => setFilesOpen(true)}
             onError={(message) => pushToast(tab.id, message)}
           />
+
+          {terminalOpen ? (
+            <TerminalPanel
+              host={tab.host}
+              port={tab.port}
+              token={tab.token}
+              sessionToken={welcome?.session_token}
+              onClose={() => setTerminalOpen(false)}
+              onDisabled={() => setTerminalDisabled(true)}
+            />
+          ) : null}
 
 
           {touchDevice && inputAvailable ? (
