@@ -484,9 +484,10 @@ std::string diag_log::format_line(int64_t epoch_ms, diag_level level,
   line += level_name(level);
   line.push_back(' ');
   line += normalize_key(truncate_utf8(event, 60));
-  // `code` is normally a verification code, but app.exit's numeric process
-  // code is the whole point of the line and cannot identify a session.
-  const bool exit_event = event == "app.exit";
+  // `code` is normally a verification code, but a numeric process exit code
+  // is the whole point of these lines and cannot identify a session.
+  const bool exit_event = event == "app.exit" || event == "term.close" ||
+                          event == "term.idle_close";
   for (const diag_field& field : fields) {
     const std::string key = normalize_key(field.key);
     std::string value;

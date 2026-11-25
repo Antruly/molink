@@ -3040,6 +3040,7 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
             j["encrypt_lan"] = settings.encrypt_lan;
             j["file_sandbox"] = settings.file_sandbox;
             j["file_sandbox_roots"] = settings.file_sandbox_roots;
+            j["terminal_enabled"] = settings.terminal_enabled;
             j["ip_allowlist"] = settings.ip_allowlist;
             j["device_name"] = settings.device_name;
             j["avatar"] = settings.avatar;
@@ -3086,6 +3087,8 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
              const bool encrypt_lan = flag("encrypt_lan", before.encrypt_lan);
              const bool file_sandbox =
                  flag("file_sandbox", before.file_sandbox);
+             const bool terminal_enabled =
+                 flag("terminal_enabled", before.terminal_enabled);
              const std::string* sandbox_roots =
                  req.query("file_sandbox_roots");
              // Validate the allowlist before applying any other change, so an
@@ -3151,6 +3154,7 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
                  file_sandbox,
                  sandbox_roots != nullptr ? *sandbox_roots
                                           : before.file_sandbox_roots);
+             deps.auth->set_terminal_enabled(terminal_enabled);
              if (allowlist_text != nullptr) {
                deps.auth->set_ip_allowlist(*allowlist_text);
              }
@@ -3190,6 +3194,7 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
              j["encrypt_lan"] = after.encrypt_lan;
              j["file_sandbox"] = after.file_sandbox;
              j["file_sandbox_roots"] = after.file_sandbox_roots;
+             j["terminal_enabled"] = after.terminal_enabled;
              j["ip_allowlist"] = after.ip_allowlist;
              j["stun_server"] = after.stun_server;
              j["device_name"] = after.device_name;

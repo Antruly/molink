@@ -646,6 +646,12 @@ void auth_state::set_file_sandbox(bool enabled, std::string roots) {
   persist_locked();
 }
 
+void auth_state::set_terminal_enabled(bool enabled) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  settings_.terminal_enabled = enabled;
+  persist_locked();
+}
+
 void auth_state::set_ip_allowlist(std::string value) {
   std::lock_guard<std::mutex> lock(mutex_);
   settings_.ip_allowlist = std::move(value);

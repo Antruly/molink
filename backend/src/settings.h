@@ -50,6 +50,9 @@ struct app_settings {
   /// `;`/newline separated write roots. Empty with `file_sandbox` on means the
   /// ordinary receive folder (`~/moLink`).
   std::string file_sandbox_roots;
+  /// Remote terminal (`/ws/terminal`, host PTY). Off by default: a terminal is
+  /// full access to the host user's account, so it is an explicit opt-in.
+  bool terminal_enabled = false;
   /// Whitespace-separated CIDR list for incoming peers. Empty means no
   /// restriction. Loopback is always allowed. Read per connection/request, so
   /// a change applies to the next one and never drops an established session.

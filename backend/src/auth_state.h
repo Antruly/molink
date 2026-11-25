@@ -134,6 +134,8 @@ class auth_state {
   /// Optional write sandbox for the file channel. Off by default; `roots` is
   /// the raw `;`/newline separated list the settings screen edits.
   void set_file_sandbox(bool enabled, std::string roots);
+  /// Remote terminal opt-in. Off by default.
+  void set_terminal_enabled(bool enabled);
   /// Replacement CIDR allowlist text. The caller has already validated it;
   /// an empty string clears the restriction.
   void set_ip_allowlist(std::string value);
