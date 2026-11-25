@@ -1398,6 +1398,22 @@ foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
 endforeach()
 add_test(NAME display_layout COMMAND molink-core-display-layout-test)
 
+# Linux desktop session classification. Pure environment parsing: a Wayland
+# host can state that only XWayland applications are reachable instead of
+# silently degrading, and every variable combination is covered here.
+add_executable(molink-core-session-type-test
+  tests/session_type_test.cpp
+)
+target_include_directories(molink-core-session-type-test PRIVATE src)
+set_target_properties(molink-core-session-type-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
+  string(TOUPPER ${uvp_config} uvp_config_upper)
+  set_target_properties(molink-core-session-type-test PROPERTIES
+    "RUNTIME_OUTPUT_DIRECTORY_${uvp_config_upper}" "${CMAKE_BINARY_DIR}")
+endforeach()
+add_test(NAME session_type COMMAND molink-core-session-type-test)
+
 # Relative (trackpad / virtual mouse) movement and sensitivity conversion.
 add_executable(molink-core-trackpad-mouse-test
   tests/trackpad_mouse_test.cpp

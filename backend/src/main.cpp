@@ -35,6 +35,7 @@
 #include "config.h"
 #include "surface/frame_surface.h"
 #include "diag_log.h"
+#include "display/session_type.h"
 #include "discovery.h"
 #include "identity.h"
 #include "tls_identity.h"
@@ -571,6 +572,42 @@ int main(int argc, char** argv) {
     fields.push_back({"device", identity.device_id});
     diag().log(diag_level::info, "app.start", std::string(), fields);
   }
+  // How this process reaches the desktop. Linux capture and input only have
+  // an X11 backend, so inside a Wayland session they talk to XWayland and
+  // native Wayland clients are invisible. Say so instead of degrading
+  // silently; the UI reads the same value from /api/state.
+  molink::display::session_type session_type =
+      molink::display::session_type::unknown;
+#if defined(__linux__)
+  {
+    const auto env_value = [](const char* name) {
+      const char* value = std::getenv(name);
+      return value != nullptr ? std::string(value) : std::string();
+    };
+    session_type = molink::display::detect_session_type(
+        env_value("XDG_SESSION_TYPE"), env_value("WAYLAND_DISPLAY"),
+        env_value("DISPLAY"));
+    const bool xwayland_only =
+        session_type == molink::display::session_type::wayland;
+    const char* backend =
+        xwayland_only ? "xwayland_only"
+                      : (session_type == molink::display::session_type::x11
+                             ? "x11"
+                             : "unknown");
+    diag().log(diag_level::info, "display.session", std::string(),
+               {{"type", molink::display::session_type_name(session_type)},
+                {"capture", backend},
+                {"input", backend}});
+    if (xwayland_only) {
+      const std::string message =
+          "Wayland session detected: only XWayland applications can be "
+          "captured or controlled; native Wayland applications need portal "
+          "support, which is not implemented yet";
+      diag().log(diag_level::warn, "display.wayland", message);
+      std::fprintf(stderr, "molink display: %s\n", message.c_str());
+    }
+  }
+#endif
 #if defined(_WIN32)
   // Console signals, logoff/shutdown and an unhandled C++/SEH exception all
   // leave one app.exit line before the process disappears. Without this a
@@ -954,6 +991,7 @@ int main(int argc, char** argv) {
   deps.network = network;
   deps.config = cfg;
   deps.started_ms = started_ms;
+  deps.session_type = molink::display::session_type_name(session_type);
   deps.http2_available = app.h2c_enabled();
   deps.tile_size = capture_opts.tile_size;
   deps.change_threshold = capture_opts.change_threshold;

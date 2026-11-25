@@ -865,6 +865,7 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
             j["host_only"] = current_settings.host_only;
             j["avatar"] = current_settings.avatar;
             j["platform"] = device_platform();
+            j["session_type"] = deps.session_type;
             if (deps.server) {
               const server_status status = deps.server->status();
               uvcpp_json server;
