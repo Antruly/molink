@@ -159,7 +159,10 @@ class session_controller final
   /// u32 file id, u32 status, u64 offset, then the requested bytes.
   void send_clipboard_file_reply(uint32_t id, uint32_t status, uint64_t offset,
                                  const uint8_t* data, std::size_t len);
-  void send_audio(std::vector<uint8_t> pcm);
+  /// @p resume marks the first audible packet after a muted stretch or a
+  /// format change: the viewer resets its jitter buffer and adopts the
+  /// rate/channels carried by the control marker.
+  void send_audio(audio_pcm_ptr pcm, bool resume);
   /// Brings up the WebRTC peer for a session that asked for one (Phase 4).
   void start_rtc(const std::shared_ptr<session_info>& session);
   /// Called from the local approval dialog (through the request registry).
@@ -246,6 +249,8 @@ class session_supervisor {
   static constexpr int kTileMaxFps = 30;
   /// Capture-stats reporting: previous sample, to derive the achieved rate.
   std::chrono::steady_clock::time_point last_capture_at_{};
+  /// audio.stats window; the requirement is one line every five seconds.
+  std::chrono::steady_clock::time_point last_audio_stats_at_{};
   uint64_t last_capture_frames_ = 0;
   /// Consecutive one-second samples with a viewer behind; two are needed
   /// before the capture is told to cut detail, so one hiccup cannot soften

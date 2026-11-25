@@ -58,6 +58,15 @@ export class PcmPlayer {
     }
   }
 
+  /// Re-anchors scheduling after the host's silence gate reopens (or its
+  /// format changed). Buffers already scheduled cannot be recalled, but
+  /// starting the next one from "now" stops the muted stretch from being
+  /// replayed as a burst once packets resume.
+  reset(): void {
+    const context = this.context
+    if (context) this.nextTime = context.currentTime + 0.08
+  }
+
   push(pcm: Uint8Array): void {
     const context = this.context
     const gain = this.gain

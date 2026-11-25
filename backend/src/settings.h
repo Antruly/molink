@@ -78,6 +78,11 @@ struct app_settings {
   /// (1 s is the most real-time, at a large bandwidth cost).
   int keyframe_interval_seconds = 0;
 
+  /// Host audio send quality: "high" keeps the loopback format (48 kHz
+  /// stereo), "balanced" mixes to 24 kHz mono and "low" to 16 kHz mono. No
+  /// new codec is involved; a lower tier is simply fewer samples.
+  std::string audio_quality = "balanced";
+
   /// Master switch for the remote directory. Off means LAN/direct only.
   bool server_enabled = true;
   /// Built-in directory is used when this is empty (and the switch is on).

@@ -3043,6 +3043,7 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
             j["server_enabled"] = settings.server_enabled;
             j["stun_server"] = settings.stun_server;
             j["long_term_code"] = settings.long_term_code;
+            j["audio_quality"] = settings.audio_quality;
             // The listener is always on 0.0.0.0; access toggles apply at once.
             j["restart_required"] = false;
             resp.set_header("Cache-Control", "no-store").json(j);
@@ -3102,6 +3103,16 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
                  return;
                }
              }
+             // Audio quality changes the samples on the wire, so validate it
+             // before applying the other fields.
+             const std::string* audio_quality = req.query("audio_quality");
+             if (audio_quality != nullptr && *audio_quality != "high" &&
+                 *audio_quality != "balanced" && *audio_quality != "low") {
+               resp.status(400).json_str(
+                   R"({"code":"invalid_audio_quality"})");
+               resp.end();
+               return;
+             }
              const std::string* stun = req.query("stun");
              if (stun != nullptr && !deps.auth->set_stun_server(*stun)) {
                resp.status(400).json_str(R"({"code":"invalid_stun"})");
@@ -3124,6 +3135,13 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
              }
              deps.auth->set_allow_sync_between_sessions(sync_between_sessions);
              deps.auth->set_transport_security(encrypt_remote, encrypt_lan);
+             if (audio_quality != nullptr) {
+               deps.auth->set_audio_quality(*audio_quality);
+               // Apply it now. The next audible packet carries a resume
+               // marker with the new rate/channels, so a live viewer
+               // rebuilds its player instead of playing at the old rate.
+               if (deps.audio) deps.audio->set_quality(*audio_quality);
+             }
              deps.auth->set_file_sandbox(
                  file_sandbox,
                  sandbox_roots != nullptr ? *sandbox_roots
@@ -3169,6 +3187,7 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
              j["ip_allowlist"] = after.ip_allowlist;
              j["stun_server"] = after.stun_server;
              j["device_name"] = after.device_name;
+             j["audio_quality"] = after.audio_quality;
              j["restart_required"] = false;
              resp.set_header("Cache-Control", "no-store").json(j);
              resp.end();

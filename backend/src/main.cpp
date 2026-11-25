@@ -642,10 +642,22 @@ int main(int argc, char** argv) {
   std::unique_ptr<audio_source> audio_source = make_audio_source(audio_error);
   std::shared_ptr<audio_hub> audio;
   if (audio_source) {
-    audio = std::make_shared<audio_hub>(std::move(audio_source));
+    audio_hub_options audio_options;
+    audio_options.quality = auth->settings().audio_quality;
+    // One line per gate state change, not per packet: the default log stays a
+    // summary timeline. The viewer count is in audio.stats.
+    audio_options.gate_log = [](const char* state, uint64_t silent_ms) {
+      diag().log(diag_level::info, "audio.gate", std::string(),
+                 {{"state", state},
+                  {"silent_ms", std::to_string(silent_ms)}});
+    };
+    audio =
+        std::make_shared<audio_hub>(std::move(audio_source), audio_options);
     const audio_format format = audio->format();
-    std::fprintf(stderr, "molink: audio loopback %d Hz, %d channel(s)\n",
-                 format.sample_rate, format.channels);
+    std::fprintf(stderr,
+                 "molink: audio loopback %d Hz, %d channel(s), quality %s\n",
+                 format.sample_rate, format.channels,
+                 audio->quality().c_str());
   }
   auto call = std::make_shared<call_hub>();
   std::string voice_error;
@@ -935,6 +947,7 @@ int main(int argc, char** argv) {
   deps.auth = auth;
   deps.access_requests = access_requests;
   deps.chat = chat;
+  deps.audio = audio;
   deps.call = call;
   deps.server = server_client_state;
   deps.lock = lock;

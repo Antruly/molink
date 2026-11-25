@@ -611,6 +611,16 @@ void auth_state::set_stream_overrides(int qp, int bitrate_kbps, int fps,
   persist_locked();
 }
 
+bool auth_state::set_audio_quality(const std::string& quality) {
+  if (quality != "high" && quality != "balanced" && quality != "low") {
+    return false;
+  }
+  std::lock_guard<std::mutex> lock(mutex_);
+  settings_.audio_quality = quality;
+  persist_locked();
+  return true;
+}
+
 void auth_state::set_allow_access_requests(bool allow) {
   std::lock_guard<std::mutex> lock(mutex_);
   settings_.allow_access_requests = allow;

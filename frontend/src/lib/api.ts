@@ -495,6 +495,8 @@ export interface SecuritySettings {
   ip_allowlist?: string
   device_name: string
   long_term_code: string
+  /// Host audio send quality: 48 kHz stereo, 24 kHz mono or 16 kHz mono.
+  audio_quality?: 'high' | 'balanced' | 'low'
   restart_required: boolean
 }
 
@@ -552,6 +554,7 @@ export function postSettings(
     name: string
     stunServer?: string
     ipAllowlist?: string
+    audioQuality?: 'high' | 'balanced' | 'low'
   },
 ): Promise<SecuritySettings> {
   const query = new URLSearchParams({
@@ -573,6 +576,9 @@ export function postSettings(
   if (values.stunServer !== undefined) query.set('stun', values.stunServer)
   if (values.ipAllowlist !== undefined) {
     query.set('ip_allowlist', values.ipAllowlist)
+  }
+  if (values.audioQuality !== undefined) {
+    query.set('audio_quality', values.audioQuality)
   }
   return request<SecuritySettings>(
     `/api/settings?${query.toString()}`,

@@ -128,6 +128,10 @@ enum packet_flags : uint16_t {
   /// A patch frame produced in answer to `request-tiles`: its tiles replace
   /// the named screen rectangles and do not continue the delta chain.
   kPacketFlagTileRefresh = 1u << 3,
+  /// First audio packet after a gate-muted stretch (or a quality change):
+  /// the viewer resets its jitter buffer instead of treating the gap as lost
+  /// audio. The payload is ordinary PCM in the advertised format.
+  kPacketFlagAudioResume = 1u << 4,
 };
 
 enum class codec : uint8_t {
