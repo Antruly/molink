@@ -16,6 +16,11 @@ bool is_loopback_host(const std::string& host);
 /// IPv4-mapped IPv6 form libuv reports on dual-stack sockets.
 bool is_loopback_peer(const std::string& peer);
 
+/// The OS session this process runs in. A core started by a service lives in
+/// session 0 and cannot capture an interactive desktop, so a shell must not
+/// reuse it: the session id is compared before an existing core is adopted.
+uint32_t current_session_id();
+
 /// Host part for a URL: IPv6 literals need brackets.
 std::string format_url_host(const std::string& host);
 

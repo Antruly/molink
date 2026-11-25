@@ -8,6 +8,7 @@
 #include <random>
 
 #if defined(_WIN32)
+#include <windows.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <iphlpapi.h>
@@ -21,6 +22,18 @@
 #endif
 
 namespace molink {
+
+uint32_t current_session_id() {
+#if defined(_WIN32)
+  DWORD id = 0;
+  if (ProcessIdToSessionId(GetCurrentProcessId(), &id) == 0) return 0;
+  return static_cast<uint32_t>(id);
+#else
+  // POSIX has no Windows-style session; 0 means "not applicable", and the
+  // shells only compare this on Windows.
+  return 0;
+#endif
+}
 
 bool is_loopback_host(const std::string& host) {
   return host == "127.0.0.1" || host == "::1" || host == "localhost";

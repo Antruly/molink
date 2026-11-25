@@ -433,6 +433,15 @@ bool core_http_get(int port, bool tls, const std::wstring& path,
   return ok;
 }
 
+/// The interactive session this shell runs in. A core owned by a service is in
+/// session 0, where no desktop can be captured, so adopting it would leave the
+/// session alive but black — and it is the one holding the port.
+unsigned long own_session_id() {
+  DWORD id = 0;
+  if (ProcessIdToSessionId(GetCurrentProcessId(), &id) == 0) return 0;
+  return static_cast<unsigned long>(id);
+}
+
 /// Ask one port whether a usable core is there. A core started with
 /// encrypt_lan on serves TLS only, so try plain HTTP first and HTTPS second.
 bool probe_core(int port, running_core& out) {
@@ -458,6 +467,14 @@ bool probe_core(int port, running_core& out) {
     out.tls = body.find("\"tls\":true") != std::string::npos || secure == 1;
     out.pid = 0;
     json_number(body, "pid", out.pid);
+    // Refuse a core from another Windows session: it cannot see this desktop.
+    long core_session = 0;
+    if (json_number(body, "session_id", core_session) && core_session > 0) {
+      const unsigned long mine = own_session_id();
+      if (mine > 0 && static_cast<unsigned long>(core_session) != mine) {
+        continue;
+      }
+    }
     return true;
   }
   return false;
