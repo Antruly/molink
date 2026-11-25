@@ -119,7 +119,32 @@
 | 5 | W7-W9 WebRTC | 收益大但改动最深，放在传输层稳定之后 |
 | 6 | T4-T5、P4 收尾 | 持久化、权限、审计 |
 
-## 五、不做 / 暂缓
+## 五、libuvcpp 升级到 1.11.0（计划，不自行编译）
+
+官方已发布 **v1.11.0**（2026-11-23），六个平台都有预编译包，**用官方二进制，不自己编译**。
+
+### 为什么值得升
+- **`uvcpp_service_run(app, argc, argv)`**：一行接入 Windows 服务 install / uninstall / start / stop / status（SCM、失败自动重启）、SIGINT/SIGTERM 优雅停机、工作目录与环境变量、stdout/stderr 重定向与轮转、单实例互斥。
+  我们现在这套服务是**手写的**（`shell/windows/service/main.cpp` + `service_control.cpp` 的命名管道 + 安装脚本 `sc create` + 计划任务），前几天 0.12.20 "控制不了"就是服务与用户会话两个 core 抢端口造成的 —— 换成官方实现能直接消掉这一类问题。
+- **`uvcpp_login_limiter`**：失败窗口/锁定/审计，可以替换 `lock_state.cpp` 里手写的限流。
+- `uvcpp_ws_bus`（Redis 跨进程广播）、`uvcpp_db_job_store`：当前单机单 core 用不上，先不接。
+
+### 现状
+- CI 与打包：默认 `1.9.1`（`packaging/fetch-uvcpp.sh msvc-x64 1.9.1`，可用仓库变量 `UVCPP_VERSION` 覆盖）
+- Win7 x86 那条线还钉在 **1.8.5** 的 mingw32 kit
+- 本机开发环境 1.9.1
+
+### 分三步
+1. **U1 只升构建**：`UVCPP_VERSION` 1.9.1 → 1.11.0，六个平台的包按官方资产名接入（msvc-x64 / mingw-x64 / linux-x64；Win7 x86 维持 1.8.5 或确认 1.11.0 有 mingw32 包再切）。**不改任何代码**，先把 61 项 ctest 和发布流程跑绿，验证脱敏后的 API 兼容性。
+2. **U2 服务层切换**：Windows 用 `uvcpp_service_run` 替换手写服务；安装包改成调用它的 CLI 动词；删掉命名管道与计划任务兜底；同步更新 `service_control.cpp` 与文档。
+3. **U3 顺手收编**：`uvcpp_login_limiter` 替换 `lock_state` 的失败计数；评估 `uvcpp_ws_bus`（多 core 部署时才需要）。
+
+### 风险与回退
+- 1.9.1 → 1.11.0 跨两个 minor，API 有变动；U1 单独一步就是为了把"编译不过"和"行为变了"分开定位。
+- 任何一步红灯：`UVCPP_VERSION` 改回 1.9.1 即回到今天的基线，不影响已发布版本。
+- Win7 x86 是唯一可能被卡住的平台（官方 1.11.0 没有 mingw32 包），届时保持 1.8.5 并标注"该平台不随主版本升级"。
+
+## 六、不做 / 暂缓
 - 提权执行（sudo / runas / SYSTEM）：与"以当前用户身份"的约定冲突。
 - UDP 端口映射：等 QUIC 数据报通道成型。
 - 移动端 Web 的终端键盘适配：先保证桌面浏览器。
