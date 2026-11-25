@@ -60,7 +60,7 @@ cmake --build build && ctest --test-dir build --output-on-failure
 `quic_port`、`tcp_data_port`、`udp_port`（由界面「偏好设置 → 网络端口」或
 配置文件写入），再退回默认值。命令行参数优先。
 
-端口段避开 RustDesk 的 21115–21119：`28418` 网页/API/WS（HTTP/1.1 + WebSocket）、
+端口段避开常见远控软件占用的 21115–21119：`28418` 网页/API/WS（HTTP/1.1 + WebSocket）、
 `28419` HTTP/3、`28420` QUIC 数据、`28421` TCP 数据、`28422` UDP 数据。
 `GET /api/transports` 返回当前 `available` 的传输和完整端口表；`welcome` 里也有
 `transports` / `transport_ports`。浏览器永远从 WebSocket 起步；HTTP/2（h2c）与

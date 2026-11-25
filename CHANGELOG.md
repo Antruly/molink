@@ -2222,7 +2222,7 @@
 
 ### Added
 
-- 自有端口段，避开 RustDesk 的 21115–21119 与 TeamViewer 的 5938：`28418` 网页/API/WS、`28419` HTTP/3、`28420` QUIC 数据、`28421` TCP 数据、`28422` UDP 数据；全部可通过命令行或配置文件修改并持久化
+- 自有端口段，避开常见远控软件的 21115–21119、5938：`28418` 网页/API/WS、`28419` HTTP/3、`28420` QUIC 数据、`28421` TCP 数据、`28422` UDP 数据；全部可通过命令行或配置文件修改并持久化
 - `--http3-port` / `--quic-port` / `--tcp-data-port` / `--udp-port` 命令行参数；`/api/network` 接口与 `/api/state` 中的端口 / `restart_required` 字段
 - `GET /api/transports` 传输协商表，以及 `ready` / WebSocket `welcome` 中的 `transports` 与 `transport_ports`；客户端按 `preferred` 顺序选择第一个可用传输
 - Web 端保持 WebSocket 基线；HTTP/3、QUIC、TCP/UDP 直连数据已预留端口与协商字段，数据面接入前统一报 `available=false`
