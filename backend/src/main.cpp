@@ -1118,13 +1118,17 @@ int main(int argc, char** argv) {
         controller->start(token);
       });
 #endif
+  // Read live on every attempt, so a host_only change applies to the next
+  // outbound session instead of needing a restart.
+  auto host_only_mode = [auth] { return auth->settings().host_only; };
   app.websocket("/ws/connect", make_connect_handler(
-      p2p, [&app](std::function<void()> fn) { app.post(std::move(fn)); }));
+      p2p, [&app](std::function<void()> fn) { app.post(std::move(fn)); },
+      host_only_mode));
   // Typed-IP sessions go through this core as well, so AV1 patches can be
   // decoded before they reach the page.
   app.websocket("/ws/direct", make_direct_handler(
       [&app](std::function<void()> fn) { app.post(std::move(fn)); },
-      app.loop()));
+      app.loop(), host_only_mode));
 
   if (!web_root.empty()) {
     uvcpp::uvcpp_web_static_options static_options;

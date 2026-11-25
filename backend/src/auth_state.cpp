@@ -621,6 +621,12 @@ bool auth_state::set_audio_quality(const std::string& quality) {
   return true;
 }
 
+void auth_state::set_host_only(bool host_only) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  settings_.host_only = host_only;
+  persist_locked();
+}
+
 void auth_state::set_allow_access_requests(bool allow) {
   std::lock_guard<std::mutex> lock(mutex_);
   settings_.allow_access_requests = allow;
