@@ -96,3 +96,38 @@ target_link_libraries(moLink-native PRIVATE
 )
 
 install(TARGETS moLink-native RUNTIME DESTINATION .)
+
+# Host-only shell (issue #97 / roadmap H3+H4): a fixed Direct2D 1.0 window
+# with status, network and security cards. It has no WebView2 dependency and
+# no remote-desktop/file/chat/terminal UI. The state, settings and service
+# modules are platform-neutral so they can be compiled and tested without
+# Win32; only host_only/main.cpp owns the window and the HTTP poller.
+add_executable(moLink-host WIN32
+  host_only/main.cpp
+  host_only/host_state.cpp
+  host_only/host_settings.cpp
+  host_only/service_ctl.cpp
+)
+target_include_directories(moLink-host PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/host_only")
+target_compile_definitions(moLink-host PRIVATE
+  _WIN32_WINNT=0x0601 NOMINMAX UNICODE _UNICODE)
+# The host-only UI deliberately stays at C++17 so the Win7 x86 toolchain can
+# build it as well as the MSVC x64 CI job.
+set_target_properties(moLink-host PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED ON)
+if(MSVC)
+  # The UI strings are UTF-8 in the source; /utf-8 also keeps the narrow
+  # service/state error strings (converted to wide at the boundary) correct.
+  target_compile_options(moLink-host PRIVATE /utf-8)
+elseif(MINGW)
+  # __uuidof(IDWriteFactory) needs the MS extension; -municode selects
+  # wWinMain as the entry point.
+  target_compile_options(moLink-host PRIVATE -fms-extensions)
+  target_link_options(moLink-host PRIVATE -municode)
+endif()
+target_link_libraries(moLink-host PRIVATE
+  d2d1 dwrite ole32 user32 gdi32 shell32 winhttp advapi32 uuid
+)
+install(TARGETS moLink-host RUNTIME DESTINATION .)
