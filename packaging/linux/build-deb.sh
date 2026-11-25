@@ -38,14 +38,16 @@ if ! grep -q "FUSE virtual clipboard enabled" "$WORK/configure.log"; then
   fi
   echo "warning: libfuse3-dev not found; the package will download clipboard files"
 fi
-cmake --build "$ROOT/backend/build" --parallel
+# The test matrix is large enough that an unbounded -j exhausts the CI
+# runner; cap it and let a caller raise the cap.
+cmake --build "$ROOT/backend/build" --parallel "${MOLINK_BUILD_JOBS:-4}"
 
 echo "== build frontend"
 (cd "$ROOT/frontend" && pnpm install --frozen-lockfile >/dev/null && pnpm build >/dev/null)
 
 echo "== build shell"
 cmake -S "$ROOT/shell/native" -B "$ROOT/shell/native/build" -DCMAKE_BUILD_TYPE=Release >/dev/null
-cmake --build "$ROOT/shell/native/build" --parallel
+cmake --build "$ROOT/shell/native/build" --parallel "${MOLINK_BUILD_JOBS:-4}"
 
 echo "== stage"
 rm -rf "$STAGE"
