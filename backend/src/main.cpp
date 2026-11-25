@@ -26,6 +26,7 @@
 #include "audio/voice.h"
 #include "auth_state.h"
 #include "call_hub.h"
+#include "port_forward.h"
 #include "capture/capture.h"
 #include "capture/capture_switch.h"
 #include "capture/windows_secure_capture.h"
@@ -606,6 +607,20 @@ int main(int argc, char** argv) {
     }
   }).detach();
   auto auth = std::make_shared<auth_state>(std::move(stored_settings));
+  // Controller-side port mappings (local listeners tunnelled through the
+  // outbound session). They share the settings file with the ordinary
+  // settings via `port_mapping=` lines. Listening itself is not a host
+  // capability: the *target* still refuses every forward-open while its own
+  // `port_forward_enabled` is off (handled in session_controller). This is
+  // why the enabled callback is always true on the viewer side.
+  std::string portmap_settings_path;
+  if (!config_directory().empty()) {
+    portmap_settings_path =
+        (std::filesystem::path(config_directory()) / "settings").string();
+  }
+  auto port_forward_manager_state = std::make_shared<port_forward_manager>(
+      make_settings_port_forward_store(portmap_settings_path),
+      [] { return true; });
   // Self-signed per-device certificate. It is generated once and reused so a
   // client's fingerprint pin survives restarts. TLS is opt-in (LAN default
   // off); the relay path keeps using the directory's WSS.
@@ -929,6 +944,7 @@ int main(int argc, char** argv) {
   deps.tls_enabled = tls_enabled;
   deps.ui = ui_preferences;
   deps.discovery = discovery;
+  deps.port_forward = port_forward_manager_state;
   deps.serve_web = !web_root.empty();
   deps.registry = registry;
   deps.capture = capture;
@@ -1128,12 +1144,12 @@ int main(int argc, char** argv) {
   auto host_only_mode = [auth] { return auth->settings().host_only; };
   app.websocket("/ws/connect", make_connect_handler(
       p2p, [&app](std::function<void()> fn) { app.post(std::move(fn)); },
-      host_only_mode));
+      host_only_mode, port_forward_manager_state));
   // Typed-IP sessions go through this core as well, so AV1 patches can be
   // decoded before they reach the page.
   app.websocket("/ws/direct", make_direct_handler(
       [&app](std::function<void()> fn) { app.post(std::move(fn)); },
-      app.loop(), host_only_mode));
+      app.loop(), host_only_mode, port_forward_manager_state));
 
   if (!web_root.empty()) {
     uvcpp::uvcpp_web_static_options static_options;

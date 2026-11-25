@@ -95,6 +95,7 @@
     "tabGeneral": "General",
     "tabSecurity": "Security",
     "tabNetwork": "Network",
+    "tabPortmap": "Port mapping",
     "tabDisplay": "Display",
     "tabService": "Service",
     "tabAbout": "About",
@@ -954,5 +955,44 @@
     "recordingOn": "Recording on",
     "recordingOff": "Recording off",
     "privacy": "The log stays on this device and is never uploaded. It never contains codes, chat or clipboard content."
+  },
+  "portmap": {
+    "title": "Port mapping",
+    "intro": "Listen on a local port and carry each connection through the current remote session to a target port on the peer. Listeners survive a disconnect and resume automatically after reconnecting.",
+    "presets": "Quick presets",
+    "empty": "No port mappings yet.",
+    "localPort": "Local port",
+    "localPortPlaceholder": "Random",
+    "target": "Target host:port",
+    "add": "Add",
+    "addHint": "Leave the local port empty to let the system pick one; a preset fills the target port.",
+    "statusLabel": "Status",
+    "status": {
+      "listening": "Listening",
+      "error": "Error",
+      "disabled": "Disabled",
+      "stopped": "Not listening"
+    },
+    "traffic": "in {{in}} · out {{out}}",
+    "toggle": "Enable or disable this mapping",
+    "delete": "Delete mapping",
+    "preset": {
+      "rdp": "RDP",
+      "ssh": "SSH",
+      "mysql": "MySQL",
+      "http": "HTTP",
+      "https": "HTTPS",
+      "smb": "SMB"
+    },
+    "errors": {
+      "port_forward_disabled": "Port forwarding is disabled: the controlled host must allow it.",
+      "bad_port": "Invalid port; use 1–65535.",
+      "port_in_use": "The port is in use or cannot be bound.",
+      "not_found": "That mapping no longer exists.",
+      "bad_target": "Invalid target; enter host:port.",
+      "save_failed": "The mapping could not be saved. Check this machine's configuration directory.",
+      "bad_request": "Malformed request.",
+      "unknown": "The operation failed; the local core is unreachable."
+    }
   }
 }

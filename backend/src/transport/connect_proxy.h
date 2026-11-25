@@ -6,6 +6,7 @@
 #include <webapp/uvcpp_web_ws.h>
 
 #include "p2p/p2p_manager.h"
+#include "port_forward.h"
 
 namespace molink {
 
@@ -25,9 +26,13 @@ namespace molink {
 /// `host_only` is read per connection so a settings change applies to the
 /// next attempt. When it returns true the handler refuses the outbound
 /// session with the `host_only_mode` close reason.
+/// `port_forward` is the controller-side manager. Every /ws/connect session is
+/// outbound (this core is the viewer), so it is attached here; a null manager
+/// keeps port forwarding off (tests and reduced builds).
 uvcpp::uvcpp_web_ws_handler make_connect_handler(
     std::shared_ptr<p2p_manager> manager,
     std::function<void(std::function<void()>)> post = {},
-    std::function<bool()> host_only = {});
+    std::function<bool()> host_only = {},
+    std::shared_ptr<port_forward_manager> port_forward = {});
 
 }  // namespace molink

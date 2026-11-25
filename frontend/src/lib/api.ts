@@ -1,5 +1,10 @@
 import { formatHost } from './net'
 import { clipboardRangeQuery } from './clipboard-lazy'
+import type {
+  PortMapping,
+  PortmapCreateInput,
+  PortmapPreset,
+} from './portmap'
 
 export interface DeviceCapabilities {
   screen_capture: boolean
@@ -1300,6 +1305,79 @@ export async function lookupDevice(
   return request<DeviceLookup>(
     `/api/directory/device?id=${encodeURIComponent(id)}`,
     {},
+    token,
+  )
+}
+
+export interface PortmapList {
+  code: string
+  mappings: PortMapping[]
+}
+
+export interface PortmapUpdate {
+  code: string
+  mapping: PortMapping
+  listen_port?: number
+}
+
+export function fetchPortMappings(token: string): Promise<PortmapList> {
+  return request<PortmapList>('/api/portmap', {}, token)
+}
+
+export function fetchPortmapPresets(
+  token: string,
+): Promise<{ code: string; presets: PortmapPreset[] }> {
+  return request<{ code: string; presets: PortmapPreset[] }>(
+    '/api/portmap/presets',
+    {},
+    token,
+  )
+}
+
+export function createPortMapping(
+  token: string,
+  input: PortmapCreateInput,
+): Promise<PortmapUpdate> {
+  return request<PortmapUpdate>(
+    '/api/portmap',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    },
+    token,
+  )
+}
+
+export interface PortmapPatch {
+  enabled?: boolean
+  target_host?: string
+  target_port?: number
+}
+
+export function patchPortMapping(
+  token: string,
+  id: number,
+  patch: PortmapPatch,
+): Promise<PortmapUpdate> {
+  return request<PortmapUpdate>(
+    `/api/portmap/${id}`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    },
+    token,
+  )
+}
+
+export function deletePortMapping(
+  token: string,
+  id: number,
+): Promise<{ code: string }> {
+  return request<{ code: string }>(
+    `/api/portmap/${id}`,
+    { method: 'DELETE' },
     token,
   )
 }

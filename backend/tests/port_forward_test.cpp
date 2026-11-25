@@ -19,7 +19,9 @@
 #include <vector>
 
 #include "port_forward.h"
+#include "portmap_api.h"
 #include "protocol/frame_packet.h"
+#include "transport/port_forward_bridge.h"
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -402,6 +404,79 @@ class capture_link final : public molink::port_forward_link {
   std::mutex mutex_;
   std::condition_variable condition_;
   std::vector<std::string> texts_;
+};
+
+/// A session transport with no socket: exactly the seam `connect_proxy` and
+/// `direct_proxy` hand to `port_forward_bridge`. It records what the manager
+/// puts on the wire and lets the test act as the remote host.
+class test_session_transport final : public molink::session_transport {
+ public:
+  const char* name() const override { return "test"; }
+  std::string peer_ip() const override { return "127.0.0.1"; }
+  unsigned int peer_port() const override { return 1; }
+  bool is_open() const override { return open_.load(); }
+
+  bool send_text(const std::string& text) override {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      texts_.push_back(text);
+    }
+    condition_.notify_all();
+    return true;
+  }
+
+  bool send_binary(const uint8_t* data, std::size_t len) override {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      binaries_.emplace_back(data, data + len);
+    }
+    condition_.notify_all();
+    return true;
+  }
+
+  void close(int, const std::string&) override { open_.store(false); }
+
+  void set_handlers(text_handler, binary_handler, close_handler) override {}
+
+  bool wait_text_contains(const std::string& needle, int timeout_ms = 3000) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return condition_.wait_for(lock, std::chrono::milliseconds(timeout_ms),
+                               [&] {
+                                 for (const std::string& text : texts_) {
+                                   if (text.find(needle) != std::string::npos) {
+                                     return true;
+                                   }
+                                 }
+                                 return false;
+                               });
+  }
+
+  std::string first_text_containing(const std::string& needle) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const std::string& text : texts_) {
+      if (text.find(needle) != std::string::npos) return text;
+    }
+    return std::string();
+  }
+
+  bool wait_binary(std::vector<uint8_t>& out, int timeout_ms = 3000) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    const bool ready = condition_.wait_for(
+        lock, std::chrono::milliseconds(timeout_ms),
+        [&] { return !binaries_.empty(); });
+    if (ready) {
+      out = binaries_.front();
+      binaries_.erase(binaries_.begin());
+    }
+    return ready;
+  }
+
+ private:
+  std::atomic<bool> open_{true};
+  std::mutex mutex_;
+  std::condition_variable condition_;
+  std::vector<std::string> texts_;
+  std::vector<std::vector<uint8_t>> binaries_;
 };
 
 // ---------------------------------------------------------------------------
@@ -817,6 +892,226 @@ void test_echo_and_recovery() {
   std::printf("  done\n");
 }
 
+void test_api_error_mapping() {
+  std::printf("api vocabulary:\n");
+  using molink::portmap_error;
+  expect(molink::portmap_valid_port(0, true), "listen port 0 is allowed");
+  expect(!molink::portmap_valid_port(0, false), "target port 0 is refused");
+  expect(molink::portmap_valid_port(1, false), "port 1 is valid");
+  expect(molink::portmap_valid_port(65535, true), "port 65535 is valid");
+  expect(!molink::portmap_valid_port(65536, true), "port 65536 is refused");
+  expect(!molink::portmap_valid_port(-1, true), "negative port is refused");
+
+  expect(molink::portmap_valid_host("127.0.0.1"), "IPv4 host is valid");
+  expect(molink::portmap_valid_host("example.lan"), "host name is valid");
+  expect(!molink::portmap_valid_host(""), "empty host is refused");
+  expect(!molink::portmap_valid_host("bad host"), "space in host is refused");
+
+  expect(molink::portmap_error_from_manager("mapping_not_found") ==
+             portmap_error::not_found,
+         "manager not-found maps to not_found");
+  expect(molink::portmap_error_from_manager("port_forward_disabled") ==
+             portmap_error::port_forward_disabled,
+         "capability refusal maps to port_forward_disabled");
+  expect(molink::portmap_error_from_manager("cannot bind 127.0.0.1:80") ==
+             portmap_error::port_in_use,
+         "bind failure maps to port_in_use");
+  expect(molink::portmap_error_from_manager("cannot write settings file") ==
+             portmap_error::save_failed,
+         "write failure maps to save_failed");
+  expect(molink::portmap_error_from_manager("cannot bind 1.2.3.4:22") ==
+             portmap_error::port_in_use,
+         "unresolvable listen host is reported as port_in_use");
+  expect(std::string(molink::portmap_error_code(
+             portmap_error::port_forward_disabled)) ==
+             "port_forward_disabled",
+         "wire code keeps its documented spelling");
+
+  std::size_t count = 0;
+  const molink::portmap_preset* presets = molink::portmap_presets(count);
+  expect(count == 6, "six quick presets are offered");
+  const uint16_t expected_ports[] = {3389, 22, 3306, 80, 443, 445};
+  for (std::size_t i = 0; i < count && i < 6; ++i) {
+    expect(presets[i].port == expected_ports[i], "preset port is correct");
+  }
+  std::printf("  done\n");
+}
+
+/// Exercises exactly the manager calls behind POST/GET/PATCH/DELETE. The
+/// listener is real (listen_port 0 lets the OS assign one) but no session is
+/// attached: the API's CRUD does not need one.
+void test_api_crud() {
+  std::printf("api crud:\n");
+  using molink::portmap_error;
+  const std::filesystem::path directory = make_temp_dir("api-crud");
+  const std::filesystem::path settings = directory / "settings";
+
+  molink::port_forward_manager manager(
+      molink::make_settings_port_forward_store(settings.string()),
+      [] { return true; });
+  molink::port_mapping mapping;
+  mapping.listen_host = "127.0.0.1";
+  mapping.listen_port = 0;
+  mapping.target_host = "127.0.0.1";
+  mapping.target_port = 22;
+  std::string error;
+  expect(manager.add(mapping, error), "POST adds a mapping");
+  expect(mapping.id != 0, "POST assigns an id");
+  expect(mapping.listening, "POST starts the listener");
+  expect(mapping.listen_port != 0, "POST reports the OS-assigned port");
+  const uint16_t assigned = mapping.listen_port;
+
+  const std::vector<molink::port_mapping> listed = manager.mappings();
+  expect(listed.size() == 1, "GET lists the new mapping");
+  molink::port_mapping fetched;
+  expect(manager.get(mapping.id, fetched), "GET finds the mapping by id");
+  expect(fetched.listen_port == assigned, "GET reports the assigned port");
+  expect(fetched.bytes_in == 0 && fetched.bytes_out == 0,
+         "a new mapping starts at zero traffic");
+
+  expect(manager.set_target(mapping.id, "127.0.0.1", 3389, error),
+         "PATCH changes the target");
+  expect(manager.get(mapping.id, fetched), "PATCH leaves the row in place");
+  expect(fetched.target_port == 3389, "PATCH stores the new target port");
+  expect(fetched.listening && fetched.listen_port == assigned,
+         "a target edit keeps the listener and its port");
+
+  expect(manager.set_enabled(mapping.id, false, error),
+         "PATCH disables the mapping");
+  expect(manager.get(mapping.id, fetched) && !fetched.listening,
+         "a disabled mapping stops listening");
+  expect(manager.set_enabled(mapping.id, true, error),
+         "PATCH re-enables the mapping");
+  expect(manager.get(mapping.id, fetched) && fetched.listening,
+         "the listener comes back on the stored port");
+
+  expect(manager.remove(mapping.id, error), "DELETE removes the mapping");
+  expect(!manager.get(mapping.id, fetched), "the removed mapping is gone");
+  expect(manager.mappings().empty(), "DELETE leaves no row");
+  expect(!manager.remove(mapping.id, error) &&
+             molink::portmap_error_from_manager(error) ==
+                 portmap_error::not_found,
+         "DELETE of a missing id reports not_found");
+
+  std::error_code ignored;
+  std::filesystem::remove_all(directory, ignored);
+  std::printf("  done\n");
+}
+
+/// The real proxy path: a mapping's local client is relayed through the
+/// session-transport seam used by /ws/connect and /ws/direct. The test acts as
+/// the remote host, so this covers forward-open, FORWARD_DATA in both
+/// directions, and detach.
+void test_session_bridge() {
+  std::printf("session bridge:\n");
+  const std::filesystem::path directory = make_temp_dir("bridge");
+  const std::filesystem::path settings = directory / "settings";
+  echo_server echo;
+  std::string error;
+  expect(echo.start(error), "echo target starts");
+
+  auto manager = std::make_shared<molink::port_forward_manager>(
+      molink::make_settings_port_forward_store(settings.string()),
+      [] { return true; });
+  molink::port_mapping mapping = make_mapping(echo.port(), 0);
+  expect(manager->add(mapping, error), "bridge mapping listens");
+
+  auto transport = std::make_shared<test_session_transport>();
+  {
+    molink::port_forward_bridge bridge(manager, transport);
+    bridge.attach();
+    expect(manager->linked(), "attach marks the session linked");
+
+    test_socket client = connect_test_socket(mapping.listen_port);
+    expect(client != kBadSocket, "local client reaches the listener");
+    expect(transport->wait_text_contains("forward-open"),
+           "forward-open goes over the session channel");
+    const std::string open_text =
+        transport->first_text_containing("forward-open");
+    molink::port_forward_message open;
+    expect(molink::decode_port_forward_message(open_text, open, error),
+           "forward-open decodes");
+    expect(open.type == "forward-open", "the message is forward-open");
+    expect(open.host == "127.0.0.1" && open.port == echo.port(),
+           "forward-open names the mapping's target");
+    expect(open.stream != 0, "forward-open carries a stream id");
+
+    expect(bridge.handle_text(molink::encode_forward_open_ok(open.stream)),
+           "forward-open-ok is consumed by the bridge");
+    expect(!bridge.handle_text("{\"type\":\"welcome\"}"),
+           "ordinary host text still reaches the page");
+
+    const uint8_t probe[] = {'b', 'r', 'i', 'd', 'g', 'e'};
+    expect(send_all_test(client, probe, sizeof(probe)), "probe sent");
+    std::vector<uint8_t> packet;
+    expect(transport->wait_binary(packet),
+           "client bytes become one FORWARD_DATA packet");
+    molink::protocol::packet decoded;
+    expect(molink::protocol::decode_packet(packet.data(), packet.size(),
+                                           decoded, error),
+           "FORWARD_DATA is a valid MOLK packet");
+    expect(decoded.type == static_cast<uint8_t>(
+                              molink::protocol::packet_type::forward_data),
+           "the packet type is FORWARD_DATA");
+    uint16_t stream = 0;
+    const uint8_t* payload = nullptr;
+    std::size_t payload_len = 0;
+    expect(molink::decode_port_forward_payload(
+               decoded.payload.data(), decoded.payload.size(), stream, payload,
+               payload_len),
+           "FORWARD_DATA payload decodes");
+    expect(stream == open.stream, "stream id round-trips");
+    expect(payload_len == sizeof(probe) &&
+               std::memcmp(payload, probe, sizeof(probe)) == 0,
+           "probe bytes round-trip");
+
+    // Be the host: the same bytes echo back on the same stream.
+    expect(bridge.handle_binary(packet.data(), packet.size()),
+           "inbound FORWARD_DATA is consumed");
+    uint8_t echoed[sizeof(probe)] = {};
+    expect(recv_exact(client, echoed, sizeof(echoed)),
+           "echoed bytes reach the local client");
+    expect(std::memcmp(echoed, probe, sizeof(probe)) == 0,
+           "the tunnel is byte-exact");
+
+    molink::protocol::packet unrelated;
+    std::vector<uint8_t> unrelated_bytes;
+    expect(molink::protocol::encode_packet_into(
+               unrelated_bytes,
+               static_cast<uint8_t>(molink::protocol::packet_type::ping), 0, 0,
+               0, 0, nullptr, 0, error),
+           "an ordinary packet serialises");
+    expect(!bridge.handle_binary(unrelated_bytes.data(),
+                                 unrelated_bytes.size()),
+           "non-forward packets still reach the page");
+
+    bridge.detach();
+    expect(!manager->linked(), "detach unlinks the session");
+    shutdown_test_socket(client);
+    close_test_socket(client);
+    molink::port_mapping stats;
+    wait_for([&] {
+      return manager->get(mapping.id, stats) && stats.active_streams == 0;
+    });
+    expect(manager->get(mapping.id, stats) && stats.listening,
+           "the listener survives detach");
+
+    // No session means a new local connection is refused, but accepted.
+    test_socket rejected = connect_test_socket(mapping.listen_port);
+    expect(rejected != kBadSocket, "the listener still accepts after detach");
+    if (rejected != kBadSocket) {
+      expect(expect_closed(rejected), "a session-less connection is refused");
+      close_test_socket(rejected);
+    }
+  }
+
+  expect(manager->remove(mapping.id, error), "bridge mapping removed");
+  echo.stop();
+  std::error_code ignored;
+  std::filesystem::remove_all(directory, ignored);
+  std::printf("  done\n");
+}
+
 }  // namespace
 
 int main() {
@@ -829,6 +1124,9 @@ int main() {
 #endif
   test_message_codec();
   test_persistence();
+  test_api_error_mapping();
+  test_api_crud();
+  test_session_bridge();
   test_capability_gate();
   test_bind_failure_rolls_back();
   test_host_connect_failure();

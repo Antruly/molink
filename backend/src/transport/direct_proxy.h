@@ -5,6 +5,8 @@
 
 #include <webapp/uvcpp_web_ws.h>
 
+#include "port_forward.h"
+
 namespace uvcpp {
 class uvcpp_loop;
 }
@@ -24,8 +26,12 @@ namespace molink {
 /// served by this core.
 /// `host_only` is read per connection. In host_only mode only a loopback
 /// target is accepted; anything else is closed with `host_only_mode`.
+/// `port_forward` is attached to the upstream session for the lifetime of the
+/// proxy, like /ws/connect: both proxies exist only when this core is the
+/// viewer.
 uvcpp::uvcpp_web_ws_handler make_direct_handler(
     std::function<void(std::function<void()>)> post, uvcpp::uvcpp_loop* loop,
-    std::function<bool()> host_only = {});
+    std::function<bool()> host_only = {},
+    std::shared_ptr<port_forward_manager> port_forward = {});
 
 }  // namespace molink

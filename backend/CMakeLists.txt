@@ -202,6 +202,7 @@ set(MOLINK_CORE_SOURCES
   src/directory_listing.cpp
   src/file_transfer.cpp
   src/port_forward.cpp
+  src/portmap_api.cpp
   src/call_hub.cpp
   src/server_client.cpp
   src/audio/audio.cpp
@@ -276,6 +277,7 @@ set(MOLINK_CORE_SOURCES
   src/transport/switchable_transport.cpp
   src/transport/connect_proxy.cpp
   src/transport/direct_proxy.cpp
+  src/transport/port_forward_bridge.cpp
   src/transport/stream_transport.cpp
   src/transport/quic_listener.cpp
   src/transport/h3_ws_listener.cpp
@@ -783,6 +785,8 @@ add_test(NAME outbound_policy COMMAND molink-core-outbound-policy-test)
 add_executable(molink-core-port-forward-test
   tests/port_forward_test.cpp
   src/port_forward.cpp
+  src/portmap_api.cpp
+  src/transport/port_forward_bridge.cpp
   src/protocol/frame_packet.cpp
   src/diag_log.cpp
 )

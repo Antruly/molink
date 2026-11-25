@@ -1,4 +1,5 @@
 import {
+  ArrowLeftRight,
   Copy,
   Eye,
   EyeOff,
@@ -27,6 +28,7 @@ import {
 import { useAppStore } from '../store/app'
 import { AboutPanel } from './AboutPanel'
 import { DiagLogPanel } from './DiagLogPanel'
+import { PortMapPanel } from './PortMapPanel'
 import { PreferencesControls } from './PreferencesControls'
 
 function Switch({
@@ -994,6 +996,7 @@ type SettingsSection =
   | 'general'
   | 'security'
   | 'network'
+  | 'portmap'
   | 'display'
   | 'service'
   | 'about'
@@ -1009,6 +1012,7 @@ const SETTINGS_SECTIONS: {
   { id: 'general', label: 'settings.tabGeneral', icon: Settings2 },
   { id: 'security', label: 'settings.tabSecurity', icon: ShieldCheck },
   { id: 'network', label: 'settings.tabNetwork', icon: Network },
+  { id: 'portmap', label: 'settings.tabPortmap', icon: ArrowLeftRight },
   { id: 'display', label: 'settings.tabDisplay', icon: Monitor },
   { id: 'service', label: 'settings.tabService', icon: Server },
   { id: 'about', label: 'settings.tabAbout', icon: Info },
@@ -1119,6 +1123,16 @@ export function SettingsPanel() {
                   <PreferencesControls section="network" />
                   <ServerControls />
                 </div>
+              ) : (
+                <p className="text-[12px] leading-relaxed text-muted">
+                  {t('settings.localOnly')}
+                </p>
+              )
+            ) : null}
+
+            {section === 'portmap' ? (
+              localMode ? (
+                <PortMapPanel />
               ) : (
                 <p className="text-[12px] leading-relaxed text-muted">
                   {t('settings.localOnly')}
