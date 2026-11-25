@@ -73,9 +73,17 @@ import {
   clearDownloadOffset,
   downloadComplete,
   downloadResumeKey,
+  downloadSinkFor,
+  downloadStartDetail,
+  eofOutcome,
+  loadDownloadOffset,
+  saveDownloadOffset,
+  type DownloadSink,
   type OffsetStore,
 } from '../lib/download-state'
+import { logDiag } from '../lib/diag-log'
 import {
+  basename,
   canPickDirectory,
   canUseFileSystemAccess,
   isPickerCancellation,
@@ -164,6 +172,7 @@ import {
   pathCrumbs,
   pathFlavor,
   relativeUnder,
+  remoteEntryPath,
   resolveRemotePath,
   safeTargetSegments,
   saveUploadOffset,
@@ -178,7 +187,17 @@ import {
 } from '../lib/file-transfer'
 import { useAppStore } from '../store/app'
 
-const downloadTimeoutMs = 30_000
+/// Session-level stall: no byte at all for this long fails the transfer.
+/// A disconnect is exempted (the reconnect loop owns that case), and a chunk
+/// that is being written does not count as a stall.
+const downloadStallTimeoutMs = 30_000
+/// One chunk write to the local disk/core. A slow disk or a busy local core
+/// must not be mistaken for a dead session.
+const downloadWriteTimeoutMs = 120_000
+/// The control channel is drained before file bytes, so `eof` can overtake the
+/// final 256 KiB chunk. The chunk may still be crossing a slow link, so this
+/// grace is generous; once it expires the transfer is genuinely incomplete.
+const downloadEofGraceMs = 30_000
 const browseTimeoutMs = 15_000
 const uploadReplyTimeoutMs = 30_000
 const uploadDoneTimeoutMs = 90_000
@@ -256,6 +275,66 @@ function formatBytes(bytes: number): string {
     return `${(bytes / 1024 / 1024).toFixed(1)} MB`
   }
   return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`
+}
+
+/// The drawer's three download destinations. Logging the actual sink is what
+/// makes "download does nothing" diagnosable: `fs` needs a secure context and
+/// a picked directory, `chunk` needs the local core, `blob` is the fallback.
+function downloadSink(job: DownloadJob): DownloadSink {
+  return downloadSinkFor({
+    stagingFile: job.fsTemp !== null,
+    writable: job.writable !== null,
+  })
+}
+
+function noteDownloadStart(job: DownloadJob): void {
+  if (job.startLogged) return
+  job.startLogged = true
+  job.startedAt = Date.now()
+  const sink = downloadSink(job)
+  logDiag(
+    'info',
+    'download.start',
+    downloadStartDetail(sink, job.name, job.size),
+    { mode: sink, name: job.name.slice(0, 80), size: job.size },
+  )
+}
+
+function noteDownloadDone(job: DownloadJob): void {
+  logDiag(
+    'info',
+    'download.done',
+    `wrote=${job.received} ms=${Math.max(0, Date.now() - job.startedAt)}`,
+    { wrote: job.received, ms: Math.max(0, Date.now() - job.startedAt) },
+  )
+}
+
+function noteDownloadFailed(job: DownloadJob, reason: string): void {
+  logDiag(
+    'warn',
+    'download.failed',
+    `reason=${reason} wrote=${job.received}`,
+    { reason, wrote: job.received, mode: downloadSink(job) },
+  )
+}
+
+/// A failed HTTP write can hang (the local core stopped answering). Never let
+/// the failure path wait forever: after this bound, keep/report what we have.
+function waitForWrites(
+  job: DownloadJob,
+  timeoutMs: number,
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false
+    const timer = window.setTimeout(() => done(false), timeoutMs)
+    function done(completed: boolean) {
+      if (settled) return
+      settled = true
+      window.clearTimeout(timer)
+      resolve(completed)
+    }
+    job.writeChain.then(() => done(true), () => done(true))
+  })
 }
 
 /// A path the user intends as an absolute home path rather than a subfolder
@@ -463,13 +542,25 @@ interface DownloadJob {
   lastPersist: number
   received: number
   eofSeen: boolean
+  /// When `eof` arrived; the final chunk may still be in flight.
+  eofAt: number
   cancelled: boolean
   finishing: boolean
   committed: boolean
   chunks: Uint8Array[]
   writeChain: Promise<void>
   writeError: unknown
+  /// Chunk writes queued or in flight. While this is non-zero a no-byte stall
+  /// is the write timeout's business, not the session timer's.
+  pendingWrites: number
   timer: number
+  eofTimer: number
+  writeTimer: number
+  /// Set once the persisted offset was checked before a staged (local core)
+  /// download started, so a retry can continue the previous `.part`.
+  resumeChecked: boolean
+  startedAt: number
+  startLogged: boolean
   resolve: () => void
 }
 
@@ -478,6 +569,11 @@ interface ReadySave {
   name: string
   size: number
   blob: Blob
+  /// The transfer failed before every byte arrived; the bytes that did arrive
+  /// are still offered, under a `.part` name.
+  partial?: boolean
+  /// Bytes actually in `blob` for a partial entry.
+  received?: number
 }
 
 interface RemotePlanFile {
@@ -646,6 +742,7 @@ export function FileTransferPanel({
   connection,
   onRemotePathChange,
   onRequestOpen,
+  onError,
 }: {
   open: boolean
   onClose: () => void
@@ -655,6 +752,9 @@ export function FileTransferPanel({
   onRemotePathChange?: (path: string) => void
   /// Asks the session to open this drawer (a drop with no destination yet).
   onRequestOpen?: () => void
+  /// Raises a failure through the session's existing toast channel, so a
+  /// write/pull error is visible even when the drawer is scrolled away.
+  onError?: (message: string) => void
 }) {
   const { t } = useTranslation()
   const localMode = useAppStore((state) => state.localMode)
@@ -1020,7 +1120,12 @@ export function FileTransferPanel({
   const downloadQueue = useRef<DownloadJob[]>([])
   const downloadPumpRef = useRef<() => void>(() => undefined)
   const finishDownloadRef = useRef<
-    (job: DownloadJob, failure?: string, cancelled?: boolean) => void
+    (
+      job: DownloadJob,
+      failure?: string,
+      cancelled?: boolean,
+      reason?: string,
+    ) => void
   >(() => undefined)
   const [saveReady, setSaveReady] = useState<ReadySave[]>([])
   const [download, setDownload] = useState<{
@@ -1031,6 +1136,9 @@ export function FileTransferPanel({
     size: number
   } | null>(null)
 
+  /// Session-level stall. This is deliberately blind to a write in progress:
+  /// a slow disk is covered by `armWriteTimeout`, and a disconnect is
+  /// covered by the reconnect poll.
   const armDownloadTimeout = useCallback(() => {
     const job = downloadSection.current
     if (!job) return
@@ -1043,21 +1151,102 @@ export function FileTransferPanel({
         // in place and the reconnect poll below re-requests the file, so do
         // not fail a transfer that is only waiting for the link.
         job.waitingLive = true
-        job.timer = window.setTimeout(tick, downloadTimeoutMs)
+        job.timer = window.setTimeout(tick, downloadStallTimeoutMs)
         return
       }
-      finishDownloadRef.current(job, t('files.incomplete'))
+      if (job.pendingWrites > 0) {
+        // A chunk arrived but has not reached disk yet. The write timeout is
+        // the one that may fail this transfer.
+        job.timer = window.setTimeout(tick, downloadStallTimeoutMs)
+        return
+      }
+      finishDownloadRef.current(
+        job,
+        t('files.downloadTimeout', { received: formatBytes(job.received) }),
+        false,
+        'stall',
+      )
     }
-    job.timer = window.setTimeout(tick, downloadTimeoutMs)
+    job.timer = window.setTimeout(tick, downloadStallTimeoutMs)
   }, [t])
+
+  /// One chunk's write. This is separate from the session stall so a big
+  /// file on a slow disk is not mistaken for a dead host.
+  const armWriteTimeout = useCallback(
+    (job: DownloadJob) => {
+      window.clearTimeout(job.writeTimer)
+      job.writeTimer = window.setTimeout(() => {
+        if (downloadSection.current !== job || job.finishing) return
+        finishDownloadRef.current(
+          job,
+          t('files.downloadWriteFailed', {
+            received: formatBytes(job.received),
+          }),
+          false,
+          'write-timeout',
+        )
+      }, downloadWriteTimeoutMs)
+    },
+    [t],
+  )
+
+  /// `eof` arrives on the control channel, which is drained before file
+  /// bytes. Wait for a final chunk that is still in flight, but never wait
+  /// forever: after the grace window the transfer is genuinely incomplete.
+  const armEofGrace = useCallback(
+    (job: DownloadJob) => {
+      window.clearTimeout(job.eofTimer)
+      const tick = () => {
+        if (downloadSection.current !== job || job.finishing) return
+        if (job.writeError !== undefined) {
+          finishDownloadRef.current(
+            job,
+            t('files.downloadWriteFailed', {
+              received: formatBytes(job.received),
+            }),
+            false,
+            'write',
+          )
+          return
+        }
+        if (job.pendingWrites > 0) {
+          // The bytes are here but the local write is still running; the
+          // write timeout owns this window.
+          job.eofTimer = window.setTimeout(tick, 100)
+          return
+        }
+        const outcome = eofOutcome(job, job.eofAt, Date.now(), downloadEofGraceMs)
+        if (outcome === 'complete') {
+          finishDownloadRef.current(job)
+          return
+        }
+        if (outcome === 'waiting') {
+          const left = Math.max(
+            0,
+            downloadEofGraceMs - (Date.now() - job.eofAt),
+          )
+          job.eofTimer = window.setTimeout(tick, Math.min(100, left))
+          return
+        }
+        finishDownloadRef.current(
+          job,
+          t('files.downloadIncomplete', {
+            received: formatBytes(job.received),
+            size: formatBytes(job.size),
+          }),
+          false,
+          'eof-incomplete',
+        )
+      }
+      job.eofTimer = window.setTimeout(tick, Math.min(100, downloadEofGraceMs))
+    },
+    [t],
+  )
 
   const discardPartial = useCallback(async (job: DownloadJob) => {
     if (job.committed) return
-    try {
-      await job.writeChain
-    } catch {
-      // A failed write is the reason we are discarding.
-    }
+    // A broken local core must not hold the queue forever.
+    await waitForWrites(job, 5_000)
     if (job.writable) {
       try {
         await job.writable.abort()
@@ -1083,29 +1272,132 @@ export function FileTransferPanel({
     }
   }, [token])
 
+  /// A failed transfer is not a reason to throw away the bytes that already
+  /// arrived. Keep the local-core staging file (a later attempt can continue
+  /// it), commit the File System Access stream as a visibly partial file, or
+  /// hand the in-memory bytes to the Save list under a `.part` name.
+  const preservePartial = useCallback(async (job: DownloadJob) => {
+    // The bytes already written are still what we want to keep, but a hung
+    // local-core write must not leave the failure unreported.
+    await waitForWrites(job, 5_000)
+    if (job.fsTemp) {
+      if (job.resumeKey !== '' && job.size > 0) {
+        saveDownloadOffset(resumeStore, job.resumeKey, job.received, job.size)
+      }
+      return
+    }
+    if (job.writable) {
+      if (job.received > 0) {
+        try {
+          // Close, not abort: File System Access commits the prefix as a real
+          // (partial) file instead of deleting it.
+          await job.writable.close()
+        } catch {
+          try {
+            await job.writable.abort()
+          } catch {
+            // Already closed or aborted.
+          }
+        }
+      } else {
+        // No byte ever arrived, so there is nothing worth leaving behind.
+        try {
+          await job.writable.abort()
+        } catch {
+          // Already closed or aborted.
+        }
+        if (job.createdFile && job.parentDir) {
+          try {
+            await job.parentDir.removeEntry(job.name)
+          } catch {
+            // It may already be gone.
+          }
+        }
+      }
+      job.writable = null
+      return
+    }
+    if (job.chunks.length > 0) {
+      const blob = new Blob(job.chunks as BlobPart[])
+      job.chunks = []
+      setSaveReady((current) => [
+        ...current.slice(-7),
+        {
+          key: job.key,
+          name: job.name,
+          size: job.size,
+          blob,
+          partial: true,
+          received: job.received,
+        },
+      ])
+    }
+  }, [])
+
   const finishDownload = useCallback(
-    (job: DownloadJob, failure?: string, cancelled = false) => {
+    (
+      job: DownloadJob,
+      failure?: string,
+      cancelled = false,
+      reason = 'failed',
+    ) => {
       if (job.finishing) return
       job.finishing = true
       window.clearTimeout(job.timer)
-      if (job.resumeKey !== '') clearDownloadOffset(resumeStore, job.resumeKey)
+      window.clearTimeout(job.eofTimer)
+      window.clearTimeout(job.writeTimer)
       if (downloadSection.current === job) downloadSection.current = null
+
+      const reportFailure = (message: string, why: string) => {
+        if (job.taskKey !== null && job.childKey) {
+          patchChild(job.taskKey, job.childKey, {
+            status: cancelled ? 'cancelled' : 'error',
+            error: cancelled ? undefined : message,
+          })
+          noteTaskSpeed(job.taskKey)
+        }
+        if (!cancelled) {
+          // Both surfaces: the drawer banner for someone looking at it, and
+          // the session toast for someone who scrolled away from the row.
+          setError(message)
+          onError?.(message)
+          noteDownloadFailed(job, why)
+        }
+        setDownload(null)
+      }
+
+      const markSaved = () => {
+        if (job.resumeKey !== '') clearDownloadOffset(resumeStore, job.resumeKey)
+        noteDownloadDone(job)
+      }
+
+      const saveFailed = async () => {
+        const message = t('files.saveFailedReceived', {
+          received: formatBytes(job.received),
+        })
+        await preservePartial(job)
+        reportFailure(message, 'save')
+      }
 
       const settle = async () => {
         if (failure !== undefined) {
-          await discardPartial(job)
           if (job.id !== 0) {
             connectionRef.current?.sendFileAction('cancel', { id: job.id })
           }
-          if (job.taskKey !== null && job.childKey) {
-            patchChild(job.taskKey, job.childKey, {
-              status: cancelled ? 'cancelled' : 'error',
-              error: cancelled ? undefined : failure,
-            })
-            noteTaskSpeed(job.taskKey)
+          if (cancelled) {
+            if (job.resumeKey !== '') {
+              clearDownloadOffset(resumeStore, job.resumeKey)
+            }
+            await discardPartial(job)
+          } else {
+            await preservePartial(job)
+            // A blob/stream job has no resumable staging file, so a stale
+            // offset would only mislead a later attempt.
+            if (!job.fsTemp && job.resumeKey !== '') {
+              clearDownloadOffset(resumeStore, job.resumeKey)
+            }
           }
-          if (!job.silent) setError(failure)
-          setDownload(null)
+          reportFailure(failure, reason)
         } else if (job.fsTemp && job.fsTarget) {
           setDownload((current) =>
             current?.key === job.key
@@ -1113,7 +1405,9 @@ export function FileTransferPanel({
               : current,
           )
           try {
-            await job.writeChain
+            if (!(await waitForWrites(job, downloadWriteTimeoutMs))) {
+              throw new Error('write timeout')
+            }
             if (job.writeError !== undefined) throw job.writeError
             if (token === '') throw new Error('no local core token')
             job.finalPath = await moveLocalFile(
@@ -1131,17 +1425,10 @@ export function FileTransferPanel({
               })
               noteTaskSpeed(job.taskKey)
             }
+            markSaved()
             setDownload(null)
           } catch {
-            await discardPartial(job)
-            if (job.taskKey !== null && job.childKey) {
-              patchChild(job.taskKey, job.childKey, {
-                status: 'error',
-                error: t('files.saveFailed'),
-              })
-            }
-            if (!job.silent) setError(t('files.saveFailed'))
-            setDownload(null)
+            await saveFailed()
           }
         } else if (job.writable) {
           setDownload((current) =>
@@ -1150,7 +1437,9 @@ export function FileTransferPanel({
               : current,
           )
           try {
-            await job.writeChain
+            if (!(await waitForWrites(job, downloadWriteTimeoutMs))) {
+              throw new Error('write timeout')
+            }
             if (job.writeError !== undefined) throw job.writeError
             await job.writable.close()
             job.committed = true
@@ -1162,6 +1451,7 @@ export function FileTransferPanel({
               })
               noteTaskSpeed(job.taskKey)
             }
+            markSaved()
             if (!job.taskKey) {
               setDownload((current) =>
                 current?.key === job.key
@@ -1177,15 +1467,7 @@ export function FileTransferPanel({
               setDownload(null)
             }
           } catch {
-            await discardPartial(job)
-            if (job.taskKey !== null && job.childKey) {
-              patchChild(job.taskKey, job.childKey, {
-                status: 'error',
-                error: t('files.saveFailed'),
-              })
-            }
-            if (!job.silent) setError(t('files.saveFailed'))
-            setDownload(null)
+            await saveFailed()
           }
         } else if (maySaveFromButton(job.strategy, job, false)) {
           const blob = new Blob(job.chunks as BlobPart[])
@@ -1216,17 +1498,15 @@ export function FileTransferPanel({
               size: job.size,
             })
           }
+          markSaved()
           setDownload(null)
         } else {
-          await discardPartial(job)
-          if (job.taskKey !== null && job.childKey) {
-            patchChild(job.taskKey, job.childKey, {
-              status: 'error',
-              error: t('files.incomplete'),
-            })
-          }
-          if (!job.silent) setError(t('files.incomplete'))
-          setDownload(null)
+          const message = t('files.downloadIncomplete', {
+            received: formatBytes(job.received),
+            size: formatBytes(job.size),
+          })
+          await preservePartial(job)
+          reportFailure(message, 'incomplete')
         }
         job.onDone?.(job.finalPath)
         job.resolve()
@@ -1234,7 +1514,15 @@ export function FileTransferPanel({
       }
       void settle()
     },
-    [discardPartial, noteTaskSpeed, patchChild, t, token],
+    [
+      discardPartial,
+      noteTaskSpeed,
+      onError,
+      patchChild,
+      preservePartial,
+      t,
+      token,
+    ],
   )
   useEffect(() => {
     finishDownloadRef.current = finishDownload
@@ -1271,7 +1559,12 @@ export function FileTransferPanel({
           job.writable = await handle.createWritable()
           job.createdFile = !existed
         } catch {
-          finishDownloadRef.current(job, t('files.saveFailed'))
+          finishDownloadRef.current(
+            job,
+            t('files.saveFailedReceived', { received: formatBytes(job.received) }),
+            false,
+            'save',
+          )
           return
         }
       } else if (job.target) {
@@ -1282,6 +1575,8 @@ export function FileTransferPanel({
             job.cancelled = true
             job.finishing = true
             window.clearTimeout(job.timer)
+            window.clearTimeout(job.eofTimer)
+            window.clearTimeout(job.writeTimer)
             if (downloadSection.current === job) downloadSection.current = null
             if (job.taskKey !== null && job.childKey) {
               patchChild(job.taskKey, job.childKey, { status: 'cancelled' })
@@ -1304,6 +1599,26 @@ export function FileTransferPanel({
         return
       }
 
+      // A staged (local core) transfer may have a `.part` left by an earlier
+      // failed attempt. Continue it only when the file really holds the
+      // remembered prefix; otherwise the first byte starts from zero.
+      if (job.fsTemp && job.resumeKey !== '' && !job.resumeChecked) {
+        job.resumeChecked = true
+        const saved = loadDownloadOffset(resumeStore, job.resumeKey, job.size)
+        if (saved > 0 && token !== '') {
+          const parent = job.fsTemp.replace(/[\\/][^\\/]*$/, '')
+          try {
+            const listing = await fetchLocalDirectory(token, parent)
+            const staged = listing.entries.find(
+              (entry) => !entry.dir && entry.name === basename(job.fsTemp!),
+            )
+            if (staged && staged.size >= saved) job.received = saved
+          } catch {
+            // The staging folder may not exist yet; start from zero.
+          }
+        }
+      }
+
       if (job.taskKey !== null) {
         updateTask(job.taskKey, (task) => ({ ...task, phase: 'running' }))
         if (job.childKey) {
@@ -1314,9 +1629,10 @@ export function FileTransferPanel({
         key: job.key,
         phase: 'waiting',
         name: job.name,
-        received: 0,
+        received: job.received,
         size: job.size,
       })
+      noteDownloadStart(job)
       job.requesting = true
       connectionRef.current?.sendFileAction('request', { path: job.path })
       armDownloadTimeout()
@@ -1327,6 +1643,7 @@ export function FileTransferPanel({
     discardPartial,
     patchChild,
     t,
+    token,
     updateTask,
   ])
   useEffect(() => {
@@ -1351,6 +1668,11 @@ export function FileTransferPanel({
       job.waitingLive = false
       job.id = 0
       job.requesting = true
+      // The new download gets its own end marker; an `eof` seen on the old
+      // connection must not make the next chunk look late.
+      job.eofSeen = false
+      job.eofAt = 0
+      window.clearTimeout(job.eofTimer)
       window.clearTimeout(job.timer)
       connection.sendFileAction('request', { path: job.path })
       armDownloadTimeout()
@@ -1370,6 +1692,9 @@ export function FileTransferPanel({
       baseDir: FileSystemDirectoryHandle | null
       segments: string[] | null
       fsTarget?: string | null
+      /// Listing size, so the start log has the real number and a failed
+      /// staged transfer can find its `.part` on a retry.
+      expectedSize?: number
       mtime?: number
       onDone?: (path: string | null) => void
       autoDownload?: boolean
@@ -1377,11 +1702,15 @@ export function FileTransferPanel({
     }): DownloadJob => {
       const key = nextKey.current++
       const fsTarget = props.fsTarget ?? null
+      const size = props.expectedSize ?? 0
+      const mtime = props.mtime ?? 0
       return {
         key,
         ...props,
         fsTarget,
-        fsTemp: fsTarget === null ? null : `${fsTarget}.molink-${key}.part`,
+        // Stable name: a retry of the same target finds the `.part` left by a
+        // previous failure instead of a per-job name.
+        fsTemp: fsTarget === null ? null : `${fsTarget}.molink.part`,
         finalPath: null,
         onDone: props.onDone ?? null,
         autoDownload: props.autoDownload === true,
@@ -1390,20 +1719,34 @@ export function FileTransferPanel({
         createdFile: false,
         requesting: false,
         id: 0,
-        size: 0,
-        mtime: props.mtime ?? 0,
-        resumeKey: '',
+        size,
+        mtime,
+        resumeKey: fsTarget === null
+          ? ''
+          : downloadResumeKey(
+            connectionRef.current?.targetAddress() ?? '',
+            props.path,
+            size,
+            mtime,
+          ),
         waitingLive: false,
         lastPersist: 0,
         received: 0,
         eofSeen: false,
+        eofAt: 0,
         cancelled: false,
         finishing: false,
         committed: false,
         chunks: [],
         writeChain: Promise.resolve(),
         writeError: undefined,
+        pendingWrites: 0,
         timer: 0,
+        eofTimer: 0,
+        writeTimer: 0,
+        resumeChecked: false,
+        startedAt: 0,
+        startLogged: false,
       }
     },
     [],
@@ -1425,6 +1768,7 @@ export function FileTransferPanel({
         path: string
         name: string
         childKey: string
+        size?: number
         mtime?: number
       }>,
       targets: Array<Promise<FileSystemWritableFileStream> | null>,
@@ -1452,6 +1796,7 @@ export function FileTransferPanel({
               baseDir: null,
               segments: null,
               fsTarget: fsTargets[index] ?? null,
+              expectedSize: file.size ?? 0,
               mtime: file.mtime ?? 0,
               resolve,
             })
@@ -1467,7 +1812,7 @@ export function FileTransferPanel({
   )
 
   const startQuickDownload = useCallback(
-    (path: string, name: string, mtime = 0) => {
+    (path: string, name: string, mtime = 0, size = 0) => {
       const suggested = suggestedFileName(name, path)
       const pick = pickSaveTarget(suggested)
       const childKey = `c${childSeq.current++}`
@@ -1476,7 +1821,7 @@ export function FileTransferPanel({
           key: childKey,
           name: suggested,
           path,
-          size: 0,
+          size,
           progress: 0,
           status: 'queued',
         },
@@ -1486,7 +1831,7 @@ export function FileTransferPanel({
       void runQuickDownloads(
         taskKey,
         run,
-        [{ path, name: suggested, childKey, mtime }],
+        [{ path, name: suggested, childKey, size, mtime }],
         [pick.target],
         pick.strategy,
         false,
@@ -1525,6 +1870,7 @@ export function FileTransferPanel({
         path: file.path,
         name: names[index]!,
         childKey: children[index]!.key,
+        size: file.size,
       })),
       targets ?? files.map(() => null),
       targets ? 'picker' : 'button',
@@ -1712,11 +2058,17 @@ export function FileTransferPanel({
             !Number.isSafeInteger(size) ||
             size < 0
           ) {
+            const why = isForbiddenPath(message)
+              ? sandboxDeniedText(t, message)
+              : (message.message ?? t('files.error'))
             finishDownloadRef.current(
               job,
-              isForbiddenPath(message)
-                ? sandboxDeniedText(t, message)
-                : (message.message ?? t('files.error')),
+              t('files.downloadRequestFailed', {
+                reason: why,
+                received: formatBytes(job.received),
+              }),
+              false,
+              'request',
             )
             return
           }
@@ -1724,7 +2076,15 @@ export function FileTransferPanel({
           // writer already holds that prefix, so keep it instead of zeroing
           // the progress and overwriting the file from the start.
           if ((job.size !== 0 && job.size !== size) || job.received > size) {
-            finishDownloadRef.current(job, t('files.incomplete'))
+            finishDownloadRef.current(
+              job,
+              t('files.downloadIncomplete', {
+                received: formatBytes(job.received),
+                size: formatBytes(size),
+              }),
+              false,
+              'size-mismatch',
+            )
             return
           }
           job.id = message.id
@@ -1767,23 +2127,35 @@ export function FileTransferPanel({
           if (message.ok === false) {
             finishDownloadRef.current(
               job,
-              message.message ?? t('files.error'),
+              t('files.downloadRequestFailed', {
+                reason: message.message ?? t('files.error'),
+                received: formatBytes(job.received),
+              }),
+              false,
+              'request',
             )
             break
           }
+          // The end marker races the last file chunk (control is drained
+          // before file bytes). Remember it and let `armEofGrace` finish the
+          // transfer once that chunk is written, or fail after the grace.
           job.eofSeen = true
-          void job.writeChain.then(() => {
-            if (job.cancelled || job.finishing) return
-            if (job.writeError !== undefined) {
-              finishDownloadRef.current(job, t('files.saveFailed'))
-              return
-            }
-            if (!downloadComplete(job)) {
-              finishDownloadRef.current(job, t('files.incomplete'))
-              return
-            }
+          job.eofAt = Date.now()
+          window.clearTimeout(job.timer)
+          if (job.writeError !== undefined) {
+            finishDownloadRef.current(
+              job,
+              t('files.downloadWriteFailed', {
+                received: formatBytes(job.received),
+              }),
+              false,
+              'write',
+            )
+          } else if (downloadComplete(job)) {
             finishDownloadRef.current(job)
-          })
+          } else {
+            armEofGrace(job)
+          }
           break
         }
         case 'cancelled': {
@@ -1807,12 +2179,31 @@ export function FileTransferPanel({
           })
           break
         case 'error': {
+          const why = message.message ?? t('files.error')
           const consumed = resolveUpload({
             ok: false,
             code: message.code,
-            message: message.message ?? t('files.error'),
+            message: why,
           })
-          if (!consumed) setError(message.message ?? t('files.error'))
+          if (!consumed) {
+            // A download waiting for `sending` must not sit until the stall
+            // timeout when the host rejected the request outright.
+            const job = downloadSection.current
+            if (job && (job.requesting ||
+                (message.id !== undefined && job.id === message.id))) {
+              finishDownloadRef.current(
+                job,
+                t('files.downloadRequestFailed', {
+                  reason: why,
+                  received: formatBytes(job.received),
+                }),
+                false,
+                'request',
+              )
+            } else {
+              setError(why)
+            }
+          }
           break
         }
         case 'clipboard':
@@ -1831,6 +2222,7 @@ export function FileTransferPanel({
     },
     [
       armDownloadTimeout,
+      armEofGrace,
       finishBrowse,
       patchChild,
       resolveUpload,
@@ -1843,19 +2235,36 @@ export function FileTransferPanel({
       const job = downloadSection.current
       if (!job || job.id !== id) return
       if (!acceptDownloadChunk(job, offset, data.byteLength)) {
-        finishDownloadRef.current(job, t('files.incomplete'))
+        finishDownloadRef.current(
+          job,
+          t('files.downloadIncomplete', {
+            received: formatBytes(job.received),
+            size: formatBytes(job.size),
+          }),
+          false,
+          'order',
+        )
         return
       }
       if (job.fsTemp) {
         if (token === '') {
-          finishDownloadRef.current(job, t('files.saveFailed'))
+          finishDownloadRef.current(
+            job,
+            t('files.saveFailedReceived', {
+              received: formatBytes(job.received),
+            }),
+            false,
+            'save',
+          )
           return
         }
         // Copy the socket buffer; it is reused after this handler returns.
         const chunk = new Uint8Array(data)
         const truncate = offset === 0
+        job.pendingWrites += 1
+        if (job.pendingWrites === 1) armWriteTimeout(job)
         job.writeChain = job.writeChain.then(async () => {
-          if (job.cancelled) return
+          if (job.cancelled || job.finishing) return
           try {
             await writeLocalFileChunk(
               token,
@@ -1872,8 +2281,10 @@ export function FileTransferPanel({
         // Copy into a plain ArrayBuffer: the socket buffer may be reused, and
         // FileSystemWritableFileStream rejects a SharedArrayBuffer-backed view.
         const chunk = new Uint8Array(data).buffer
+        job.pendingWrites += 1
+        if (job.pendingWrites === 1) armWriteTimeout(job)
         job.writeChain = job.writeChain.then(async () => {
-          if (job.cancelled) return
+          if (job.cancelled || job.finishing) return
           try {
             await job.writable!.write(chunk)
           } catch (writeError) {
@@ -1881,7 +2292,10 @@ export function FileTransferPanel({
           }
         })
       } else {
-        job.chunks.push(data)
+        // The socket buffer may be reused after this handler returns, and the
+        // blob path keeps the bytes until EOF, so copy instead of holding a
+        // view into the transport's buffer.
+        job.chunks.push(new Uint8Array(data))
       }
       armDownloadTimeout()
       if (job.taskKey !== null && job.childKey) {
@@ -1895,9 +2309,18 @@ export function FileTransferPanel({
         size: job.size,
       })
       void job.writeChain.then(() => {
+        job.pendingWrites = Math.max(0, job.pendingWrites - 1)
+        if (job.pendingWrites === 0) window.clearTimeout(job.writeTimer)
         if (job.cancelled || job.finishing) return
         if (job.writeError !== undefined) {
-          finishDownloadRef.current(job, t('files.saveFailed'))
+          finishDownloadRef.current(
+            job,
+            t('files.downloadWriteFailed', {
+              received: formatBytes(job.received),
+            }),
+            false,
+            'write',
+          )
           return
         }
         if (downloadComplete(job)) {
@@ -1905,7 +2328,10 @@ export function FileTransferPanel({
           return
         }
         if (job.eofSeen) {
-          finishDownloadRef.current(job, t('files.incomplete'))
+          // The end marker is already here. A final chunk that just landed
+          // is handled above; otherwise the grace timer (armed by `eof`)
+          // decides between waiting and failing.
+          if (job.pendingWrites === 0) armEofGrace(job)
           return
         }
         if (job.received < job.size) {
@@ -1913,7 +2339,7 @@ export function FileTransferPanel({
         }
       })
     },
-    [armDownloadTimeout, patchProgress, t, token],
+    [armDownloadTimeout, armEofGrace, armWriteTimeout, patchProgress, t, token],
   )
 
   const messageRef = useRef(handleMessage)
@@ -2657,7 +3083,7 @@ export function FileTransferPanel({
     if (!listing) return [] as Array<FileEntry & { path: string }>
     return [...remoteSelection.values()].map((entry) => ({
       ...entry,
-      path: entry.path ?? joinPath(listing.path, entry.name),
+      path: remoteEntryPath(listing.path, entry),
     }))
   }, [listing, remoteSelection])
 
@@ -3006,7 +3432,7 @@ export function FileTransferPanel({
         }
         if (stopped()) return
         for (const entry of result.entries) {
-          const childPath = joinPath(result.path, entry.name)
+          const childPath = remoteEntryPath(result.path, entry)
           const childRel = rel === '' ? entry.name : `${rel}/${entry.name}`
           if (entry.dir) await walk(childPath, childRel)
           else {
@@ -3251,6 +3677,7 @@ export function FileTransferPanel({
                 baseDir: null,
                 segments: null,
                 fsTarget,
+                expectedSize: file.size,
                 onDone: (path) => {
                   if (path) committed.push(path)
                 },
@@ -3718,7 +4145,7 @@ export function FileTransferPanel({
         }
         if (run.cancelled) return
         for (const entry of result.entries) {
-          const childPath = joinPath(result.path, entry.name)
+          const childPath = remoteEntryPath(result.path, entry)
           const childRel = relativeUnder(remoteRoot, childPath) ??
             (rel === '' ? entry.name : `${rel}/${entry.name}`)
           if (entry.dir) await walk(childPath, childRel)
@@ -3824,6 +4251,7 @@ export function FileTransferPanel({
             baseDir: fsTarget ? null : destination,
             segments: fsTarget ? null : parent,
             fsTarget,
+            expectedSize: file.size,
             mtime: file.mtime ?? 0,
             resolve,
           })
@@ -3935,7 +4363,10 @@ export function FileTransferPanel({
     const url = URL.createObjectURL(item.blob)
     const anchor = document.createElement('a')
     anchor.href = url
-    anchor.download = suggestedFileName(item.name, item.name)
+    // A failed transfer keeps the bytes under a `.part` name so it cannot be
+    // mistaken for a complete file.
+    const name = item.partial ? `${item.name}.part` : item.name
+    anchor.download = suggestedFileName(name, item.name)
     document.body.appendChild(anchor)
     anchor.click()
     anchor.remove()
@@ -4499,7 +4930,7 @@ export function FileTransferPanel({
                       disabled={typeof file.path !== 'string'}
                       onClick={() => {
                         if (typeof file.path === 'string') {
-                          startQuickDownload(file.path, file.name)
+                          startQuickDownload(file.path, file.name, 0, file.size)
                         }
                       }}
                       className="flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left transition hover:bg-panel/60"
@@ -4537,8 +4968,7 @@ export function FileTransferPanel({
                 {listing.entries.map((entry) => {
                   const selected = remoteSelection.has(entry.name)
                   const rootsView = listing.path === ''
-                  const entryPath =
-                    entry.path ?? joinPath(listing.path, entry.name)
+                  const entryPath = remoteEntryPath(listing.path, entry)
                   return (
                     <li
                       key={entry.name}
@@ -4610,6 +5040,7 @@ export function FileTransferPanel({
                               entryPath,
                               entry.name,
                               entry.mtime,
+                              entry.size,
                             )
                           }
                           className="grid h-6 w-6 shrink-0 place-items-center rounded text-muted transition hover:bg-panel hover:text-accent"
@@ -4712,8 +5143,13 @@ export function FileTransferPanel({
               >
                 {item.name}
               </span>
+              {item.partial ? (
+                <span className="chip !px-1 !py-0 shrink-0 text-[9px] text-warn">
+                  {t('files.partialSave')}
+                </span>
+              ) : null}
               <span className="shrink-0 text-[9px] text-muted">
-                {formatBytes(item.size)}
+                {formatBytes(item.received ?? item.size)}
               </span>
               <button
                 type="button"
