@@ -1,10 +1,14 @@
 import { formatHost } from './net'
 import { clipboardRangeQuery } from './clipboard-lazy'
+<<<<<<< HEAD
 import type {
   PortMapping,
   PortmapCreateInput,
   PortmapPreset,
 } from './portmap'
+=======
+import type { SessionType } from './session-type'
+>>>>>>> origin/main
 
 export interface DeviceCapabilities {
   screen_capture: boolean
@@ -207,6 +211,9 @@ export interface ServerState {
   device_name?: string
   avatar?: string
   platform?: string
+  /// Host desktop session. Absent on an older core, which behaves like
+  /// unknown. A Wayland host only reaches XWayland applications.
+  session_type?: SessionType
   allow_remote_access?: boolean
   /// This core refuses every outbound session except a loopback
   /// self-connection. Optional so an older core (no field) renders normally.

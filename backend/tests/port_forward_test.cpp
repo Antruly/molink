@@ -19,9 +19,13 @@
 #include <vector>
 
 #include "port_forward.h"
+<<<<<<< HEAD
 #include "portmap_api.h"
 #include "protocol/frame_packet.h"
 #include "transport/port_forward_bridge.h"
+=======
+#include "protocol/frame_packet.h"
+>>>>>>> origin/main
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -406,6 +410,7 @@ class capture_link final : public molink::port_forward_link {
   std::vector<std::string> texts_;
 };
 
+<<<<<<< HEAD
 /// A session transport with no socket: exactly the seam `connect_proxy` and
 /// `direct_proxy` hand to `port_forward_bridge`. It records what the manager
 /// puts on the wire and lets the test act as the remote host.
@@ -479,6 +484,8 @@ class test_session_transport final : public molink::session_transport {
   std::vector<std::vector<uint8_t>> binaries_;
 };
 
+=======
+>>>>>>> origin/main
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -892,6 +899,7 @@ void test_echo_and_recovery() {
   std::printf("  done\n");
 }
 
+<<<<<<< HEAD
 void test_api_error_mapping() {
   std::printf("api vocabulary:\n");
   using molink::portmap_error;
@@ -1112,6 +1120,8 @@ void test_session_bridge() {
   std::printf("  done\n");
 }
 
+=======
+>>>>>>> origin/main
 }  // namespace
 
 int main() {
@@ -1124,9 +1134,12 @@ int main() {
 #endif
   test_message_codec();
   test_persistence();
+<<<<<<< HEAD
   test_api_error_mapping();
   test_api_crud();
   test_session_bridge();
+=======
+>>>>>>> origin/main
   test_capability_gate();
   test_bind_failure_rolls_back();
   test_host_connect_failure();

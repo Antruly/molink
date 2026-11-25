@@ -926,6 +926,11 @@
     "enable": "启用",
     "decline": "暂不启用"
   },
+  "wayland": {
+    "title": "Wayland 会话",
+    "body": "当前只能同步 XWayland 应用；原生 Wayland 应用需要 portal 支持，尚未实现。",
+    "dismiss": "忽略此提示"
+  },
   "diagnostics": {
     "open": "运行日志",
     "title": "运行日志",
