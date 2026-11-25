@@ -163,6 +163,8 @@ app_settings load_settings() {
     const std::string value = trim(line.substr(eq + 1));
     if (key == "allow_remote_access") {
       settings.allow_remote_access = parse_bool(value, false);
+    } else if (key == "host_only") {
+      settings.host_only = parse_bool(value, false);
     } else if (key == "allow_web_client") {
       settings.allow_web_client = parse_bool(value, false);
     } else if (key == "discovery_enabled") {
@@ -312,6 +314,7 @@ void save_settings(const app_settings& settings) {
   stream << "# moLink settings. Contains secrets; keep this file private.\n";
   stream << "allow_remote_access=" << (settings.allow_remote_access ? 1 : 0)
          << "\n";
+  stream << "host_only=" << (settings.host_only ? 1 : 0) << "\n";
   stream << "allow_web_client=" << (settings.allow_web_client ? 1 : 0) << "\n";
   stream << "discovery_enabled=" << (settings.discovery_enabled ? 1 : 0)
          << "\n";

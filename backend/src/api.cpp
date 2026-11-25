@@ -862,6 +862,7 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
             j["device_name"] = current_settings.device_name;
             j["allow_access_requests"] = current_settings.allow_access_requests;
             j["allow_remote_access"] = current_settings.allow_remote_access;
+            j["host_only"] = current_settings.host_only;
             j["avatar"] = current_settings.avatar;
             j["platform"] = device_platform();
             if (deps.server) {
@@ -3027,6 +3028,7 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
             const app_settings settings = deps.auth->settings();
             uvcpp_json j;
             j["allow_remote_access"] = settings.allow_remote_access;
+            j["host_only"] = settings.host_only;
             j["allow_web_client"] = settings.allow_web_client;
             j["discovery_enabled"] = settings.discovery_enabled;
             j["allow_access_requests"] = settings.allow_access_requests;
@@ -3071,6 +3073,7 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
                return *value == "1" || *value == "true" || *value == "yes";
              };
              const bool allow_remote = flag("allow_remote", before.allow_remote_access);
+             const bool host_only = flag("host_only", before.host_only);
              const bool allow_web = flag("allow_web", before.allow_web_client);
              const bool discovery = flag("discovery", before.discovery_enabled);
              const bool access_requests =
@@ -3125,6 +3128,7 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
              const std::string* name = req.query("name");
              deps.auth->update_access(allow_remote, allow_web, discovery,
                                       name != nullptr ? *name : std::string());
+             deps.auth->set_host_only(host_only);
              deps.auth->set_allow_access_requests(access_requests);
              // The host-wide default for new sessions. A live session keeps
              // the mask it was created with unless the local user changes it
@@ -3178,6 +3182,7 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
              }
              uvcpp_json j;
              j["allow_remote_access"] = after.allow_remote_access;
+             j["host_only"] = after.host_only;
              j["allow_web_client"] = after.allow_web_client;
              j["discovery_enabled"] = after.discovery_enabled;
              j["allow_access_requests"] = after.allow_access_requests;

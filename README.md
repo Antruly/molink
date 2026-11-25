@@ -200,12 +200,12 @@ pacman -S --needed mingw-w64-x86_64-gcc mingw-w64-x86_64-openssl \
   mingw-w64-x86_64-svt-av1 mingw-w64-x86_64-usrsctp \
   mingw-w64-x86_64-nlohmann-json mingw-w64-x86_64-libwebp
 
-./packaging/fetch-uvcpp.sh mingw-x64 1.9.1 build/uvcpp-1.9.1-mingw
+./packaging/fetch-uvcpp.sh mingw-x64 1.11.0 build/uvcpp-1.11.0-mingw
 
 export MOLINK_MINGW64_PREFIX=C:/msys64/mingw64
 cmake -S backend -B build-mingw64 -G Ninja \
   -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/mingw64-msvcrt.cmake \
-  -DMOLINK_UVCPP_PREFIX=build/uvcpp-1.9.1-mingw \
+  -DMOLINK_UVCPP_PREFIX=build/uvcpp-1.11.0-mingw \
   -DCMAKE_PREFIX_PATH="C:/msys64/mingw64" \
   -DOPENSSL_ROOT_DIR="C:/msys64/mingw64" \
   -DMOLINK_ENABLE_AV1=ON -DMOLINK_ENABLE_VPX=ON \

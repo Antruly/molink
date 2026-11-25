@@ -22,8 +22,12 @@ namespace molink {
 /// `post` queues a callback on the core's event loop. It is required for AV1:
 /// decoding runs on a worker thread and the rewritten packet must be delivered
 /// from the loop, not from that thread.
+/// `host_only` is read per connection so a settings change applies to the
+/// next attempt. When it returns true the handler refuses the outbound
+/// session with the `host_only_mode` close reason.
 uvcpp::uvcpp_web_ws_handler make_connect_handler(
     std::shared_ptr<p2p_manager> manager,
-    std::function<void(std::function<void()>)> post = {});
+    std::function<void(std::function<void()>)> post = {},
+    std::function<bool()> host_only = {});
 
 }  // namespace molink

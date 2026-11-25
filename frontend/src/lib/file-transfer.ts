@@ -100,6 +100,21 @@ export function joinPath(base: string, name: string): string {
   return trimmed + separator + name
 }
 
+/// A listing row's absolute host path. A normal entry carries only a name --
+/// after the clipboard-path change the host no longer includes absolute paths
+/// in listings -- so the folder it was listed from supplies the rest. A volume
+/// row in the roots view carries its own path. Never invent a name: an empty
+/// result is a bug the caller should report, not a file called `unknown.bin`.
+export function remoteEntryPath(
+  folderPath: string,
+  entry: { name: string; path?: string },
+): string {
+  const own = (entry.path ?? '').trim()
+  if (own !== '') return own
+  if (entry.name.trim() === '') return ''
+  return joinPath(folderPath, entry.name)
+}
+
 /// The parent shown by the up button. A volume root (and a UNC share root)
 /// has no parent, which the remote panel turns into its drive list.
 export function parentPath(path: string): string {

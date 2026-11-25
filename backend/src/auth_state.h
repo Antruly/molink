@@ -116,6 +116,9 @@ class auth_state {
   void refresh_daily();
   void update_access(bool allow_remote_access, bool allow_web_client,
                      bool discovery_enabled, const std::string& device_name);
+  /// Host-only edition: refuse every outbound session this core would open,
+  /// except a loopback self-connection.
+  void set_host_only(bool host_only);
   /// Toggle the no-code approval flow without touching the other access
   /// switches. Defaults to enabled.
   void set_allow_access_requests(bool allow);

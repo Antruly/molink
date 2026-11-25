@@ -27,6 +27,54 @@ export function downloadComplete(progress: DownloadProgress): boolean {
     progress.received === progress.size
 }
 
+/// Where a download's bytes actually land. The three destinations have very
+/// different failure and resume behaviour, so the job logs and the partial-byte
+/// bookkeeping both key off this instead of guessing from a container name.
+export type DownloadSink = 'fs' | 'blob' | 'chunk'
+
+export function downloadSinkFor(
+  target: { stagingFile: boolean; writable: boolean },
+): DownloadSink {
+  // `chunk` is the local core's /api/fs/write staging file, `fs` is a File
+  // System Access writable, and `blob` is the in-memory Save button fallback.
+  if (target.stagingFile) return 'chunk'
+  if (target.writable) return 'fs'
+  return 'blob'
+}
+
+export type EofOutcome = 'complete' | 'waiting' | 'incomplete'
+
+/// The host sends `eof` on the control channel, and that channel is drained
+/// before file bytes (see channel_scheduler). The final chunk can therefore
+/// arrive *after* the end marker. Keep waiting through a short grace window
+/// instead of throwing away a transfer that is already complete on the wire.
+export function eofOutcome(
+  progress: DownloadProgress,
+  eofAt: number,
+  now: number,
+  graceMs: number,
+): EofOutcome {
+  if (downloadComplete(progress)) return 'complete'
+  if (progress.cancelled === true) return 'incomplete'
+  if (progress.eofSeen !== true) return 'waiting'
+  return now - eofAt >= graceMs ? 'incomplete' : 'waiting'
+}
+
+/// The exact `download.start` detail string. Names come from the host, so
+/// keep the log line bounded and strip control characters that would break a
+/// one-line export.
+export function downloadStartDetail(
+  sink: DownloadSink,
+  name: string,
+  size: number,
+): string {
+  const clean = name
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f]/g, '?')
+    .slice(0, 80)
+  return `mode=${sink} name=${clean} size=${size}`
+}
+
 /// The tiny slice of `localStorage` the resume bookkeeping needs. Keeping it
 /// structural lets the tests use a Map and lets the panel pass a wrapper that
 /// tolerates a disabled storage.

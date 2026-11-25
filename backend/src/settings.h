@@ -10,6 +10,10 @@ namespace molink {
 struct app_settings {
   /// Bind 0.0.0.0 and accept non-loopback peers. Off by default.
   bool allow_remote_access = false;
+  /// This machine may only be controlled. Outbound sessions this core opens
+  /// on behalf of a local page or shell are refused unless they target
+  /// loopback (the "view this screen" path). Off by default.
+  bool host_only = false;
   /// Allow a normal browser (not the desktop shell) to load the web UI.
   bool allow_web_client = false;
   /// Multicast LAN discovery. Requires allow_remote_access.

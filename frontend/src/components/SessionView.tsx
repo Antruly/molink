@@ -3810,6 +3810,7 @@ export function SessionView({
             connection={connection() ?? null}
             onRemotePathChange={setRemoteDir}
             onRequestOpen={() => setFilesOpen(true)}
+            onError={(message) => pushToast(tab.id, message)}
           />
 
 

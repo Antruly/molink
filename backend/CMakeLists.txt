@@ -257,6 +257,7 @@ set(MOLINK_CORE_SOURCES
   src/tls_identity.cpp
   src/lock_state.cpp
   src/net/ip_allowlist.cpp
+  src/net/outbound_policy.cpp
   src/session_registry.cpp
   src/session_preset.cpp
   src/service_control.cpp
@@ -758,6 +759,24 @@ foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
     "RUNTIME_OUTPUT_DIRECTORY_${uvp_config_upper}" "${CMAKE_BINARY_DIR}")
 endforeach()
 add_test(NAME ip_allowlist COMMAND molink-core-ip-allowlist-test)
+
+# Host-only outbound policy: a normal install keeps every target, a host-only
+# one permits loopback self-connections only, and the refusal carries the
+# documented error code and log fields. Pure logic plus the logger.
+add_executable(molink-core-outbound-policy-test
+  tests/outbound_policy_test.cpp
+  src/net/outbound_policy.cpp
+  src/diag_log.cpp
+)
+target_include_directories(molink-core-outbound-policy-test PRIVATE src)
+set_target_properties(molink-core-outbound-policy-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
+  string(TOUPPER "${uvp_config}" uvp_config_upper)
+  set_target_properties(molink-core-outbound-policy-test PROPERTIES
+    "RUNTIME_OUTPUT_DIRECTORY_${uvp_config_upper}" "${CMAKE_BINARY_DIR}")
+endforeach()
+add_test(NAME outbound_policy COMMAND molink-core-outbound-policy-test)
 
 # Diagnostic log rotation, retention, tailing and redaction. Pure filesystem
 # plus a fake clock, so it builds without libuvcpp.
