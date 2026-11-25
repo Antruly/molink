@@ -105,6 +105,7 @@ import { TileCanvas, type DisplayMode } from './TileCanvas'
 import { ChatPanel } from './ChatPanel'
 import { FileTransferPanel } from './FileTransferPanel'
 import { TerminalPanel } from './TerminalPanel'
+import { sessionToolEntries } from '../lib/session-tools'
 import type { ChatMessage } from '../lib/client'
 import { VoiceCall } from '../lib/voice'
 
@@ -560,7 +561,16 @@ export function SessionView({
   /// The terminal endpoint authenticates with the host session token, so wait
   /// for the live welcome. A host that answered `terminal_disabled` never
   /// shows the entry again in this session.
-  const terminalAvailable = tab.phase === 'live' && !terminalDisabled
+  /// The chat/files/terminal entries are built once and rendered by both the
+  /// wide toolbar and the compact tools menu, so the two paths can never
+  /// disagree about whether the terminal is available.
+  const sessionEntries = sessionToolEntries({
+    phase: tab.phase,
+    terminalDisabled,
+    chatLabel: t('session.chat'),
+    filesLabel: t('session.files'),
+    terminalLabel: t('terminal.title'),
+  })
   /// The remote folder the file panel is showing, published by the panel. A
   /// drop on the session is uploaded straight into it.
   const [remoteDir, setRemoteDir] = useState('')
@@ -1742,7 +1752,7 @@ export function SessionView({
         })
       }
     }, 200)
-  }, [isFullscreen, setImmersive, setWindowFullscreen])
+  }, [isFullscreen, setImmersive, setWindowFullscreen, setMobileToolsOpen])
 
   // Esc leaves immersive mode, unless input control is on: then Esc belongs
   // to the remote application.
@@ -3121,6 +3131,204 @@ export function SessionView({
                   <Maximize2 size={14} />
                 )}
               </button>
+              {/* The session's own entries live at the head of the bar, in
+                  front of the picture controls. A compact bar can still
+                  overflow (the quality controls alone fill a phone-width
+                  bar), and anything placed after them would be clipped
+                  off-screen with no visible scroll affordance. */}
+              {compactBar ? (
+                <ToolbarMenu
+                  icon={<Wrench size={13} />}
+                  label={t('session.tools')}
+                  title={t('session.tools')}
+                  items={[
+                    ...sessionEntries.map((entry) => ({
+                      key: entry.key,
+                      label: entry.label,
+                      icon:
+                        entry.key === 'chat' ? (
+                          <MessageSquare size={12} />
+                        ) : entry.key === 'files' ? (
+                          <FolderOpen size={12} />
+                        ) : (
+                          <TerminalIcon size={12} />
+                        ),
+                      active:
+                        entry.key === 'chat'
+                          ? chatOpen
+                          : entry.key === 'files'
+                            ? filesOpen
+                            : terminalOpen,
+                      onSelect: () => {
+                        if (entry.key === 'chat') setChatUnread(0)
+                        setChatOpen(entry.key === 'chat')
+                        setFilesOpen(entry.key === 'files')
+                        setTerminalOpen(entry.key === 'terminal')
+                      },
+                    })),
+                    ...(inputAvailable
+                      ? [
+                          {
+                            key: 'control',
+                            label: tab.controlEnabled
+                              ? t('session.stopControl')
+                              : t('session.startControl'),
+                            icon: tab.controlEnabled ? (
+                              <Hand size={12} />
+                            ) : (
+                              <MousePointer2 size={12} />
+                            ),
+                            active: tab.controlEnabled,
+                            onSelect: () => {
+                              const next = !tab.controlEnabled
+                              setControlEnabled(tab.id, next)
+                              if (!next) setVirtualMouse(false)
+                            },
+                          },
+                          {
+                            key: 'sas',
+                            label: t('session.ctrlAltDel'),
+                            icon: <Keyboard size={12} />,
+                            onSelect: () => connection()?.sendInput({ k: 'sas' }),
+                          },
+                        ]
+                      : []),
+                    ...(!popout && localMode
+                      ? [
+                          {
+                            key: 'popout',
+                            label: t('session.popOut'),
+                            icon: <ExternalLink size={12} />,
+                            onSelect: openPopout,
+                          },
+                        ]
+                      : []),
+                  ]}
+                />
+              ) : (
+                <>
+                  {sessionEntries.map((entry) =>
+                    entry.key === 'chat' ? (
+                      <button
+                        key={entry.key}
+                        type="button"
+                        onClick={() => {
+                          setChatUnread(0)
+                          setChatOpen(true)
+                          setFilesOpen(false)
+                          setTerminalOpen(false)
+                        }}
+                        className={
+                          'relative btn h-7 w-7 shrink-0 !px-0 ' +
+                          (chatOpen ? 'text-accent' : 'btn-quiet')
+                        }
+                        title={entry.label}
+                        aria-label={entry.label}
+                      >
+                        <MessageSquare size={13} />
+                        {chatUnread > 0 && !chatOpen ? (
+                          <span className="absolute -right-0.5 -top-0.5 grid h-4 min-w-4 place-items-center rounded-full bg-danger px-1 text-[9px] font-semibold text-white">
+                            {chatUnread > 9 ? '9+' : chatUnread}
+                          </span>
+                        ) : null}
+                      </button>
+                    ) : entry.key === 'files' ? (
+                      <button
+                        key={entry.key}
+                        type="button"
+                        onClick={() => {
+                          setFilesOpen(true)
+                          setChatOpen(false)
+                          setTerminalOpen(false)
+                        }}
+                        className={
+                          'btn h-7 w-7 shrink-0 !px-0 ' +
+                          (filesOpen ? 'text-accent' : 'btn-quiet')
+                        }
+                        title={entry.label}
+                        aria-label={entry.label}
+                      >
+                        <FolderOpen size={13} />
+                      </button>
+                    ) : (
+                      <button
+                        key={entry.key}
+                        type="button"
+                        onClick={() => {
+                          setChatOpen(false)
+                          setFilesOpen(false)
+                          setTerminalOpen(true)
+                        }}
+                        className={
+                          'btn h-7 w-7 shrink-0 !px-0 ' +
+                          (terminalOpen ? 'text-accent' : 'btn-quiet')
+                        }
+                        title={entry.label}
+                        aria-label={entry.label}
+                      >
+                        <TerminalIcon size={13} />
+                      </button>
+                    ),
+                  )}
+                  {inputAvailable ? (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const next = !tab.controlEnabled
+                          setControlEnabled(tab.id, next)
+                          if (!next) setVirtualMouse(false)
+                        }}
+                        className={
+                          'btn h-7 w-7 shrink-0 !px-0 ' +
+                          (tab.controlEnabled
+                            ? 'border-accent/50 bg-accent-soft text-accent'
+                            : 'btn-quiet')
+                        }
+                        title={
+                          tab.controlEnabled
+                            ? t('session.stopControl')
+                            : t('session.startControl')
+                        }
+                        aria-label={
+                          tab.controlEnabled
+                            ? t('session.stopControl')
+                            : t('session.startControl')
+                        }
+                        aria-pressed={tab.controlEnabled}
+                      >
+                        {tab.controlEnabled ? (
+                          <Hand size={13} />
+                        ) : (
+                          <MousePointer2 size={13} />
+                        )}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => connection()?.sendInput({ k: 'sas' })}
+                        className="btn btn-quiet h-7 w-7 shrink-0 !px-0"
+                        title={t('session.ctrlAltDelHint')}
+                        aria-label={t('session.ctrlAltDel')}
+                      >
+                        <Keyboard size={13} />
+                      </button>
+                      {comboMenu}
+                    </>
+                  ) : null}
+                  {!popout && localMode ? (
+                    <button
+                      type="button"
+                      onClick={openPopout}
+                      className="btn btn-quiet h-7 w-7 shrink-0 !px-0"
+                      title={t('session.popOut')}
+                      aria-label={t('session.popOut')}
+                    >
+                      <ExternalLink size={13} />
+                    </button>
+                  ) : null}
+                </>
+              )}
+              {compactBar ? comboMenu : null}
               <span className="mx-0.5 h-4 w-px shrink-0 bg-line" />
               {(['fit', 'actual', 'fill'] as DisplayMode[]).map((mode) => (
                 <button
@@ -3425,205 +3633,6 @@ export function SessionView({
                   style={{ accentColor: 'var(--accent)' }}
                   aria-label={t('session.audioVolume')}
                 />
-              ) : null}
-              {compactBar ? (
-                <ToolbarMenu
-                  icon={<Wrench size={13} />}
-                  label={t('session.tools')}
-                  title={t('session.tools')}
-                  items={[
-                    {
-                      key: 'chat',
-                      label: t('session.chat'),
-                      icon: <MessageSquare size={12} />,
-                      active: chatOpen,
-                      onSelect: () => {
-                        setChatUnread(0)
-                        setChatOpen(true)
-                        setTerminalOpen(false)
-                      },
-                    },
-                    {
-                      key: 'files',
-                      label: t('session.files'),
-                      icon: <FolderOpen size={12} />,
-                      active: filesOpen,
-                      onSelect: () => {
-                        setFilesOpen(true)
-                        setChatOpen(false)
-                        setTerminalOpen(false)
-                      },
-                    },
-                    ...(terminalAvailable
-                      ? [
-                          {
-                            key: 'terminal',
-                            label: t('terminal.title'),
-                            icon: <TerminalIcon size={12} />,
-                            active: terminalOpen,
-                            onSelect: () => {
-                              setChatOpen(false)
-                              setFilesOpen(false)
-                              setTerminalOpen(true)
-                            },
-                          },
-                        ]
-                      : []),
-                    ...(inputAvailable
-                      ? [
-                          {
-                            key: 'control',
-                            label: tab.controlEnabled
-                              ? t('session.stopControl')
-                              : t('session.startControl'),
-                            icon: tab.controlEnabled ? (
-                              <Hand size={12} />
-                            ) : (
-                              <MousePointer2 size={12} />
-                            ),
-                            active: tab.controlEnabled,
-                            onSelect: () => {
-                              const next = !tab.controlEnabled
-                              setControlEnabled(tab.id, next)
-                              if (!next) setVirtualMouse(false)
-                            },
-                          },
-                          {
-                            key: 'sas',
-                            label: t('session.ctrlAltDel'),
-                            icon: <Keyboard size={12} />,
-                            onSelect: () => connection()?.sendInput({ k: 'sas' }),
-                          },
-                        ]
-                      : []),
-                    ...(!popout && localMode
-                      ? [
-                          {
-                            key: 'popout',
-                            label: t('session.popOut'),
-                            icon: <ExternalLink size={12} />,
-                            onSelect: openPopout,
-                          },
-                        ]
-                      : []),
-                  ]}
-                />
-              ) : null}
-              {compactBar ? comboMenu : null}
-              {!compactBar ? (
-                <>
-              <button
-                type="button"
-                onClick={() => {
-                  setChatUnread(0)
-                  setChatOpen(true)
-                  setTerminalOpen(false)
-                }}
-                className={
-                  'relative btn h-7 w-7 shrink-0 !px-0 ' +
-                  (chatOpen ? 'text-accent' : 'btn-quiet')
-                }
-                title={t('session.chat')}
-                aria-label={t('session.chat')}
-              >
-                <MessageSquare size={13} />
-                {chatUnread > 0 && !chatOpen ? (
-                  <span className="absolute -right-0.5 -top-0.5 grid h-4 min-w-4 place-items-center rounded-full bg-danger px-1 text-[9px] font-semibold text-white">
-                    {chatUnread > 9 ? '9+' : chatUnread}
-                  </span>
-                ) : null}
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setFilesOpen(true)
-                  setChatOpen(false)
-                  setTerminalOpen(false)
-                }}
-                className={
-                  'btn h-7 w-7 shrink-0 !px-0 ' +
-                  (filesOpen ? 'text-accent' : 'btn-quiet')
-                }
-                title={t('session.files')}
-                aria-label={t('session.files')}
-              >
-                <FolderOpen size={13} />
-              </button>
-              {terminalAvailable ? (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setChatOpen(false)
-                    setFilesOpen(false)
-                    setTerminalOpen(true)
-                  }}
-                  className={
-                    'btn h-7 w-7 shrink-0 !px-0 ' +
-                    (terminalOpen ? 'text-accent' : 'btn-quiet')
-                  }
-                  title={t('terminal.title')}
-                  aria-label={t('terminal.title')}
-                >
-                  <TerminalIcon size={13} />
-                </button>
-              ) : null}
-              {inputAvailable ? (
-                <>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const next = !tab.controlEnabled
-                      setControlEnabled(tab.id, next)
-                      if (!next) setVirtualMouse(false)
-                    }}
-                    className={
-                      'btn h-7 w-7 shrink-0 !px-0 ' +
-                      (tab.controlEnabled
-                        ? 'border-accent/50 bg-accent-soft text-accent'
-                        : 'btn-quiet')
-                    }
-                    title={
-                      tab.controlEnabled
-                        ? t('session.stopControl')
-                        : t('session.startControl')
-                    }
-                    aria-label={
-                      tab.controlEnabled
-                        ? t('session.stopControl')
-                        : t('session.startControl')
-                    }
-                    aria-pressed={tab.controlEnabled}
-                  >
-                    {tab.controlEnabled ? (
-                      <Hand size={13} />
-                    ) : (
-                      <MousePointer2 size={13} />
-                    )}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => connection()?.sendInput({ k: 'sas' })}
-                    className="btn btn-quiet h-7 w-7 shrink-0 !px-0"
-                    title={t('session.ctrlAltDelHint')}
-                    aria-label={t('session.ctrlAltDel')}
-                  >
-                    <Keyboard size={13} />
-                  </button>
-                  {comboMenu}
-                </>
-              ) : null}
-              {!popout && localMode ? (
-                <button
-                  type="button"
-                  onClick={openPopout}
-                  className="btn btn-quiet h-7 w-7 shrink-0 !px-0"
-                  title={t('session.popOut')}
-                  aria-label={t('session.popOut')}
-                >
-                  <ExternalLink size={13} />
-                </button>
-              ) : null}
-                </>
               ) : null}
               <span className="mx-0.5 h-4 w-px shrink-0 bg-line" />
               {compactBar ? (
