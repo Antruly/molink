@@ -74,6 +74,9 @@ struct api_deps {
   int change_threshold = 0;
   core_config config;
   uint64_t started_ms = 0;
+  /// Host desktop session ("x11", "wayland" or "unknown"). Linux capture and
+  /// input are X11 only, so a Wayland host only reaches XWayland clients.
+  std::string session_type = "unknown";
   /// True when a built frontend is mounted at "/", so the JSON index route is
   /// not registered and the static handler owns that path.
   bool serve_web = false;

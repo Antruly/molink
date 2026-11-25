@@ -6,6 +6,7 @@ import { homeLayout } from '../../lib/host-only'
 import { parseTarget } from '../../lib/target'
 import { useAppStore, type SessionIntent } from '../../store/app'
 import { ServiceNotice } from '../ServiceNotice'
+import { WaylandNotice } from '../WaylandNotice'
 import { ConnectCard } from './ConnectCard'
 import { DeviceList, type DeviceItem } from './DeviceList'
 import { NoticePanel } from './NoticePanel'
@@ -192,6 +193,7 @@ export function SimpleHomeView() {
   return (
     <div className="mx-auto w-full max-w-7xl px-4 py-3 sm:px-6">
       <ServiceNotice />
+      <WaylandNotice />
 
       {!localMode && token ? (
         <div className="mb-3 flex flex-wrap items-center gap-3 rounded-xl border border-line bg-panel/50 px-3 py-2">
