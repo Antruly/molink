@@ -37,6 +37,7 @@ import type {
   Welcome,
 } from '../lib/client'
 import { cleanDeviceNote, deviceNoteKey } from '../lib/device-note'
+import type { SessionIntent } from '../lib/session-modes'
 import {
   normalizeComboForwardAsked,
   type ComboForwardChoice,
@@ -95,12 +96,10 @@ export type { SessionPresetId } from '../lib/session-presets'
 /// A control session starts with input enabled; a view-only session starts
 /// with it off. The session toolbar can still change it later.
 export type SessionMode = 'control' | 'view'
-import {
-  nextVisibleTabId,
-  type PaneKind,
-  type SessionIntent,
-} from '../lib/session-intent'
-export type { SessionIntent } from '../lib/session-intent'
+import { nextVisibleTabId, type PaneKind } from '../lib/session-intent'
+// #136 established session-modes as the single list of connect modes; the pane
+// helper keeps the pure tab-ordering functions. Both must agree on the union.
+export type { SessionIntent } from '../lib/session-modes'
 export type UiMode = 'simple' | 'advanced'
 /// 'unknown_domain' means the code was revoked (the device left the group).
 export type DomainOutcome = 'ok' | 'unknown_domain' | 'failed'

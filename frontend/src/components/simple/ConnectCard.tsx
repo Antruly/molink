@@ -1,21 +1,14 @@
 import {
   Eye,
   EyeOff,
-  FolderUp,
   KeyRound,
-  MessageSquare,
-  Monitor,
   Send,
 } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { SESSION_MODES } from '../../lib/session-modes'
 import type { SessionIntent } from '../../store/app'
-
-const MODES: Array<{ value: SessionIntent; icon: typeof Monitor; label: string }> = [
-  { value: 'desktop', icon: Monitor, label: 'simple.modeDesktop' },
-  { value: 'files', icon: FolderUp, label: 'simple.modeFiles' },
-  { value: 'chat', icon: MessageSquare, label: 'simple.modeChat' },
-]
+import { MODE_ICONS } from './mode-icons'
 
 export function ConnectCard({
   mode,
@@ -52,23 +45,23 @@ export function ConnectCard({
           <h2 className="text-[15px] font-semibold text-ink">{t('simple.connectTitle')}</h2>
           <p className="mt-0.5 text-[10px] text-muted">{t('simple.connectHint')}</p>
         </div>
-        <div className="flex rounded-full border border-line bg-panel/70 p-0.5">
-          {MODES.map((item) => {
-            const Icon = item.icon
+        <div className="flex flex-wrap justify-center rounded-2xl border border-line bg-panel/70 p-0.5 sm:justify-end sm:rounded-full">
+          {SESSION_MODES.map((item) => {
+            const Icon = MODE_ICONS[item.intent]
             return (
               <button
-                key={item.value}
+                key={item.intent}
                 type="button"
-                onClick={() => setMode(item.value)}
+                onClick={() => setMode(item.intent)}
                 className={
-                  'flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] transition ' +
-                  (mode === item.value
+                  'flex items-center gap-1 whitespace-nowrap rounded-full px-2 py-1 text-[11px] transition sm:px-2.5 ' +
+                  (mode === item.intent
                     ? 'bg-accent-soft text-accent'
                     : 'text-muted hover:text-ink')
                 }
               >
                 <Icon size={12} />
-                {t(item.label)}
+                {t(item.labelKey)}
               </button>
             )
           })}

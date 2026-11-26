@@ -134,6 +134,36 @@ export function portmapErrorKey(
   }
 }
 
+/// What the panel should render for a mapping's `last_error`. The core writes
+/// short codes; known ones become a sentence (connect_failed names the actual
+/// target) while anything unrecognised is shown as-is. `null` means no error.
+export interface PortmapLastErrorText {
+  /// Locale key, or null when `raw` should be displayed verbatim.
+  key: string | null
+  values: { target: string }
+  raw: string
+}
+
+const KNOWN_LAST_ERRORS = new Set([
+  'no_session',
+  'connect_failed',
+  'port_forward_disabled',
+  'port_in_use',
+])
+
+export function portmapLastErrorText(
+  mapping: Pick<PortMapping, 'last_error' | 'target_host' | 'target_port'>,
+): PortmapLastErrorText | null {
+  const raw = mapping.last_error?.trim() ?? ''
+  if (raw === '') return null
+  const target = `${mapping.target_host}:${mapping.target_port}`
+  return {
+    key: KNOWN_LAST_ERRORS.has(raw) ? `portmap.lastError.${raw}` : null,
+    values: { target },
+    raw,
+  }
+}
+
 /// The subset of /api/settings the port-map panel needs. The panel only owns
 /// the host-side opt-in, so every other field is carried through unchanged
 /// when it saves.

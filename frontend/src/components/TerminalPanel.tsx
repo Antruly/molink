@@ -45,6 +45,13 @@ import {
 const MAX_TERMINALS = 4
 const DEFAULT_COLS = 80
 const DEFAULT_ROWS = 24
+/// Follow the platform's own monospace stack (Cascadia/Consolas on Windows,
+/// Ubuntu/DejaVu/Noto on Linux) instead of the browser default, which lands on
+/// Liberation Mono on many Linux desktop themes. No web fonts: the terminal
+/// must never wait on the network for glyphs.
+const TERMINAL_FONT_FAMILY =
+  '"Cascadia Mono", "Consolas", "Ubuntu Mono", "DejaVu Sans Mono", "Noto Sans Mono", "Liberation Mono", monospace'
+const TERMINAL_FONT_SIZE = 13
 const encoder = new TextEncoder()
 
 type ConnectionState =
@@ -105,9 +112,10 @@ function TerminalTabView({
     if (host === null) return
     const term = new Terminal({
       cursorBlink: true,
-      fontSize: 13,
-      fontFamily:
-        'ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace',
+      fontSize: TERMINAL_FONT_SIZE,
+      fontFamily: TERMINAL_FONT_FAMILY,
+      lineHeight: 1.2,
+      letterSpacing: 0,
       scrollback: 5000,
       theme: {
         background: '#0b0e14',
