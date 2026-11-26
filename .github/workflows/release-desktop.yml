@@ -53,7 +53,8 @@ jobs:
             got=$(sed -n 's/.*VERSION:-\([0-9][0-9.]*\).*/\1/p' "$f" | head -1)
             [ "$got" = "$core" ] || fail "$f default VERSION=$got, version.h=$core"
           done
-          for f in packaging/windows/installer.iss packaging/windows/win7-x86-installer.iss; do
+          for f in packaging/windows/installer.iss packaging/windows/win7-x86-installer.iss \
+                   packaging/windows/host-only.iss; do
             got=$(sed -n 's/^  #define AppVersion "\(.*\)"/\1/p' "$f" | head -1)
             [ "$got" = "$core" ] || fail "$f AppVersion=$got, version.h=$core"
           done
@@ -61,6 +62,8 @@ jobs:
           [ "$got" = "$core" ] || fail "portable.nsi VERSION=$got, version.h=$core"
           got=$(sed -n 's/.*\[string\]\$Version = "\(.*\)".*/\1/p' packaging/windows/build-win7-x86.ps1 | head -1)
           [ "$got" = "$core" ] || fail "build-win7-x86.ps1 default Version=$got, version.h=$core"
+          got=$(sed -n 's/.*\[string\]\$Version = "\(.*\)".*/\1/p' packaging/windows/build-host-only.ps1 | head -1)
+          [ "$got" = "$core" ] || fail "build-host-only.ps1 default Version=$got, version.h=$core"
           got=$(grep -oE "ref_name \|\| '[0-9]+\.[0-9]+\.[0-9]+'" .github/workflows/release-desktop.yml \
                 | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | head -1)
           [ "$got" = "$core" ] || fail "PKG_VERSION fallback=$got, version.h=$core"
@@ -403,6 +406,54 @@ jobs:
             "/c/Program Files (x86)/NSIS/makensis.exe" /DVERSION="$VERSION" \
             /DPKG_DIR="$PKG_DIR" /DOUT_DIR="$OUT_DIR" \
             packaging/windows/portable.nsi
+
+      # The host-only product (被控端专用) is a separate install tree: its own
+      # stage, installer and artifact name. It reuses the core, shell,
+      # service/helper and frontend built above, but never shares the full
+      # product's package directory or output names. Inno Setup was installed
+      # by the previous step.
+      - name: Stage the host-only package
+        shell: pwsh
+        run: |
+          $version = '${{ env.PKG_VERSION }}' -replace '^v',''
+          ./packaging/windows/build-host-only.ps1 `
+            -Version $version -Arch x64 `
+            -Stage "$PWD\build\host-only\stage"
+
+      - name: Build the host-only installer
+        shell: bash
+        run: |
+          VERSION="${PKG_VERSION#v}"
+          PKG_DIR="$(cygpath -w "$GITHUB_WORKSPACE/build/host-only/stage")"
+          OUT_DIR="$(cygpath -w "$GITHUB_WORKSPACE/build/host-only/package")"
+          LANG_FILE="$(cygpath -w "$GITHUB_WORKSPACE/packaging/windows/ChineseSimplified.isl")"
+          mkdir -p build/host-only/package
+          ISCC=$(find "/c/Program Files (x86)" "/c/Program Files" \
+            -maxdepth 2 -iname ISCC.exe 2>/dev/null | head -n 1)
+          if [ -z "$ISCC" ] || [ ! -x "$ISCC" ]; then
+            echo "Inno Setup compiler not found" >&2
+            exit 1
+          fi
+          MSYS2_ARG_CONV_EXCL='*' MSYS_NO_PATHCONV=1 \
+            "$ISCC" /DAppVersion="$VERSION" /DPkgDir="$PKG_DIR" \
+            /DOutputDir="$OUT_DIR" /DLangFile="$LANG_FILE" \
+            /DOutputName="moLinkHost-$VERSION-x64" \
+            packaging/windows/host-only.iss
+          test -f "build/host-only/package/moLinkHost-$VERSION-x64.exe" || {
+            echo "::error title=missing-artifact::the host-only installer was not produced"
+            ls -l build/host-only/package
+            exit 1
+          }
+          ls -l build/host-only/package
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: moLink-windows-host-only
+          if-no-files-found: error
+          # The release job downloads every artifact named moLink-* and
+          # publishes its contents, so this new file is attached without
+          # touching the full product's artifact names or paths.
+          path: build/host-only/package/*.exe
 
       # The native Direct2D shell: same staged tree, MinGW-w64 build, packaged
       # with the same installer/launcher scripts (AppExeName=moLink-native.exe).
