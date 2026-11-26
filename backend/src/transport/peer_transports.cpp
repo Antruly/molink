@@ -7,6 +7,8 @@
 #include <cstring>
 #include <string>
 
+#include "net/socket_wait.h"
+
 #if defined(_WIN32)
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -58,12 +60,7 @@ socket_handle connect_with_timeout(const addrinfo* addresses, int timeout_ms) {
     bool connected = ::connect(handle, entry->ai_addr,
                                static_cast<int>(entry->ai_addrlen)) == 0;
     if (!connected && last_socket_error() == would_block) {
-      fd_set writable;
-      FD_ZERO(&writable);
-      FD_SET(handle, &writable);
-      timeval deadline{timeout_ms / 1000, (timeout_ms % 1000) * 1000};
-      connected = ::select(static_cast<int>(handle) + 1, nullptr, &writable,
-                           nullptr, &deadline) > 0;
+      connected = wait_writable(handle, timeout_ms);
       if (connected) {
         int socket_error = 0;
         socket_length length = sizeof(socket_error);

@@ -21,6 +21,7 @@
 #endif
 
 #include "diag_log.h"
+#include "net/socket_wait.h"
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -742,27 +743,7 @@ socket_t connect_target(const std::string& host, uint16_t port,
         error = "connect_timeout";
         return kInvalidSocket;
       }
-      fd_set writable;
-      fd_set failed;
-      FD_ZERO(&writable);
-      FD_ZERO(&failed);
-      FD_SET(fd, &writable);
-      FD_SET(fd, &failed);
-      timeval timeout{};
-      timeout.tv_sec = 0;
-      timeout.tv_usec = 100000;
-#if defined(_WIN32)
-      const int ready = ::select(0, nullptr, &writable, &failed, &timeout);
-#else
-      const int ready = ::select(fd + 1, nullptr, &writable, &failed, &timeout);
-#endif
-      if (ready < 0) {
-        if (error_interrupted(socket_error())) continue;
-        close_socket(fd);
-        error = "connect_failed";
-        return kInvalidSocket;
-      }
-      if (ready == 0) continue;
+      if (!wait_writable(fd, 100)) continue;
       int socket_err = 0;
 #if defined(_WIN32)
       int length = sizeof(socket_err);
