@@ -5,6 +5,7 @@
 // points directly, which is exactly the seam the real session adapter uses.
 
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -19,6 +20,7 @@
 #include <vector>
 
 #include "port_forward.h"
+#include "net/socket_wait.h"
 #include "portmap_api.h"
 #include "protocol/frame_packet.h"
 #include "transport/port_forward_bridge.h"
@@ -31,9 +33,10 @@
 #include <ws2tcpip.h>
 #else
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
-#include <sys/select.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #endif
@@ -169,24 +172,7 @@ bool recv_exact(test_socket fd, uint8_t* data, std::size_t len,
     const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
         deadline - std::chrono::steady_clock::now());
     if (left.count() <= 0) return false;
-    fd_set readable;
-    FD_ZERO(&readable);
-    FD_SET(fd, &readable);
-    timeval timeout{};
-    timeout.tv_sec = static_cast<long>(left.count() / 1000);
-    timeout.tv_usec = static_cast<long>((left.count() % 1000) * 1000);
-#if defined(_WIN32)
-    const int ready = ::select(0, &readable, nullptr, nullptr, &timeout);
-#else
-    const int ready = ::select(fd + 1, &readable, nullptr, nullptr, &timeout);
-#endif
-    if (ready < 0) {
-#if !defined(_WIN32)
-      if (errno == EINTR) continue;
-#endif
-      return false;
-    }
-    if (ready == 0) continue;
+    if (!molink::wait_readable(fd, static_cast<int>(left.count()))) return false;
     const int got =
         ::recv(fd, reinterpret_cast<char*>(data + received),
                static_cast<int>(len - received), 0);
@@ -205,19 +191,7 @@ bool expect_closed(test_socket fd, int timeout_ms = 3000) {
   const auto deadline = std::chrono::steady_clock::now() +
                         std::chrono::milliseconds(timeout_ms);
   while (std::chrono::steady_clock::now() < deadline) {
-    fd_set readable;
-    FD_ZERO(&readable);
-    FD_SET(fd, &readable);
-    timeval timeout{};
-    timeout.tv_sec = 0;
-    timeout.tv_usec = 100000;
-#if defined(_WIN32)
-    const int ready = ::select(0, &readable, nullptr, nullptr, &timeout);
-#else
-    const int ready = ::select(fd + 1, &readable, nullptr, nullptr, &timeout);
-#endif
-    if (ready < 0) return true;
-    if (ready == 0) continue;
+    if (!molink::wait_readable(fd, 100)) continue;
     char buffer[16];
     const int got = ::recv(fd, buffer, sizeof(buffer), 0);
     if (got <= 0) return true;
@@ -265,22 +239,10 @@ class echo_server {
 
  private:
   void run() {
-    // select() with a short timeout keeps stop() from needing to close the
-    // listening socket under a blocked accept().
+    // Wait in short slices so stop() does not need to close the listening
+    // socket under a blocked accept().
     while (!stopping_.load()) {
-      fd_set readable;
-      FD_ZERO(&readable);
-      FD_SET(listener_, &readable);
-      timeval timeout{};
-      timeout.tv_sec = 0;
-      timeout.tv_usec = 100000;
-#if defined(_WIN32)
-      const int ready = ::select(0, &readable, nullptr, nullptr, &timeout);
-#else
-      const int ready =
-          ::select(listener_ + 1, &readable, nullptr, nullptr, &timeout);
-#endif
-      if (ready <= 0) continue;
+      if (!molink::wait_readable(listener_, 100)) continue;
       sockaddr_in peer{};
       socklen_t length = sizeof(peer);
       const test_socket client =
@@ -1112,6 +1074,77 @@ void test_session_bridge() {
   std::printf("  done\n");
 }
 
+// Regression: select()/FD_SET aborts the whole process once the descriptor is
+// >= FD_SETSIZE (1024 with glibc's fortify checks), which a long-running host
+// reaches with one socket per forwarded connection. wait_writable() goes
+// through poll()/WSAPoll() and must handle such descriptors normally.
+void test_wait_writable_high_fd() {
+#if defined(_WIN32)
+  // Winsock descriptors are handles, not small integers, and wait_writable()
+  // uses WSAPoll(): there is no FD_SETSIZE boundary to cross on Windows.
+  std::printf("  wait_writable high-fd: skipped on Windows\n");
+#else
+  // 1100 descriptors are needed. Raise the soft limit towards the hard one
+  // when the caller's is lower; skip if the environment still refuses.
+  struct rlimit limit{};
+  if (::getrlimit(RLIMIT_NOFILE, &limit) == 0 &&
+      limit.rlim_cur < limit.rlim_max) {
+    limit.rlim_cur = limit.rlim_max < 4096 ? limit.rlim_max : 4096;
+    ::setrlimit(RLIMIT_NOFILE, &limit);
+  }
+
+  int pair[2] = {-1, -1};
+  expect(::socketpair(AF_UNIX, SOCK_STREAM, 0, pair) == 0,
+         "socketpair for the high-fd check");
+  if (pair[0] < 0) return;
+  const int flags = ::fcntl(pair[1], F_GETFL, 0);
+  if (flags >= 0) ::fcntl(pair[1], F_SETFL, flags | O_NONBLOCK);
+
+  // dup() shares the same socket, so filling its send queue through pair[1]
+  // also makes the high descriptor non-writable.
+  std::vector<int> filler;
+  filler.reserve(1100);
+  int high = -1;
+  while (filler.size() < 1100) {
+    const int fd = ::dup(pair[1]);
+    if (fd < 0) break;
+    if (fd >= 1024 && high < 0) high = fd;
+    filler.push_back(fd);
+  }
+  if (high < 1024) {
+    std::printf("  wait_writable high-fd: skipped (%zu descriptors available)\n",
+                filler.size());
+    for (int fd : filler) ::close(fd);
+    ::close(pair[0]);
+    ::close(pair[1]);
+    return;
+  }
+
+  // An idle stream socket is writable, even above FD_SETSIZE.
+  expect(molink::wait_writable(high, 100),
+         "wait_writable succeeds on fd >= 1024");
+
+  char chunk[65536];
+  std::memset(chunk, 'x', sizeof(chunk));
+  bool full = false;
+  for (int i = 0; i < 4096 && !full; ++i) {
+    const ssize_t written = ::send(pair[1], chunk, sizeof(chunk), 0);
+    if (written < 0) {
+      full = errno == EAGAIN || errno == EWOULDBLOCK;
+      break;
+    }
+    if (written == 0) break;
+  }
+  expect(full, "socketpair send queue filled");
+  expect(!molink::wait_writable(high, 10),
+         "wait_writable times out on fd >= 1024 without aborting");
+
+  for (int fd : filler) ::close(fd);
+  ::close(pair[0]);
+  ::close(pair[1]);
+#endif
+}
+
 }  // namespace
 
 int main() {
@@ -1131,6 +1164,7 @@ int main() {
   test_bind_failure_rolls_back();
   test_host_connect_failure();
   test_echo_and_recovery();
+  test_wait_writable_high_fd();
 #if defined(_WIN32)
   WSACleanup();
 #endif
