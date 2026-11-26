@@ -2,11 +2,8 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   ChevronLeft,
   ChevronRight,
-  FolderUp,
   LayoutGrid,
   List,
-  MessageSquare,
-  Monitor,
   PencilLine,
   Star,
   Trash2,
@@ -16,9 +13,11 @@ import { lookupDevices, type PeerStatus } from '../../lib/api'
 import { platformEmoji } from '../../lib/avatar'
 import { deviceNoteKey } from '../../lib/device-note'
 import { formatRelative } from '../../lib/format'
+import { SESSION_MODES } from '../../lib/session-modes'
 import { useAppStore, type SessionIntent } from '../../store/app'
 import { DeviceNoteDialog } from '../DeviceNoteDialog'
 import { Avatar } from './Avatar'
+import { MODE_ICONS } from './mode-icons'
 
 export interface DeviceItem {
   key: string
@@ -279,27 +278,29 @@ export function DeviceList({
   }
 
   const quickActions = (item: DeviceItem) => (
-    <div className="flex items-center gap-0.5">
-      {(
-        [
-          ['desktop', Monitor],
-          ['files', FolderUp],
-          ['chat', MessageSquare],
-        ] as const
-      ).map(([intent, Icon]) => (
-        <button
-          key={intent}
-          type="button"
-          className="grid h-7 w-7 place-items-center rounded-md text-muted transition hover:bg-panel hover:text-ink"
-          title={t(`simple.mode${intent[0].toUpperCase()}${intent.slice(1)}`)}
-          onClick={(event) => {
-            event.stopPropagation()
-            onConnect(item, intent)
-          }}
-        >
-          <Icon size={13} />
-        </button>
-      ))}
+    // Four modes on every card. They stay icon-only with a title/aria-label:
+    // on a narrow single-column card the four glyphs still fit, while a text
+    // label per mode would wrap the row and push the layout around.
+    <div className="flex shrink-0 items-center gap-0 sm:gap-0.5">
+      {SESSION_MODES.map(({ intent, labelKey }) => {
+        const Icon = MODE_ICONS[intent]
+        const label = t(labelKey)
+        return (
+          <button
+            key={intent}
+            type="button"
+            className="grid h-6 w-6 place-items-center rounded-md text-muted transition hover:bg-panel hover:text-ink sm:h-7 sm:w-7"
+            title={label}
+            aria-label={label}
+            onClick={(event) => {
+              event.stopPropagation()
+              onConnect(item, intent)
+            }}
+          >
+            <Icon size={13} />
+          </button>
+        )
+      })}
     </div>
   )
 

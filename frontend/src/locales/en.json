@@ -819,6 +819,7 @@
     "modeDesktop": "Remote desktop",
     "modeFiles": "File transfer",
     "modeChat": "Chat",
+    "modeTerminal": "Remote terminal",
     "connectTitle": "Connect to a device",
     "connectHint": "Enter a device ID or an address; the port defaults to 28418",
     "targetPlaceholder": "Device ID or IP[:port]",
@@ -1007,6 +1008,12 @@
     "traffic": "in {{in}} · out {{out}}",
     "toggle": "Enable or disable this mapping",
     "delete": "Delete mapping",
+    "lastError": {
+      "no_session": "There is no remote session yet; connect first and try again",
+      "connect_failed": "Cannot reach {{target}} (nothing is listening, or a firewall is blocking it)",
+      "port_forward_disabled": "The host has not enabled port forwarding",
+      "port_in_use": "The local port is in use"
+    },
     "preset": {
       "rdp": "RDP",
       "ssh": "SSH",

@@ -18,6 +18,7 @@ import {
   portForwardEnabled,
   portForwardSaveValues,
   portmapErrorKey,
+  portmapLastErrorText,
   type PortMapping,
   type PortmapForm,
 } from '../lib/portmap'
@@ -266,6 +267,7 @@ export function PortMapPanel() {
         ) : (
           mappings.map((mapping) => {
             const status = mappingStatus(mapping)
+            const lastError = portmapLastErrorText(mapping)
             return (
               <div
                 key={mapping.id}
@@ -295,12 +297,14 @@ export function PortMapPanel() {
                       })}
                     </span>
                   </div>
-                  {mapping.last_error ? (
+                  {lastError ? (
                     <div
-                      className="mt-0.5 truncate text-[10px] text-red-500"
-                      title={mapping.last_error}
+                      className="mt-0.5 text-[10px] leading-snug text-red-500"
+                      title={lastError.raw}
                     >
-                      {mapping.last_error}
+                      {lastError.key
+                        ? t(lastError.key, lastError.values)
+                        : lastError.raw}
                     </div>
                   ) : null}
                 </div>
