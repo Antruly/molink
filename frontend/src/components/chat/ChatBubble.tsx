@@ -9,11 +9,13 @@ import {
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
+  attachmentHasThumb,
   avatarColorFor,
   formatDuration,
   formatSize,
   formatTime,
   initialFor,
+  pickThumbSource,
   type ChatAttachment,
 } from '../../lib/chat'
 import type { ChatAttachmentAccess } from '../../lib/chat-access'
@@ -40,30 +42,37 @@ export interface ChatFeedRow {
 function useThumb(
   access: ChatAttachmentAccess,
   attachment: ChatAttachment,
-): { url: string | null; loading: boolean } {
-  const initial = attachment.thumb.startsWith('data:')
-    ? attachment.thumb
-    : null
+): { url: string | null; loading: boolean; hasThumb: boolean } {
+  const hasThumb = attachmentHasThumb(attachment)
+  // A `data:` URL is already in the page; anything else names a host file the
+  // access object has to pull before the bubble can paint it.
+  const inline = pickThumbSource(attachment, null)
   const key = `${attachment.id}\u0000${attachment.thumb}\u0000${attachment.src}`
   // The descriptor is rebuilt by the parent on every render; keep the last
   // object for the async lookup but key all state by the primitive fields.
   const attachmentRef = useRef(attachment)
   const [state, setState] = useState<{ key: string; url: string | null }>({
     key,
-    url: initial,
+    url: inline,
   })
 
   useEffect(() => {
     attachmentRef.current = attachment
   }, [attachment])
 
+  const remoteOnly = hasThumb && inline === null
   useEffect(() => {
-    if (attachment.thumb === '' || attachment.thumb.startsWith('data:')) return
+    if (!remoteOnly) return
     let alive = true
     access
       .thumbUrl(attachmentRef.current)
       .then((value) => {
-        if (alive) setState({ key, url: value })
+        if (alive) {
+          setState({
+            key,
+            url: pickThumbSource(attachmentRef.current, value),
+          })
+        }
       })
       .catch(() => {
         if (alive) setState({ key, url: null })
@@ -71,12 +80,14 @@ function useThumb(
     return () => {
       alive = false
     }
-  }, [access, key, attachment.thumb])
+  }, [access, key, remoteOnly])
 
-  if (attachment.thumb === '') return { url: null, loading: false }
-  if (initial !== null) return { url: initial, loading: false }
-  if (state.key !== key) return { url: null, loading: true }
-  return { url: state.url, loading: false }
+  // No reference at all: the file card, never a spinner.
+  if (!hasThumb) return { url: null, loading: false, hasThumb: false }
+  if (inline !== null) return { url: inline, loading: false, hasThumb: true }
+  // A reference exists but the downloaded file has not resolved yet.
+  if (state.key !== key) return { url: null, loading: true, hasThumb: true }
+  return { url: state.url, loading: false, hasThumb: true }
 }
 
 function attachmentBox(
@@ -106,7 +117,7 @@ function ImageAttachment({
   onOpen: () => void
 }) {
   const { t } = useTranslation()
-  const { url, loading } = useThumb(access, attachment)
+  const { url, loading, hasThumb } = useThumb(access, attachment)
   const box = attachmentBox(attachment.w, attachment.h)
 
   if (url) {
@@ -128,7 +139,7 @@ function ImageAttachment({
       </button>
     )
   }
-  if (loading) {
+  if (hasThumb && loading) {
     return (
       <div
         className="grid place-items-center rounded-xl bg-black/10 text-white/70"
@@ -138,6 +149,8 @@ function ImageAttachment({
       </div>
     )
   }
+  // Nothing to paint: no local data URI and no thumb file. The click opens
+  // the original in the full-screen viewer; it does not retry the preview.
   return (
     <button
       type="button"

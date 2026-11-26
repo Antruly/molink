@@ -398,6 +398,75 @@ export function encodeChatPayload(payload: ChatPayload): string {
   })
 }
 
+/// Whether the descriptor carries any preview reference. `thumb` is empty for
+/// a file without a cover (and for a message from a peer that could not make
+/// one); the bubble then shows the file card instead of waiting forever.
+export function attachmentHasThumb(
+  attachment: { thumb?: string | null },
+): boolean {
+  return (attachment.thumb ?? '').trim() !== ''
+}
+
+/// The source a bubble should paint. A locally generated `data:` URI wins: it
+/// is already in the page and needs no file transfer. Next is the object URL
+/// resolved from the downloaded `thumb-*.webp` file. `null` means neither is
+/// available, which is the file-card state.
+export function pickThumbSource(
+  attachment: { thumb?: string | null },
+  remoteThumbUrl?: string | null,
+): string | null {
+  const reference = (attachment.thumb ?? '').trim()
+  if (reference.startsWith('data:')) return reference
+  const remote = (remoteThumbUrl ?? '').trim()
+  return remote === '' ? null : remote
+}
+
+export interface OutgoingChatMessage {
+  /// The envelope handed to the core. Its `thumb` is the uploaded thumbnail's
+  /// host path: the descriptor must stay well inside `CHAT_TEXT_LIMIT`, which
+  /// a full `data:` URL usually exceeds.
+  wire: ChatPayload
+  /// `encodeChatPayload(wire)`, ready for `sendChat`/`postChat`.
+  text: string
+  /// The copy this client keeps in its own feed. Its `thumb` stays the
+  /// generated `data:` URL, so the sender paints the picture immediately and
+  /// can reuse it later without pulling the thumbnail back.
+  local: ChatPayload
+}
+
+/// Build the two copies of an attachment message. The wire copy names the
+/// uploaded `thumb-*.webp`; the local copy keeps the generated preview so the
+/// sender's own bubble never falls back to the "tap to load" card.
+export function buildOutgoingMessage(options: {
+  attachment: ChatAttachment
+  text?: string
+  /// The generated `data:` preview to keep in the local copy.
+  thumb?: string
+  /// The wire thumbnail reference; defaults to `attachment.thumb`.
+  wireThumb?: string
+}): OutgoingChatMessage {
+  const body = options.text ?? ''
+  const wireThumb = options.wireThumb ?? options.attachment.thumb
+  const wireAttachment: ChatAttachment = wireThumb === options.attachment.thumb
+    ? options.attachment
+    : { ...options.attachment, thumb: wireThumb }
+  const preview = (options.thumb ?? '').trim()
+  const localAttachment: ChatAttachment =
+    preview.startsWith('data:') && preview !== wireThumb
+      ? { ...wireAttachment, thumb: preview }
+      : wireAttachment
+  const wire: ChatPayload = {
+    type: 'chat',
+    text: body,
+    attachments: [wireAttachment],
+  }
+  return {
+    wire,
+    text: encodeChatPayload(wire),
+    local: { type: 'chat', text: body, attachments: [localAttachment] },
+  }
+}
+
 /// UTF-8 bytes, not UTF-16 code units: the host measures the wire string.
 export function chatTextBytes(text: string): number {
   return new TextEncoder().encode(text).length
