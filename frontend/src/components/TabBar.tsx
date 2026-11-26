@@ -1,7 +1,8 @@
-import { House, Plus, ShieldCheck, ShieldOff, X } from 'lucide-react'
+import { House, Maximize2, Minus, Plus, ShieldCheck, ShieldOff, X } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { openSessionWindow } from '../lib/windows'
 import { formatDisplayId } from '../lib/format'
+import { intentSuffixKey, tabTitle } from '../lib/session-intent'
 import { useAppStore, type SessionTab } from '../store/app'
 
 function StatusDot({ tab }: { tab: SessionTab }) {
@@ -60,7 +61,13 @@ export function TabBar({ inline = false }: { inline?: boolean }) {
   const activeTabId = useAppStore((state) => state.activeTabId)
   const setActiveTab = useAppStore((state) => state.setActiveTab)
   const closeTab = useAppStore((state) => state.closeTab)
+  const setTabMinimized = useAppStore((state) => state.setTabMinimized)
   const localMode = useAppStore((state) => state.localMode)
+  // `YQYX-OFFICE01 · 文件` for a files tab; the bare label for desktop.
+  const labelFor = (tab: SessionTab): string => {
+    const key = intentSuffixKey(tab.intent)
+    return tabTitle(tab.label, tab.intent, key ? String(t(key)) : '')
+  }
 
   return (
     <div
@@ -105,6 +112,7 @@ export function TabBar({ inline = false }: { inline?: boolean }) {
                 port: tab.port,
                 token: tab.token,
                 label: tab.label,
+                intent: tab.intent,
               })
             ) {
               closeTab(tab.id)
@@ -112,7 +120,10 @@ export function TabBar({ inline = false }: { inline?: boolean }) {
           }}
           className={
             'group flex shrink-0 items-center gap-1.5 rounded-lg pl-3 pr-1.5 text-[12px] transition ' +
-            (activeTabId === tab.id
+            (tab.minimized
+              ? 'border border-dashed border-line bg-panel/30 opacity-70 '
+              : '') +
+            (activeTabId === tab.id && !tab.minimized
               ? 'bg-accent-soft text-accent'
               : 'text-muted hover:bg-panel hover:text-ink')
           }
@@ -121,11 +132,25 @@ export function TabBar({ inline = false }: { inline?: boolean }) {
             type="button"
             onClick={() => setActiveTab(tab.id)}
             className="flex max-w-[190px] items-center gap-2 py-1.5"
-            title={tab.deviceId ? `${formatDisplayId(tab.deviceId)} · ${tab.label}` : `${tab.host}:${tab.port}`}
+            title={
+              tab.deviceId
+                ? `${formatDisplayId(tab.deviceId)} · ${labelFor(tab)}`
+                : `${tab.host}:${tab.port}`
+            }
           >
             <StatusDot tab={tab} />
             <SecurityIcon tab={tab} />
-            <span className="truncate">{tab.label}</span>
+            <span className="truncate">{labelFor(tab)}</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setTabMinimized(tab.id, !tab.minimized)}
+            aria-label={tab.minimized ? t('tabs.restore') : t('tabs.minimize')}
+            title={tab.minimized ? t('tabs.restore') : t('tabs.minimize')}
+            aria-pressed={tab.minimized === true}
+            className="grid h-5 w-5 place-items-center rounded text-muted/60 transition hover:bg-panel hover:text-ink"
+          >
+            {tab.minimized ? <Maximize2 size={11} /> : <Minus size={12} />}
           </button>
           <button
             type="button"

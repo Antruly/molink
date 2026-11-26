@@ -7,6 +7,7 @@ import {
   ClipboardCopy,
   ClipboardPaste,
   Download,
+  ExternalLink,
   File as FileIcon,
   Folder,
   FolderOpen,
@@ -24,6 +25,7 @@ import {
   useRef,
   useState,
   type DragEvent,
+  type MutableRefObject,
   type PointerEvent as ReactPointerEvent,
 } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -736,6 +738,15 @@ function downloadPhaseText(
 /// the right and one explicit action in the middle. Uploads carry relative
 /// paths (folders keep their shape), downloads rebuild the same tree through a
 /// directory handle when the browser allows it.
+/// Actions the tab shell's floating toolbar drives. The panel owns the
+/// selection, destination and upload plumbing, so the toolbar only has to
+/// call into it.
+export interface FilePanelActions {
+  upload: () => void
+  download: () => void
+  newFolder: () => void
+}
+
 export function FileTransferPanel({
   open,
   onClose,
@@ -743,10 +754,19 @@ export function FileTransferPanel({
   onRemotePathChange,
   onRequestOpen,
   onError,
+  fullPage = false,
+  onPopOut,
+  actionsRef,
 }: {
   open: boolean
   onClose: () => void
   connection: SessionConnection | null
+  /// Standalone tab: fill the page instead of sliding in from the right.
+  fullPage?: boolean
+  /// Embedded drawer only: move this pane into its own tab.
+  onPopOut?: () => void
+  /// Publishes imperative actions for the floating toolbar.
+  actionsRef?: MutableRefObject<FilePanelActions | null>
   /// Publishes the folder the remote pane is showing so the session surface
   /// can describe a drop target.
   onRemotePathChange?: (path: string) => void
@@ -4291,6 +4311,35 @@ export function FileTransferPanel({
     updateTask,
   ])
 
+  /// Creates a folder under the remote pane's current directory. The host
+  /// takes the receive root as `dest` and a relative name as `path`.
+  const createRemoteFolder = useCallback(() => {
+    const current = listing?.path ?? ''
+    // The host resolves an empty destination to ~/moLink; an absolute browse
+    // path is the folder the user is actually looking at.
+    const base = current === '' ? '~' : current
+    const name = window.prompt(String(t('files.newFolderPrompt')))?.trim()
+    if (!name || name.includes('/') || name.includes('\\')) return
+    connectionRef.current?.sendFileAction('mkdir', { path: name, dest: base })
+    window.setTimeout(() => void browseRemote(current), 400)
+  }, [browseRemote, listing, t])
+
+  // The tab shell's floating toolbar drives these. The panel keeps ownership
+  // of the selection and the destination, so the buttons are thin calls.
+  useEffect(() => {
+    if (!actionsRef) return
+    actionsRef.current = {
+      upload: () => fileInputRef.current?.click(),
+      download: () => {
+        void receiveBack()
+      },
+      newFolder: createRemoteFolder,
+    }
+    return () => {
+      actionsRef.current = null
+    }
+  }, [actionsRef, createRemoteFolder, receiveBack])
+
   // ------------------------------------------------------ connection cleanup
   // The unsubscribe below must not run on a language change, so the message
   // is read through a ref instead of putting `t` in the dependency list.
@@ -4412,7 +4461,11 @@ export function FileTransferPanel({
     <div
       data-local-input="true"
       data-file-drop="true"
-      className="absolute inset-y-0 right-0 z-40 flex w-[min(96vw,980px)] flex-col border-l border-line bg-surface/95 shadow-2xl backdrop-blur-md"
+      className={
+        fullPage
+          ? 'relative flex h-full w-full min-h-0 flex-col bg-surface'
+          : 'absolute inset-y-0 right-0 z-40 flex w-[min(96vw,980px)] flex-col border-l border-line bg-surface/95 shadow-2xl backdrop-blur-md'
+      }
       onPointerDown={(event) => event.stopPropagation()}
       onPointerUp={(event) => event.stopPropagation()}
       onDragOver={(event) => {
@@ -4431,10 +4484,24 @@ export function FileTransferPanel({
         <FolderOpen size={15} className="text-accent" />
         <span className="text-[13px] font-medium">{t('files.title')}</span>
         <span className="text-[10px] text-muted">{t('files.remoteHint')}</span>
+        {onPopOut ? (
+          <button
+            type="button"
+            onClick={onPopOut}
+            className="ml-auto grid h-7 w-7 place-items-center rounded-md text-muted transition hover:bg-panel hover:text-ink"
+            aria-label={t('session.openInTab')}
+            title={t('session.openInTab')}
+          >
+            <ExternalLink size={14} />
+          </button>
+        ) : null}
         <button
           type="button"
           onClick={onClose}
-          className="ml-auto grid h-7 w-7 place-items-center rounded-md text-muted transition hover:bg-panel hover:text-ink"
+          className={
+            (onPopOut ? '' : 'ml-auto ') +
+            'grid h-7 w-7 place-items-center rounded-md text-muted transition hover:bg-panel hover:text-ink'
+          }
           aria-label={t('files.close')}
           title={t('files.close')}
         >

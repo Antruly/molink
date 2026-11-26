@@ -39,6 +39,7 @@
 #endif
 #include "protocol/frame_packet.h"
 #include "service_control.h"
+#include "session_intent.h"
 #include "session_preset.h"
 #include "transport/switchable_transport.h"
 #include "transport/ws_transport.h"
@@ -1651,6 +1652,10 @@ void send_welcome(session_transport* transport, const session_info& session,
   j["protocol"] = protocol::kProtocolVersion;
   j["service"] = MOLINK_CORE_SERVICE;
   j["version"] = opt.version;
+  // Echo the purpose so a page can tell a desktop session from a files/chat/
+  // terminal one. The host has already stripped the video fields below for a
+  // non-desktop intent.
+  j["intent"] = session_intent_name(session.intent);
   // The viewer may report its own paint health; the host uses it to send less
   // detail when the client, not the encoder, is the limit.
   // The host resolves "auto" from the viewers' painted rate; an older
@@ -1915,6 +1920,21 @@ void send_welcome(session_transport* transport, const session_info& session,
     if (!current.device_name.empty()) welcome_name = current.device_name;
   }
   j["device_name"] = welcome_name;
+  if (!intent_wants_video(session.intent)) {
+    // A files/chat/terminal page has no picture to paint. Say so explicitly
+    // instead of advertising a stream it will never request: no push clock,
+    // no decoders, no input, no audio, and a synthetic (empty) tile surface.
+    j["video_push"] = false;
+    j["h264_stream"] = false;
+    j["stream_codecs"] = uvcpp_json::array();
+    j["input"] = false;
+    j["audio"] = false;
+    j["call"] = false;
+    j["tiles"]["codec"] = "bgra";
+    j["tiles"]["screen_w"] = 0;
+    j["tiles"]["screen_h"] = 0;
+    j["tiles"]["synthetic"] = true;
+  }
   send_json(transport, j);
 }
 
@@ -2840,9 +2860,20 @@ void session_controller::approve_access_request(const std::string& policy) {
   if (!policy.empty() && valid_access_policy(policy)) {
     registry_->set_capabilities(session->id, capabilities_for_policy(policy));
   }
+  if (!intent_wants_video(session->intent)) {
+    registry_->set_capabilities(
+        session->id,
+        session_intent_capabilities(registry_->capabilities(session->id),
+                                    session->intent));
+  }
   registry_->touch(*session);
   issue_resume_token();
-  if (options_.capture) {
+  diag().log(diag_level::info, "session.open", std::string(),
+             {{"peer", session->peer_ip},
+              {"intent", session_intent_name(session->intent)},
+              {"session_id", session->public_id},
+              {"approved", "1"}});
+  if (options_.capture && intent_wants_video(session->intent)) {
     options_.capture->set_active(true);
     options_.capture->request_stream(10000);
   }
@@ -2909,6 +2940,17 @@ void session_controller::on_text(const std::string& text) {
   auto require_cap = [&](capability value) -> bool {
     if (registry_->has_capability(session->id, value)) return true;
     send_forbidden(transport.get(), value);
+    return false;
+  };
+
+  /// Screen-scoped messages (frame pulls, presets, display switches, codec
+  /// changes) are meaningless for a files/chat/terminal page. Refuse them
+  /// explicitly instead of touching the host-wide encoder for a viewer that
+  /// has no picture.
+  auto require_video_intent = [&]() -> bool {
+    if (intent_wants_video(session->intent)) return true;
+    send_error(transport.get(), "intent_mismatch",
+               "this session did not request the remote screen");
     return false;
   };
 
@@ -2988,6 +3030,10 @@ void session_controller::on_text(const std::string& text) {
     // a probe finishes, and a session approved by the host user is already
     // authenticated before its first hello arrives. Returning early without
     // this left the session claiming only H.264 forever.
+    // Purpose of this connection. Read before the capabilities so a non-
+    // desktop page cannot accidentally re-enable the video path by repeating
+    // a hello with the browser's default flags.
+    session->intent = normalize_session_intent(string_field(j, "intent"));
     bool hello_av1_native = false;
     const auto read_hello_capabilities = [&] {
       session->av1 = bool_field(j, "av1", false);
@@ -3010,12 +3056,29 @@ void session_controller::on_text(const std::string& text) {
       session->vp9_stream = bool_field(j, "vp9_stream", false);
       session->vp8_stream = bool_field(j, "vp8_stream", false);
       session->webrtc = bool_field(j, "webrtc", false);
+      if (!intent_wants_video(session->intent)) {
+        // A files/chat/terminal session never receives a picture, so it must
+        // not vote in the "every viewer can decode X" tests either.
+        session->av1 = false;
+        session->av1_stream = false;
+        session->h264_stream = false;
+        session->vp9_stream = false;
+        session->vp8_stream = false;
+        session->push_enabled = false;
+        session->webrtc = false;
+      }
     };
     // A repeat hello must not cost another use of a multi-use code: the relay
     // proxy replays one when its first datagram races the session setup, and
     // a reconnect replays the whole handshake.
     if (session->authenticated) {
       read_hello_capabilities();
+      if (!intent_wants_video(session->intent)) {
+        registry_->set_capabilities(
+            session->id, session_intent_capabilities(
+                             registry_->capabilities(session->id),
+                             session->intent));
+      }
       if (std::getenv("MOLINK_STREAM_LOG") != nullptr) {
         std::fprintf(stderr,
                      "host: hello (repeat) av1_stream=%d h264=%d vp9=%d "
@@ -3145,6 +3208,15 @@ void session_controller::on_text(const std::string& text) {
                 {"ok", "1"},
                 {"locked", locked_for_peer ? "1" : "0"}});
     read_hello_capabilities();
+    // A files/chat/terminal page never gets the screen or input bits, even
+    // when its host-wide policy is "full". The panel routes (files, chat,
+    // clipboard, terminal) keep their own bits.
+    if (!intent_wants_video(session->intent)) {
+      registry_->set_capabilities(
+          session->id,
+          session_intent_capabilities(registry_->capabilities(session->id),
+                                      session->intent));
+    }
     if (std::getenv("MOLINK_AV1_LOG") != nullptr) {
       std::fprintf(stderr, "host: session av1=%d\n", session->av1 ? 1 : 0);
     }
@@ -3172,15 +3244,24 @@ void session_controller::on_text(const std::string& text) {
       transport->close(transport_close::policy, "session limit");
       return;
     }
+    diag().log(diag_level::info, "session.open", std::string(),
+               {{"peer", peer_ip},
+                {"intent", session_intent_name(session->intent)},
+                {"session_id", session->public_id}});
     // A session without AV1 must stop patches immediately; the supervisor
-    // turns them back on once every session can decode them again.
-    if (!session->av1 && options_.capture) options_.capture->set_av1_allowed(false);
+    // turns them back on once every session can decode them again. A files/
+    // chat/terminal session never sees the picture at all and must not veto a
+    // decoder for the desktop viewers.
+    if (intent_wants_video(session->intent) && !session->av1 &&
+        options_.capture) {
+      options_.capture->set_av1_allowed(false);
+    }
     if (locked_for_peer) options_.lock->unlock();
     if (options_.lock) {
       options_.lock->record_success(peer_ip);
       options_.lock->record_success(peer_ip, "totp");
     }
-    if (options_.capture) {
+    if (options_.capture && intent_wants_video(session->intent)) {
       options_.capture->set_active(true);
       // A viewer that just joined starts on the stream, not on tiles.
       options_.capture->request_stream(10000);
@@ -3243,6 +3324,10 @@ void session_controller::on_text(const std::string& text) {
         string_field(j, "name").substr(0, 64);
     session->client_id =
         string_field(j, "device_id").substr(0, 64);
+    // A no-code session never sends a hello, so the request carries its
+    // purpose too. The approved session must not start capture for a page
+    // that only wants its files, chat or terminal.
+    session->intent = normalize_session_intent(string_field(j, "intent"));
     // A no-code session never sends a hello, so this request carries the one
     // capability the clipboard path needs.
     session->clipboard_stream = clipboard_stream_capable(j);
@@ -3319,6 +3404,7 @@ void session_controller::on_text(const std::string& text) {
 
   if (type == "capture-fps") {
     if (!require_cap(capability::screen)) return;
+    if (!require_video_intent()) return;
     if (!options_.capture) {
       send_error(transport.get(), "not_implemented", "capture is unavailable");
       return;
@@ -3343,6 +3429,7 @@ void session_controller::on_text(const std::string& text) {
   // is shared, but each viewer's selector stays its own.
   if (type == "session-preset") {
     if (!require_cap(capability::screen)) return;
+    if (!require_video_intent()) return;
     if (!options_.capture) {
       send_error(transport.get(), "not_implemented", "capture is unavailable");
       return;
@@ -3512,6 +3599,7 @@ void session_controller::on_text(const std::string& text) {
   // Both are global to the host, like the capture rate.
   if (type == "quality") {
     if (!require_cap(capability::screen)) return;
+    if (!require_video_intent()) return;
     if (!options_.capture) {
       send_error(transport.get(), "not_implemented", "capture is unavailable");
       return;
@@ -3644,6 +3732,7 @@ void session_controller::on_text(const std::string& text) {
 
   if (type == "display") {
     if (!require_cap(capability::screen)) return;
+    if (!require_video_intent()) return;
     if (!options_.capture) {
       send_error(transport.get(), "not_implemented", "capture is unavailable");
       return;
@@ -3755,6 +3844,7 @@ void session_controller::on_text(const std::string& text) {
 
   if (type == "display-mode") {
     if (!require_cap(capability::screen)) return;
+    if (!require_video_intent()) return;
     if (!options_.capture) {
       send_error(transport.get(), "not_implemented", "capture is unavailable");
       return;
@@ -3897,6 +3987,7 @@ void session_controller::on_text(const std::string& text) {
 
   if (type == "request-frame") {
     if (!require_cap(capability::screen)) return;
+    if (!require_video_intent()) return;
     // A polling client is proof that someone is watching. Ensure the capture
     // thread is awake even if the periodic registry check has not run yet;
     // otherwise the first request can be answered with empty frames only.
@@ -3909,6 +4000,7 @@ void session_controller::on_text(const std::string& text) {
 
   if (type == "request-tiles") {
     if (!require_cap(capability::screen)) return;
+    if (!require_video_intent()) return;
     std::vector<refresh_rect> rects;
     const auto tiles = j.find("tiles");
     if (tiles != j.end() && tiles->is_array()) {
@@ -3941,6 +4033,7 @@ void session_controller::on_text(const std::string& text) {
   if (type == "rtc-answer") {
     if (!require_auth()) return;
     if (!require_cap(capability::screen)) return;
+    if (!require_video_intent()) return;
 #if MOLINK_HAVE_WEBRTC
     if (session->rtc) {
       std::string rtc_error;
@@ -3957,6 +4050,7 @@ void session_controller::on_text(const std::string& text) {
   if (type == "rtc-ice") {
     if (!require_auth()) return;
     if (!require_cap(capability::screen)) return;
+    if (!require_video_intent()) return;
 #if MOLINK_HAVE_WEBRTC
     if (session->rtc) {
       session->rtc->add_remote_candidate(string_field(j, "candidate"),
@@ -3973,6 +4067,7 @@ void session_controller::on_text(const std::string& text) {
   if (type == "video-mode") {
     if (!require_auth()) return;
     if (!require_cap(capability::screen)) return;
+    if (!require_video_intent()) return;
     const std::string value = string_field(j, "value");
     if (!options_.auth || !options_.auth->set_video_mode(value)) {
       send_error(transport.get(), "bad_video_mode",
@@ -4006,6 +4101,7 @@ void session_controller::on_text(const std::string& text) {
   if (type == "stream-codec") {
     if (!require_auth()) return;
     if (!require_cap(capability::screen)) return;
+    if (!require_video_intent()) return;
     const std::string value = string_field(j, "value");
     // Only codecs this host can actually encode are accepted, plus "auto"
     // and the explicit "tiles" (never stream).
@@ -4064,6 +4160,7 @@ void session_controller::on_text(const std::string& text) {
 
   if (type == "request-keyframe") {
     if (!require_cap(capability::screen)) return;
+    if (!require_video_intent()) return;
     // MOLINK_STREAM_LOG=1: a viewer whose decoder works asks for a keyframe a
     // few times per session; one that cannot decode asks every throttle tick
     // (300 ms), which is a very different rate.
@@ -4091,6 +4188,7 @@ void session_controller::on_text(const std::string& text) {
   if (type == "video-push") {
     if (!require_auth()) return;
     if (!require_cap(capability::screen)) return;
+    if (!require_video_intent()) return;
     // Frames the viewer skipped while it was pulling are repaired by the
     // sequence map and tile clock like any other gap, so turning the clock
     // back on does not need a keyframe.
@@ -4800,6 +4898,11 @@ void session_controller::on_text(const std::string& text) {
 
   if (type == "input") {
     if (!require_cap(capability::input)) return;
+    if (!intent_allows_input(session->intent)) {
+      send_error(transport.get(), "intent_mismatch",
+                 "a files/chat/terminal session cannot inject input");
+      return;
+    }
     // A viewer that sent input is the one the user is working in. With no
     // `video-push` foreground signal (legacy clients), this is what makes the
     // clipboard route to the right session.
@@ -5394,6 +5497,7 @@ void session_supervisor::run_push_clock() {
     bool any = false;
     for (const session_info& peer : registry_->snapshot()) {
       if (!peer.authenticated || !peer.push_enabled || !peer.transport) continue;
+      if (!intent_wants_video(peer.intent)) continue;
       any = true;
       if (peer.viewer_stats_ms == 0 || now_ms - peer.viewer_stats_ms > 3000) {
         continue;
@@ -5414,6 +5518,7 @@ void session_supervisor::run_push_clock() {
         if (!peer.authenticated || !peer.push_enabled || !peer.transport) {
           continue;
         }
+        if (!intent_wants_video(peer.intent)) continue;
         const std::shared_ptr<session_info> live = registry_ref->find(peer.id);
         if (!live || !live->transport) continue;
         session_transport* transport = live->transport.get();
@@ -5478,8 +5583,9 @@ void session_supervisor::run() {
         // it in the "all viewers can decode X" test made a single such
         // session disable the stream for every real viewer.
         const bool video_viewer =
-            peer.push_enabled || peer.av1_stream || peer.h264_stream ||
-            peer.vp9_stream || peer.vp8_stream;
+            intent_wants_video(peer.intent) &&
+            (peer.push_enabled || peer.av1_stream || peer.h264_stream ||
+             peer.vp9_stream || peer.vp8_stream);
         if (!video_viewer) continue;
         live = true;
         ++viewers;
@@ -6028,8 +6134,17 @@ void session_supervisor::run() {
                    options_.lock->timeout_seconds());
     }
     if (options_.capture) {
-      // Safety net in case a close callback was missed during shutdown.
-      options_.capture->set_active(registry_->has_authenticated());
+      // Safety net in case a close callback was missed during shutdown. A
+      // files/chat/terminal session keeps the registry non-empty but must not
+      // wake the capture thread: only a desktop viewer needs pixels.
+      bool desktop_viewer = false;
+      for (const session_info& peer : registry_->snapshot()) {
+        if (peer.authenticated && intent_wants_video(peer.intent)) {
+          desktop_viewer = true;
+          break;
+        }
+      }
+      options_.capture->set_active(desktop_viewer);
     }
     const std::vector<session_info> sessions = registry_->snapshot();
     if (options_.capture) {
