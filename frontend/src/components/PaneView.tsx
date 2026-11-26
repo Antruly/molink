@@ -213,9 +213,11 @@ function ChatPane({ paneId }: { paneId: string }) {
     connection.requestChatHistory()
     return connection.addListener((event) => {
       if (event.kind === 'chat-history') {
-        setMessages(event.messages)
+        // Keep a large tail: the feed pages within it instead of asking the
+        // host for another window (the chat protocol has no before-cursor).
+        setMessages(event.messages.slice(-500))
       } else if (event.kind === 'chat') {
-        setMessages((previous) => [...previous, event.message].slice(-200))
+        setMessages((previous) => [...previous, event.message].slice(-500))
       }
     })
   }, [connection])
@@ -243,7 +245,12 @@ function ChatPane({ paneId }: { paneId: string }) {
         fullPage={standalone}
         onClose={disconnect}
         messages={messages}
-        onSend={(text) => connection?.sendChat(text)}
+        onSend={(text) => {
+          if (!connection || !connection.isLive()) return false
+          connection.sendChat(text)
+          return true
+        }}
+        connection={connection ?? null}
         remoteLabel={owner?.label ?? ''}
         remoteId={owner?.welcome?.device_id}
         selfSessionId={owner?.welcome?.session_id}

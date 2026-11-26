@@ -1,18 +1,41 @@
-import { ExternalLink, MessageSquare, Phone, Send, X } from 'lucide-react'
-import { useEffect, useRef, useState, type FormEvent } from 'react'
+import { ExternalLink, MessageSquare, Phone, X } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { ChatMessage } from '../lib/client'
+import {
+  attachmentKind,
+  chatDisplayName,
+  chatThumbName,
+  chatUploadName,
+  encodeChatPayload,
+  fitsChatText,
+  MAX_CHAT_ATTACHMENT_BYTES,
+  mimeForName,
+  newAttachmentId,
+  parseChatPayload,
+  type ChatAttachment,
+} from '../lib/chat'
+import { RemoteAttachmentAccess } from '../lib/chat-access'
+import {
+  dataUrlToBlob,
+  attachmentThumbnail,
+  type ChatThumbnail,
+} from '../lib/chat-media'
+import { uploadChatFile } from '../lib/chat-transfer'
+import type { SessionConnection } from '../lib/session-connection'
+import { ChatComposer } from './chat/ChatComposer'
+import { ChatFeed } from './chat/ChatFeed'
+import type { ChatDelivery, ChatFeedRow } from './chat/ChatBubble'
+import { useFileDrop } from './chat/chat-hooks'
 
-function timeLabel(ts: number): string {
-  if (!ts) return ''
-  try {
-    return new Date(ts).toLocaleTimeString(undefined, {
-      hour: '2-digit',
-      minute: '2-digit',
-    })
-  } catch {
-    return ''
-  }
+interface PendingMessage {
+  localId: string
+  text: string
+  attachments: ChatAttachment[]
+  ts: number
+  status: ChatDelivery
+  progress?: number
+  retry: () => void
 }
 
 /// Chat drawer shared by the local UI and a controlling client. The core keeps
@@ -25,6 +48,8 @@ export function ChatPanel({
   remoteLabel,
   remoteId,
   selfSessionId,
+  selfName,
+  connection,
   callAvailable = false,
   callPhase = 'idle',
   onCall,
@@ -38,49 +63,375 @@ export function ChatPanel({
   /// Embedded drawer only: move this pane into its own tab.
   onPopOut?: () => void
   messages: ChatMessage[]
-  onSend: (text: string) => void
+  /// Return false when the session is not live; the pending row then shows the
+  /// failed state and can be retried from the bubble.
+  onSend: (text: string) => boolean
   remoteLabel: string
   /// Device ID of the peer (shown next to its name).
   remoteId?: string
   /// This viewer's host-side session id, used to mark its own messages when
   /// several people share one chat.
   selfSessionId?: number
+  selfName?: string
+  /// The session file channel; attachments are uploaded through it.
+  connection?: SessionConnection | null
   callAvailable?: boolean
   callPhase?: 'idle' | 'ringing' | 'active'
   onCall?: () => void
 }) {
   const { t } = useTranslation()
-  const [text, setText] = useState('')
-  const listRef = useRef<HTMLDivElement>(null)
-
+  const [pending, setPending] = useState<PendingMessage[]>([])
+  const [hint, setHint] = useState<string | null>(null)
+  const hintTimer = useRef(0)
+  const abortRef = useRef(new AbortController())
+  const seen = useRef(new Set<string>())
+  const uploadChain = useRef<Promise<unknown>>(Promise.resolve())
+  // Pending rows outlive a reconnect (and its new SessionConnection / send
+  // closure). Their retry callbacks go through these refs so they always use
+  // the live channel instead of the one captured when the bubble was created.
+  const onSendRef = useRef(onSend)
   useEffect(() => {
-    if (!open) return
-    const element = listRef.current
-    if (element) element.scrollTop = element.scrollHeight
-  }, [messages, open])
+    onSendRef.current = onSend
+  }, [onSend])
+
+  const access = useMemo(() => new RemoteAttachmentAccess(null), [])
+  useEffect(() => {
+    access.setConnection(connection ?? null)
+  }, [access, connection])
+  useEffect(() => {
+    access.revive()
+    const controller = new AbortController()
+    abortRef.current = controller
+    return () => {
+      access.dispose()
+      controller.abort()
+    }
+  }, [access])
+
+  const showHint = useCallback((message: string) => {
+    setHint(message)
+    window.clearTimeout(hintTimer.current)
+    hintTimer.current = window.setTimeout(() => setHint(null), 6000)
+  }, [])
+
+  const patchPending = useCallback(
+    (localId: string, patch: Partial<PendingMessage>) => {
+      setPending((list) =>
+        list.map((item) =>
+          item.localId === localId ? { ...item, ...patch } : item,
+        ),
+      )
+    },
+    [],
+  )
+
+  /// The file channel answers one offer at a time; a second offer would race
+  /// the first `accept`, so every attachment task joins one queue.
+  const enqueue = useCallback(<T,>(task: () => Promise<T>): Promise<T> => {
+    const next = uploadChain.current.then(task, task)
+    uploadChain.current = next.then(
+      () => undefined,
+      () => undefined,
+    )
+    return next
+  }, [])
+
+  const startAttachment = useCallback(
+    (
+      file: File,
+      id: string,
+      localId: string,
+      ts: number,
+      kind: ChatAttachment['kind'],
+    ) => {
+      patchPending(localId, { status: 'sending', progress: 0, ts })
+      void enqueue(async () => {
+        let media: ChatThumbnail | null = null
+        const mime = file.type || mimeForName(file.name)
+        const displayName = chatDisplayName(file.name, mime, id)
+        const base: ChatAttachment = {
+          id,
+          name: displayName,
+          size: file.size,
+          mime,
+          kind,
+          thumb: '',
+          src: '',
+          w: 0,
+          h: 0,
+          dur: 0,
+        }
+        try {
+          if (kind === 'image' || kind === 'video') {
+            media = await attachmentThumbnail(file, file.name, kind)
+            if (media) {
+              access.rememberLocal(
+                id,
+                file,
+                media.dataUrl === '' ? undefined : media.dataUrl,
+              )
+              patchPending(localId, {
+                attachments: [
+                  {
+                    ...base,
+                    thumb: media.dataUrl,
+                    w: media.w,
+                    h: media.h,
+                    dur: media.dur,
+                  },
+                ],
+              })
+            } else {
+              access.rememberLocal(id, file)
+            }
+          } else {
+            access.rememberLocal(id, file)
+          }
+
+          if (!connection) throw new Error('offline')
+          const uploaded = await uploadChatFile({
+            connection,
+            name: chatUploadName(displayName),
+            blob: file,
+            signal: abortRef.current.signal,
+            onProgress: (progress) => {
+              patchPending(localId, {
+                progress: progress.total > 0
+                  ? progress.sent / progress.total
+                  : 1,
+              })
+            },
+          })
+
+          let thumbPath = ''
+          if (media && media.dataUrl !== '') {
+            try {
+              const thumb = await uploadChatFile({
+                connection,
+                name: chatThumbName(id),
+                blob: dataUrlToBlob(media.dataUrl),
+                signal: abortRef.current.signal,
+              })
+              thumbPath = thumb.path
+            } catch {
+              // The preview is cosmetic; the message still delivers.
+            }
+          }
+
+          const attachment: ChatAttachment = {
+            ...base,
+            thumb: thumbPath,
+            src: uploaded.path,
+            w: media?.w ?? 0,
+            h: media?.h ?? 0,
+            dur: media?.dur ?? 0,
+          }
+          patchPending(localId, { attachments: [attachment], progress: 1 })
+          const encoded = encodeChatPayload({
+            type: 'chat',
+            text: '',
+            attachments: [attachment],
+          })
+          if (!fitsChatText(encoded)) throw new Error('message_too_long')
+          if (!onSend(encoded)) throw new Error('offline')
+          patchPending(localId, { status: 'sent', progress: undefined })
+        } catch (error) {
+          patchPending(localId, { status: 'failed', progress: undefined })
+          const reason = error instanceof Error ? error.message : ''
+          showHint(
+            reason === 'message_too_long'
+              ? t('chat.attachmentNameTooLong')
+              : t('chat.uploadFailed'),
+          )
+        }
+      })
+    },
+    [access, connection, enqueue, onSend, patchPending, showHint, t],
+  )
+
+  const startAttachmentRef = useRef(startAttachment)
+  useEffect(() => {
+    startAttachmentRef.current = startAttachment
+  })
+
+  const sendFiles = useCallback(
+    (files: File[]) => {
+      if (files.length === 0) return
+      if (!connection) {
+        showHint(t('chat.offline'))
+        return
+      }
+      for (const file of files) {
+        if (file.size > MAX_CHAT_ATTACHMENT_BYTES) {
+          showHint(
+            t('chat.attachmentTooLarge', {
+              name: file.name,
+              limit: '200 MiB',
+            }),
+          )
+          continue
+        }
+        const id = newAttachmentId()
+        const ts = Date.now()
+        const kind = attachmentKind(file.name, file.type)
+        const mime = file.type || mimeForName(file.name)
+        const row: PendingMessage = {
+          localId: id,
+          text: '',
+          attachments: [
+            {
+              id,
+              name: chatDisplayName(file.name, mime, id),
+              size: file.size,
+              mime,
+              kind,
+              thumb: '',
+              src: '',
+              w: 0,
+              h: 0,
+              dur: 0,
+            },
+          ],
+          ts,
+          status: 'sending',
+          progress: 0,
+          retry: () =>
+            startAttachmentRef.current(file, id, id, Date.now(), kind),
+        }
+        setPending((list) => [...list, row])
+        startAttachment(file, id, id, ts, kind)
+      }
+    },
+    [connection, showHint, startAttachment, t],
+  )
+
+  const retryText = useCallback(
+    (localId: string, text: string) => {
+      const ok = onSendRef.current(text)
+      patchPending(localId, { status: ok ? 'sent' : 'failed' })
+      if (!ok) showHint(t('chat.offline'))
+    },
+    [patchPending, showHint, t],
+  )
+
+  const sendText = (value: string): boolean => {
+    if (!fitsChatText(value)) {
+      showHint(t('chat.messageTooLong'))
+      return false
+    }
+    const localId = newAttachmentId()
+    const ts = Date.now()
+    const ok = onSend(value)
+    setPending((list) => [
+      ...list,
+      {
+        localId,
+        text: value,
+        attachments: [],
+        ts,
+        status: ok ? 'sent' : 'failed',
+        retry: () => retryText(localId, value),
+      },
+    ])
+    if (!ok) showHint(t('chat.offline'))
+    return true
+  }
+
+  const isMine = useCallback(
+    (message: ChatMessage) =>
+      message.from !== 'host' &&
+      (message.senderSession === undefined ||
+        selfSessionId === undefined ||
+        message.senderSession === selfSessionId),
+    [selfSessionId],
+  )
+
+  // Drop the optimistic copy once the core echoes the message back. The core
+  // broadcasts to every viewer, including the one that sent it.
+  useEffect(() => {
+    if (pending.length === 0) return
+    setPending((current) => {
+      if (current.length === 0) return current
+      const remaining = [...current]
+      for (const message of messages) {
+        if (!isMine(message)) continue
+        const key = `${message.id}:${message.ts}`
+        if (seen.current.has(key)) continue
+        const payload = parseChatPayload(message.text)
+        if (payload && payload.attachments.length > 0) {
+          const ids = new Set(payload.attachments.map((item) => item.id))
+          const index = remaining.findIndex((item) =>
+            item.attachments.some((attachment) => ids.has(attachment.id)),
+          )
+          if (index >= 0) {
+            remaining.splice(index, 1)
+            seen.current.add(key)
+          }
+          continue
+        }
+        const text = payload?.text ?? message.text
+        const index = remaining.findIndex(
+          (item) =>
+            item.attachments.length === 0 &&
+            item.text === text &&
+            Math.abs(item.ts - message.ts) < 120_000,
+        )
+        if (index >= 0) {
+          remaining.splice(index, 1)
+          seen.current.add(key)
+        }
+      }
+      return remaining.length === current.length ? current : remaining
+    })
+  }, [isMine, messages, pending.length])
+
+  const ownName =
+    messages.find((message) => isMine(message) && message.senderName?.trim())
+      ?.senderName?.trim() ||
+    selfName ||
+    t('chat.me')
+
+  const rows: ChatFeedRow[] = []
+  const echoedIds = new Set<string>()
+  for (const message of messages) {
+    const payload = parseChatPayload(message.text)
+    if (payload) {
+      for (const attachment of payload.attachments) echoedIds.add(attachment.id)
+    }
+    const mine = isMine(message)
+    rows.push({
+      key: `srv-${message.id}-${message.ts}`,
+      mine,
+      senderName:
+        message.senderName?.trim() ||
+        (message.from === 'host' ? t('chat.host') : t('chat.remote')),
+      ...(message.senderId ? { senderId: message.senderId } : {}),
+      text: payload ? payload.text : message.text,
+      attachments: payload?.attachments ?? [],
+      ts: message.ts,
+      ...(mine ? { status: 'sent' as const } : {}),
+    })
+  }
+  for (const item of pending) {
+    if (item.attachments.some((attachment) => echoedIds.has(attachment.id))) {
+      continue
+    }
+    rows.push({
+      key: `local-${item.localId}`,
+      mine: true,
+      senderName: ownName,
+      text: item.text,
+      attachments: item.attachments,
+      ts: item.ts,
+      status: item.status,
+      ...(item.progress !== undefined ? { progress: item.progress } : {}),
+      onRetry: item.retry,
+    })
+  }
+
+  const drop = useFileDrop(Boolean(connection), sendFiles)
 
   if (!open) return null
-
-  const isMine = (message: ChatMessage) =>
-    message.from !== 'host' &&
-    (message.senderSession === undefined ||
-      selfSessionId === undefined ||
-      message.senderSession === selfSessionId)
-  const senderName = (message: ChatMessage) =>
-    message.senderName?.trim() ||
-    (message.from === 'host' ? t('chat.host') : t('chat.remote'))
-
-  const send = () => {
-    const value = text.trim()
-    if (value === '') return
-    onSend(value)
-    setText('')
-  }
-
-  const submit = (event: FormEvent) => {
-    event.preventDefault()
-    send()
-  }
 
   return (
     <div
@@ -92,6 +443,7 @@ export function ChatPanel({
       }
       onPointerDown={(event) => event.stopPropagation()}
       onPointerUp={(event) => event.stopPropagation()}
+      {...drop.handlers}
     >
       <div className="flex h-11 shrink-0 items-center gap-2 border-b border-line-soft px-3">
         <MessageSquare size={15} className="text-accent" />
@@ -141,75 +493,27 @@ export function ChatPanel({
         </div>
       </div>
 
-      <div ref={listRef} className="min-h-0 flex-1 space-y-2 overflow-y-auto px-3 py-3">
-        {messages.length === 0 ? (
-          <div className="rounded-xl border border-dashed border-line px-3 py-8 text-center text-[12px] leading-relaxed text-muted">
-            {t('chat.empty')}
-          </div>
-        ) : (
-          messages.map((message) => {
-            const mine = isMine(message)
-            return (
-              <div
-                key={`${message.id}-${message.ts}`}
-                className={mine ? 'flex justify-end' : 'flex justify-start'}
-              >
-                <div
-                  className={
-                    'max-w-[85%] rounded-2xl px-3 py-2 text-[12px] leading-relaxed shadow-sm ' +
-                    (mine
-                      ? 'rounded-br-md bg-accent text-on-accent'
-                      : 'rounded-bl-md border border-line bg-panel text-ink')
-                  }
-                >
-                  <div className="whitespace-pre-wrap break-words">
-                    {message.text}
-                  </div>
-                  <div
-                    className={
-                      'mt-1 text-right text-[9px] ' +
-                      (mine ? 'text-on-accent/60' : 'text-muted/70')
-                    }
-                  >
-                    {senderName(message)}
-                    {message.senderId ? ` · ${message.senderId}` : ''} ·{' '}
-                    {timeLabel(message.ts)}
-                  </div>
-                </div>
-              </div>
-            )
-          })
-        )}
-      </div>
+      <ChatFeed
+        rows={rows}
+        access={access}
+        selfName={ownName}
+        empty={t('chat.empty')}
+        conversationKey={remoteId ?? remoteLabel}
+      />
 
-      <form
-        onSubmit={submit}
-        className="flex shrink-0 items-end gap-2 border-t border-line-soft p-2.5"
-      >
-        <textarea
-          value={text}
-          onChange={(event) => setText(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter' && !event.shiftKey) {
-              event.preventDefault()
-              send()
-            }
-          }}
-          rows={2}
-          maxLength={4096}
-          placeholder={t('chat.placeholder')}
-          className="field min-h-9 resize-none !py-2 text-[12px]"
-        />
-        <button
-          type="submit"
-          disabled={text.trim() === ''}
-          className="btn btn-primary h-9 w-9 shrink-0 !px-0"
-          aria-label={t('chat.send')}
-          title={t('chat.send')}
-        >
-          <Send size={14} />
-        </button>
-      </form>
+      <ChatComposer
+        onSendText={sendText}
+        onSendFiles={sendFiles}
+        attachEnabled={Boolean(connection)}
+        placeholder={t('chat.placeholder')}
+        hint={hint}
+      />
+
+      {drop.dragging ? (
+        <div className="pointer-events-none absolute inset-0 z-50 grid place-items-center border-2 border-dashed border-accent bg-surface/85 text-[12px] font-medium text-accent">
+          {t('chat.dropHint')}
+        </div>
+      ) : null}
     </div>
   )
 }
