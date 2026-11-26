@@ -55,6 +55,7 @@
 #include "host_settings.h"
 #include "host_state.h"
 #include "service_ctl.h"
+#include "service_paths.h"
 
 // windows.h renames the D2D DrawText method and its call together (the macro
 // is active while d2d1.h is parsed), so call DrawText as written; do not
@@ -230,6 +231,30 @@ int persisted_core_port() {
   const std::wstring directory = config_directory();
   if (directory.empty()) return 0;
   const std::wstring path = directory + L"\\tcp_port";
+  HANDLE file = CreateFileW(path.c_str(), GENERIC_READ,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (file == INVALID_HANDLE_VALUE) return 0;
+  char buffer[32] = {};
+  DWORD read = 0;
+  ReadFile(file, buffer, static_cast<DWORD>(std::size(buffer) - 1), &read,
+           nullptr);
+  CloseHandle(file);
+  if (read == 0) return 0;
+  const int port = std::atoi(buffer);
+  return port > 0 && port <= 65535 ? port : 0;
+}
+
+/// Port the molink-helper published for the service's core (`core.port`, next
+/// to core.path). The host-only core no longer runs on a hard-coded 28418:
+/// the helper picks the first free port of its isolated block and records it,
+/// so the UI must ask before probing.
+int service_core_port() {
+  const std::wstring program_data = environment(L"ProgramData");
+  if (program_data.empty()) return 0;
+  const std::wstring path =
+      molink::service_paths::resolve(program_data, L"moLinkHost").core_port;
+  if (path.empty()) return 0;
   HANDLE file = CreateFileW(path.c_str(), GENERIC_READ,
                             FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
                             OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -446,6 +471,11 @@ std::vector<int> probe_ports() {
     }
     ports.push_back(port);
   };
+  // The service's published port comes first. If the UI was started before
+  // the service's core (or adopted the full-product core on 28418), the next
+  // poll still moves to the host product's own core instead of staying on the
+  // first connection it found.
+  add(service_core_port());
   const core_conn current = get_connection();
   add(current.port);
   add(g_attach_port);
@@ -1168,6 +1198,10 @@ int configured_port() {
     return g_view.state.tcp_port;
   }
   if (g_view.device.port > 0) return g_view.device.port;
+  // Not connected yet: show the port the service's helper published instead
+  // of pretending the core is on 28418.
+  const int service_port = service_core_port();
+  if (service_port > 0) return service_port;
   return kDefaultPort;
 }
 

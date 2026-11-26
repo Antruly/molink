@@ -15,7 +15,9 @@ if(WIN32)
     "${CMAKE_CURRENT_SOURCE_DIR}/../service")
   target_link_libraries(molink-helper PRIVATE
     molink-supervisor-policy
-    advapi32 wtsapi32 user32 gdi32 userenv)
+    # ws2_32: probe candidate core ports before passing --port, so a host-only
+    # core does not repeatedly lose a bind race with the full product.
+    advapi32 wtsapi32 user32 gdi32 userenv ws2_32)
   # The helper writes app.exit lines with the core's own formatter so the
   # diagnostic log keeps one convention, not a second hand-rolled one.
   add_library(molink-diag STATIC

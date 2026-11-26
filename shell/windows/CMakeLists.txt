@@ -107,9 +107,13 @@ add_executable(moLink-host WIN32
   host_only/host_state.cpp
   host_only/host_settings.cpp
   host_only/service_ctl.cpp
+  # The service data directory and core.port path are derived from the service
+  # name, exactly as the helper derives them; do not duplicate the mapping.
+  service/service_paths.cpp
 )
 target_include_directories(moLink-host PRIVATE
-  "${CMAKE_CURRENT_SOURCE_DIR}/host_only")
+  "${CMAKE_CURRENT_SOURCE_DIR}/host_only"
+  "${CMAKE_CURRENT_SOURCE_DIR}/service")
 target_compile_definitions(moLink-host PRIVATE
   _WIN32_WINNT=0x0601 NOMINMAX UNICODE _UNICODE)
 # The host-only UI deliberately stays at C++17 so the Win7 x86 toolchain can
