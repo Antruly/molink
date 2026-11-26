@@ -1,0 +1,61 @@
+name: android
+
+# The Android shell is a separate Gradle project under mobile/android. It has
+# nothing to share with the CMake/pnpm build, so it gets its own workflow and
+# only runs when that tree (or this file) changes.
+
+on:
+  pull_request:
+    paths:
+      - 'mobile/android/**'
+      - '.github/workflows/android.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'mobile/android/**'
+      - '.github/workflows/android.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: android
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: mobile/android
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # The runner image ships the Android SDK already; pin the same platform
+      # and build-tools the project declares so a runner update cannot drift.
+      - name: Install SDK packages
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "platforms;android-34" "build-tools;34.0.0" "platform-tools" > /dev/null
+
+      - name: Assemble debug APK
+        run: ./gradlew --no-daemon :app:assembleDebug
+
+      - name: Report artifact details
+        run: |
+          apk=$(ls app/build/outputs/apk/debug/*.apk)
+          ls -lh "$apk"
+          "$ANDROID_HOME/build-tools/34.0.0/aapt2" dump badging "$apk" | head -5
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: molink-android-debug
+          path: mobile/android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
