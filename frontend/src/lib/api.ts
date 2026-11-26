@@ -242,11 +242,15 @@ export interface CoreInfo {
 export class ApiError extends Error {
   readonly status: number
   readonly code: string
+  /// Optional machine-readable detail (e.g. the `reason` on
+  /// `bad_download_root`). Empty when the endpoint does not send one.
+  readonly reason: string
 
-  constructor(status: number, code: string) {
+  constructor(status: number, code: string, reason = '') {
     super(code)
     this.status = status
     this.code = code
+    this.reason = reason
   }
 }
 
@@ -290,13 +294,23 @@ async function request<T>(
   })
   if (!response.ok) {
     let code = ''
+    let reason = ''
     try {
-      const body = (await response.json()) as { code?: string; error?: string }
+      const body = (await response.json()) as {
+        code?: string
+        error?: string
+        reason?: string
+      }
       code = body.code ?? body.error ?? ''
+      reason = body.reason ?? ''
     } catch {
       code = ''
     }
-    throw new ApiError(response.status, code || `http_${response.status}`)
+    throw new ApiError(
+      response.status,
+      code || `http_${response.status}`,
+      reason,
+    )
   }
   if (response.status === 204) return undefined as T
   return (await response.json()) as T
@@ -512,6 +526,13 @@ export interface SecuritySettings {
   /// Allow this host to open port-mapping tunnels for a viewer. Off by
   /// default; the core reads it on every forward-open.
   port_forward_enabled?: boolean
+  /// Storage root for files received from remote devices. The GET response
+  /// carries the effective path (the stored choice, or the platform default).
+  /// A new root applies to the next transfer; running transfers keep their
+  /// destination.
+  download_root?: string
+  /// The platform default, shown when the user wants to reset the choice.
+  download_root_default?: string
   restart_required: boolean
 }
 
@@ -604,6 +625,22 @@ export function postSettings(
       values.portForwardEnabled ? '1' : '0',
     )
   }
+  return request<SecuritySettings>(
+    `/api/settings?${query.toString()}`,
+    { method: 'POST' },
+    token,
+  )
+}
+
+/// Changes only the storage root. The core validates the path and answers
+/// `bad_download_root` (with a `reason`) instead of persisting an unusable one.
+/// The other settings are untouched because an absent query parameter falls
+/// back to its current value.
+export function postDownloadRoot(
+  token: string,
+  root: string,
+): Promise<SecuritySettings> {
+  const query = new URLSearchParams({ download_root: root })
   return request<SecuritySettings>(
     `/api/settings?${query.toString()}`,
     { method: 'POST' },

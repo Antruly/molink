@@ -28,6 +28,7 @@
 #include "config.h"
 #include "capture/frame_encode.h"
 #include "diag_log.h"
+#include "download_root.h"
 #include "compression.h"
 #include "capture/replay_policy.h"
 #include "capture/video_push.h"
@@ -2280,6 +2281,27 @@ bool session_controller::start(const std::string* initial_token) {
       }
     }
     return policy;
+  });
+  // A viewer that sends no `dest` receives the host's layout:
+  // <download_root>/<remote device id>/<YYYY-MM-DD>. The provider is read per
+  // offer, so changing the root applies to the next transfer while one in
+  // flight keeps the folder resolved when it was accepted.
+  files_->set_default_destination([weak]() {
+    std::string root;
+    std::string remote_id;
+    if (auto self = weak.lock()) {
+      if (self->options_.auth) {
+        root = effective_download_root(self->options_.auth->settings());
+      }
+      if (auto session = self->session_.lock()) {
+        remote_id = !session->client_id.empty() ? session->client_id
+                                                : session->peer_ip;
+      }
+    }
+    if (root.empty()) root = default_download_root();
+    if (root.empty()) return std::string();
+    if (remote_id.empty()) remote_id = "unknown";
+    return download_directory(root, remote_id, local_date_string());
   });
   transport->set_handlers(
       [weak](const std::string& text) {
@@ -4601,15 +4623,39 @@ void session_controller::on_text(const std::string& text) {
           it != j.end() && it->is_number()) {
         tag = it->get<int>();
       }
+      // Clipboard files materialised on this host follow the same storage
+      // layout as ordinary receives. The viewer's `dest` is a hint from an
+      // older build (`~/moLink/clipboard-lazy`) and would ignore a changed
+      // root, so it is replaced here rather than trusted.
+      std::string destination = string_field(j, "dest");
+      if (tag >= 0) {
+        std::string root;
+        if (options_.auth) {
+          root = effective_download_root(options_.auth->settings());
+        }
+        if (root.empty()) root = default_download_root();
+        if (!root.empty()) {
+          std::string remote_id =
+              session->client_id.empty() ? session->peer_ip
+                                         : session->client_id;
+          if (remote_id.empty()) remote_id = "unknown";
+          const std::string day = download_directory(
+              root, remote_id, local_date_string());
+          if (!day.empty()) {
+            destination =
+                path_to_utf8(path_from_utf8(day) / "clipboard");
+          }
+        }
+      }
       diag().log(diag_level::info, "file.offer", std::string(),
                  {{"peer", peer_ip},
                   {"session_id", session->public_id},
                   {"name", string_field(j, "name")},
                   {"bytes", std::to_string(size)},
-                  {"dest", string_field(j, "dest")},
+                  {"dest", destination},
                   {"offset", std::to_string(offset)}});
-      files_->offer(string_field(j, "name"), size, string_field(j, "dest"),
-                    tag, offset, digest, resume);
+      files_->offer(string_field(j, "name"), size, destination, tag, offset,
+                    digest, resume);
       update_file_retry_timer();
     } else if (action == "clipboard-offer") {
       // The viewer copied files on its own machine. Register the descriptors

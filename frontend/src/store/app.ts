@@ -9,6 +9,7 @@ import {
   fetchState,
   fetchUiPreferences,
   postDomain,
+  postDownloadRoot,
   saveAvatar,
   saveUiPreferences,
   postServerEnabled,
@@ -403,6 +404,12 @@ interface AppState {
     ipAllowlist?: string
     portForwardEnabled?: boolean
   }) => Promise<boolean>
+  /// Saves the received-file storage root. Empty restores the platform
+  /// default. Returns the core's error code (`bad_download_root`) and its
+  /// reason so the page can explain a refused path.
+  saveDownloadRoot: (
+    root: string,
+  ) => Promise<{ ok: boolean; code?: string; reason?: string }>
   decideAccessRequest: (id: number, allow: boolean) => Promise<void>
   setLongTermCode: (value: string) => Promise<boolean>
   touchActivity: () => void
@@ -1691,6 +1698,25 @@ export const useAppStore = create<AppState>((set, get) => {
       } catch {
         set({ stateError: 'settings_failed' })
         return false
+      }
+    },
+
+    saveDownloadRoot: async (root) => {
+      const token = get().token
+      if (!token) return { ok: false, code: 'settings_unavailable' }
+      try {
+        const security = await postDownloadRoot(token, root)
+        set({ security, stateError: null })
+        return { ok: true }
+      } catch (error) {
+        const code = error instanceof ApiError ? error.code : ''
+        const reason = error instanceof ApiError ? error.reason : ''
+        set({ stateError: 'settings_failed' })
+        return {
+          ok: false,
+          code: code || 'settings_failed',
+          reason,
+        }
       }
     },
 

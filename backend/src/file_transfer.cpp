@@ -28,6 +28,7 @@
 #include <webapp/uvcpp_web_json.h>
 
 #include "diag_log.h"
+#include "download_root.h"
 #include "directory_listing.h"
 #include "sha256.h"
 #include "util.h"
@@ -170,23 +171,6 @@ std::string clean_file_name(const std::string& name) {
     out.resize(cut);
   }
   return out;
-}
-
-std::string unique_path_in(const fs::path& dir, const std::string& name) {
-  const fs::path name_path = path_from_utf8(name);
-  fs::path candidate = dir / name_path;
-  std::error_code ec;
-  if (!fs::exists(candidate, ec)) return path_to_utf8(candidate);
-  const std::string stem = path_to_utf8(name_path.stem());
-  const std::string extension = path_to_utf8(name_path.extension());
-  for (int i = 1; i < 10000; ++i) {
-    candidate = dir / path_from_utf8(stem + " (" + std::to_string(i) + ")" +
-                                     extension);
-    if (!fs::exists(candidate, ec)) return path_to_utf8(candidate);
-  }
-  return path_to_utf8(dir / path_from_utf8(stem + "-" +
-                                           std::to_string(now_ms()) +
-                                           extension));
 }
 
 /// Resolves the viewer's destination folder. Empty means ~/moLink; `~` is the
@@ -503,6 +487,11 @@ void file_transfer::set_write_policy(write_policy_provider provider) {
   write_policy_provider_ = std::move(provider);
 }
 
+void file_transfer::set_default_destination(
+    default_destination_provider provider) {
+  default_destination_provider_ = std::move(provider);
+}
+
 file_transfer::write_policy file_transfer::current_write_policy() const {
   return write_policy_provider_ ? write_policy_provider_() : write_policy{};
 }
@@ -738,8 +727,15 @@ void file_transfer::offer(const std::string& name, uint64_t size,
     fail("reject", 0, "file is larger than 8 GiB");
     return;
   }
+  // An empty `dest` is the viewer's "use the host's default". The provider is
+  // read here, once: a settings change after the offer must not move an
+  // upload that is already running.
+  std::string destination_text = destination;
+  if (destination_text.empty() && default_destination_provider_) {
+    destination_text = default_destination_provider_();
+  }
   const std::optional<fs::path> dest_path =
-      resolve_destination_path(destination);
+      resolve_destination_path(destination_text);
   if (!dest_path) {
     fail("reject", 0, "could not resolve the receive folder");
     return;
@@ -832,8 +828,12 @@ void file_transfer::mkdir(const std::string& path,
     fail("mkdir", 0, "invalid folder path");
     return;
   }
+  std::string destination_text = destination;
+  if (destination_text.empty() && default_destination_provider_) {
+    destination_text = default_destination_provider_();
+  }
   const std::optional<fs::path> dest_path =
-      resolve_destination_path(destination);
+      resolve_destination_path(destination_text);
   if (!dest_path) {
     fail("mkdir", 0, "could not resolve the receive folder");
     return;
@@ -943,7 +943,7 @@ void file_transfer::complete(uint32_t id, clock::time_point now) {
     return;
   }
   const std::string final_path =
-      unique_path_in(path_from_utf8(item.final_dir), item.name);
+      unique_path(item.final_dir, item.name);
   std::error_code ec;
   fs::rename(path_from_utf8(item.temp_path), path_from_utf8(final_path), ec);
   if (ec) {

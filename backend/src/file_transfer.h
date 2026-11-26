@@ -55,6 +55,13 @@ class file_transfer {
     std::vector<std::string> roots;
   };
   using write_policy_provider = std::function<write_policy()>;
+  /// Resolves the destination folder used when a viewer sends an empty
+  /// `dest`. The host installs this to place files under
+  /// `<download_root>/<remote device id>/<YYYY-MM-DD>`; an empty return keeps
+  /// the historical `~/moLink` default. It is read once per offer, so a
+  /// settings change applies to the next transfer while an in-flight upload
+  /// keeps the folder it already resolved.
+  using default_destination_provider = std::function<std::string()>;
 
   enum class upload_event { accepted, progress, done, failed };
   /// Upload lifecycle for the delayed clipboard path. `tag` is the opaque
@@ -75,6 +82,8 @@ class file_transfer {
   /// Called for every upload and `mkdir`. An empty provider, or a disabled
   /// policy, keeps the historical "any folder" behaviour.
   void set_write_policy(write_policy_provider provider);
+  /// Installs the default destination resolver described above.
+  void set_default_destination(default_destination_provider provider);
 
   /// `name` is a bare file name from the peer; `size` is the declared length.
   /// `destination` is the viewer's chosen folder; empty means ~/moLink. A
@@ -209,6 +218,7 @@ class file_transfer {
   chunk_sender send_chunk_;
   upload_watcher upload_watcher_;
   write_policy_provider write_policy_provider_;
+  default_destination_provider default_destination_provider_;
   std::string session_id_;
   std::map<uint32_t, upload> uploads_;
   std::map<uint32_t, download> downloads_;

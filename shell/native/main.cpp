@@ -2094,6 +2094,17 @@ void on_script_message(WebKitUserContentManager*, WebKitJavascriptResult* result
     } else {
       gtk_window_fullscreen(GTK_WINDOW(window));
     }
+  } else if (action.rfind("open-folder:", 0) == 0) {
+    // Settings -> 存储位置 -> 打开文件夹. The path comes from the page, which
+    // got it from the local core's /api/settings, so it is this machine's.
+    const std::string path = action.substr(std::strlen("open-folder:"));
+    gchar* uri = path.empty() ? nullptr
+                              : g_filename_to_uri(path.c_str(), nullptr, nullptr);
+    if (uri != nullptr) {
+      gtk_show_uri_on_window(GTK_WINDOW(window), uri, GDK_CURRENT_TIME,
+                             nullptr);
+      g_free(uri);
+    }
   } else if (action.rfind("open-url:", 0) == 0 ||
              action.rfind("update-url:", 0) == 0) {
     // Linux packages need the user's package manager, so both actions open

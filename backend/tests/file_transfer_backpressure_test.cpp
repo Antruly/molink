@@ -638,6 +638,61 @@ void test_part_retention_grace() {
   remove_tree(home);
 }
 
+// The host's storage layout: a viewer that sends no `dest` is answered with
+// <root>/<id>/<date>, and a second file of the same name must not overwrite
+// the first. A provider is read once per offer, so a later root change only
+// affects the next transfer.
+void test_default_destination_provider() {
+  namespace fs = std::filesystem;
+  const fs::path home = fresh_home("molink-default-destination-test");
+  const fs::path target = home / "CBM-RPH-3NZ" / "2026-11-26";
+
+  std::vector<std::string> json;
+  const auto accept_chunk = [](uint32_t, uint64_t, const uint8_t*,
+                               std::size_t) { return true; };
+  molink::file_transfer transfer(
+      [&json](std::string value) { json.push_back(std::move(value)); },
+      accept_chunk);
+  transfer.set_default_destination([&target]() { return target.string(); });
+
+  transfer.offer("report.docx", 4, std::string());
+  expect(!json.empty() && json.back().find("\"accept\"") != std::string::npos,
+         "an empty dest is accepted through the default provider");
+  expect(json.back().find(target.string()) != std::string::npos,
+         "the accept reply names the default device/date folder");
+  const uint32_t first = id_in(json.back());
+  transfer.chunk(first, 0,
+                 reinterpret_cast<const uint8_t*>("test"), 4);
+  transfer.complete(first);
+  expect(fs::exists(target / "report.docx"),
+         "the received file lands under <root>/<id>/<date>");
+
+  transfer.offer("report.docx", 4, std::string());
+  const uint32_t second = id_in(json.back());
+  transfer.chunk(second, 0,
+                 reinterpret_cast<const uint8_t*>("next"), 4);
+  transfer.complete(second);
+  expect(fs::exists(target / "report.docx") &&
+             fs::exists(target / "report (1).docx"),
+         "a repeated name becomes (1) instead of overwriting");
+  expect(read_file(target / "report.docx") == "test",
+         "the first file keeps its bytes");
+
+  // Empty return keeps the historical ~/moLink fallback for a caller that has
+  // no provider.
+  json.clear();
+  molink::file_transfer legacy(
+      [&json](std::string value) { json.push_back(std::move(value)); },
+      accept_chunk);
+  legacy.set_default_destination([]() { return std::string(); });
+  legacy.offer("fallback.bin", 2, std::string());
+  expect(json.back().find("\"accept\"") != std::string::npos,
+         "an empty provider result falls back instead of failing");
+
+  std::error_code ec;
+  fs::remove_all(home, ec);
+}
+
 void test_write_sandbox() {
   namespace fs = std::filesystem;
   const fs::path home = fresh_home("molink-write-sandbox-test");
@@ -809,6 +864,7 @@ int main() {
   test_upload_resume_is_byte_identical();
   test_upload_resume_digest();
   test_part_retention_grace();
+  test_default_destination_provider();
   test_write_sandbox();
   test_download_pull_offset();
   std::printf("%d checks, %d failures\n", checks, failures);

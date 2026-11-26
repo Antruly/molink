@@ -174,6 +174,15 @@ export function openLogDirectory(): boolean {
   return true
 }
 
+/// Asks the desktop shell to open an absolute folder in the OS file manager.
+/// A plain browser cannot do this; callers keep the path visible so it can be
+/// copied instead.
+export function openFolder(path: string): boolean {
+  if (!shellInfo.enabled || path === '') return false
+  postShellCommand(`open-folder:${path}`)
+  return true
+}
+
 /// Opens a URL in the system browser (not an in-app window).
 export function openExternal(url: string): void {
   if (!url) return
@@ -212,8 +221,16 @@ export interface ShellDragOutPayload {
 /// plain file picker, so this bridge is the only correct folder picker there.
 export function shellDirectoryPickerCapable(): boolean {
   const target = window as unknown as WebKitWindow
-  return shellInfo.enabled && shellInfo.platform === 'linux' &&
-    Boolean(target.webkit?.messageHandlers?.molink)
+  if (!shellInfo.enabled) return false
+  if (shellInfo.platform === 'linux') {
+    return Boolean(target.webkit?.messageHandlers?.molink)
+  }
+  // The Windows shell answers `pick-directory` with SHBrowseForFolder and
+  // posts the absolute path back as a `molink-directory` DOM event.
+  if (shellInfo.platform === 'windows') {
+    return Boolean(target.chrome?.webview)
+  }
+  return false
 }
 
 /// Asks the shell to open `gtk_file_chooser_dialog_new(... SELECT_FOLDER ...)`.
