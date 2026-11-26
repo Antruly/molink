@@ -4,7 +4,7 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
-VERSION=${VERSION:-0.12.26}
+VERSION=${VERSION:-0.12.27}
 BUILD=${BUILD_DIR:-$ROOT/build/appimage}
 APPDIR="$BUILD/AppDir"
 TOOLS="$ROOT/build/tools"
