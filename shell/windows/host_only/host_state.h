@@ -114,7 +114,7 @@ bool effective_remote_access(const settings_info& settings,
 /// "完整控制" / "仅协助（可输入）" / "仅查看".
 std::string access_policy_text(const std::string& policy);
 
-/// "版本 0.12.24" or "版本 —" when the core has not answered yet.
+/// "版本 0.12.25" or "版本 —" when the core has not answered yet.
 std::string format_version(const std::string& version);
 
 }  // namespace hostui
