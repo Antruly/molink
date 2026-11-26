@@ -107,11 +107,27 @@ const entry kEntries[] = {
 
     // ---- Notification area -------------------------------------------------
     {"tray.show", L"Show moLink", L"显示 moLink"},
+    {"tray.copyId", L"Copy device ID", L"复制设备 ID"},
+    {"tray.autostart", L"Start at login", L"开机自启"},
+    {"tray.closeToTray", L"Close window to tray", L"关闭窗口时隐藏到托盘"},
     {"tray.recent", L"Recent sessions", L"最近会话"},
     {"tray.recentEmpty", L"No recent sessions", L"暂无最近会话"},
     {"tray.exit", L"Exit", L"退出"},
     {"tray.prefilled", L"Filled the form; double-click to connect",
      L"已填入连接框，双击直接连接"},
+    {"tray.backgroundTitle", L"moLink", L"moLink"},
+    {"tray.backgroundBody",
+     L"moLink is running in the background. Double-click the tray icon to "
+     L"open it.",
+     L"已在后台运行。双击托盘图标打开主界面。"},
+    {"tray.autostartStillOn",
+     L"moLink starts automatically at login. Quitting ends this session, but "
+     L"it will still start at the next login.\r\n\r\nQuit anyway?",
+     L"moLink 已设为开机自启。退出只结束本次运行，下次开机仍会自启。\r\n\r\n"
+     L"仍要退出吗？"},
+    {"tray.idCopied", L"Device ID copied", L"已复制设备 ID"},
+    {"tray.idUnavailable", L"The device ID is not ready yet.",
+     L"设备 ID 尚未就绪。"},
 
     // ---- Toasts (shell-only wording where the Web has no key) --------------
     {"toast.connecting", L"Connecting…", L"正在连接中…"},

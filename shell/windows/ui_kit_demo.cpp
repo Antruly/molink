@@ -55,8 +55,12 @@
 #include "ui_strings.h"
 #include "watermark_fade.h"
 
+#include "../common/tray_settings.h"
+
 using namespace molink::ui;
 using namespace molink::net;
+
+namespace tray = molink::tray;
 
 namespace {
 
@@ -560,9 +564,6 @@ struct app_state {
   D2D1_RECT_F hit_recent_card[4]{};
   bool close_prompt = false;
   bool close_remember = false;
-  /// 1 hide to tray (default), 2 close the session tab, 3 quit. 0 (the old
-  /// "ask" value) is migrated to 1 when loaded.
-  int close_behavior = 1;
   D2D1_RECT_F hit_close_panel{}, hit_close_cancel{}, hit_close_tab{},
       hit_close_tray{}, hit_close_remember{};
   /// Watermark proximity fade (U1): the badges and stats bar fade
@@ -582,6 +583,13 @@ struct app_state {
   bool tray_added = false;
   bool quitting = false;
   HICON tray_icon = nullptr;
+  /// --tray: the login launch, which never maps the main window.
+  bool start_hidden = false;
+  /// Real HKCU Run state, and the close rule derived from it.
+  bool autostart = false;
+  bool close_to_tray = false;
+  bool close_to_tray_set = false;
+  bool balloon_seen = false;
   // Right-click menu for the text fields (cut/copy/paste/select all).
   int ctx_field = 0;
   D2D1_RECT_F ctx_panel{}, hit_ctx[4]{};
@@ -732,6 +740,9 @@ constexpr UINT WM_APP_START_CONNECT = WM_APP + 11;
 constexpr UINT kTrayId = 1;
 constexpr UINT kTrayShow = 1;
 constexpr UINT kTrayExit = 2;
+constexpr UINT kTrayCopyId = 3;
+constexpr UINT kTrayAutostart = 4;
+constexpr UINT kTrayCloseToTray = 5;
 /// Recent-session commands occupy kTrayRecentBase + index.
 constexpr UINT kTrayRecentBase = 1000;
 
@@ -744,6 +755,7 @@ struct connect_result {
 void save_theme_mode();
 void show_toast(const std::wstring& text);
 void show_toast(const std::wstring& text, int level);
+void set_clipboard_text(const std::wstring& text);
 void open_diagnostics();
 void draw_diag_panel(float w, float h);
 bool diag_panel_click(float x, float y);
@@ -1430,6 +1442,15 @@ bool looks_like_device_id(const std::wstring& target) {
 
 /// Session/diagnostic log (defined below; used by the core launcher too).
 void native_log(const std::wstring& text);
+
+/// Full path of this executable. Autostart writes it into HKCU\...\Run and the
+/// real-state check compares the stored command against it.
+std::wstring native_exe_path() {
+  wchar_t buffer[32768] = {};
+  const DWORD length = GetModuleFileNameW(
+      nullptr, buffer, static_cast<DWORD>(std::size(buffer)));
+  return length > 0 ? std::wstring(buffer, length) : std::wstring();
+}
 
 std::wstring find_core_exe() {
   if (!g.core_path.empty()) return g.core_path;
@@ -4015,30 +4036,143 @@ void save_theme_mode() {
   RegCloseKey(key);
 }
 
-int load_close_behavior() {
-  DWORD value = 1;
+bool read_ui_dword(const wchar_t* name, DWORD& out) {
+  DWORD value = 0;
   DWORD size = sizeof(value);
-  if (RegGetValueW(HKEY_CURRENT_USER, kUiKey, L"WindowCloseBehavior",
-                   RRF_RT_REG_DWORD, nullptr, &value, &size) ==
-          ERROR_SUCCESS &&
-      value >= 1 && value <= 3) {
-    return static_cast<int>(value);
+  if (RegGetValueW(HKEY_CURRENT_USER, kUiKey, name, RRF_RT_REG_DWORD, nullptr,
+                   &value, &size) != ERROR_SUCCESS) {
+    return false;
   }
-  // The old default was "ask" (0). The native client now mirrors the WebView2
-  // shell: closing the window hides it to the tray and keeps the core alive.
-  return 1;
+  out = value;
+  return true;
 }
 
-void save_close_behavior(int behavior) {
+void write_ui_dword(const wchar_t* name, DWORD value) {
   HKEY key = nullptr;
   if (RegCreateKeyExW(HKEY_CURRENT_USER, kUiKey, 0, nullptr, 0, KEY_SET_VALUE,
                       nullptr, &key, nullptr) != ERROR_SUCCESS) {
     return;
   }
-  const DWORD value = static_cast<DWORD>(behavior);
-  RegSetValueExW(key, L"WindowCloseBehavior", 0, REG_DWORD,
+  RegSetValueExW(key, name, 0, REG_DWORD,
                  reinterpret_cast<const BYTE*>(&value), sizeof(value));
   RegCloseKey(key);
+}
+
+/// `close_to_tray` is an explicit user choice; before it is ever set the
+/// native shell follows the real autostart state. The old three-value
+/// WindowCloseBehavior is migrated once (1 hide, 3 quit, 2 "close tab" no
+/// longer exists and becomes "follow autostart").
+bool load_close_to_tray_override(bool& value) {
+  DWORD raw = 0;
+  if (read_ui_dword(L"CloseToTray", raw)) {
+    value = raw != 0;
+    return true;
+  }
+  if (read_ui_dword(L"WindowCloseBehavior", raw)) {
+    if (raw == 1) {
+      value = true;
+      return true;
+    }
+    if (raw == 3) {
+      value = false;
+      return true;
+    }
+  }
+  return false;
+}
+
+void save_close_to_tray_override(bool value) {
+  write_ui_dword(L"CloseToTray", value ? 1 : 0);
+}
+
+bool load_balloon_seen() {
+  DWORD raw = 0;
+  return read_ui_dword(L"TrayBalloonSeen", raw) && raw != 0;
+}
+
+void save_balloon_seen() { write_ui_dword(L"TrayBalloonSeen", 1); }
+
+const std::wstring& native_run_key() {
+  static const std::wstring path = wide_of(tray::windows_run_key());
+  return path;
+}
+
+/// The real autostart state: the Run value must launch this executable.
+bool read_native_autostart() {
+  HKEY key = nullptr;
+  if (RegOpenKeyExW(HKEY_CURRENT_USER, native_run_key().c_str(), 0,
+                    KEY_QUERY_VALUE, &key) != ERROR_SUCCESS) {
+    return false;
+  }
+  wchar_t buffer[32768] = {};
+  DWORD size = sizeof(buffer);
+  DWORD type = 0;
+  const LSTATUS status = RegQueryValueExW(
+      key, wide_of(tray::windows_run_value_name()).c_str(), nullptr, &type,
+      reinterpret_cast<BYTE*>(buffer), &size);
+  RegCloseKey(key);
+  if (status != ERROR_SUCCESS ||
+      (type != REG_SZ && type != REG_EXPAND_SZ)) {
+    return false;
+  }
+  std::wstring value(buffer, size / sizeof(wchar_t));
+  while (!value.empty() && value.back() == L'\0') value.pop_back();
+  return tray::windows_run_command_matches(utf8_of(value),
+                                           utf8_of(native_exe_path()));
+}
+
+bool write_native_autostart(bool enabled) {
+  HKEY key = nullptr;
+  if (RegCreateKeyExW(HKEY_CURRENT_USER, native_run_key().c_str(), 0, nullptr,
+                      0, KEY_SET_VALUE | KEY_QUERY_VALUE, nullptr, &key,
+                      nullptr) != ERROR_SUCCESS) {
+    return false;
+  }
+  const std::wstring name = wide_of(tray::windows_run_value_name());
+  bool ok = false;
+  if (enabled) {
+    const std::wstring command =
+        wide_of(tray::windows_run_command(utf8_of(native_exe_path())));
+    ok = RegSetValueExW(
+             key, name.c_str(), 0, REG_SZ,
+             reinterpret_cast<const BYTE*>(command.c_str()),
+             static_cast<DWORD>((command.size() + 1) * sizeof(wchar_t))) ==
+         ERROR_SUCCESS;
+  } else {
+    const LSTATUS status = RegDeleteValueW(key, name.c_str());
+    ok = status == ERROR_SUCCESS || status == ERROR_FILE_NOT_FOUND;
+  }
+  RegCloseKey(key);
+  return ok;
+}
+
+void refresh_native_tray_settings() {
+  g.autostart = read_native_autostart();
+  g.close_to_tray_set = load_close_to_tray_override(g.close_to_tray);
+  g.close_to_tray = tray::effective_close_to_tray(
+      g.autostart, g.close_to_tray_set, g.close_to_tray);
+  g.balloon_seen = load_balloon_seen();
+}
+
+void set_native_autostart(bool enabled) {
+  if (!write_native_autostart(enabled)) {
+    native_log(L"shell.tray autostart write failed");
+    return;
+  }
+  g.autostart = enabled;
+  if (!g.close_to_tray_set) {
+    g.close_to_tray = tray::default_close_to_tray(enabled);
+  }
+}
+
+void set_native_close_to_tray(bool enabled) {
+  g.close_to_tray_set = true;
+  g.close_to_tray = enabled;
+  save_close_to_tray_override(enabled);
+}
+
+void log_native_tray(const char* action) {
+  native_log(wide_of(tray::log_line(action, g.autostart, g.close_to_tray)));
 }
 
 // ---------------------------------------------------------------------------
@@ -4081,11 +4215,61 @@ void remove_tray_icon() {
   g.tray_added = false;
 }
 
+/// One notification. Used for the first "running in the background" balloon
+/// and for copy feedback while the window is hidden.
+void show_native_balloon(const wchar_t* body) {
+  if (!add_tray_icon()) return;
+  NOTIFYICONDATAW data{};
+  data.cbSize = sizeof(data);
+  data.hWnd = g.window;
+  data.uID = kTrayId;
+  data.uFlags = NIF_INFO;
+  data.dwInfoFlags = NIIF_INFO;
+  data.uTimeout = 5000;
+  wcscpy_s(data.szInfoTitle, L"moLink");
+  wcscpy_s(data.szInfo, body != nullptr ? body : L"");
+  Shell_NotifyIconW(NIM_MODIFY, &data);
+}
+
+void maybe_show_native_balloon() {
+  if (g.balloon_seen) return;
+  g.balloon_seen = true;
+  save_balloon_seen();
+  show_native_balloon(trc("tray.backgroundBody"));
+}
+
+/// The tray menu is not the page: refresh the cached identity if needed, then
+/// copy the same id the home card shows.
+void copy_device_id_from_tray() {
+  if (g.device_id.empty()) load_device_identity();
+  if (g.device_id.empty()) {
+    show_native_balloon(trc("tray.idUnavailable"));
+    return;
+  }
+  set_clipboard_text(g.device_id);
+  show_native_balloon(trc("tray.idCopied"));
+}
+
+/// Tray Exit always exits. An autostart entry survives it, so warn first.
+void request_native_quit() {
+  if (g.quitting) return;
+  if (g.autostart) {
+    if (MessageBoxW(g.window, trc("tray.autostartStillOn"), L"moLink",
+                    MB_ICONINFORMATION | MB_OKCANCEL) != IDOK) {
+      return;
+    }
+  }
+  log_native_tray("quit");
+  g.quitting = true;
+  DestroyWindow(g.window);
+}
+
 void show_main_window() {
   ShowWindow(g.window, SW_SHOW);
   if (IsIconic(g.window)) ShowWindow(g.window, SW_RESTORE);
   SetForegroundWindow(g.window);
   remove_tray_icon();
+  log_native_tray("show");
 }
 
 /// Hide the window and leave the app running in the notification area, like
@@ -4095,6 +4279,8 @@ void minimize_to_tray() {
   // on the taskbar instead of hiding it forever.
   if (add_tray_icon()) {
     ShowWindow(g.window, SW_HIDE);
+    maybe_show_native_balloon();
+    log_native_tray("hide");
   } else {
     ShowWindow(g.window, SW_MINIMIZE);
   }
@@ -4120,6 +4306,7 @@ void show_tray_menu() {
   HMENU menu = CreatePopupMenu();
   if (menu == nullptr) return;
   AppendMenuW(menu, MF_STRING, kTrayShow, trc("tray.show"));
+  AppendMenuW(menu, MF_STRING, kTrayCopyId, trc("tray.copyId"));
 
   HMENU recent = CreatePopupMenu();
   if (recent != nullptr) {
@@ -4139,6 +4326,12 @@ void show_tray_menu() {
     AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(recent),
                 trc("tray.recent"));
   }
+  AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+  AppendMenuW(menu, MF_STRING | (g.autostart ? MF_CHECKED : MF_UNCHECKED),
+              kTrayAutostart, trc("tray.autostart"));
+  AppendMenuW(menu,
+              MF_STRING | (g.close_to_tray ? MF_CHECKED : MF_UNCHECKED),
+              kTrayCloseToTray, trc("tray.closeToTray"));
   AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
   AppendMenuW(menu, MF_STRING, kTrayExit, trc("tray.exit"));
   SetMenuDefaultItem(menu, kTrayShow, FALSE);
@@ -8412,14 +8605,12 @@ void draw_settings_modal(float w, float h) {
     settings_head(icon::close, trc("window.closeBehavior"), x, y);
     y += 22;
     y = settings_hint(x, y, cw, trc("window.closeBehaviorHint")) + 6;
-    // Persisted values are 1 hide, 2 close tab, 3 quit; the legacy 0 ("ask")
-    // is shown as the current default.
-    const int close_index =
-        g.close_behavior == 2 ? 1 : (g.close_behavior == 3 ? 2 : 0);
-    const wchar_t* close_labels[3] = {trc("window.hideToTray"),
-                                      trc("window.closeTab"),
+    // The rule is binary now: hide to tray (default while autostart is on) or
+    // exit. Choosing here stores an explicit close_to_tray override.
+    const int close_index = g.close_to_tray ? 0 : 1;
+    const wchar_t* close_labels[2] = {trc("window.hideToTray"),
                                       trc("window.quit")};
-    settings_segment(x, y, cw, close_labels, nullptr, 3, close_index,
+    settings_segment(x, y, cw, close_labels, nullptr, 2, close_index,
                      g.hit_seg_close, hv_set_seg_close0);
     y += 36;
   } else if (section_now == 1) {
@@ -8932,10 +9123,9 @@ void settings_click(float x, float y) {
           return;
         }
       }
-      for (int i = 0; i < 3; ++i) {
+      for (int i = 0; i < 2; ++i) {
         if (inside(g.hit_seg_close[i], x, y)) {
-          g.close_behavior = i == 0 ? 1 : (i == 1 ? 2 : 3);
-          save_close_behavior(g.close_behavior);
+          set_native_close_to_tray(i == 0);
           show_toast(tr("settings.saved"));
           return;
         }
@@ -10337,13 +10527,12 @@ bool close_prompt_click(float x, float y) {
     return true;
   }
   if (inside(g.hit_close_tab, x, y)) {
-    if (g.close_remember) save_close_behavior(2);
     g.close_prompt = false;
     close_session_tab();
     return true;
   }
   if (inside(g.hit_close_tray, x, y)) {
-    if (g.close_remember) save_close_behavior(1);
+    if (g.close_remember) set_native_close_to_tray(true);
     g.close_prompt = false;
     minimize_to_tray();
     return true;
@@ -11346,39 +11535,28 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
     case WM_ACTIVATE:
       if (LOWORD(wparam) == WA_INACTIVE) release_remote_keys();
       break;
+    case WM_SYSCOMMAND:
+      // Every minimise path (system menu, Win+Down, accessibility tools) goes
+      // to the tray, not the taskbar.
+      if ((wparam & 0xFFF0) == SC_MINIMIZE) {
+        minimize_to_tray();
+        return 0;
+      }
+      break;
     case WM_CLOSE:
-      // Default: hide to the notification area and keep the core (and any
-      // session) alive, like the WebView2 shell. 设置 → 常规 can switch the
-      // close button to "close the session tab" or to a real quit.
+      // close_to_tray follows autostart until the user changes it. Off means
+      // a real exit: this shell only terminates the core it started itself.
       if (g.quitting) {
         DestroyWindow(window);
         return 0;
       }
-      if (g.close_behavior == 3) {
-        g.quitting = true;
-        DestroyWindow(window);
-        return 0;
-      }
-      if (g.close_behavior == 1) {
+      if (g.close_to_tray) {
         minimize_to_tray();
         return 0;
       }
-      if (!g.session_open) {
-        // "Close the session tab" with no tab: keep the app in the tray; the
-        // tray menu still offers a real exit.
-        minimize_to_tray();
-        return 0;
-      }
-      if (g.close_behavior == 2) {
-        close_session_tab();
-        InvalidateRect(window, nullptr, FALSE);
-        return 0;
-      }
-      // Legacy "ask" value (0) from a pre-batch-9 store.
-      close_ctx_menu();
-      g.close_prompt = true;
-      g.close_remember = false;
-      InvalidateRect(window, nullptr, FALSE);
+      log_native_tray("quit");
+      g.quitting = true;
+      DestroyWindow(window);
       return 0;
     case WM_NCCALCSIZE:
       if (wparam == TRUE) return 0;  // no native frame
@@ -12280,7 +12458,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
         }
       }
       if (!g.immersive && inside(g.hit_win[0], x, y)) {
-        ShowWindow(window, SW_MINIMIZE);
+        minimize_to_tray();
         return 0;
       }
       if (!g.immersive && inside(g.hit_win[1], x, y)) {
@@ -13013,9 +13191,20 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
         show_main_window();
         return 0;
       }
+      if (LOWORD(wparam) == kTrayCopyId) {
+        copy_device_id_from_tray();
+        return 0;
+      }
+      if (LOWORD(wparam) == kTrayAutostart) {
+        set_native_autostart(!g.autostart);
+        return 0;
+      }
+      if (LOWORD(wparam) == kTrayCloseToTray) {
+        set_native_close_to_tray(!g.close_to_tray);
+        return 0;
+      }
       if (LOWORD(wparam) == kTrayExit) {
-        g.quitting = true;
-        DestroyWindow(window);
+        request_native_quit();
         return 0;
       }
       if (LOWORD(wparam) >= kTrayRecentBase) {
@@ -13095,7 +13284,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   g.pinned = load_pinned();
   g.bar_open = g.pinned;
   g.mode = static_cast<app_state::theme_mode>(load_theme_mode());
-  g.close_behavior = load_close_behavior();
+  refresh_native_tray_settings();
   {
     const std::wstring language_path = ui_language_path();
     if (!language_path.empty()) {
@@ -13149,6 +13338,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     }
     if (wcscmp(__wargv[i], L"--immersive") == 0) g.immersive = true;
     if (wcscmp(__wargv[i], L"--standalone") == 0) standalone = true;
+    if (wcscmp(__wargv[i], L"--tray") == 0) {
+      // Autostart/login launch: run in the notification area only.
+      g.start_hidden = true;
+    }
     if (wcscmp(__wargv[i], L"--proxy") == 0) g.proxy_mode = true;
     if (wcscmp(__wargv[i], L"--send-file") == 0 && i + 1 < __argc) {
       g.send_after_connect = __wargv[++i];
@@ -13193,8 +13386,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
           existing = FindWindowW(L"moLinkUiKitDemo", nullptr);
         }
         if (existing != nullptr) {
-          ShowWindow(existing, IsIconic(existing) ? SW_RESTORE : SW_SHOW);
-          SetForegroundWindow(existing);
+          if (!g.start_hidden) {
+            ShowWindow(existing, IsIconic(existing) ? SW_RESTORE : SW_SHOW);
+            SetForegroundWindow(existing);
+          }
           break;
         }
         Sleep(100);
@@ -13290,10 +13485,17 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   const int window_y = work_area.top + (work_h - window_h) / 2;
   HWND window = CreateWindowExW(
       0, cls.lpszClassName, L"moLink \x2014 native UI kit",
-      WS_POPUP | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_VISIBLE,
+      WS_POPUP | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX,
       window_x, window_y, window_w, window_h, nullptr, nullptr, instance,
       nullptr);
   if (window == nullptr) return 1;
+  if (g.start_hidden) {
+    add_tray_icon();
+    maybe_show_native_balloon();
+    log_native_tray("hide");
+  } else {
+    ShowWindow(window, SW_SHOW);
+  }
   MSG message{};
   bool keys_remote = false;
   while (GetMessageW(&message, nullptr, 0, 0) > 0) {

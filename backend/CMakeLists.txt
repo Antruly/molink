@@ -1403,6 +1403,23 @@ set_target_properties(molink-core-ui-strings-test PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 add_test(NAME ui_strings COMMAND molink-core-ui-strings-test)
 
+# Tray / autostart rules shared by the three desktop shells: the Windows Run
+# value format and match, the Linux .desktop entry and its enabled check, the
+# close_to_tray default, and the log line. Header-only, so the shells and this
+# test compile the exact same code. No Win32 or GTK.
+add_executable(molink-core-tray-settings-test
+  tests/tray_settings_test.cpp)
+target_include_directories(molink-core-tray-settings-test PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../shell/common")
+set_target_properties(molink-core-tray-settings-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
+  string(TOUPPER "${uvp_config}" uvp_config_upper)
+  set_target_properties(molink-core-tray-settings-test PROPERTIES
+    "RUNTIME_OUTPUT_DIRECTORY_${uvp_config_upper}" "${CMAKE_BINARY_DIR}")
+endforeach()
+add_test(NAME tray_settings COMMAND molink-core-tray-settings-test)
+
 # Watermark proximity geometry and the 28 px / 80 ms fade rules, shared with
 # the Windows painter so they can be checked without a display.
 add_executable(molink-core-watermark-fade-test
