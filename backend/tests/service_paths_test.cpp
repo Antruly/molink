@@ -9,7 +9,9 @@
 
 namespace {
 
+using molink::service_paths::default_port_for;
 using molink::service_paths::global_object_name;
+using molink::service_paths::is_core_path_in_dir;
 using molink::service_paths::is_legacy_service;
 using molink::service_paths::paths;
 using molink::service_paths::resolve;
@@ -31,6 +33,14 @@ void expect_eq(const std::wstring& actual, const std::wstring& expected,
   ++failures;
   std::fprintf(stderr, "FAIL: %s\n  expected: %ls\n  actual:   %ls\n",
                description, expected.c_str(), actual.c_str());
+}
+
+void expect_eq(int actual, int expected, const char* description) {
+  ++checks;
+  if (actual == expected) return;
+  ++failures;
+  std::fprintf(stderr, "FAIL: %s\n  expected: %d\n  actual:   %d\n",
+               description, expected, actual);
 }
 
 bool starts_with(const std::wstring& value, const std::wstring& prefix) {
@@ -62,6 +72,10 @@ int main() {
             "legacy core.path stays put");
   expect_eq(legacy.core_pid, L"C:\\ProgramData\\moLink\\service\\core.pid",
             "legacy core.pid stays put");
+  expect_eq(legacy.core_port, L"C:\\ProgramData\\moLink\\service\\core.port",
+            "legacy core.port is next to core.path");
+  expect_eq(legacy.default_port, 28418,
+            "the full product keeps port 28418");
   expect_eq(legacy.supervisor_mutex, L"Global\\moLinkCoreSupervisor",
             "legacy supervisor mutex name is unchanged");
   expect_eq(legacy.helper_stop_event, L"Global\\moLinkHelperStop",
@@ -86,6 +100,9 @@ int main() {
   expect_eq(host.core_pid,
             L"C:\\ProgramData\\moLinkHost\\service\\core.pid",
             "moLinkHost core.pid is in its own directory");
+  expect_eq(host.core_port,
+            L"C:\\ProgramData\\moLinkHost\\service\\core.port",
+            "moLinkHost core.port is in its own directory");
   expect_eq(host.supervisor_mutex, L"Global\\moLinkHostCoreSupervisor",
             "moLinkHost supervisor mutex carries the service name");
   expect_eq(host.helper_stop_event, L"Global\\moLinkHostHelperStop",
@@ -140,6 +157,56 @@ int main() {
             "object names do not depend on ProgramData");
   expect(missing.service_name == L"moLinkHost",
          "the service name survives an empty ProgramData");
+
+  // 6. The host-only product must not start on the full product's port. Its
+  //    starting port is stable (two helpers derive the same value) and inside
+  //    the isolated block.
+  expect(default_port_for(L"moLinkSession") == 28418,
+         "the legacy service's port is 28418");
+  expect(default_port_for(L"") == 28418,
+         "an empty service name keeps 28418");
+  const int host_port = default_port_for(L"moLinkHost");
+  expect(host_port != 28418, "moLinkHost does not start on 28418");
+  expect(host_port >= 28419 && host_port <= 28430,
+         "moLinkHost starts inside the isolated port block");
+  expect(default_port_for(L"moLinkHost") == host_port,
+         "the host-only port is stable across calls");
+  expect(host.default_port == host_port,
+         "resolve() reports the same default port");
+  expect(default_port_for(L"molinkhost") == host_port,
+         "the port mapping is case-insensitive");
+  const int alpha_port = default_port_for(L"moLinkAlpha");
+  expect(alpha_port >= 28419 && alpha_port <= 28430,
+         "another service also starts inside the isolated block");
+  expect(alpha_port != 28418, "another service does not start on 28418");
+
+  // 7. Ownership: a discovered core is ours only when its executable is
+  //    <this service's install dir>\molink-core.exe. The comparison must work
+  //    on Linux, so it is plain case-insensitive string matching.
+  const std::wstring host_dir = L"C:\\Program Files\\moLinkHost";
+  const std::wstring full_dir = L"C:\\Program Files\\moLink";
+  expect(is_core_path_in_dir(host_dir + L"\\molink-core.exe", host_dir),
+         "the host-only install's core belongs to moLinkHost");
+  expect(!is_core_path_in_dir(full_dir + L"\\molink-core.exe", host_dir),
+         "the full product's core does not belong to moLinkHost");
+  expect(!is_core_path_in_dir(host_dir + L"\\molink-core.exe", full_dir),
+         "the ownership check is not symmetric");
+  expect(is_core_path_in_dir(L"c:\\program files\\MOLINKHOST\\MOLINK-CORE.EXE",
+                             host_dir),
+         "paths are compared case-insensitively");
+  expect(is_core_path_in_dir(L"C:/Program Files/moLinkHost/molink-core.exe",
+                             host_dir),
+         "either separator style is accepted");
+  expect(is_core_path_in_dir(host_dir + L"\\molink-core.exe", host_dir + L"\\"),
+         "a trailing separator on the install dir is ignored");
+  expect(!is_core_path_in_dir(host_dir + L"\\sub\\molink-core.exe", host_dir),
+         "a core in a subdirectory is not the service's core");
+  expect(!is_core_path_in_dir(host_dir + L"\\molink-helper.exe", host_dir),
+         "a different executable is not the service's core");
+  expect(!is_core_path_in_dir(std::wstring(), host_dir),
+         "an unqueryable process path is not assumed to be ours");
+  expect(!is_core_path_in_dir(host_dir + L"\\molink-core.exe", std::wstring()),
+         "an empty install dir matches nothing");
 
   std::printf("service_paths: %d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;

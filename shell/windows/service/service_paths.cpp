@@ -19,6 +19,28 @@ std::wstring join(std::wstring_view directory, std::wstring_view name) {
   return out;
 }
 
+wchar_t ascii_lower(wchar_t value) {
+  return value >= L'A' && value <= L'Z' ? value - L'A' + L'a' : value;
+}
+
+/// Windows file names are case-insensitive, so compare the portability-safe
+/// way here rather than dragging in a platform header.
+bool equals_ignore_case(std::wstring_view left, std::wstring_view right) {
+  if (left.size() != right.size()) return false;
+  for (std::size_t i = 0; i < left.size(); ++i) {
+    if (ascii_lower(left[i]) != ascii_lower(right[i])) return false;
+  }
+  return true;
+}
+
+std::wstring normalized_separators(std::wstring_view path) {
+  std::wstring out(path);
+  for (wchar_t& ch : out) {
+    if (ch == L'/') ch = L'\\';
+  }
+  return out;
+}
+
 }  // namespace
 
 bool is_legacy_service(std::wstring_view service_name) {
@@ -42,6 +64,39 @@ std::wstring global_object_name(std::wstring_view service_name,
   return name;
 }
 
+int default_port_for(std::wstring_view service_name) {
+  if (is_legacy_service(service_name)) return kLegacyPort;
+  // FNV-1a over the lower-cased service name. Only stability matters: the
+  // helper probes forward if another service already owns the first choice.
+  std::uint32_t hash = 2166136261u;
+  for (wchar_t ch : service_name) {
+    hash ^= static_cast<std::uint32_t>(ascii_lower(ch)) & 0xFFFFu;
+    hash *= 16777619u;
+  }
+  const int span = kLastIsolatedPort - kFirstIsolatedPort + 1;
+  return kFirstIsolatedPort +
+         static_cast<int>(hash % static_cast<std::uint32_t>(span));
+}
+
+bool is_core_path_in_dir(std::wstring_view core_path,
+                         std::wstring_view directory) {
+  if (core_path.empty() || directory.empty()) return false;
+  std::wstring dir(directory);
+  // A trailing separator is common when the path was built by appending one;
+  // strip it so "C:\Program Files\moLinkHost\" and "...\moLinkHost" match.
+  while (dir.size() > 1 && (dir.back() == L'\\' || dir.back() == L'/')) {
+    dir.pop_back();
+  }
+  if (dir.empty()) return false;
+  std::wstring expected = dir;
+  if (expected.back() != L'\\' && expected.back() != L'/') {
+    expected.push_back(L'\\');
+  }
+  expected.append(L"molink-core.exe");
+  return equals_ignore_case(normalized_separators(core_path),
+                            normalized_separators(expected));
+}
+
 paths resolve(std::wstring_view program_data, std::wstring_view service_name) {
   paths result;
   result.service_name = is_legacy_service(service_name)
@@ -63,7 +118,9 @@ paths resolve(std::wstring_view program_data, std::wstring_view service_name) {
     result.helper_log = join(result.data_dir, L"helper.log");
     result.core_pid = join(result.data_dir, L"core.pid");
     result.core_path_hint = join(result.data_dir, L"core.path");
+    result.core_port = join(result.data_dir, L"core.port");
   }
+  result.default_port = default_port_for(service_name);
 
   // The object names do not depend on ProgramData: a service with an unset
   // environment still has to create and open its own events and mutex.

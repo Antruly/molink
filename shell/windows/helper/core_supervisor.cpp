@@ -20,6 +20,9 @@
 
 #include "core_supervisor.h"
 
+// winsock2.h must precede windows.h; WIN32_LEAN_AND_MEAN keeps the latter
+// from pulling in the old winsock.h that would conflict.
+#include <winsock2.h>
 #include <windows.h>
 #include <tlhelp32.h>
 #include <userenv.h>
@@ -32,6 +35,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -63,6 +67,19 @@ void write_helper_log(const std::string& line) {
 
 void write_service_log(const std::string& line) {
   append_line(g_paths.service_log, line);
+}
+
+std::string utf8_text(const std::wstring& value) {
+  if (value.empty()) return std::string();
+  const int size = WideCharToMultiByte(CP_UTF8, 0, value.data(),
+                                       static_cast<int>(value.size()),
+                                       nullptr, 0, nullptr, nullptr);
+  if (size <= 0) return std::string();
+  std::string out(static_cast<std::size_t>(size), '\0');
+  WideCharToMultiByte(CP_UTF8, 0, value.data(),
+                      static_cast<int>(value.size()), out.data(), size,
+                      nullptr, nullptr);
+  return out;
 }
 
 bool enable_privilege(const wchar_t* name) {
@@ -144,38 +161,150 @@ std::wstring join_path(const std::wstring& dir, const wchar_t* name) {
   return path.wstring();
 }
 
-/// Where molink-core.exe lives. `core.path` is written by the service
-/// installer so a package that keeps the core outside the service directory
-/// still works; the environment and conventional install locations follow.
-std::wstring resolve_core_path() {
-  std::vector<std::wstring> candidates;
+std::wstring parent_dir(const std::wstring& path) {
+  if (path.empty()) return std::wstring();
+  return fs::path(path).parent_path().wstring();
+}
+
+/// Directories this service considers its own. The core normally sits next to
+/// the packaged service (`core.path`, written by the installer), while the
+/// running helper is copied to the service data directory; the environment
+/// override is honoured because start_core honours it too.
+///
+/// The full product keeps its historical fallbacks (parent directories and
+/// Program Files\moLink) so an upgrade still finds an old layout. The
+/// host-only product must not: falling back to Program Files\moLink would make
+/// it launch the full product's core when its own core is missing.
+std::vector<std::wstring> core_directories() {
+  std::vector<std::wstring> dirs;
+  auto add = [&dirs](std::wstring dir) {
+    while (dir.size() > 1 && (dir.back() == L'\\' || dir.back() == L'/')) {
+      dir.pop_back();
+    }
+    if (dir.empty()) return;
+    for (const std::wstring& existing : dirs) {
+      if (_wcsicmp(existing.c_str(), dir.c_str()) == 0) return;
+    }
+    dirs.push_back(std::move(dir));
+  };
+
   const std::wstring hint = read_first_line(g_paths.core_path_hint);
-  if (!hint.empty()) candidates.push_back(hint);
+  if (!hint.empty()) add(parent_dir(hint));
   const std::wstring env = trim(env_var(L"MOLINK_CORE"));
-  if (!env.empty()) candidates.push_back(env);
+  if (!env.empty()) add(parent_dir(env));
 
   const std::wstring dir = exe_dir();
   if (!dir.empty()) {
-    candidates.push_back(join_path(dir, kCoreExeName));
-    fs::path parent(dir);
-    parent = parent.parent_path();
-    candidates.push_back(join_path(parent.wstring(), kCoreExeName));
-    fs::path grandparent(parent);
-    grandparent = grandparent.parent_path();
-    candidates.push_back(join_path(grandparent.wstring(), kCoreExeName));
-  }
-  for (const wchar_t* base :
-       {L"ProgramFiles", L"ProgramW6432", L"ProgramFiles(x86)"}) {
-    const std::wstring root = env_var(base);
-    if (!root.empty()) {
-      candidates.push_back(join_path(join_path(root, L"moLink"),
-                                     kCoreExeName));
+    add(dir);
+    if (molink::service_paths::is_legacy_service(g_paths.service_name)) {
+      const std::wstring parent = parent_dir(dir);
+      add(parent);
+      add(parent_dir(parent));
+      for (const wchar_t* base :
+           {L"ProgramFiles", L"ProgramW6432", L"ProgramFiles(x86)"}) {
+        const std::wstring root = env_var(base);
+        if (!root.empty()) add(join_path(root, L"moLink"));
+      }
     }
   }
-  for (const std::wstring& candidate : candidates) {
+  return dirs;
+}
+
+bool path_is_own_core(const std::wstring& path,
+                      const std::vector<std::wstring>& own_dirs) {
+  if (path.empty()) return false;
+  for (const std::wstring& dir : own_dirs) {
+    if (molink::service_paths::is_core_path_in_dir(path, dir)) return true;
+  }
+  return false;
+}
+
+/// Where molink-core.exe lives. `core.path` is written by the service
+/// installer so a package that keeps the core outside the service directory
+/// still works; the environment and (for the full product) conventional
+/// install locations follow.
+std::wstring resolve_core_path() {
+  // The hint and the environment variable name an executable directly (the
+  // installer writes ...\molink-core.exe), so honour them verbatim before
+  // looking for the conventional name in each directory.
+  const std::wstring hint = read_first_line(g_paths.core_path_hint);
+  if (!hint.empty() && file_exists(hint)) return hint;
+  const std::wstring env = trim(env_var(L"MOLINK_CORE"));
+  if (!env.empty() && file_exists(env)) return env;
+  for (const std::wstring& dir : core_directories()) {
+    const std::wstring candidate = join_path(dir, kCoreExeName);
     if (file_exists(candidate)) return candidate;
   }
   return std::wstring();
+}
+
+/// The full path of a running process, or empty when the caller may not query
+/// it. Callers must not guess ownership from an empty path.
+std::wstring process_image_path(DWORD pid) {
+  if (pid == 0) return std::wstring();
+  HANDLE process =
+      OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+  if (process == nullptr) return std::wstring();
+  wchar_t buffer[32768] = {};
+  DWORD size = static_cast<DWORD>(std::size(buffer));
+  const BOOL ok = QueryFullProcessImageNameW(process, 0, buffer, &size);
+  CloseHandle(process);
+  if (!ok || size == 0) return std::wstring();
+  return std::wstring(buffer, size);
+}
+
+/// Whether the helper can bind `port` on all interfaces. The core binds
+/// 0.0.0.0, so a loopback-only probe would give a false positive.
+bool tcp_port_available(int port) {
+  static std::once_flag winsock_once;
+  static bool winsock_ready = false;
+  std::call_once(winsock_once, [] {
+    WSADATA data{};
+    winsock_ready = WSAStartup(MAKEWORD(2, 2), &data) == 0;
+  });
+  if (!winsock_ready) return false;
+
+  SOCKET probe = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+  if (probe == INVALID_SOCKET) return false;
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(INADDR_ANY);
+  address.sin_port = htons(static_cast<unsigned short>(port));
+  const int result =
+      bind(probe, reinterpret_cast<sockaddr*>(&address), sizeof(address));
+  const int error = result == 0 ? 0 : WSAGetLastError();
+  closesocket(probe);
+  if (result != 0) {
+    write_helper_log("core.port busy port=" + std::to_string(port) +
+                     " error=" + std::to_string(error));
+    return false;
+  }
+  return true;
+}
+
+/// Pick the first bindable port at or after this service's default. The
+/// full product is not port-probed: it keeps its historical 28418 behaviour.
+bool choose_core_port(int& port) {
+  const int span = molink::service_paths::kLastIsolatedPort -
+                   molink::service_paths::kFirstIsolatedPort + 1;
+  const int start = g_paths.default_port;
+  constexpr int kAttempts = 5;
+  for (int attempt = 0; attempt < kAttempts; ++attempt) {
+    const int candidate = molink::service_paths::kFirstIsolatedPort +
+                          ((start - molink::service_paths::kFirstIsolatedPort +
+                            attempt) %
+                           span);
+    if (!tcp_port_available(candidate)) continue;
+    port = candidate;
+    write_helper_log("core.port selected port=" + std::to_string(port) +
+                     " service=" + utf8_text(g_paths.service_name));
+    return true;
+  }
+  write_helper_log("core.port unavailable service=" +
+                   utf8_text(g_paths.service_name) + " starts_at=" +
+                   std::to_string(start) + " attempts=" +
+                   std::to_string(kAttempts));
+  return false;
 }
 
 DWORD own_session_id() {
@@ -186,18 +315,32 @@ DWORD own_session_id() {
 
 DWORD active_console_session() { return WTSGetActiveConsoleSessionId(); }
 
-/// The first running molink-core.exe, if any. A previous core may still be
-/// around for a second after its helper was killed; scanning for the image
-/// name catches that as well as a core started by the desktop shell.
-DWORD find_existing_core(DWORD exclude_pid, DWORD only_session,
-                         bool* scanned = nullptr) {
-  if (scanned != nullptr) *scanned = false;
+struct core_candidate {
+  bool scanned = false;
+  DWORD pid = 0;
+  std::wstring path;
+};
+
+/// The first running molink-core.exe this service may adopt, if any. A
+/// previous core may still be around for a second after its helper was
+/// killed; scanning for the image name catches that as well as a core started
+/// by the desktop shell.
+///
+/// `require_own` is the ownership check that keeps the host-only helper from
+/// adopting the full product's core: the executable's full path must be
+/// <one of own_dirs>\molink-core.exe. When the path cannot be queried the
+/// candidate is skipped rather than assumed to be ours. The full product
+/// passes false to preserve its historical "reuse whatever core is running"
+/// behaviour.
+core_candidate find_existing_core(DWORD exclude_pid, DWORD only_session,
+                                  const std::vector<std::wstring>& own_dirs,
+                                  bool require_own, bool log_candidates) {
+  core_candidate result;
   HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-  if (snapshot == INVALID_HANDLE_VALUE) return 0;
-  if (scanned != nullptr) *scanned = true;
+  if (snapshot == INVALID_HANDLE_VALUE) return result;
+  result.scanned = true;
   PROCESSENTRY32W entry{};
   entry.dwSize = sizeof(entry);
-  DWORD found = 0;
   if (Process32FirstW(snapshot, &entry)) {
     do {
       if (entry.th32ProcessID == 0 ||
@@ -213,12 +356,24 @@ DWORD find_existing_core(DWORD exclude_pid, DWORD only_session,
           continue;
         }
       }
-      found = entry.th32ProcessID;
+      const std::wstring path = process_image_path(entry.th32ProcessID);
+      const bool own = path_is_own_core(path, own_dirs);
+      const bool accepted = own || !require_own;
+      if (log_candidates) {
+        write_helper_log("core.adopt pid=" +
+                         std::to_string(entry.th32ProcessID) + " path=" +
+                         (path.empty() ? std::string("?") : utf8_text(path)) +
+                         " own=" + (own ? "1" : "0") + " action=" +
+                         (accepted ? "reuse" : "spawn"));
+      }
+      if (!accepted) continue;
+      result.pid = entry.th32ProcessID;
+      result.path = path;
       break;
     } while (Process32NextW(snapshot, &entry));
   }
   CloseHandle(snapshot);
-  return found;
+  return result;
 }
 
 /// The helper must own a console for the core to inherit and for its
@@ -270,6 +425,15 @@ void clear_core_pid() {
   DeleteFileW(g_paths.core_pid.c_str());
 }
 
+/// Publish the port chosen for the core this helper launched. The UI reads it
+/// next to `core.path`/`core.pid`; an adopted core already has the file from
+/// the helper that launched it, so this is only called from start_core.
+void write_core_port(int port) {
+  if (g_paths.core_port.empty() || port <= 0) return;
+  std::ofstream out(fs::path(g_paths.core_port), std::ios::trunc);
+  if (out) out << port << "\n";
+}
+
 class core_supervisor_backend final : public backend {
  public:
   core_supervisor_backend(std::atomic<bool>& running,
@@ -277,6 +441,9 @@ class core_supervisor_backend final : public backend {
       : running_(running),
         policy_(policy),
         session_(own_session_id()),
+        own_dirs_(core_directories()),
+        require_own_(!molink::service_paths::is_legacy_service(
+            g_paths.service_name)),
         stop_event_(OpenEventW(SYNCHRONIZE, FALSE,
                                g_paths.helper_stop_event.c_str())),
         detach_event_(OpenEventW(SYNCHRONIZE, FALSE,
@@ -318,9 +485,10 @@ class core_supervisor_backend final : public backend {
     // `pid_` is our previous core after a crash. Its process object can still
     // be listed until close_core, and adopting it would count the same exit
     // twice.
-    bool scanned = false;
-    external_pid_ = find_existing_core(pid_, session_, &scanned);
-    if (!scanned) {
+    const core_candidate candidate =
+        find_existing_core(pid_, session_, own_dirs_, require_own_, true);
+    external_pid_ = candidate.pid;
+    if (!candidate.scanned) {
       // A failed snapshot must not be read as "no core"; wait for the next
       // poll instead of launching a duplicate.
       write_helper_log("core scan failed, waiting");
@@ -342,7 +510,6 @@ class core_supervisor_backend final : public backend {
     // Record it too: a session switch with a dead helper uses core.pid to
     // clean up a core this helper was only watching.
     write_core_pid(external_pid_, external_);
-    write_helper_log("core already running pid=" + std::to_string(external_pid_));
     return true;
   }
 
@@ -351,13 +518,13 @@ class core_supervisor_backend final : public backend {
     if (external_ == nullptr) {
       // The first scan could not open the core. Re-scan; once it is gone,
       // treat the disappearance as an abnormal exit so we launch our own.
-      bool scanned = false;
-      const DWORD still = find_existing_core(pid_, session_, &scanned);
-      if (!scanned) {
+      const core_candidate still =
+          find_existing_core(pid_, session_, own_dirs_, require_own_, false);
+      if (!still.scanned) {
         Sleep(timeout);
         return false;
       }
-      if (still == 0) {
+      if (still.pid == 0) {
         exit_code = 1;
         // Keep the pid excluded from the next scan until the process object
         // is fully reaped; otherwise the same exit can be counted twice.
@@ -367,13 +534,14 @@ class core_supervisor_backend final : public backend {
         return true;
       }
       // The snapshot recovered and the core is still there: adopt it.
-      external_pid_ = still;
+      external_pid_ = still.pid;
       external_ = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION |
                                   PROCESS_TERMINATE,
-                              FALSE, still);
+                              FALSE, external_pid_);
       if (external_ == nullptr) {
         external_ = OpenProcess(
-            SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, still);
+            SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE,
+            external_pid_);
       }
       write_core_pid(external_pid_, external_);
       if (external_ == nullptr) {
@@ -406,7 +574,21 @@ class core_supervisor_backend final : public backend {
       write_helper_log("core path=" + utf8(core_path_));
     }
 
+    // The full product keeps the historical 28418 behaviour (including the
+    // core's persisted tcp_port). Every other service must not fight it for
+    // the port, so pick the first bindable port in the isolated block and
+    // pass it explicitly.
+    int core_port = 0;
+    if (!molink::service_paths::is_legacy_service(g_paths.service_name) &&
+        !choose_core_port(core_port)) {
+      error = "no free core port for service";
+      return false;
+    }
+
     std::wstring command = L"\"" + core_path_ + L"\"";
+    if (core_port > 0) {
+      command += L" --port " + std::to_wstring(core_port);
+    }
     std::vector<wchar_t> command_line(command.begin(), command.end());
     command_line.push_back(L'\0');
 
@@ -466,6 +648,11 @@ class core_supervisor_backend final : public backend {
     process_.hThread = nullptr;
     pid_ = process_.dwProcessId;
     write_core_pid(pid_, process_.hProcess);
+    if (core_port > 0) {
+      write_core_port(core_port);
+      write_helper_log("core started pid=" + std::to_string(pid_) +
+                       " port=" + std::to_string(core_port));
+    }
     pid = pid_;
     return true;
   }
@@ -677,6 +864,10 @@ class core_supervisor_backend final : public backend {
   std::atomic<bool>& running_;
   restart_policy policy_;
   DWORD session_ = 0;
+  std::vector<std::wstring> own_dirs_;
+  /// The full product (moLinkSession) reuses any running core; every other
+  /// service only adopts a core whose image lives in one of own_dirs_.
+  bool require_own_ = false;
   HANDLE stop_event_ = nullptr;
   HANDLE detach_event_ = nullptr;
   HANDLE instance_ = nullptr;

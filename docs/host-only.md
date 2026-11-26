@@ -153,7 +153,8 @@ python3 tools/check-inno-script.py packaging/windows/host-only.iss
 6. 等待约 2 秒，让 UI 自己拉起的 core 通过 `--parent-pid` 感知父进程退出，
    然后再删除安装目录文件。
 
-**保留** `%ProgramData%\moLinkHost`（服务/helper 日志、`core.pid`、`core.path` 等）。
+**保留** `%ProgramData%\moLinkHost`（服务/helper 日志、`core.pid`、`core.path`、
+`core.port` 等）。
 卸载向导会明确提示这一点；如需彻底清除，卸载后手动删除该目录。
 `%APPDATA%\moLink`（用户配置/身份）不属于 host-only 产品独占，不会被卸载器删除。
 
@@ -185,6 +186,7 @@ python3 tools/check-inno-script.py packaging/windows/host-only.iss
 | Inno `AppId` | 独立 GUID | `{B2D9F7D4-…}` |
 | 服务名 | `moLinkHost` | `moLinkSession` |
 | 服务数据/日志 | `%ProgramData%\moLinkHost\service` | `%ProgramData%\moLink\service` |
+| core 网页端口 | 28419–28430 中第一个可用端口，写入 `core.port` | 28418 |
 | 服务命名对象 | `Global\moLinkHost*` | `Global\moLink*` |
 | UI 单实例互斥量 | `moLinkHostShell` | 全功能壳自己的互斥量 |
 | Run 值 / 防火墙规则 | `moLinkHost` / `moLink Host` | 全功能版自己的名称 |
@@ -192,17 +194,21 @@ python3 tools/check-inno-script.py packaging/windows/host-only.iss
 需要注意的：
 
 - **用户配置目录目前仍共用** `%APPDATA%\moLink`（`config_directory()` 没有按产品名隔离）。
-  同一 Windows 账号下，两套产品会看到同一个 `identity`、`settings` 和
-  `tcp_port`。这意味着两个 core 会争同一个默认端口 28418。
-  同时使用两套产品时，建议用不同的 Windows 账号运行，或不要同时运行它们的 core。
-- **端口冲突**：host-only core 默认监听 28418。如果端口被全功能版占用，两者共用
-  同一个 `tcp_port`，host-only UI 的 loopback 探测还可能直接认到全功能版的 core，
-  并把 `host_only=1` 写进它的设置。**同一账号下不要同时运行两套 core**；需要并存
-  时用不同的 Windows 账号，或先停掉一套。若 host-only core 因端口被占用而启动
-  失败，它会打印 `listen-failed`/`busy` 并退出；当前 UI 的端口输入只在 core 在线时
-  可保存，处理办法是停掉占用端口的 core，或在 core 停止时手动修改
-  `%APPDATA%\moLink\tcp_port` 后再启动。当前版本**没有**静默自动递增端口的逻辑，
-  冲突必须手动处理；这是与产品规划里“冲突时自动换端口”的已知差距。
+  同一 Windows 账号下，两套产品会看到同一个 `identity`、`settings`。服务的 core
+  不再依赖共享的 `tcp_port`：下一条的端口由 helper 显式传入。
+- **端口已隔离**：`moLinkHost` 的服务 core 不再监听 28418。helper 从
+  `service_paths::default_port_for("moLinkHost")` 给出的保留段端口（28419–28430）
+  开始，用 `bind` 探测最多 5 个端口，把选中的端口通过 `--port` 传给 core，并写入
+  `%ProgramData%\moLinkHost\service\core.port`；UI 优先探测这个文件里的端口，不再
+  硬编码 28418。全功能版 `moLinkSession` 保持 28418 和原有行为。
+- **core 归属**：host-only helper 接管已有 core 前，会用
+  `QueryFullProcessImageNameW` 取进程完整路径，要求它等于
+  `{安装目录}\molink-core.exe`（大小写不敏感）；拿不到路径或路径不属于
+  `%ProgramData%\moLinkHost\service\core.path` 指向的安装目录时跳过接管、启动自己的
+  core。helper.log 里对应 `core.adopt pid=… path=… own=1|0 action=reuse|spawn`。
+  因此全功能版的 core 不会被 host-only 服务接管。
+- 仍需要注意：未安装服务时由 UI 自己拉起的 core 走 core 的默认/持久化端口；如果
+  同一账号下全功能版正在运行，仍可能冲突。需要完全并存时，优先用服务托管 core。
 - 卸载 host-only 不会删除全功能版的服务、文件或 core；卸载全功能版也不会删除
   host-only 的 `%ProgramData%\moLinkHost`。
 - 两套产品共用同一份 `molink-core.exe`/协议版本时，建议同版本升级；混用旧 core
@@ -213,7 +219,12 @@ python3 tools/check-inno-script.py packaging/windows/host-only.iss
 - 服务状态：`sc query moLinkHost`；服务日志：
   `%ProgramData%\moLinkHost\service\service.log`、`helper.log`。
 - `core.path` 指向服务应当启动的 core；文件不存在时 helper 日志会写
-  `molink-core.exe not found`。
+  `molink-core.exe not found`。`core.port` 是 helper 为服务 core 选中的网页端口，
+  `core.pid` 是它守护的进程。
+- 判断某个 core 是否被本服务接管：helper.log 的
+  `core.adopt pid=… path=… own=… action=…`。`own=0` 表示路径不属于本服务安装目录，
+  已跳过；`own=1 action=reuse` 才是接管。两个服务并存时应各有一行 `own=1 action=reuse`，
+  且 path 分别指向各自的安装目录。
 - UI/核心日志：`%LOCALAPPDATA%\moLink\logs`（如果 `%ProgramData%\moLink`
   已存在，则 core 诊断日志在 `%ProgramData%\moLink\logs`）。
 - 安装了服务但连不上：确认防火墙规则 `moLink Host` 存在、端口是
