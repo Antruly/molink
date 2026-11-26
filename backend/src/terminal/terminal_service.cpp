@@ -197,7 +197,11 @@ uint64_t terminal_service::open(uint64_t viewer, const std::string& shell,
     return 0;
   }
 
-  const std::string command = shell.empty() ? pty_default_shell() : shell;
+  // Pass the request through unchanged: an empty shell asks the platform for
+  // its default. On Windows the helper then picks the *console user's*
+  // %COMSPEC% (from the user environment block it builds); resolving it here
+  // with the service's own environment would defeat that.
+  const std::string command = shell;
   std::string spawn_error;
   pty_handle handle = pty_spawn(command, cols, rows, spawn_error);
   if (!pty_valid(handle)) {
@@ -211,10 +215,13 @@ uint64_t terminal_service::open(uint64_t viewer, const std::string& shell,
     return 0;
   }
 
+  // Only a display value for term.open; pty_spawn resolved the real default.
+  const std::string shown_shell =
+      command.empty() ? pty_default_shell() : command;
   const uint64_t id = next_id_++;
   auto entry = std::make_unique<terminal_service::entry>();
   entry->session = std::make_unique<terminal_session>(
-      id, handle, command, cols, rows, ring_bytes_);
+      id, handle, shown_shell, cols, rows, ring_bytes_);
   entry->owner = viewer;
   entry->viewers.insert(viewer);
   entry->last_active = std::chrono::steady_clock::now();
@@ -222,7 +229,7 @@ uint64_t terminal_service::open(uint64_t viewer, const std::string& shell,
 
   diag().log(diag_level::info, "term.open", std::string(),
              {{"id", std::to_string(id)},
-              {"shell", command},
+              {"shell", shown_shell},
               {"cols", dimension_text(cols)},
               {"rows", dimension_text(rows)}});
   return id;

@@ -2,10 +2,16 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <cwchar>
+#include <iterator>
 #include <string>
 #include <vector>
+
+#include "diag_log.h"
+#include "terminal/helper_protocol.h"
 
 #if !defined(_WIN32)
 
@@ -101,6 +107,16 @@ int status_exit_code(int status) {
   if (WIFEXITED(status)) return WEXITSTATUS(status);
   if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
   return -1;
+}
+
+/// Login name for `term.spawn`, so a real-machine log shows which account the
+/// shell inherited on every platform. The POSIX path is already the right one.
+std::string current_user_name() {
+  for (const char* name : {"USER", "LOGNAME"}) {
+    const char* value = std::getenv(name);
+    if (value != nullptr && value[0] != '\0') return value;
+  }
+  return "?";
 }
 
 }  // namespace
@@ -210,6 +226,12 @@ pty_handle pty_spawn(const std::string& command, int cols, int rows,
 
   handle.fd = master;
   handle.pid = pid;
+  // POSIX has no service-account problem: core and shell already share the
+  // login user. Record it anyway so both backends appear in the same log.
+  diag().log(diag_level::info, "term.spawn", std::string(),
+             {{"backend", "direct"},
+              {"user", current_user_name()},
+              {"session_id", "-"}});
   return handle;
 }
 
@@ -351,6 +373,7 @@ std::string pty_default_shell() {
 #define NTDDI_VERSION 0x0A000006  // NTDDI_WIN10_RS5
 #endif
 #include <windows.h>
+#include <wtsapi32.h>
 
 #if defined(NTDDI_VERSION) && (NTDDI_VERSION >= 0x0A000006)
 #define MOLINK_HAS_CONPTY 1
@@ -367,6 +390,11 @@ int clamp_dimension(int value, int fallback) {
   return value;
 }
 
+std::string win_error(const char* call, DWORD code) {
+  return std::string(call) + " failed (win32 error " + std::to_string(code) +
+         ")";
+}
+
 #if MOLINK_HAS_CONPTY
 std::wstring widen_utf8(const std::string& text) {
   if (text.empty()) return std::wstring();
@@ -381,29 +409,242 @@ std::wstring widen_utf8(const std::string& text) {
   }
   return out;
 }
-
-std::string win_error(const char* call, DWORD code) {
-  return std::string(call) + " failed (win32 error " + std::to_string(code) +
-         ")";
-}
 #endif  // MOLINK_HAS_CONPTY
+
+std::string utf8_from_wide(const std::wstring& text) {
+  if (text.empty()) return std::string();
+  const int length = static_cast<int>(text.size());
+  const int needed = ::WideCharToMultiByte(CP_UTF8, 0, text.data(), length,
+                                           nullptr, 0, nullptr, nullptr);
+  if (needed <= 0) return std::string();
+  std::string out(static_cast<std::size_t>(needed), '\0');
+  ::WideCharToMultiByte(CP_UTF8, 0, text.data(), length, out.data(), needed,
+                        nullptr, nullptr);
+  return out;
+}
+
+DWORD current_session_id() {
+  DWORD session = 0;
+  if (::ProcessIdToSessionId(::GetCurrentProcessId(), &session)) return session;
+  return 0;
+}
+
+std::wstring wts_session_string(DWORD session, WTS_INFO_CLASS info) {
+  LPWSTR buffer = nullptr;
+  DWORD bytes = 0;
+  if (!::WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, session, info,
+                                     &buffer, &bytes) ||
+      buffer == nullptr || bytes == 0) {
+    return std::wstring();
+  }
+  std::wstring value(buffer);
+  ::WTSFreeMemory(buffer);
+  return value;
+}
+
+std::wstring current_user_name_w() {
+  wchar_t buffer[256] = {};
+  DWORD length = static_cast<DWORD>(std::size(buffer));
+  if (!::GetUserNameW(buffer, &length) || length == 0) return std::wstring();
+  return std::wstring(buffer, length > 0 ? length - 1 : 0);
+}
+
+/// Whether this process already runs as the user logged into the active
+/// console session. Only then may the core start a shell itself: a
+/// service-hosted core (SYSTEM, or an elevated service account) must go
+/// through the helper, because inheriting its own token is exactly the bug
+/// this bridge fixes.
+bool running_as_console_user() {
+  const DWORD session = current_session_id();
+  if (session == 0) return false;  // services run in session 0
+  const DWORD active = ::WTSGetActiveConsoleSessionId();
+  if (active == 0xFFFFFFFF || session != active) return false;
+
+  const std::wstring session_user =
+      wts_session_string(active, WTSUserName);
+  if (session_user.empty()) return false;
+  const std::wstring session_domain =
+      wts_session_string(active, WTSDomainName);
+
+  std::wstring current_domain;
+  std::wstring current_user = current_user_name_w();
+  const std::size_t slash = current_user.find(L'\\');
+  if (slash != std::wstring::npos) {
+    current_domain = current_user.substr(0, slash);
+    current_user = current_user.substr(slash + 1);
+  }
+  if (current_user.empty() ||
+      ::_wcsicmp(current_user.c_str(), session_user.c_str()) != 0) {
+    return false;
+  }
+  if (!session_domain.empty() && !current_domain.empty() &&
+      ::_wcsicmp(session_domain.c_str(), current_domain.c_str()) != 0) {
+    return false;
+  }
+  return true;
+}
+
+HANDLE open_helper_pipe(DWORD wait_ms) {
+  if (wait_ms != 0) {
+    ::WaitNamedPipeW(terminal_bridge::kPipeName, wait_ms);
+  }
+  HANDLE pipe = ::CreateFileW(terminal_bridge::kPipeName,
+                              GENERIC_READ | GENERIC_WRITE, 0, nullptr,
+                              OPEN_EXISTING, 0, nullptr);
+  if (pipe == INVALID_HANDLE_VALUE) return nullptr;
+  DWORD mode = PIPE_READMODE_MESSAGE;
+  if (!::SetNamedPipeHandleState(pipe, &mode, nullptr, nullptr)) {
+    ::CloseHandle(pipe);
+    return nullptr;
+  }
+  return pipe;
+}
+
+bool write_pipe_message(HANDLE pipe, const void* data, DWORD len) {
+  DWORD written = 0;
+  return ::WriteFile(pipe, data, len, &written, nullptr) != 0 &&
+         written == len;
+}
+
+std::string reply_field(const std::string& line, const std::string& key) {
+  const std::string needle = " " + key + "=";
+  const std::size_t pos = line.find(needle);
+  if (pos == std::string::npos) return std::string();
+  const std::size_t start = pos + needle.size();
+  const std::size_t end = line.find(' ', start);
+  return line.substr(start, end == std::string::npos ? std::string::npos
+                                                     : end - start);
+}
+
+/// Text after "<key>=" up to the end of the line; user names may contain
+/// spaces, so the helper puts this field last.
+std::string reply_rest(const std::string& line, const std::string& key) {
+  const std::string needle = " " + key + "=";
+  const std::size_t pos = line.find(needle);
+  if (pos == std::string::npos) return std::string();
+  return line.substr(pos + needle.size());
+}
+
+struct helper_reply {
+  bool attempted = false;
+  HANDLE pipe = nullptr;
+  int pid = -1;
+  unsigned session = 0;
+  std::string user;
+  std::string reason;
+  std::string message;
+};
+
+/// Ask the helper for a PTY owned by the console user. On success `pipe` is
+/// the live stream connection; on failure `reason` explains why the helper
+/// could not serve it (and `attempted` tells "no helper at all" from "helper
+/// replied with an error").
+helper_reply try_helper_spawn(const std::string& command, int cols,
+                              int rows) {
+  helper_reply reply;
+  HANDLE pipe = open_helper_pipe(150);
+  if (pipe == nullptr) {
+    reply.reason = "no_session_helper";
+    return reply;
+  }
+  reply.attempted = true;
+
+  std::string request = std::string(terminal_bridge::kOpenPrefix) + " " +
+                        std::to_string(cols) + " " + std::to_string(rows);
+  if (!command.empty()) request += " " + command;
+  if (!write_pipe_message(pipe, request.data(),
+                          static_cast<DWORD>(request.size()))) {
+    reply.reason = "helper_write_failed";
+    reply.message = win_error("WriteFile", ::GetLastError());
+    ::CloseHandle(pipe);
+    return reply;
+  }
+
+  std::vector<char> buffer(4096);
+  DWORD read = 0;
+  if (!::ReadFile(pipe, buffer.data(), static_cast<DWORD>(buffer.size()), &read,
+                  nullptr) ||
+      read == 0) {
+    reply.reason = "helper_reply_failed";
+    reply.message = win_error("ReadFile", ::GetLastError());
+    ::CloseHandle(pipe);
+    return reply;
+  }
+  const std::string line(buffer.data(), read);
+  if (line.rfind(terminal_bridge::kOkPrefix, 0) == 0) {
+    reply.pid = std::atoi(reply_field(line, "pid").c_str());
+    reply.session = static_cast<unsigned>(
+        std::strtoul(reply_field(line, "session").c_str(), nullptr, 10));
+    reply.user = reply_rest(line, "user");
+    if (reply.user.empty()) reply.user = "?";
+    reply.pipe = pipe;
+    return reply;
+  }
+  if (line.rfind(terminal_bridge::kErrorPrefix, 0) == 0) {
+    reply.reason = reply_field(line, "reason");
+    if (reply.reason.empty()) reply.reason = "helper_error";
+    reply.message = reply_rest(line, "message");
+  } else {
+    // An older helper treats `term-open` as an unknown command and answers
+    // with its JSON error. Treat that as "bridge unsupported", never as a
+    // reason to start a shell with the service token.
+    reply.reason = "helper_unsupported";
+    reply.message = line.substr(0, 200);
+  }
+  ::CloseHandle(pipe);
+  return reply;
+}
+
+void put_u32(unsigned char* out, std::uint32_t value) {
+  out[0] = static_cast<unsigned char>(value & 0xff);
+  out[1] = static_cast<unsigned char>((value >> 8) & 0xff);
+  out[2] = static_cast<unsigned char>((value >> 16) & 0xff);
+  out[3] = static_cast<unsigned char>((value >> 24) & 0xff);
+}
+
+std::uint32_t get_u32(const unsigned char* in) {
+  return static_cast<std::uint32_t>(in[0]) |
+         (static_cast<std::uint32_t>(in[1]) << 8) |
+         (static_cast<std::uint32_t>(in[2]) << 16) |
+         (static_cast<std::uint32_t>(in[3]) << 24);
+}
 
 }  // namespace
 
-#if MOLINK_HAS_CONPTY
-
-/// One ConPTY session. Shared by every copy of a pty_handle so a copied handle
-/// cannot double-close the same pipes or leak them when the last copy dies.
+/// One terminal session. A copy of the handle shares this state so a stray
+/// copy cannot double-close the pipes; `mode` selects the ConPTY backend or
+/// the helper bridge.
 struct pty_impl {
+  enum class kind { conpty, helper };
+  kind mode = kind::conpty;
+
+  // Direct ConPTY backend.
+#if MOLINK_HAS_CONPTY
   HPCON pc = nullptr;
   HANDLE in_write = nullptr;  // viewer -> child (the child's stdin)
   HANDLE out_read = nullptr;  // child -> viewer (the child's stdout/stderr)
   HANDLE process = nullptr;
   bool killed = false;
+#endif
+
+  // Helper bridge backend.
+  HANDLE helper_pipe = nullptr;
+  bool helper_exited = false;
+  int helper_exit_code = -1;
+  /// Reused frame buffer so a keystroke does not allocate.
+  std::vector<unsigned char> helper_out;
 
   ~pty_impl() { release(); }
 
   void release() {
+    if (mode == kind::helper) {
+      if (helper_pipe != nullptr) {
+        ::CloseHandle(helper_pipe);
+        helper_pipe = nullptr;
+      }
+      return;
+    }
+#if MOLINK_HAS_CONPTY
     if (process != nullptr) {
       // A process that was already reaped still has an open handle;
       // TerminateProcess on it simply fails.
@@ -424,10 +665,9 @@ struct pty_impl {
       ::CloseHandle(out_read);
       out_read = nullptr;
     }
+#endif
   }
 };
-
-#endif  // MOLINK_HAS_CONPTY
 
 bool pty_supported() {
 #if MOLINK_HAS_CONPTY
@@ -438,10 +678,13 @@ bool pty_supported() {
 }
 
 bool pty_valid(const pty_handle& handle) {
+  if (handle.impl == nullptr) return false;
+  if (handle.impl->mode == pty_impl::kind::helper) {
+    return handle.impl->helper_pipe != nullptr;
+  }
 #if MOLINK_HAS_CONPTY
-  return handle.impl != nullptr && handle.impl->pc != nullptr;
+  return handle.impl->pc != nullptr;
 #else
-  (void)handle;
   return false;
 #endif
 }
@@ -452,11 +695,53 @@ pty_handle pty_spawn(const std::string& command, int cols, int rows,
   err.clear();
   cols = clamp_dimension(cols, 80);
   rows = clamp_dimension(rows, 24);
+
+  // Preferred path: the helper runs in the interactive session and can start
+  // the shell with the console user's token, which a service-hosted core
+  // cannot do by itself.
+  helper_reply helper = try_helper_spawn(command, cols, rows);
+  if (helper.pipe != nullptr) {
+    auto impl = std::make_shared<pty_impl>();
+    impl->mode = pty_impl::kind::helper;
+    impl->helper_pipe = helper.pipe;
+    handle.impl = impl;
+    handle.pid = helper.pid;
+    diag().log(diag_level::info, "term.spawn", std::string(),
+               {{"backend", "helper"},
+                {"user", helper.user},
+                {"session_id", std::to_string(helper.session)}});
+    return handle;
+  }
+
+  // No usable helper. Starting a ConPTY here is only correct when this core
+  // already runs as the logged-in user (a shell that launched the core
+  // directly, or a core the helper started as that user). Otherwise the
+  // inherited token is the service account, and spawning would silently
+  // elevate the remote terminal -- report the failure instead.
+  const bool direct_ok = running_as_console_user();
+  const std::string user = utf8_from_wide(current_user_name_w());
+  const std::string session_id = std::to_string(current_session_id());
+  if (!direct_ok) {
+    std::string reason =
+        helper.reason.empty() ? "no_session_helper" : helper.reason;
+    err = "terminal_unavailable: " + reason +
+          " (core runs as " + (user.empty() ? "?" : user) + " in session " +
+          session_id +
+          ", not the console user; refusing to start a shell as the service "
+          "account)";
+    if (!helper.message.empty()) err += ": " + helper.message;
+    diag().log(diag_level::warn, "term.spawn", err,
+               {{"backend", "unavailable"},
+                {"user", user.empty() ? "?" : user},
+                {"session_id", session_id},
+                {"reason", helper.reason.empty() ? "no_session_helper"
+                                                 : helper.reason}});
+    return handle;
+  }
+
 #if !MOLINK_HAS_CONPTY
-  (void)command;
   err =
-      "terminal is not supported on this Windows version (ConPTY requires "
-      "Windows 10 1809 or newer)";
+      "terminal_unavailable: ConPTY requires Windows 10 1809 or newer";
   return handle;
 #else
   const std::string line = command.empty() ? pty_default_shell() : command;
@@ -514,6 +799,7 @@ pty_handle pty_spawn(const std::string& command, int cols, int rows,
   close_handle(out_write);
 
   auto impl = std::make_shared<pty_impl>();
+  impl->mode = pty_impl::kind::conpty;
   impl->pc = pc;
   impl->in_write = in_write;
   impl->out_read = out_read;
@@ -559,34 +845,66 @@ pty_handle pty_spawn(const std::string& command, int cols, int rows,
   impl->process = process_info.hProcess;
   handle.impl = impl;
   handle.pid = static_cast<int>(process_info.dwProcessId);
+  diag().log(diag_level::info, "term.spawn", std::string(),
+             {{"backend", "direct"},
+              {"user", user.empty() ? "?" : user},
+              {"session_id", session_id}});
   return handle;
 #endif
 }
 
 bool pty_resize(pty_handle& handle, int cols, int rows) {
-#if !MOLINK_HAS_CONPTY
-  (void)handle;
-  (void)cols;
-  (void)rows;
-  return false;
-#else
-  if (handle.impl == nullptr || handle.impl->pc == nullptr) return false;
+  if (handle.impl == nullptr) return false;
   cols = clamp_dimension(cols, 80);
   rows = clamp_dimension(rows, 24);
+  if (handle.impl->mode == pty_impl::kind::helper) {
+    if (handle.impl->helper_pipe == nullptr) return false;
+    unsigned char frame[1 + terminal_bridge::kResizePayload] = {};
+    frame[0] = static_cast<unsigned char>(terminal_bridge::to_helper::resize);
+    put_u32(frame + 1, static_cast<std::uint32_t>(cols));
+    put_u32(frame + 5, static_cast<std::uint32_t>(rows));
+    return write_pipe_message(handle.impl->helper_pipe, frame,
+                              static_cast<DWORD>(sizeof(frame)));
+  }
+#if !MOLINK_HAS_CONPTY
+  return false;
+#else
+  if (handle.impl->pc == nullptr) return false;
   const COORD size = {static_cast<SHORT>(cols), static_cast<SHORT>(rows)};
   return SUCCEEDED(::ResizePseudoConsole(handle.impl->pc, size));
 #endif
 }
 
 int pty_write(pty_handle& handle, const void* data, std::size_t len) {
+  if (handle.impl == nullptr) return -1;
+  const char* bytes = static_cast<const char*>(data);
+  if (handle.impl->mode == pty_impl::kind::helper) {
+    if (handle.impl->helper_pipe == nullptr ||
+        handle.impl->helper_exited) {
+      return -1;
+    }
+    std::vector<unsigned char>& frame = handle.impl->helper_out;
+    std::size_t written = 0;
+    while (written < len) {
+      const std::size_t chunk = (std::min)(
+          len - written, terminal_bridge::kMaxFramePayload);
+      frame.resize(1 + chunk);
+      frame[0] = static_cast<unsigned char>(terminal_bridge::to_helper::input);
+      std::memcpy(frame.data() + 1, bytes + written, chunk);
+      if (!write_pipe_message(handle.impl->helper_pipe, frame.data(),
+                              static_cast<DWORD>(frame.size()))) {
+        if (written > 0) return static_cast<int>(written);
+        errno = EIO;
+        return -1;
+      }
+      written += chunk;
+    }
+    return static_cast<int>(written);
+  }
 #if !MOLINK_HAS_CONPTY
-  (void)handle;
-  (void)data;
-  (void)len;
   return -1;
 #else
-  if (handle.impl == nullptr || handle.impl->in_write == nullptr) return -1;
-  const char* bytes = static_cast<const char*>(data);
+  if (handle.impl->in_write == nullptr) return -1;
   std::size_t written = 0;
   while (written < len) {
     // Anonymous pipes have no O_NONBLOCK; a full input buffer blocks this
@@ -612,15 +930,138 @@ int pty_write(pty_handle& handle, const void* data, std::size_t len) {
 #endif
 }
 
+namespace {
+
+/// Read one helper message. Returns payload bytes for an output frame, 0 at
+/// end of stream, -1 with EAGAIN when nothing is buffered and -1 with EIO on
+/// a broken/oversized message. An exit frame records the code and reports
+/// EAGAIN; pty_poll_exit() then observes it.
+int helper_read_frame(pty_impl& impl, void* buffer, std::size_t len) {
+  if (impl.helper_pipe == nullptr) return -1;
+  DWORD available = 0;
+  if (!::PeekNamedPipe(impl.helper_pipe, nullptr, 0, nullptr, &available,
+                       nullptr)) {
+    impl.helper_exited = true;
+    if (impl.helper_exit_code < 0) impl.helper_exit_code = 1;
+    return 0;
+  }
+  if (available == 0) {
+    errno = EAGAIN;
+    return -1;
+  }
+  if (len < 2) {
+    errno = EAGAIN;
+    return -1;
+  }
+  const DWORD chunk = static_cast<DWORD>((std::min)(
+      len, static_cast<std::size_t>(0xFFFFFFFFu)));
+  DWORD count = 0;
+  if (!::ReadFile(impl.helper_pipe, buffer, chunk, &count, nullptr)) {
+    const DWORD code = ::GetLastError();
+    if (code == ERROR_BROKEN_PIPE || code == ERROR_PIPE_NOT_CONNECTED ||
+        code == ERROR_INVALID_HANDLE) {
+      impl.helper_exited = true;
+      if (impl.helper_exit_code < 0) impl.helper_exit_code = 1;
+      return 0;
+    }
+    if (code == ERROR_MORE_DATA) {
+      // Larger than the caller's buffer (never produced by this helper).
+      // Drain the rest of the message so the stream stays aligned.
+      unsigned char scratch[4096];
+      for (;;) {
+        DWORD more = 0;
+        if (::ReadFile(impl.helper_pipe, scratch,
+                       static_cast<DWORD>(sizeof(scratch)), &more, nullptr)) {
+          break;
+        }
+        if (::GetLastError() != ERROR_MORE_DATA) break;
+      }
+    }
+    errno = EIO;
+    return -1;
+  }
+  if (count == 0) {
+    impl.helper_exited = true;
+    if (impl.helper_exit_code < 0) impl.helper_exit_code = 1;
+    return 0;
+  }
+  const auto* bytes = static_cast<const unsigned char*>(buffer);
+  const auto kind = static_cast<terminal_bridge::from_helper>(bytes[0]);
+  if (kind == terminal_bridge::from_helper::exit) {
+    if (count >= 1 + terminal_bridge::kExitPayload) {
+      const std::uint32_t raw = get_u32(bytes + 1);
+      impl.helper_exit_code = static_cast<int>(raw);
+    } else {
+      impl.helper_exit_code = 0;
+    }
+    impl.helper_exited = true;
+    errno = EAGAIN;
+    return -1;
+  }
+  if (kind != terminal_bridge::from_helper::output) {
+    errno = EIO;
+    return -1;
+  }
+  const std::size_t payload = static_cast<std::size_t>(count) - 1;
+  std::memmove(buffer, bytes + 1, payload);
+  return static_cast<int>(payload);
+}
+
+/// Consume buffered helper messages without a caller buffer. Used while
+/// stopping, where output no longer matters but the exit frame does.
+void helper_drain(pty_impl& impl) {
+  if (impl.helper_pipe == nullptr || impl.helper_exited) return;
+  for (;;) {
+    DWORD available = 0;
+    if (!::PeekNamedPipe(impl.helper_pipe, nullptr, 0, nullptr, &available,
+                         nullptr)) {
+      impl.helper_exited = true;
+      if (impl.helper_exit_code < 0) impl.helper_exit_code = 1;
+      return;
+    }
+    if (available == 0) return;
+    unsigned char buffer[1024];
+    DWORD count = 0;
+    if (!::ReadFile(impl.helper_pipe, buffer,
+                    static_cast<DWORD>(sizeof(buffer)), &count, nullptr)) {
+      if (::GetLastError() == ERROR_MORE_DATA) continue;
+      impl.helper_exited = true;
+      if (impl.helper_exit_code < 0) impl.helper_exit_code = 1;
+      return;
+    }
+    if (count == 0) {
+      impl.helper_exited = true;
+      if (impl.helper_exit_code < 0) impl.helper_exit_code = 1;
+      return;
+    }
+    if (static_cast<terminal_bridge::from_helper>(buffer[0]) ==
+        terminal_bridge::from_helper::exit) {
+      if (count >= 1 + terminal_bridge::kExitPayload) {
+        impl.helper_exit_code =
+            static_cast<int>(get_u32(buffer + 1));
+      } else {
+        impl.helper_exit_code = 0;
+      }
+      impl.helper_exited = true;
+      return;
+    }
+  }
+}
+
+}  // namespace
+
 int pty_read(pty_handle& handle, void* buffer, std::size_t len) {
+  if (handle.impl == nullptr) return -1;
+  if (handle.impl->mode == pty_impl::kind::helper) {
+    return helper_read_frame(*handle.impl, buffer, len);
+  }
 #if !MOLINK_HAS_CONPTY
-  (void)handle;
   (void)buffer;
   (void)len;
   errno = ENOSYS;
   return -1;
 #else
-  if (handle.impl == nullptr || handle.impl->out_read == nullptr) return -1;
+  if (handle.impl->out_read == nullptr) return -1;
   if (len == 0) return 0;
   DWORD available = 0;
   if (!::PeekNamedPipe(handle.impl->out_read, nullptr, 0, nullptr, &available,
@@ -650,12 +1091,23 @@ int pty_read(pty_handle& handle, void* buffer, std::size_t len) {
 }
 
 bool pty_poll_exit(pty_handle& handle, int& exit_code) {
+  if (handle.impl == nullptr) return false;
+  if (handle.impl->mode == pty_impl::kind::helper) {
+    if (handle.reaped) {
+      exit_code = handle.exit_code;
+      return handle.pid > 0;
+    }
+    if (!handle.impl->helper_exited) return false;
+    handle.reaped = true;
+    handle.exit_code =
+        handle.impl->helper_exit_code < 0 ? 1 : handle.impl->helper_exit_code;
+    exit_code = handle.exit_code;
+    return true;
+  }
 #if !MOLINK_HAS_CONPTY
-  (void)handle;
   (void)exit_code;
   return false;
 #else
-  if (handle.impl == nullptr) return false;
   if (handle.reaped) {
     exit_code = handle.exit_code;
     return handle.pid > 0;
@@ -676,10 +1128,37 @@ bool pty_poll_exit(pty_handle& handle, int& exit_code) {
 }
 
 void pty_kill(pty_handle& handle) {
+  if (handle.impl == nullptr) return;
+  if (handle.impl->mode == pty_impl::kind::helper) {
+    if (!handle.impl->helper_exited && handle.impl->helper_pipe != nullptr) {
+      unsigned char frame =
+          static_cast<unsigned char>(terminal_bridge::to_helper::close);
+      write_pipe_message(handle.impl->helper_pipe, &frame, 1);
+      // Give the helper a moment to report the real exit code and to clean
+      // the child up before the pipe goes away. Bounded: the event loop calls
+      // this from the service poll.
+      for (int waited = 0; waited < 500 && !handle.impl->helper_exited;
+           waited += 5) {
+        helper_drain(*handle.impl);
+        if (!handle.impl->helper_exited) ::Sleep(5);
+      }
+    }
+    if (!handle.impl->helper_exited) {
+      handle.impl->helper_exited = true;
+      if (handle.impl->helper_exit_code < 0) handle.impl->helper_exit_code = -1;
+    }
+    const int code = handle.impl->helper_exit_code;
+    // Closing the pipe makes the helper's input thread see a broken client
+    // and terminate the shell, even if the close frame above was lost.
+    handle.impl->release();
+    handle.reaped = true;
+    handle.exit_code = code;
+    return;
+  }
 #if !MOLINK_HAS_CONPTY
-  (void)handle;
+  return;
 #else
-  if (handle.impl == nullptr || handle.impl->killed) return;
+  if (handle.impl->killed) return;
   handle.impl->killed = true;
   if (handle.impl->process != nullptr) {
     if (::WaitForSingleObject(handle.impl->process, 0) == WAIT_TIMEOUT) {

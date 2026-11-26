@@ -627,7 +627,11 @@ if(MOLINK_BUILD_CORE)
     # store APIs directly (MinGW builds against a static OpenSSL need it).
     target_link_libraries(molink-core PRIVATE
       d3d11 dxgi dxguid gdi32 user32 ole32 uuid ws2_32 iphlpapi advapi32
-      shell32 crypt32 windowscodecs)
+      shell32 crypt32 windowscodecs
+      # The Windows terminal bridge compares this process with the console
+      # session user (WTSQuerySessionInformation) before deciding that a
+      # direct ConPTY is safe.
+      wtsapi32)
     if(MINGW)
       # WASAPI format GUIDs (KSDATAFORMAT_SUBTYPE_*) live in ksguid on MinGW;
       # MSVC pulls them in through the SDK's default libraries.
@@ -889,7 +893,8 @@ add_executable(molink-core-terminal-test
 )
 target_include_directories(molink-core-terminal-test PRIVATE src)
 if(WIN32)
-  target_link_libraries(molink-core-terminal-test PRIVATE ws2_32 iphlpapi)
+  target_link_libraries(molink-core-terminal-test PRIVATE
+    ws2_32 iphlpapi advapi32 wtsapi32)
 endif()
 set_target_properties(molink-core-terminal-test PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")

@@ -211,8 +211,14 @@ class terminal_connection final
     std::string err;
     const uint64_t id = service_->open(viewer_, shell, cols, rows, err);
     if (id == 0) {
-      send_error(pty_supported() ? "terminal_open_failed"
-                                 : "terminal_unavailable",
+      // A Windows core that could not reach a session helper reports the
+      // failure with this prefix: the page must say "terminal unavailable"
+      // rather than "could not open", because retrying will not help until
+      // the service/helper is installed or running.
+      const bool unavailable =
+          err.rfind("terminal_unavailable", 0) == 0 || !pty_supported();
+      send_error(unavailable ? "terminal_unavailable"
+                             : "terminal_open_failed",
                  err);
       return;
     }
