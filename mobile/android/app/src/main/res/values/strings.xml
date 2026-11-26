@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">moLink Remote</string>
+
+    <string name="setup_title">Connect to a host</string>
+    <string name="setup_subtitle">Enter the address and verification code shown on the machine you want to control.</string>
+    <string name="setup_address">Host address</string>
+    <string name="setup_address_hint">192.168.1.10:28418</string>
+    <string name="setup_code">Verification code</string>
+    <string name="setup_code_hint">Code shown on the host</string>
+    <string name="setup_connect">Connect</string>
+    <string name="setup_note">Format: host:port. The port defaults to 28418. Only the address is remembered.</string>
+    <string name="setup_error_address">Enter a valid host address.</string>
+    <string name="setup_error_port">The port must be between 1 and 65535.</string>
+
+    <string name="action_keyboard">Keyboard</string>
+    <string name="action_reload">Reload</string>
+    <string name="action_host">Host</string>
+
+    <string name="status_loading">Loading…</string>
+    <string name="status_ready">Ready</string>
+    <string name="status_error">Load failed</string>
+
+    <string name="download_started">Download started</string>
+    <string name="download_saved">Saved to Download</string>
+    <string name="download_description">Downloading from a moLink host</string>
+    <string name="download_failed">Could not save the download</string>
+    <string name="download_unsupported">This download type is not supported yet</string>
+    <string name="storage_permission_denied">Storage permission is required to save downloads</string>
+    <string name="file_picker_unavailable">No file picker is available</string>
+
+    <string name="web_error">Page failed to load: %1$s</string>
+    <string name="web_http_error">The host returned HTTP %1$d</string>
+</resources>
