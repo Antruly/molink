@@ -1,7 +1,7 @@
 ; moLink Host (host-only / 被控端专用) installer (Inno Setup 6).
 ;
 ; Build with:
-;   ISCC.exe /DAppVersion=0.12.25 \
+;   ISCC.exe /DAppVersion=0.12.26 \
 ;            /DPkgDir=C:\path\to\staged\host-only \
 ;            /DOutputDir=C:\path\to\build\package \
 ;            host-only.iss
@@ -17,7 +17,7 @@
 ; keeps them in sync with packaging/windows/build-host-only.ps1 without Inno
 ; Setup (it cannot run on the Linux CI runner).
 #ifndef AppVersion
-  #define AppVersion "0.12.25"
+  #define AppVersion "0.12.26"
 #endif
 #ifndef PkgDir
   #error PkgDir must point at the staged host-only package directory
