@@ -1,6 +1,6 @@
 ﻿# Build the host-only ("被控端专用") Windows package stage.
 #
-#   build-host-only.ps1 -Version 0.12.27 -Arch x64 -Stage C:\path\to\stage
+#   build-host-only.ps1 -Version 0.12.28 -Arch x64 -Stage C:\path\to\stage
 #
 # The CI job compiles the core, the Direct2D host shell, the service/helper and
 # the frontend first; this script only collects the already-built artifacts
@@ -11,7 +11,7 @@
 # target. The Win7 x86 path (GCC/MinGW) is not wired up yet, and failing here
 # is better than producing a package with half of its binaries missing.
 param(
-  [string]$Version = "0.12.27",
+  [string]$Version = "0.12.28",
   [ValidateSet('x64', 'x86')][string]$Arch = 'x64',
   [string]$Stage = '',
   [string]$Repo = '',
