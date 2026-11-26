@@ -3265,10 +3265,13 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
                // Close active non-loopback WebSocket sessions immediately;
                // new TCP connections are rejected by the connection hook.
                for (const session_info& session : deps.registry->snapshot()) {
-                 if (session.transport &&
-                     !is_loopback_peer(session.peer_ip)) {
-                   session.transport->close(transport_close::going_away,
-                                            "LAN access disabled");
+                 if (!is_loopback_peer(session.peer_ip)) {
+                   const std::shared_ptr<session_transport> transport =
+                       session.transport.lock();
+                   if (transport) {
+                     transport->close(transport_close::going_away,
+                                      "LAN access disabled");
+                   }
                  }
                }
              }

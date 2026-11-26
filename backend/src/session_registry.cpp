@@ -48,7 +48,9 @@ std::shared_ptr<session_info> session_registry::add(
   s->connected_ms = now_ms();
   s->last_seen_ms = s->connected_ms;
   s->last_ping_ms = s->connected_ms;
-  s->transport = std::move(transport);
+  // A weak view: session_controller holds the owning reference for exactly as
+  // long as the session is live.
+  s->transport = transport;
   sessions_.push_back(s);
   return s;
 }

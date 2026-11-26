@@ -43,6 +43,7 @@
 #include "session_intent.h"
 #include "session_preset.h"
 #include "transport/switchable_transport.h"
+#include "transport/video_send.h"
 #include "transport/ws_transport.h"
 #include "util.h"
 #include "version.h"
@@ -237,7 +238,7 @@ std::vector<clipboard_route_session> clipboard_route_view(
     clipboard_route_session route;
     route.id = session.id;
     route.authenticated = session.authenticated;
-    route.connected = session.transport != nullptr;
+    route.connected = !session.transport.expired();
     route.foreground_ms = session.foreground_hint_ms;
     route.last_input_ms = session.last_input_ms;
     route.connected_ms = session.connected_ms;
@@ -505,7 +506,11 @@ bool clipboard_stream_capable(const uvcpp_json& j) {
 void send_clipboard_files_to(
     const std::shared_ptr<session_registry>& registry, const session_info& peer,
     const std::vector<clipboard_file>& files, bool nested_rdp) {
-  if (!peer.authenticated || !peer.transport) return;
+  if (!peer.authenticated) return;
+  // Hold the transport for the whole message: the record only carries a weak
+  // view, and teardown may have dropped it between the snapshot and here.
+  std::shared_ptr<session_transport> transport = peer.transport.lock();
+  if (!transport) return;
 
   // Count entries are batched, not dropped: the byte caps still end the
   // prefix, and the viewer learns how many were left out. The host records a
@@ -622,7 +627,7 @@ void send_clipboard_files_to(
       if (omitted > 0 && batch.end == advertised) {
         out["omitted"] = static_cast<uint64_t>(omitted);
       }
-      send_json(peer.transport.get(), out);
+      send_json(transport.get(), out);
     }
   }
 
@@ -630,7 +635,7 @@ void send_clipboard_files_to(
   legacy_out["type"] = "clipboard";
   legacy_out["action"] = "files";
   legacy_out["files"] = legacy_list;
-  send_json(peer.transport.get(), legacy_out);
+  send_json(transport.get(), legacy_out);
 }
 
 void publish_clipboard_files(
@@ -655,7 +660,9 @@ void publish_clipboard_files(
     log_clipboard_route(route, "local", "kind", "files");
     for (uint32_t id : route.targets) {
       const std::shared_ptr<session_info> peer = registry->find(id);
-      if (!peer || !peer->authenticated || !peer->transport) continue;
+      if (!peer || !peer->authenticated) continue;
+      // send_clipboard_files_to() locks the transport itself; no raw pointer
+      // is carried across this loop.
       const uint64_t now = now_ms();
       if (g_clipboard_echoes.suppress(id, echo_key, now)) {
         std::vector<diag_field> fields;
@@ -721,7 +728,9 @@ void publish_clipboard_image(
     std::size_t sent = 0;
     for (uint32_t id : route.targets) {
       const std::shared_ptr<session_info> peer = registry->find(id);
-      if (!peer || !peer->authenticated || !peer->transport) continue;
+      if (!peer || !peer->authenticated) continue;
+      std::shared_ptr<session_transport> transport = peer->transport.lock();
+      if (!transport) continue;
       // The bytes travel through the id-based pull channel; a client that
       // cannot pull must not receive a files-only message it would mistake
       // for a file list.
@@ -759,7 +768,7 @@ void publish_clipboard_image(
         out["chain"] = chain;
       }
       if (nested_rdp) out["nested_rdp"] = true;
-      send_json(peer->transport.get(), out);
+      send_json(transport.get(), out);
       ++sent;
     }
     diag().log(diag_level::info, "clipboard.image", std::string(),
@@ -843,41 +852,70 @@ bool decode_input_event(const uvcpp_json& j, input_event& out,
   return false;
 }
 
-bool send_frame_payload(session_transport* transport,
-                        const std::shared_ptr<session_info>& session,
+bool send_frame_payload(const std::shared_ptr<session_info>& session,
                         uint16_t flags, uint64_t ts_us,
                         const std::vector<uint8_t>& payload,
                         const session_options* opt = nullptr) {
-  std::vector<uint8_t> bytes;
-  std::string err;
-  const uint32_t seq = session->out_seq++;
-  if (!protocol::encode_packet_into(
-          bytes, static_cast<uint8_t>(protocol::packet_type::frame), flags,
-          session->id, seq, ts_us, payload.data(), payload.size(), err)) {
-    send_error(transport, "frame_build_failed", err);
-    return false;
-  }
-  const bool accepted = transport->send_binary(transport_channel::video,
-                                               bytes.data(), bytes.size());
   const uint64_t now = now_ms();
-  const video_send_status status = handle_video_send_result(
-      accepted, transport->is_open(), now, session->video_drop,
-      // A dropped frame leaves the viewer without a reference it needs. Ask
-      // the capture for a new baseline, but not on every frame of a burst.
-      [&session, opt, now] {
-        if (!opt || !opt->capture) return;
-        // Keep the capture-side throttle in sync so the caller's own recovery
-        // path does not ask for the same keyframe again in this tick.
-        session->last_keyframe_request_ms = now;
-        opt->capture->request_keyframe();
-      },
-      [transport, opt] {
-        if (opt) send_stream_gap(transport);
-      },
-      [transport] { send_error(transport, "send_failed", "could not queue frame"); });
-  if (status != video_send_status::sent) return false;
-  ++session->frames_sent;
-  return true;
+  // The transport-facing half locks the session's weak reference and skips the
+  // frame when it is gone. Nothing below may touch a connection before that
+  // lock succeeded.
+  const video_packet_result packet =
+      send_frame_packet(session, flags, ts_us, payload);
+  switch (packet.status) {
+    case video_packet_status::sent:
+      return true;
+    case video_packet_status::no_transport: {
+      // A push tick can win the race against teardown; that is expected, but a
+      // broken session must not flood the log once per frame.
+      constexpr uint64_t kLogIntervalMs = 2000;
+      if (session->last_no_transport_log_ms == 0 ||
+          now >= session->last_no_transport_log_ms + kLogIntervalMs) {
+        session->last_no_transport_log_ms = now;
+        diag().log(diag_level::debug, "video.drop", std::string(),
+                   {{"reason", "no_transport"},
+                    {"session_id", std::to_string(session->id)}});
+      }
+      return false;
+    }
+    case video_packet_status::encode_failed: {
+      const std::shared_ptr<session_transport> transport =
+          session->transport.lock();
+      if (transport) send_error(transport.get(), "frame_build_failed", packet.error);
+      return false;
+    }
+    case video_packet_status::refused_open:
+    case video_packet_status::refused_closed: {
+      const std::shared_ptr<session_transport> transport =
+          session->transport.lock();
+      if (!transport) return false;
+      const bool open =
+          packet.status == video_packet_status::refused_open;
+      const video_send_status status = handle_video_send_result(
+          false, open, now, session->video_drop,
+          // A dropped frame leaves the viewer without a reference it needs.
+          // Ask the capture for a new baseline, but not on every frame of a
+          // burst.
+          [&session, opt, now] {
+            if (!opt || !opt->capture) return;
+            // Keep the capture-side throttle in sync so the caller's own
+            // recovery path does not ask for the same keyframe again in this
+            // tick.
+            session->last_keyframe_request_ms = now;
+            opt->capture->request_keyframe();
+          },
+          [&transport, opt] {
+            if (opt) send_stream_gap(transport.get());
+          },
+          [&transport] {
+            send_error(transport.get(), "send_failed",
+                       "could not queue frame");
+          });
+      (void)status;
+      return false;
+    }
+  }
+  return false;
 }
 
 /// Sends one captured frame.
@@ -953,8 +991,7 @@ bool send_realtime_file(const std::weak_ptr<session_info>& weak_session,
   return false;
 }
 
-bool send_frame_with_av1(session_transport* transport,
-                         const std::shared_ptr<session_info>& session,
+bool send_frame_with_av1(const std::shared_ptr<session_info>& session,
                          const captured_frame& frame,
                          const session_options* opt = nullptr) {
   // The pipeline diagnostic measures from capture completion (when the pixels
@@ -999,23 +1036,21 @@ bool send_frame_with_av1(session_transport* transport,
     }
 #endif
     const bool sent = send_frame_payload(
-        transport, session,
-        frame.keyframe ? protocol::kPacketFlagKeyframe : 0, frame.ts_us,
-        frame.av1_payload, opt);
+        session, frame.keyframe ? protocol::kPacketFlagKeyframe : 0,
+        frame.ts_us, frame.av1_payload, opt);
     if (sent) note_sent(frame.av1_payload.size() +
                         protocol::kPacketHeaderSize);
     return sent;
   }
-  if (!send_frame_payload(transport, session,
+  if (!send_frame_payload(session,
                           frame.keyframe ? protocol::kPacketFlagKeyframe : 0,
                           frame.ts_us, frame.payload, opt)) {
     return false;
   }
   note_sent(frame.payload.size() + protocol::kPacketHeaderSize);
   if (session->av1 && !frame.av1_payload.empty()) {
-    if (send_frame_payload(transport, session,
-                           protocol::kPacketFlagTileRefresh, frame.ts_us,
-                           frame.av1_payload, opt)) {
+    if (send_frame_payload(session, protocol::kPacketFlagTileRefresh,
+                           frame.ts_us, frame.av1_payload, opt)) {
       video_pipeline().note_sent_bytes(frame.av1_payload.size() +
                                        protocol::kPacketHeaderSize);
     }
@@ -1049,9 +1084,8 @@ void send_empty_frame(session_transport* transport,
     send_error(transport, "frame_build_failed", err);
     return;
   }
-  send_frame_payload(transport, session,
-                     keyframe ? protocol::kPacketFlagKeyframe : 0, epoch_us(),
-                     payload);
+  send_frame_payload(session, keyframe ? protocol::kPacketFlagKeyframe : 0,
+                     epoch_us(), payload);
 }
 
 
@@ -1144,9 +1178,8 @@ bool send_tile_refresh(session_transport* transport,
                             nullptr, err)) {
     return false;
   }
-  if (!send_frame_payload(transport, session,
-                          protocol::kPacketFlagTileRefresh, epoch_us(),
-                          payload, &opt)) {
+  if (!send_frame_payload(session, protocol::kPacketFlagTileRefresh,
+                          epoch_us(), payload, &opt)) {
     return false;
   }
   // The full-screen refresh above was flagged as a keyframe, so it counts as
@@ -1531,7 +1564,7 @@ void send_capture_frame(session_transport* transport,
       epoch_msg["mode"] = frame->av1_only ? "video" : "tiles";
       send_json(transport, epoch_msg);
     }
-    if (!send_frame_with_av1(transport, session, *frame, &opt)) {
+    if (!send_frame_with_av1(session, *frame, &opt)) {
       // The transport refused the frame: its channel is full, or the session
       // is gone. Advancing anyway would tell the next tick that the viewer is
       // up to date when it is now one delta behind, and every later frame
@@ -1620,7 +1653,9 @@ static void post_rtc_signal(std::function<void(std::function<void()>)> post,
   if (!post) return;
   post([registry, id, type = std::string(type), sdp, candidate, mid] {
     const std::shared_ptr<session_info> session = registry->find(id);
-    if (!session || !session->transport) return;
+    if (!session) return;
+    const std::shared_ptr<session_transport> transport = session->transport.lock();
+    if (!transport) return;
     uvcpp_json j;
     if (type == "ice") {
       j["type"] = "rtc-ice";
@@ -1630,7 +1665,7 @@ static void post_rtc_signal(std::function<void(std::function<void()>)> post,
       j["type"] = "rtc-" + type;
       j["sdp"] = sdp;
     }
-    send_json(session->transport.get(), j);
+    send_json(transport.get(), j);
   });
 }
 #endif
@@ -1945,7 +1980,7 @@ session_controller::session_controller(
     std::shared_ptr<session_registry> registry,
     std::shared_ptr<session_transport> transport, session_options options)
     : registry_(std::move(registry)),
-      transport_(transport),
+      transport_(std::move(transport)),
       options_(std::move(options)) {}
 
 session_controller::~session_controller() = default;
@@ -2029,7 +2064,7 @@ void session_controller::sync_input_rect() {
 void session_controller::send_lazy_offer_reply(bool ok, bool stream,
                                                const std::string& message,
                                                bool compat) {
-  std::shared_ptr<session_transport> transport = transport_.lock();
+  std::shared_ptr<session_transport> transport = transport_;
   if (!transport) return;
   uvcpp_json out;
   out["type"] = "file";
@@ -2057,7 +2092,7 @@ void session_controller::send_lazy_offer_reply(bool ok, bool stream,
 void session_controller::request_lazy_range(std::size_t index, uint32_t id,
                                             uint64_t offset,
                                             uint32_t length) {
-  std::shared_ptr<session_transport> transport = transport_.lock();
+  std::shared_ptr<session_transport> transport = transport_;
   std::shared_ptr<session_info> session = session_.lock();
   std::shared_ptr<remote_file_source> source = stream_source_;
   const auto fail = [&source](uint32_t request_id, uint64_t at) {
@@ -2088,7 +2123,7 @@ void session_controller::request_lazy_range(std::size_t index, uint32_t id,
 }
 
 void session_controller::request_lazy_file(std::size_t index) {
-  std::shared_ptr<session_transport> transport = transport_.lock();
+  std::shared_ptr<session_transport> transport = transport_;
   std::shared_ptr<session_info> session = session_.lock();
   std::shared_ptr<lazy_blob_source> source = lazy_source_;
   if (!source || index >= source->size()) {
@@ -2151,7 +2186,7 @@ void session_controller::on_upload_event(int tag,
       // Tell the originating viewer which host paths were materialised, so
       // its reverse clipboard sync suppresses the echo instead of downloading
       // its own files back (the source of the (1)(2) loop).
-      std::shared_ptr<session_transport> transport = transport_.lock();
+      std::shared_ptr<session_transport> transport = transport_;
       if (transport && !path.empty()) {
         uvcpp_json out;
         out["type"] = "file";
@@ -2166,7 +2201,7 @@ void session_controller::on_upload_event(int tag,
 }
 
 bool session_controller::start(const std::string* initial_token) {
-  std::shared_ptr<session_transport> transport = transport_.lock();
+  std::shared_ptr<session_transport> transport = transport_;
   if (!transport) return false;
   const std::string peer_ip = transport->peer_ip();
   {
@@ -2190,7 +2225,7 @@ bool session_controller::start(const std::string* initial_token) {
                  {{"reason", "allowlist"}, {"peer", peer_ip}});
       send_error(transport.get(), "ip_not_allowed",
                  "this address is not in the host's IP allowlist");
-      transport->close(transport_close::policy, "address not allowed");
+      close_transport(transport_close::policy, "address not allowed");
       return false;
     }
   }
@@ -2202,7 +2237,7 @@ bool session_controller::start(const std::string* initial_token) {
       send_error(transport.get(), banned ? "ip_banned" : "too_many_attempts",
                  banned ? "this address is blocked"
                         : "too many failed attempts; wait before trying again");
-      transport->close(transport_close::policy,
+      close_transport(transport_close::policy,
                        banned ? "ip banned" : "too many attempts");
       return false;
     }
@@ -2228,7 +2263,7 @@ bool session_controller::start(const std::string* initial_token) {
                      : std::to_string(session_registry::kMaxUnauthenticated)}});
     send_error(transport.get(), "connection_limit",
                "too many pending connections; try again later");
-    transport->close(transport_close::policy, "connection limit");
+    close_transport(transport_close::policy, "connection limit");
     return false;
   }
   session_ = session;
@@ -2352,7 +2387,7 @@ bool session_controller::start(const std::string* initial_token) {
                      std::to_string(session_registry::kMaxAuthenticated)}});
         send_error(transport.get(), "session_limit",
                    "the host has reached its authenticated session limit");
-        transport->close(transport_close::policy, "session limit");
+        close_transport(transport_close::policy, "session limit");
         return false;
       }
       if (session_token) {
@@ -2375,13 +2410,13 @@ bool session_controller::start(const std::string* initial_token) {
                      banned ? "ip_banned" : "too_many_attempts",
                      banned ? "this address is blocked"
                             : "too many failed attempts; wait before trying again");
-          transport->close(transport_close::policy,
+          close_transport(transport_close::policy,
                            banned ? "ip banned" : "too many attempts");
           return false;
         }
       }
       send_error(transport.get(), "unauthorized", "invalid token");
-      transport->close(transport_close::policy, "invalid token");
+      close_transport(transport_close::policy, "invalid token");
       return false;
     }
   }
@@ -2408,7 +2443,7 @@ bool session_controller::start(const std::string* initial_token) {
 }
 
 void session_controller::send_welcome_message() {
-  std::shared_ptr<session_transport> transport = transport_.lock();
+  std::shared_ptr<session_transport> transport = transport_;
   std::shared_ptr<session_info> session = session_.lock();
   if (transport && session) {
     send_welcome(transport.get(), *session, options_, resume_token_);
@@ -2432,7 +2467,7 @@ void session_controller::send_welcome_message() {
 void session_controller::announce_current_clipboard(const char* reason) {
   if (!options_.clipboard || !options_.clipboard->available()) return;
   const std::shared_ptr<session_info> session = session_.lock();
-  if (!session || !session->authenticated || !session->transport) return;
+  if (!session || !session->authenticated || session->transport.expired()) return;
   const uint32_t session_id = session->id;
   const std::string reason_text = reason != nullptr ? reason : "connect";
   std::shared_ptr<session_registry> registry = registry_;
@@ -2450,7 +2485,9 @@ void session_controller::announce_current_clipboard(const char* reason) {
     auto deliver = [registry, session_id, text = std::move(text), hash, key,
                    device, reason_text] {
       const std::shared_ptr<session_info> live = registry->find(session_id);
-      if (!live || !live->authenticated || !live->transport) return;
+      if (!live || !live->authenticated) return;
+      std::shared_ptr<session_transport> transport = live->transport.lock();
+      if (!transport) return;
       g_clipboard_echoes.remember(session_id, key,
                                   clipboard_echo_direction::delivered,
                                   now_ms());
@@ -2459,7 +2496,7 @@ void session_controller::announce_current_clipboard(const char* reason) {
       out["text"] = text;
       out["hash"] = hash;
       out["chain"] = device;
-      send_json(live->transport.get(), out);
+      send_json(transport.get(), out);
       diag().log(diag_level::info, "clipboard.announce", std::string(),
                  {{"target", std::to_string(session_id)},
                   {"direction", reason_text},
@@ -2490,7 +2527,7 @@ void session_controller::announce_current_clipboard(const char* reason) {
     auto deliver = [registry, session_id, files = std::move(files), nested,
                     key, reason_text] {
       const std::shared_ptr<session_info> live = registry->find(session_id);
-      if (!live || !live->authenticated || !live->transport) return;
+      if (!live || !live->authenticated || live->transport.expired()) return;
       g_clipboard_echoes.remember(session_id, key,
                                   clipboard_echo_direction::delivered,
                                   now_ms());
@@ -2595,7 +2632,7 @@ void session_controller::stop_voice() {
 }
 
 void session_controller::send_voice(std::vector<uint8_t> pcm) {
-  std::shared_ptr<session_transport> transport = transport_.lock();
+  std::shared_ptr<session_transport> transport = transport_;
   if (!transport || !transport->is_open() || pcm.empty()) return;
   std::vector<uint8_t> out;
   std::string error;
@@ -2610,7 +2647,7 @@ void session_controller::send_voice(std::vector<uint8_t> pcm) {
 void session_controller::start_rtc(const std::shared_ptr<session_info>& session) {
 #if MOLINK_HAVE_WEBRTC
   if (!session || session->rtc) return;
-  std::shared_ptr<session_transport> transport = transport_.lock();
+  std::shared_ptr<session_transport> transport = transport_;
   if (!transport) return;
 
   rtc_session::config config;
@@ -2705,7 +2742,7 @@ void session_controller::start_rtc(const std::shared_ptr<session_info>& session)
 }
 
 void session_controller::send_json_string(const std::string& text) {
-  std::shared_ptr<session_transport> transport = transport_.lock();
+  std::shared_ptr<session_transport> transport = transport_;
   if (transport && transport->is_open()) {
     transport->send_text(transport_channel::control, text);
   }
@@ -2714,7 +2751,7 @@ void session_controller::send_json_string(const std::string& text) {
 bool session_controller::send_file_chunk(uint32_t id, uint64_t offset,
                                          const uint8_t* data,
                                          std::size_t len) {
-  std::shared_ptr<session_transport> transport = transport_.lock();
+  std::shared_ptr<session_transport> transport = transport_;
   if (!transport || !transport->is_open()) return false;
   std::vector<uint8_t> payload(16 + len);
   std::memcpy(payload.data(), &id, sizeof(id));
@@ -2738,7 +2775,7 @@ void session_controller::send_clipboard_file_reply(uint32_t id,
                                                    const uint8_t* data,
                                                    std::size_t len) {
   try {
-  std::shared_ptr<session_transport> transport = transport_.lock();
+  std::shared_ptr<session_transport> transport = transport_;
   if (!transport || !transport->is_open()) return;
   std::vector<uint8_t> payload(16 + len);
   auto put_u32 = [&payload](std::size_t at, uint32_t value) {
@@ -2778,7 +2815,7 @@ void session_controller::send_clipboard_file_reply(uint32_t id,
 }
 
 void session_controller::send_audio(audio_pcm_ptr pcm, bool resume) {
-  std::shared_ptr<session_transport> transport = transport_.lock();
+  std::shared_ptr<session_transport> transport = transport_;
   if (!transport || !transport->is_open() || !pcm || pcm->empty()) return;
   if (resume) {
     // Announce the new format before the first packet. The same packet also
@@ -2860,7 +2897,7 @@ void session_controller::chat_history() {
 }
 
 void session_controller::approve_access_request(const std::string& policy) {
-  std::shared_ptr<session_transport> transport = transport_.lock();
+  std::shared_ptr<session_transport> transport = transport_;
   std::shared_ptr<session_info> session = session_.lock();
   if (!transport || !session) return;
   session->access_request_id = 0;
@@ -2874,7 +2911,7 @@ void session_controller::approve_access_request(const std::string& policy) {
                 {"limit", std::to_string(session_registry::kMaxAuthenticated)}});
     send_error(transport.get(), "session_limit",
                "the host has reached its authenticated session limit");
-    transport->close(transport_close::policy, "session limit");
+    close_transport(transport_close::policy, "session limit");
     return;
   }
   // The local user can narrow this one connection while approving it. An
@@ -2903,18 +2940,18 @@ void session_controller::approve_access_request(const std::string& policy) {
 }
 
 void session_controller::deny_access_request() {
-  std::shared_ptr<session_transport> transport = transport_.lock();
+  std::shared_ptr<session_transport> transport = transport_;
   std::shared_ptr<session_info> session = session_.lock();
   if (!transport || !session) return;
   session->access_request_id = 0;
   registry_->set_awaiting_approval(session, false);
   send_error(transport.get(), "access_denied",
              "the host declined the request");
-  transport->close(transport_close::policy, "access denied");
+  close_transport(transport_close::policy, "access denied");
 }
 
 void session_controller::on_text(const std::string& text) {
-  std::shared_ptr<session_transport> transport = transport_.lock();
+  std::shared_ptr<session_transport> transport = transport_;
   std::shared_ptr<session_info> session = session_.lock();
   if (!transport || !session) return;
   const std::string peer_ip = transport->peer_ip();
@@ -2937,7 +2974,7 @@ void session_controller::on_text(const std::string& text) {
     send_error(transport.get(), "message_too_large",
                "messages from an unauthenticated connection are limited to "
                "128 KiB");
-    transport->close(transport_close::policy, "message too large");
+    close_transport(transport_close::policy, "message too large");
     return;
   }
 
@@ -3179,14 +3216,14 @@ void session_controller::on_text(const std::string& text) {
                        banned
                            ? "this address is blocked"
                            : "too many failed attempts; wait before trying again");
-            transport->close(transport_close::policy,
+            close_transport(transport_close::policy,
                              banned ? "ip banned" : "too many attempts");
             return;
           }
         }
         send_error(transport.get(), "invalid_totp",
                    "the six-digit code is not valid");
-        transport->close(transport_close::policy,
+        close_transport(transport_close::policy,
                          "invalid two-factor code");
         return;
       }
@@ -3215,13 +3252,13 @@ void session_controller::on_text(const std::string& text) {
                      banned ? "ip_banned" : "too_many_attempts",
                      banned ? "this address is blocked"
                             : "too many failed attempts; wait before trying again");
-          transport->close(transport_close::policy,
+          close_transport(transport_close::policy,
                            banned ? "ip banned" : "too many attempts");
           return;
         }
       }
       send_error(transport.get(), "unauthorized", "invalid token");
-      transport->close(transport_close::policy, "invalid token");
+      close_transport(transport_close::policy, "invalid token");
       return;
     }
     diag().log(diag_level::info, "session.auth", "hello accepted",
@@ -3263,7 +3300,7 @@ void session_controller::on_text(const std::string& text) {
                   {"limit", std::to_string(session_registry::kMaxAuthenticated)}});
       send_error(transport.get(), "session_limit",
                  "the host has reached its authenticated session limit");
-      transport->close(transport_close::policy, "session limit");
+      close_transport(transport_close::policy, "session limit");
       return;
     }
     diag().log(diag_level::info, "session.open", std::string(),
@@ -3327,7 +3364,7 @@ void session_controller::on_text(const std::string& text) {
     if (options_.lock && options_.lock->locked() &&
         !is_loopback_peer(peer_ip)) {
       send_error(transport.get(), "locked", "the UI is locked");
-      transport->close(transport_close::policy, "locked");
+      close_transport(transport_close::policy, "locked");
       return;
     }
     if (session->access_request_id != 0) {
@@ -3378,7 +3415,7 @@ void session_controller::on_text(const std::string& text) {
   }
 
   if (!require_auth()) {
-    transport->close(transport_close::policy, "not authenticated");
+    close_transport(transport_close::policy, "not authenticated");
     return;
   }
 
@@ -3545,8 +3582,10 @@ void session_controller::on_text(const std::string& text) {
         shared["value"] = resolved.codec;
         shared["scope"] = "global";
         for (const session_info& peer : registry_->snapshot()) {
-          if (!peer.authenticated || !peer.transport) continue;
-          send_json(peer.transport.get(), shared);
+          if (!peer.authenticated) continue;
+          const std::shared_ptr<session_transport> transport =
+              peer.transport.lock();
+          if (transport) send_json(transport.get(), shared);
         }
       }
     }
@@ -3789,7 +3828,7 @@ void session_controller::on_text(const std::string& text) {
   // so nested sessions cannot echo it back.
   if (type == "clipboard-sync") {
     if (!require_auth()) {
-      transport->close(transport_close::policy, "not authenticated");
+      close_transport(transport_close::policy, "not authenticated");
       return;
     }
     if (!require_cap(capability::clipboard_write)) return;
@@ -3844,7 +3883,9 @@ void session_controller::on_text(const std::string& text) {
     for (uint32_t id : route.targets) {
       if (id == session->id) continue;
       const std::shared_ptr<session_info> peer = registry_->find(id);
-      if (!peer || !peer->authenticated || !peer->transport) continue;
+      if (!peer || !peer->authenticated) continue;
+      std::shared_ptr<session_transport> transport = peer->transport.lock();
+      if (!transport) continue;
       if (g_clipboard_echoes.suppress(id, key, now)) {
         diag().log(diag_level::debug, "clipboard.announce", std::string(),
                    {{"target", std::to_string(id)},
@@ -3859,7 +3900,7 @@ void session_controller::on_text(const std::string& text) {
       out["text"] = text;
       out["hash"] = hash;
       out["chain"] = chain;
-      send_json(peer->transport.get(), out);
+      send_json(transport.get(), out);
     }
     return;
   }
@@ -3992,13 +4033,16 @@ void session_controller::on_text(const std::string& text) {
             post([registry_ref, session_id,
                   clipboard_text = std::move(clipboard_text)] {
               const auto live = registry_ref->find(session_id);
-              if (!live || !live->transport) return;
+              if (!live) return;
+              const std::shared_ptr<session_transport> transport =
+                  live->transport.lock();
+              if (!transport) return;
               diag().log(diag_level::info, "clipboard.get", std::string(),
                          {{"bytes", std::to_string(clipboard_text.size())}});
               uvcpp_json reply;
               reply["type"] = "clipboard";
               reply["text"] = clipboard_text;
-              send_json(live->transport.get(), reply);
+              send_json(transport.get(), reply);
             });
           });
       return;
@@ -4114,8 +4158,10 @@ void session_controller::on_text(const std::string& text) {
     shared["value"] = mode;
     shared["scope"] = "global";
     for (const session_info& peer : registry_->snapshot()) {
-      if (!peer.authenticated || !peer.transport) continue;
-      send_json(peer.transport.get(), shared);
+      if (!peer.authenticated) continue;
+      const std::shared_ptr<session_transport> transport =
+          peer.transport.lock();
+      if (transport) send_json(transport.get(), shared);
     }
     return;
   }
@@ -4174,8 +4220,10 @@ void session_controller::on_text(const std::string& text) {
     shared["value"] = value;
     shared["scope"] = "global";
     for (const session_info& peer : registry_->snapshot()) {
-      if (!peer.authenticated || !peer.transport) continue;
-      send_json(peer.transport.get(), shared);
+      if (!peer.authenticated) continue;
+      const std::shared_ptr<session_transport> transport =
+          peer.transport.lock();
+      if (transport) send_json(transport.get(), shared);
     }
     return;
   }
@@ -4948,7 +4996,7 @@ void session_controller::on_text(const std::string& text) {
   }
 
   if (type == "bye") {
-    transport->close(transport_close::normal, "client said bye");
+    close_transport(transport_close::normal, "client said bye");
     return;
   }
 
@@ -5111,7 +5159,7 @@ void session_controller::on_text(const std::string& text) {
 }
 
 void session_controller::on_binary(const uint8_t* data, std::size_t len) {
-  std::shared_ptr<session_transport> transport = transport_.lock();
+  std::shared_ptr<session_transport> transport = transport_;
   std::shared_ptr<session_info> session = session_.lock();
   if (!transport || !session) return;
 
@@ -5130,7 +5178,7 @@ void session_controller::on_binary(const uint8_t* data, std::size_t len) {
     send_error(transport.get(), "message_too_large",
                "packets from an unauthenticated connection are limited to "
                "128 KiB");
-    transport->close(transport_close::policy, "packet too large");
+    close_transport(transport_close::policy, "packet too large");
     return;
   }
   protocol::packet pkt;
@@ -5270,6 +5318,37 @@ void session_controller::on_binary(const uint8_t* data, std::size_t len) {
 }
 
 void session_controller::on_close(int code, const std::string& reason) {
+  // The transport itself is ending this session (peer close, read error,
+  // protocol error). Tear the session down; the owning `transport_` reference
+  // is released when this controller is destroyed, which is after the
+  // transport's callback returns.
+  finish_close(code, reason);
+}
+
+void session_controller::close_transport(int code, const std::string& reason) {
+  // This side is ending the session. libuvcpp does **not** invoke on_close for
+  // a locally initiated close, so the push clock must be stopped here, before
+  // the connection can be recycled.
+  std::shared_ptr<session_info> session = session_.lock();
+  if (session) session->push_enabled = false;
+  // Keep the owning reference for the rest of this controller's life instead
+  // of resetting it here: transport_ is read by callbacks that can run on the
+  // clipboard/audio threads, and a concurrent reset would race on the
+  // shared_ptr itself. The transport is already latched closed, so every send
+  // is a no-op. The controller owns the object until teardown completes.
+  if (transport_) transport_->close(code, reason);
+  // A local close has no callback coming, so run the teardown now. If the
+  // transport does report one anyway, finish_close() is idempotent.
+  finish_close(code, reason);
+  // Only now is it safe to clear the record's weak view: finish_close() took
+  // it out of the registry, so a supervisor snapshot can no longer be copying
+  // this weak_ptr while we reset it.
+  if (session) session->transport.reset();
+}
+
+void session_controller::finish_close(int code, const std::string& reason) {
+  if (finished_) return;
+  finished_ = true;
   std::shared_ptr<session_info> session = session_.lock();
   if (!session) return;
   {
@@ -5418,7 +5497,10 @@ void session_supervisor::start() {
             std::size_t sent = 0;
             for (uint32_t id : route.targets) {
               const std::shared_ptr<session_info> live = registry->find(id);
-              if (!live || !live->authenticated || !live->transport) continue;
+              if (!live || !live->authenticated) continue;
+              const std::shared_ptr<session_transport> transport =
+                  live->transport.lock();
+              if (!transport) continue;
               const uint64_t now = now_ms();
               g_clipboard_echoes.remember(
                   id, key, clipboard_echo_direction::delivered, now);
@@ -5428,7 +5510,7 @@ void session_supervisor::start() {
               out["text"] = text;
               out["hash"] = hash;
               out["chain"] = device;
-              send_json(live->transport.get(), out);
+              send_json(transport.get(), out);
             }
             // Bytes and viewer count only: never the text itself.
             diag().log(diag_level::info, "clipboard.announce",
@@ -5552,7 +5634,10 @@ void session_supervisor::run_push_clock() {
     bool dropping = false;
     bool any = false;
     for (const session_info& peer : registry_->snapshot()) {
-      if (!peer.authenticated || !peer.push_enabled || !peer.transport) continue;
+      if (!peer.authenticated || !peer.push_enabled ||
+          peer.transport.expired()) {
+        continue;
+      }
       if (!intent_wants_video(peer.intent)) continue;
       any = true;
       if (peer.viewer_stats_ms == 0 || now_ms - peer.viewer_stats_ms > 3000) {
@@ -5571,20 +5656,27 @@ void session_supervisor::run_push_clock() {
     session_options options = options_;
     post([registry_ref, options] {
       for (const session_info& peer : registry_ref->snapshot()) {
-        if (!peer.authenticated || !peer.push_enabled || !peer.transport) {
+        if (!peer.authenticated || !peer.push_enabled ||
+            peer.transport.expired()) {
           continue;
         }
         if (!intent_wants_video(peer.intent)) continue;
         const std::shared_ptr<session_info> live = registry_ref->find(peer.id);
-        if (!live || !live->transport) continue;
-        session_transport* transport = live->transport.get();
-        send_capture_frame(transport, live, options, /*push=*/true);
+        if (!live) continue;
+        // Hold the transport for this whole tick: the record carries a weak
+        // view, and a close that raced the snapshot must not leave a dangling
+        // pointer for the frame send. send_frame_payload() re-checks the weak
+        // reference too, so a teardown between here and the send still skips.
+        const std::shared_ptr<session_transport> transport =
+            live->transport.lock();
+        if (!transport) continue;
+        send_capture_frame(transport.get(), live, options, /*push=*/true);
         // These rode along with `request-frame` in the pull model. A pushed
         // session sends no requests, so the clock has to carry them or the
         // cursor freezes and the sequence map that names stale cells never
         // reaches the viewer.
-        maybe_send_cursor(transport, live, options);
-        send_tile_seq(transport, live, options);
+        maybe_send_cursor(transport.get(), live, options);
+        send_tile_seq(transport.get(), live, options);
       }
     });
   }
@@ -5658,8 +5750,10 @@ void session_supervisor::run() {
       {
         uint64_t video_drops = 0;
         for (const session_info& peer : registry_->snapshot()) {
-          if (!peer.authenticated || !peer.transport) continue;
-          video_drops += peer.transport->take_video_drops();
+          if (!peer.authenticated) continue;
+          const std::shared_ptr<session_transport> transport =
+              peer.transport.lock();
+          if (transport) video_drops += transport->take_video_drops();
         }
         if (video_drops > 0) {
           video_pipeline().note_dropped(video_drops);
@@ -5889,9 +5983,21 @@ void session_supervisor::run() {
           status["type"] = "codec-status";
           status["codec"] = preference;
           status["available"] = codec_available;
-          for (const session_info& peer : registry_->snapshot()) {
-            if (!peer.authenticated || !peer.transport) continue;
-            send_json(peer.transport.get(), status);
+          // This runs on the supervisor thread. The transports are loop
+          // affine, so hop the actual send onto the app loop instead of
+          // touching a connection from here.
+          auto deliver_status = [registry = registry_, status] {
+            for (const session_info& peer : registry->snapshot()) {
+              if (!peer.authenticated) continue;
+              const std::shared_ptr<session_transport> transport =
+                  peer.transport.lock();
+              if (transport) send_json(transport.get(), status);
+            }
+          };
+          if (options_.post) {
+            options_.post(std::move(deliver_status));
+          } else {
+            deliver_status();
           }
         }
       }
@@ -5913,7 +6019,8 @@ void session_supervisor::run() {
                          peer.id, peer.av1_stream ? 1 : 0,
                          peer.h264_stream ? 1 : 0, peer.vp9_stream ? 1 : 0,
                          peer.vp8_stream ? 1 : 0, peer.push_enabled ? 1 : 0,
-                         peer.has_image ? 1 : 0, peer.transport ? 1 : 0,
+                         peer.has_image ? 1 : 0,
+                         peer.transport.expired() ? 0 : 1,
                          static_cast<unsigned long long>(
                              now_ms() - (peer.last_seen_ms != 0
                                              ? peer.last_seen_ms
@@ -6011,8 +6118,12 @@ void session_supervisor::run() {
         const std::string message(text);
         post([registry_ref, message] {
           for (const session_info& peer : registry_ref->snapshot()) {
-            if (!peer.authenticated || !peer.transport) continue;
-            peer.transport->send_text(transport_channel::control, message);
+            if (!peer.authenticated) continue;
+            const std::shared_ptr<session_transport> transport =
+                peer.transport.lock();
+            if (transport) {
+              transport->send_text(transport_channel::control, message);
+            }
           }
         });
       }
@@ -6030,9 +6141,10 @@ void session_supervisor::run() {
         const uint64_t now = epoch_us();
         post([registry_ref, clock = std::move(clock), now] {
           for (const session_info& peer : registry_ref->snapshot()) {
-            if (!peer.authenticated || !peer.transport || !peer.has_image) {
-              continue;
-            }
+            if (!peer.authenticated || !peer.has_image) continue;
+            const std::shared_ptr<session_transport> transport =
+                peer.transport.lock();
+            if (!transport) continue;
             std::vector<uint8_t> bytes;
             std::string error;
             if (!protocol::encode_packet_into(
@@ -6041,8 +6153,8 @@ void session_supervisor::run() {
                     peer.id, 0, now, clock.data(), clock.size(), error)) {
               continue;
             }
-            peer.transport->send_binary(transport_channel::video, bytes.data(),
-                                        bytes.size());
+            transport->send_binary(transport_channel::video, bytes.data(),
+                                   bytes.size());
           }
         });
       }
@@ -6144,9 +6256,10 @@ void session_supervisor::run() {
               for (uint32_t id : route.targets) {
                 const std::shared_ptr<session_info> live =
                     registry_ref->find(id);
-                if (!live || !live->authenticated || !live->transport) {
-                  continue;
-                }
+                if (!live || !live->authenticated) continue;
+                const std::shared_ptr<session_transport> transport =
+                    live->transport.lock();
+                if (!transport) continue;
                 const uint64_t now = now_ms();
                 if (g_clipboard_echoes.suppress(id, key, now)) continue;
                 g_clipboard_echoes.remember(
@@ -6156,7 +6269,7 @@ void session_supervisor::run() {
                 out["text"] = text;
                 out["hash"] = hash;
                 out["chain"] = device;
-                send_json(live->transport.get(), out);
+                send_json(transport.get(), out);
               }
             });
           });
@@ -6250,8 +6363,10 @@ void session_supervisor::run() {
           const uint32_t id = s.id;
           app_.post([registry = registry_, id, message] {
             const auto live = registry->find(id);
-            if (!live || !live->transport) return;
-            send_json(live->transport.get(), message);
+            if (!live) return;
+            const std::shared_ptr<session_transport> transport =
+                live->transport.lock();
+            if (transport) send_json(transport.get(), message);
           });
         }
       }
@@ -6269,11 +6384,14 @@ void session_supervisor::run() {
           const uint32_t id = s.id;
           app_.post([registry = registry_, id, display] {
             const auto live = registry->find(id);
-            if (!live || !live->transport) return;
+            if (!live) return;
+            const std::shared_ptr<session_transport> transport =
+                live->transport.lock();
+            if (!transport) return;
             uvcpp_json message;
             message["type"] = "display";
             message["index"] = display;
-            send_json(live->transport.get(), message);
+            send_json(transport.get(), message);
           });
         }
       }
@@ -6301,9 +6419,12 @@ void session_supervisor::run() {
             // Remove before closing so a recycled transport cannot be closed
             // again by the next supervisor tick.
             registry->remove(id);
-            if (live->transport) {
-              live->transport->close(transport_close::policy,
-                                     "hello timeout");
+            live->push_enabled = false;
+            const std::shared_ptr<session_transport> transport =
+                live->transport.lock();
+            live->transport.reset();
+            if (transport) {
+              transport->close(transport_close::policy, "hello timeout");
             }
           });
         }
@@ -6315,11 +6436,14 @@ void session_supervisor::run() {
         const uint32_t id = s.id;
         app_.post([registry = registry_, id] {
           const auto live = registry->find(id);
-          if (!live || !live->transport || !live->authenticated) return;
+          if (!live || !live->authenticated) return;
+          const std::shared_ptr<session_transport> transport =
+              live->transport.lock();
+          if (!transport) return;
           uvcpp_json j;
           j["type"] = "ping";
           j["t"] = now_ms();
-          send_json(live->transport.get(), j);
+          send_json(transport.get(), j);
           live->last_ping_ms = now_ms();
         });
       }
@@ -6342,9 +6466,12 @@ void session_supervisor::run() {
           // Drop the record first: libuvcpp may recycle the connection object
           // for a later handshake, and a stale close would hit the new peer.
           registry->remove(id);
-          if (live->transport) {
-            live->transport->close(transport_close::going_away,
-                                   "idle timeout");
+          live->push_enabled = false;
+          const std::shared_ptr<session_transport> transport =
+              live->transport.lock();
+          live->transport.reset();
+          if (transport) {
+            transport->close(transport_close::going_away, "idle timeout");
           }
         });
       }
