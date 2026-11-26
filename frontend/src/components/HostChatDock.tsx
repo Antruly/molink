@@ -1,5 +1,5 @@
-import { GripHorizontal, MessageSquare, Phone, PhoneOff, Send, X } from 'lucide-react'
-import { useEffect, useRef, useState } from 'react'
+import { GripHorizontal, MessageSquare, Phone, PhoneOff, X } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
   fetchCall,
@@ -9,18 +9,47 @@ import {
   type CallState,
   type ChatEntry,
 } from '../lib/api'
+import {
+  attachmentKind,
+  chatDisplayName,
+  encodeChatPayload,
+  fitsChatText,
+  hostChatDirectory,
+  joinHostPath,
+  localDateString,
+  MAX_CHAT_ATTACHMENT_BYTES,
+  mimeForName,
+  newAttachmentId,
+  parseChatPayload,
+  safeChatFileName,
+  type ChatAttachment,
+} from '../lib/chat'
+import { HostAttachmentAccess } from '../lib/chat-access'
+import {
+  attachmentThumbnail,
+  dataUrlToBlob,
+  type ChatThumbnail,
+} from '../lib/chat-media'
+import { writeHostFile } from '../lib/chat-transfer'
 import { useAppStore } from '../store/app'
+import { ChatComposer } from './chat/ChatComposer'
+import { ChatFeed } from './chat/ChatFeed'
+import type { ChatDelivery, ChatFeedRow } from './chat/ChatBubble'
+import { useFileDrop } from './chat/chat-hooks'
 
-function timeLabel(ts: number): string {
-  if (!ts) return ''
-  try {
-    return new Date(ts).toLocaleTimeString(undefined, {
-      hour: '2-digit',
-      minute: '2-digit',
-    })
-  } catch {
-    return ''
-  }
+interface HostPending {
+  localId: string
+  text: string
+  attachments: ChatAttachment[]
+  ts: number
+  status: ChatDelivery
+  progress?: number
+  retry: () => void
+}
+
+const CALL_TIME = (seconds: number) => {
+  const minutes = Math.floor(seconds / 60)
+  return `${minutes}:${String(seconds % 60).padStart(2, '0')}`
 }
 
 /// Chat dock for the person sitting at this machine. A controlling client
@@ -31,16 +60,28 @@ export function HostChatDock() {
   const localMode = useAppStore((state) => state.localMode)
   const token = useAppStore((state) => state.token)
   const immersive = useAppStore((state) => state.immersive)
+  const security = useAppStore((state) => state.security)
+  const device = useAppStore((state) => state.device)
 
   const [open, setOpen] = useState(false)
   const [messages, setMessages] = useState<ChatEntry[]>([])
+  const [pending, setPending] = useState<HostPending[]>([])
+  const [hint, setHint] = useState<string | null>(null)
   const [unread, setUnread] = useState(0)
-  const [text, setText] = useState('')
   const [call, setCall] = useState<CallState | null>(null)
   const [callBusy, setCallBusy] = useState(false)
   const [callSeconds, setCallSeconds] = useState(0)
   const cursorRef = useRef(0)
   const openRef = useRef(false)
+  const hintTimer = useRef(0)
+  const seen = useRef(new Set<string>())
+  const writeChain = useRef<Promise<unknown>>(Promise.resolve())
+  // A pending bubble outlives a re-login; its retry always uses the current
+  // token and attachment writer.
+  const tokenRef = useRef(token)
+  useEffect(() => {
+    tokenRef.current = token
+  }, [token])
   // The dock is a floating card: both the collapsed bubble and the open card
   // can be dragged anywhere in the window.
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null)
@@ -55,9 +96,46 @@ export function HostChatDock() {
     target: HTMLElement
   } | null>(null)
   const suppressClick = useRef(false)
-  const listRef = useRef<HTMLDivElement>(null)
-  const pollRef = useRef<() => Promise<void>>(async () => {})
   const ringingRef = useRef(false)
+
+  const downloadRoot = security?.download_root || security?.download_root_default || ''
+  const deviceId = device?.device_id || 'self'
+  const canAttach = Boolean(token && downloadRoot !== '')
+
+  const access = useMemo(
+    () => new HostAttachmentAccess(token, downloadRoot),
+    [token, downloadRoot],
+  )
+  useEffect(() => {
+    access.revive()
+    return () => access.dispose()
+  }, [access])
+
+  const showHint = useCallback((message: string) => {
+    setHint(message)
+    window.clearTimeout(hintTimer.current)
+    hintTimer.current = window.setTimeout(() => setHint(null), 6000)
+  }, [])
+
+  const patchPending = useCallback(
+    (localId: string, patch: Partial<HostPending>) => {
+      setPending((list) =>
+        list.map((item) =>
+          item.localId === localId ? { ...item, ...patch } : item,
+        ),
+      )
+    },
+    [],
+  )
+
+  const enqueue = useCallback(<T,>(task: () => Promise<T>): Promise<T> => {
+    const next = writeChain.current.then(task, task)
+    writeChain.current = next.then(
+      () => undefined,
+      () => undefined,
+    )
+    return next
+  }, [])
 
   useEffect(() => {
     openRef.current = open
@@ -86,7 +164,7 @@ export function HostChatDock() {
         cursorRef.current = result.cursor
         if (result.messages.length > 0) {
           setMessages((previous) =>
-            [...previous, ...result.messages].slice(-200),
+            [...previous, ...result.messages].slice(-500),
           )
           if (!openRef.current) {
             const incoming = result.messages.filter(
@@ -105,7 +183,6 @@ export function HostChatDock() {
         // Voice calls may be unavailable on this host.
       }
     }
-    pollRef.current = poll
     void poll()
     const timer = window.setInterval(() => void poll(), 2000)
     return () => {
@@ -113,12 +190,6 @@ export function HostChatDock() {
       window.clearInterval(timer)
     }
   }, [localMode, token])
-
-  useEffect(() => {
-    if (!open) return
-    const element = listRef.current
-    if (element) element.scrollTop = element.scrollHeight
-  }, [messages, open])
 
   useEffect(() => {
     if (call?.state !== 'active' || !call.started_ms) return
@@ -169,6 +240,310 @@ export function HostChatDock() {
     }
   }, [call?.state, t])
 
+  const startAttachment = useCallback(
+    (
+      file: File,
+      id: string,
+      localId: string,
+      ts: number,
+      kind: ChatAttachment['kind'],
+    ) => {
+      patchPending(localId, { status: 'sending', progress: 0, ts })
+      void enqueue(async () => {
+        let media: ChatThumbnail | null = null
+        const mime = file.type || mimeForName(file.name)
+        const displayName = chatDisplayName(file.name, mime, id)
+        const base: ChatAttachment = {
+          id,
+          name: displayName,
+          size: file.size,
+          mime,
+          kind,
+          thumb: '',
+          src: '',
+          w: 0,
+          h: 0,
+          dur: 0,
+        }
+        try {
+          if (!token) throw new Error('offline')
+          const directory = hostChatDirectory(
+            downloadRoot,
+            deviceId,
+            localDateString(),
+          )
+          if (directory === '') throw new Error('no_storage')
+          const source = joinHostPath(
+            directory,
+            `${id}-${safeChatFileName(displayName)}`,
+          )
+          if (kind === 'image' || kind === 'video') {
+            media = await attachmentThumbnail(file, file.name, kind)
+            if (media) {
+              const preview = media.dataUrl
+              access.rememberLocal(id, file, preview === '' ? undefined : preview)
+              patchPending(localId, {
+                attachments: [
+                  {
+                    ...base,
+                    thumb: preview,
+                    w: media.w,
+                    h: media.h,
+                    dur: media.dur,
+                  },
+                ],
+              })
+            } else {
+              access.rememberLocal(id, file)
+            }
+          } else {
+            access.rememberLocal(id, file)
+          }
+          await writeHostFile({
+            token,
+            path: source,
+            blob: file,
+            onProgress: (sent, total) => {
+              patchPending(localId, {
+                progress: total > 0 ? sent / total : 1,
+              })
+            },
+          })
+          let thumbPath = ''
+          if (media && media.dataUrl !== '') {
+            thumbPath = joinHostPath(directory, `thumb-${id}.webp`)
+            try {
+              await writeHostFile({
+                token,
+                path: thumbPath,
+                blob: dataUrlToBlob(media.dataUrl),
+              })
+            } catch {
+              thumbPath = ''
+            }
+          }
+          const attachment: ChatAttachment = {
+            ...base,
+            thumb: thumbPath,
+            src: source,
+            w: media?.w ?? 0,
+            h: media?.h ?? 0,
+            dur: media?.dur ?? 0,
+          }
+          patchPending(localId, { attachments: [attachment], progress: 1 })
+          const encoded = encodeChatPayload({
+            type: 'chat',
+            text: '',
+            attachments: [attachment],
+          })
+          if (!fitsChatText(encoded)) throw new Error('message_too_long')
+          await postChat(token, encoded)
+          patchPending(localId, { status: 'sent', progress: undefined })
+        } catch (error) {
+          patchPending(localId, { status: 'failed', progress: undefined })
+          const reason = error instanceof Error ? error.message : ''
+          if (reason === 'message_too_long') {
+            showHint(t('chat.attachmentNameTooLong'))
+          } else if (reason === 'no_storage') {
+            showHint(t('chat.noStorage'))
+          } else {
+            showHint(t('chat.uploadFailed'))
+          }
+        }
+      })
+    },
+    [access, deviceId, downloadRoot, enqueue, patchPending, showHint, t, token],
+  )
+
+  const startAttachmentRef = useRef(startAttachment)
+  useEffect(() => {
+    startAttachmentRef.current = startAttachment
+  })
+
+  const sendFiles = useCallback(
+    (files: File[]) => {
+      if (files.length === 0) return
+      if (!token) {
+        showHint(t('chat.offline'))
+        return
+      }
+      if (!canAttach) {
+        showHint(t('chat.noStorage'))
+        return
+      }
+      for (const file of files) {
+        if (file.size > MAX_CHAT_ATTACHMENT_BYTES) {
+          showHint(
+            t('chat.attachmentTooLarge', {
+              name: file.name,
+              limit: '200 MiB',
+            }),
+          )
+          continue
+        }
+        const id = newAttachmentId()
+        const ts = Date.now()
+        const kind = attachmentKind(file.name, file.type)
+        const mime = file.type || mimeForName(file.name)
+        setPending((list) => [
+          ...list,
+          {
+            localId: id,
+            text: '',
+            attachments: [
+              {
+                id,
+                name: chatDisplayName(file.name, mime, id),
+                size: file.size,
+                mime,
+                kind,
+                thumb: '',
+                src: '',
+                w: 0,
+                h: 0,
+                dur: 0,
+              },
+            ],
+            ts,
+            status: 'sending',
+            progress: 0,
+            retry: () =>
+              startAttachmentRef.current(file, id, id, Date.now(), kind),
+          },
+        ])
+        startAttachment(file, id, id, ts, kind)
+      }
+    },
+    [canAttach, showHint, startAttachment, t, token],
+  )
+
+  const retryText = useCallback(
+    (localId: string, text: string) => {
+      const current = tokenRef.current
+      if (!current) {
+        showHint(t('chat.offline'))
+        return
+      }
+      patchPending(localId, { status: 'sending' })
+      void postChat(current, text)
+        .then(() => patchPending(localId, { status: 'sent' }))
+        .catch(() => {
+          patchPending(localId, { status: 'failed' })
+          showHint(t('chat.sendFailed'))
+        })
+    },
+    [patchPending, showHint, t],
+  )
+
+  const sendText = (value: string): boolean => {
+    if (!token) return false
+    if (!fitsChatText(value)) {
+      showHint(t('chat.messageTooLong'))
+      return false
+    }
+    const localId = newAttachmentId()
+    const ts = Date.now()
+    setPending((list) => [
+      ...list,
+      {
+        localId,
+        text: value,
+        attachments: [],
+        ts,
+        status: 'sending',
+        retry: () => retryText(localId, value),
+      },
+    ])
+    void postChat(token, value)
+      .then(() => patchPending(localId, { status: 'sent' }))
+      .catch(() => {
+        patchPending(localId, { status: 'failed' })
+        showHint(t('chat.sendFailed'))
+      })
+    return true
+  }
+
+  // The polled log is authoritative: drop the optimistic row once its copy
+  // arrives (the host usually sees it within one poll interval).
+  useEffect(() => {
+    if (pending.length === 0) return
+    setPending((current) => {
+      if (current.length === 0) return current
+      const remaining = [...current]
+      for (const message of messages) {
+        if (message.from !== 'host') continue
+        const key = `m${message.id}`
+        if (seen.current.has(key)) continue
+        const payload = parseChatPayload(message.text)
+        if (payload && payload.attachments.length > 0) {
+          const ids = new Set(payload.attachments.map((item) => item.id))
+          const index = remaining.findIndex((item) =>
+            item.attachments.some((attachment) => ids.has(attachment.id)),
+          )
+          if (index >= 0) {
+            remaining.splice(index, 1)
+            seen.current.add(key)
+          }
+          continue
+        }
+        const text = payload?.text ?? message.text
+        const index = remaining.findIndex(
+          (item) =>
+            item.attachments.length === 0 &&
+            item.text === text &&
+            Math.abs(item.ts - message.ts) < 120_000,
+        )
+        if (index >= 0) {
+          remaining.splice(index, 1)
+          seen.current.add(key)
+        }
+      }
+      return remaining.length === current.length ? current : remaining
+    })
+  }, [messages, pending.length])
+
+  const selfName = device?.device_name?.trim() || t('chat.host')
+
+  const rows: ChatFeedRow[] = []
+  const echoedIds = new Set<string>()
+  for (const message of messages) {
+    const payload = parseChatPayload(message.text)
+    if (payload) {
+      for (const attachment of payload.attachments) echoedIds.add(attachment.id)
+    }
+    const mine = message.from === 'host'
+    rows.push({
+      key: `srv-${message.id}-${message.ts}`,
+      mine,
+      senderName:
+        message.sender_name?.trim() ||
+        (mine ? selfName : t('chat.remote')),
+      ...(message.sender_id ? { senderId: message.sender_id } : {}),
+      text: payload ? payload.text : message.text,
+      attachments: payload?.attachments ?? [],
+      ts: message.ts,
+      ...(mine ? { status: 'sent' as const } : {}),
+    })
+  }
+  for (const item of pending) {
+    if (item.attachments.some((attachment) => echoedIds.has(attachment.id))) {
+      continue
+    }
+    rows.push({
+      key: `local-${item.localId}`,
+      mine: true,
+      senderName: selfName,
+      text: item.text,
+      attachments: item.attachments,
+      ts: item.ts,
+      status: item.status,
+      ...(item.progress !== undefined ? { progress: item.progress } : {}),
+      onRetry: item.retry,
+    })
+  }
+
+  const drop = useFileDrop(Boolean(token && canAttach), sendFiles)
+
   if (!localMode) return null
 
   const callAction = async (action: 'accept' | 'decline' | 'end') => {
@@ -186,13 +561,8 @@ export function HostChatDock() {
     }
   }
 
-  const formatCallTime = (seconds: number) => {
-    const minutes = Math.floor(seconds / 60)
-    return `${minutes}:${String(seconds % 60).padStart(2, '0')}`
-  }
-
   const beginDrag = (
-    event: React.PointerEvent<HTMLElement>,
+    event: ReactPointerEvent<HTMLElement>,
     target: HTMLElement | null,
   ) => {
     if (!target) return
@@ -211,7 +581,7 @@ export function HostChatDock() {
     event.currentTarget.setPointerCapture(event.pointerId)
   }
 
-  const moveDrag = (event: React.PointerEvent<HTMLElement>) => {
+  const moveDrag = (event: ReactPointerEvent<HTMLElement>) => {
     const state = drag.current
     if (!state) return
     if (
@@ -244,19 +614,6 @@ export function HostChatDock() {
     }, 0)
   }
 
-  const send = async () => {
-    const value = text.trim()
-    if (value === '' || !token) return
-    setText('')
-    try {
-      await postChat(token, value)
-      await pollRef.current()
-    } catch {
-      // Keep the draft when the core is unavailable.
-      setText(value)
-    }
-  }
-
   return (
     <>
       {call && call.state !== 'idle' ? (
@@ -281,7 +638,7 @@ export function HostChatDock() {
               </div>
               <div className="text-[10px] text-muted">
                 {call.state === 'active'
-                  ? formatCallTime(callSeconds)
+                  ? CALL_TIME(callSeconds)
                   : call.host_microphone
                     ? t('call.hostMicReady')
                     : t('call.hostNoMic')}
@@ -337,6 +694,7 @@ export function HostChatDock() {
             (pos ? '' : 'bottom-4 right-4')
           }
           style={pos ? { left: pos.x, top: pos.y } : undefined}
+          {...drop.handlers}
         >
           <div
             className="flex h-10 shrink-0 cursor-move touch-none items-center gap-2 border-b border-line-soft px-3"
@@ -362,76 +720,25 @@ export function HostChatDock() {
               <X size={14} />
             </button>
           </div>
-          <div
-            ref={listRef}
-            className="min-h-0 flex-1 space-y-2 overflow-y-auto px-3 py-3"
-          >
-            {messages.length === 0 ? (
-              <div className="rounded-xl border border-dashed border-line px-3 py-8 text-center text-[11px] leading-relaxed text-muted">
-                {t('chat.emptyHost')}
-              </div>
-            ) : (
-              messages.map((message) => {
-                const mine = message.from === 'host'
-                return (
-                  <div
-                    key={`${message.id}-${message.ts}`}
-                    className={mine ? 'flex justify-end' : 'flex justify-start'}
-                  >
-                    <div
-                      className={
-                        'max-w-[85%] rounded-2xl px-3 py-2 text-[12px] leading-relaxed ' +
-                        (mine
-                          ? 'rounded-br-md bg-accent text-on-accent'
-                          : 'rounded-bl-md border border-line bg-panel text-ink')
-                      }
-                    >
-                      <div className="whitespace-pre-wrap break-words">
-                        {message.text}
-                      </div>
-                      <div
-                        className={
-                          'mt-1 text-right text-[9px] ' +
-                          (mine ? 'text-on-accent/60' : 'text-muted/70')
-                        }
-                      >
-                        {message.sender_name?.trim() ||
-                          (mine ? t('chat.host') : t('chat.remote'))}
-                        {message.sender_id ? ` · ${message.sender_id}` : ''} ·{' '}
-                        {timeLabel(message.ts)}
-                      </div>
-                    </div>
-                  </div>
-                )
-              })
-            )}
-          </div>
-          <div className="flex shrink-0 items-end gap-2 border-t border-line-soft p-2.5">
-            <textarea
-              value={text}
-              onChange={(event) => setText(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' && !event.shiftKey) {
-                  event.preventDefault()
-                  void send()
-                }
-              }}
-              rows={2}
-              maxLength={4096}
-              placeholder={t('chat.placeholder')}
-              className="field min-h-9 resize-none !py-2 text-[12px]"
-            />
-            <button
-              type="button"
-              onClick={() => void send()}
-              disabled={text.trim() === ''}
-              className="btn btn-primary h-9 w-9 shrink-0 !px-0"
-              aria-label={t('chat.send')}
-              title={t('chat.send')}
-            >
-              <Send size={14} />
-            </button>
-          </div>
+          <ChatFeed
+            rows={rows}
+            access={access}
+            selfName={selfName}
+            empty={t('chat.emptyHost')}
+            conversationKey="host"
+          />
+          <ChatComposer
+            onSendText={sendText}
+            onSendFiles={sendFiles}
+            attachEnabled={canAttach}
+            placeholder={t('chat.placeholder')}
+            hint={hint}
+          />
+          {drop.dragging ? (
+            <div className="pointer-events-none absolute inset-0 z-50 grid place-items-center border-2 border-dashed border-accent bg-surface/85 text-[12px] font-medium text-accent">
+              {t('chat.dropHint')}
+            </div>
+          ) : null}
         </div>
       ) : (
         <button
