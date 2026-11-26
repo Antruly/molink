@@ -819,6 +819,7 @@
     "modeDesktop": "远程桌面",
     "modeFiles": "文件传输",
     "modeChat": "聊天",
+    "modeTerminal": "远程终端",
     "connectTitle": "连接设备",
     "connectHint": "输入设备 ID 或地址，端口默认 28418",
     "targetPlaceholder": "设备 ID 或 IP[:端口]",
@@ -1007,6 +1008,12 @@
     "traffic": "入 {{in}} · 出 {{out}}",
     "toggle": "启用或停用此映射",
     "delete": "删除映射",
+    "lastError": {
+      "no_session": "当前没有远程会话，连上之后再试",
+      "connect_failed": "对方 {{target}} 连不上（没有服务监听或被防火墙拦住）",
+      "port_forward_disabled": "主机没有开启端口映射权限",
+      "port_in_use": "本地端口被占用"
+    },
     "preset": {
       "rdp": "RDP",
       "ssh": "SSH",
