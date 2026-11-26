@@ -12,12 +12,18 @@
 import { FitAddon } from '@xterm/addon-fit'
 import { Terminal } from '@xterm/xterm'
 import '@xterm/xterm/css/xterm.css'
-import { Plus, Terminal as TerminalIcon, X } from 'lucide-react'
+import {
+  ExternalLink,
+  Plus,
+  Terminal as TerminalIcon,
+  X,
+} from 'lucide-react'
 import {
   useCallback,
   useEffect,
   useRef,
   useState,
+  type MutableRefObject,
 } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
@@ -39,6 +45,13 @@ import {
 const MAX_TERMINALS = 4
 const DEFAULT_COLS = 80
 const DEFAULT_ROWS = 24
+/// Follow the platform's own monospace stack (Cascadia/Consolas on Windows,
+/// Ubuntu/DejaVu/Noto on Linux) instead of the browser default, which lands on
+/// Liberation Mono on many Linux desktop themes. No web fonts: the terminal
+/// must never wait on the network for glyphs.
+const TERMINAL_FONT_FAMILY =
+  '"Cascadia Mono", "Consolas", "Ubuntu Mono", "DejaVu Sans Mono", "Noto Sans Mono", "Liberation Mono", monospace'
+const TERMINAL_FONT_SIZE = 13
 const encoder = new TextEncoder()
 
 type ConnectionState =
@@ -71,18 +84,24 @@ interface Size {
 function TerminalTabView({
   terminalId,
   active,
+  fontSize,
   onInput,
   onResize,
   registerWriter,
+  registerTerminal,
 }: {
   terminalId: number
   active: boolean
+  fontSize: number
   onInput: (id: number, data: string) => void
   onResize: (id: number, cols: number, rows: number) => void
   registerWriter: (
     id: number,
     write: ((data: Uint8Array) => void) | null,
   ) => void
+  /// Exposes the xterm instance so the tab shell's copy/paste/zoom actions
+  /// can reach the active terminal.
+  registerTerminal: (id: number, term: Terminal | null) => void
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null)
   const termRef = useRef<Terminal | null>(null)
@@ -93,9 +112,10 @@ function TerminalTabView({
     if (host === null) return
     const term = new Terminal({
       cursorBlink: true,
-      fontSize: 13,
-      fontFamily:
-        'ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace',
+      fontSize: TERMINAL_FONT_SIZE,
+      fontFamily: TERMINAL_FONT_FAMILY,
+      lineHeight: 1.2,
+      letterSpacing: 0,
       scrollback: 5000,
       theme: {
         background: '#0b0e14',
@@ -111,6 +131,7 @@ function TerminalTabView({
     fitRef.current = fit
     const dataSub = term.onData((data) => onInput(terminalId, data))
     registerWriter(terminalId, (data) => term.write(data))
+    registerTerminal(terminalId, term)
 
     const fitNow = () => {
       // A hidden tab has no measurable cell; fitting it would throw (or
@@ -134,11 +155,30 @@ function TerminalTabView({
       observer?.disconnect()
       dataSub.dispose()
       registerWriter(terminalId, null)
+      registerTerminal(terminalId, null)
       term.dispose()
       termRef.current = null
       fitRef.current = null
     }
-  }, [terminalId, onInput, onResize, registerWriter])
+  }, [terminalId, onInput, onResize, registerWriter, registerTerminal])
+
+  // The toolbar's A-/A+ changes xterm's font size in place: the scrollback and
+  // cursor stay, only the cell grid is refitted.
+  useEffect(() => {
+    const term = termRef.current
+    const fit = fitRef.current
+    const host = hostRef.current
+    if (term === null || fit === null || host === null) return
+    if (term.options.fontSize === fontSize) return
+    term.options.fontSize = fontSize
+    if (host.clientWidth === 0 || host.clientHeight === 0) return
+    try {
+      fit.fit()
+      onResize(terminalId, term.cols, term.rows)
+    } catch {
+      // A hidden tab refits when it becomes active.
+    }
+  }, [fontSize, terminalId, onResize])
 
   useEffect(() => {
     if (!active) return
@@ -163,6 +203,15 @@ function TerminalTabView({
   return <div ref={hostRef} className="h-full w-full" />
 }
 
+/// Actions the tab shell's floating toolbar drives. The panel owns the xterm
+/// instances and the socket; the toolbar only calls into them.
+export interface TerminalPanelActions {
+  copy: () => void
+  paste: () => void
+  zoomIn: () => void
+  zoomOut: () => void
+}
+
 export function TerminalPanel({
   host,
   port,
@@ -170,6 +219,9 @@ export function TerminalPanel({
   sessionToken,
   onClose,
   onDisabled,
+  fullPage = false,
+  onPopOut,
+  actionsRef,
 }: {
   host: string
   port: number
@@ -181,12 +233,24 @@ export function TerminalPanel({
   /// The host has `terminal_enabled=false`. The session hides the toolbar
   /// entry so it cannot be clicked again.
   onDisabled?: () => void
+  /// Standalone tab: fill the page instead of sliding in from the right.
+  fullPage?: boolean
+  /// Embedded drawer only: move this pane into its own tab.
+  onPopOut?: () => void
+  /// Publishes copy/paste/font actions for the floating toolbar.
+  actionsRef?: MutableRefObject<TerminalPanelActions | null>
 }) {
   const { t } = useTranslation()
   const [connection, setConnection] = useState<ConnectionState>('connecting')
   const [tabs, setTabs] = useState<TabState[]>([])
   const [activeKey, setActiveKey] = useState(0)
   const [notice, setNotice] = useState<string | null>(null)
+  const [fontSize, setFontSize] = useState(13)
+  const terminals = useRef(new Map<number, Terminal>())
+  const registerTerminal = useCallback((id: number, term: Terminal | null) => {
+    if (term === null) terminals.current.delete(id)
+    else terminals.current.set(id, term)
+  }, [])
 
   const wsRef = useRef<WebSocket | null>(null)
   const tabsRef = useRef<TabState[]>([])
@@ -637,6 +701,40 @@ export function TerminalPanel({
   }, [connect])
 
   const activeTab = tabs.find((tab) => tab.key === activeKey)
+
+  const activeTerminal = useCallback((): Terminal | null => {
+    const tab = tabs.find((item) => item.key === activeKey)
+    if (!tab || tab.id === null) return null
+    return terminals.current.get(tab.id) ?? null
+  }, [activeKey, tabs])
+
+  useEffect(() => {
+    if (!actionsRef) return
+    actionsRef.current = {
+      copy: () => {
+        const selection = activeTerminal()?.getSelection() ?? ''
+        if (selection !== '') {
+          void navigator.clipboard?.writeText(selection).catch(() => undefined)
+        }
+      },
+      paste: () => {
+        const terminal = activeTerminal()
+        if (terminal === null || !navigator.clipboard?.readText) return
+        void navigator.clipboard
+          .readText()
+          .then((text) => {
+            if (text !== '') terminal.paste(text)
+          })
+          .catch(() => undefined)
+      },
+      zoomIn: () => setFontSize((size) => Math.min(22, size + 1)),
+      zoomOut: () => setFontSize((size) => Math.max(9, size - 1)),
+    }
+    return () => {
+      actionsRef.current = null
+    }
+  }, [actionsRef, activeTerminal])
+
   const connecting = connection === 'connecting'
   const statusText =
     connection === 'open'
@@ -652,7 +750,11 @@ export function TerminalPanel({
   return (
     <div
       data-local-input="true"
-      className="absolute inset-y-0 right-0 z-40 flex w-[min(96vw,900px)] flex-col border-l border-line bg-surface/95 shadow-2xl backdrop-blur-md"
+      className={
+        fullPage
+          ? 'relative flex h-full w-full min-h-0 flex-col bg-surface'
+          : 'absolute inset-y-0 right-0 z-40 flex w-[min(96vw,900px)] flex-col border-l border-line bg-surface/95 shadow-2xl backdrop-blur-md'
+      }
       onPointerDown={(event) => event.stopPropagation()}
       onPointerUp={(event) => event.stopPropagation()}
     >
@@ -673,15 +775,28 @@ export function TerminalPanel({
           aria-hidden="true"
         />
         <span className="text-[10px] text-muted">{statusText}</span>
-        <button
-          type="button"
-          onClick={closePanel}
-          className="ml-auto grid h-7 w-7 place-items-center rounded-md text-muted transition hover:bg-panel hover:text-ink"
-          aria-label={t('terminal.close')}
-          title={t('terminal.close')}
-        >
-          <X size={15} />
-        </button>
+        <div className="ml-auto flex items-center gap-0.5">
+          {onPopOut ? (
+            <button
+              type="button"
+              onClick={onPopOut}
+              className="grid h-7 w-7 place-items-center rounded-md text-muted transition hover:bg-panel hover:text-ink"
+              aria-label={t('session.openInTab')}
+              title={t('session.openInTab')}
+            >
+              <ExternalLink size={14} />
+            </button>
+          ) : null}
+          <button
+            type="button"
+            onClick={closePanel}
+            className="grid h-7 w-7 place-items-center rounded-md text-muted transition hover:bg-panel hover:text-ink"
+            aria-label={t('terminal.close')}
+            title={t('terminal.close')}
+          >
+            <X size={15} />
+          </button>
+        </div>
       </div>
 
       <div className="flex h-9 shrink-0 items-center gap-1 overflow-x-auto border-b border-line-soft px-2">
@@ -786,9 +901,11 @@ export function TerminalPanel({
               <TerminalTabView
                 terminalId={tab.id}
                 active={tab.key === activeKey}
+                fontSize={fontSize}
                 onInput={handleInput}
                 onResize={handleResize}
                 registerWriter={registerWriter}
+                registerTerminal={registerTerminal}
               />
             </div>
           ),

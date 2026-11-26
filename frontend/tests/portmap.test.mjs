@@ -11,6 +11,7 @@ import {
   portForwardEnabled,
   portForwardSaveValues,
   portmapErrorKey,
+  portmapLastErrorText,
 } from '../src/lib/portmap.ts'
 
 const zh = JSON.parse(
@@ -240,5 +241,66 @@ test('error codes map to the Chinese messages shipped in the locale', () => {
   assert.equal(
     translate(portmapErrorKey('something_new')),
     '操作失败，无法连接本机后台。',
+  )
+})
+
+test('last_error codes become a readable sentence for the row', () => {
+  const target = { target_host: '10.0.0.5', target_port: 3389 }
+
+  assert.deepEqual(
+    portmapLastErrorText(mapping({ ...target, last_error: 'no_session' })),
+    {
+      key: 'portmap.lastError.no_session',
+      values: { target: '10.0.0.5:3389' },
+      raw: 'no_session',
+    },
+  )
+  assert.deepEqual(
+    portmapLastErrorText(mapping({ ...target, last_error: 'connect_failed' })),
+    {
+      key: 'portmap.lastError.connect_failed',
+      values: { target: '10.0.0.5:3389' },
+      raw: 'connect_failed',
+    },
+  )
+  assert.equal(
+    portmapLastErrorText(mapping({ last_error: 'port_forward_disabled' })).key,
+    'portmap.lastError.port_forward_disabled',
+  )
+  assert.equal(
+    portmapLastErrorText(mapping({ last_error: 'port_in_use' })).key,
+    'portmap.lastError.port_in_use',
+  )
+
+  // Unrecognised codes are shown verbatim; no error means no line at all.
+  assert.deepEqual(
+    portmapLastErrorText(mapping({ last_error: 'teapot_on_fire' })),
+    {
+      key: null,
+      values: { target: '127.0.0.1:3389' },
+      raw: 'teapot_on_fire',
+    },
+  )
+  assert.equal(portmapLastErrorText(mapping({ last_error: '' })), null)
+  assert.equal(portmapLastErrorText(mapping({ last_error: '   ' })), null)
+})
+
+test('the last_error copy ships in both languages', () => {
+  const zh = {
+    no_session: '当前没有远程会话，连上之后再试',
+    connect_failed: '对方 {{target}} 连不上（没有服务监听或被防火墙拦住）',
+    port_forward_disabled: '主机没有开启端口映射权限',
+    port_in_use: '本地端口被占用',
+  }
+  for (const [code, message] of Object.entries(zh)) {
+    assert.equal(translate(`portmap.lastError.${code}`), message)
+    assert.ok(en.portmap.lastError[code], `en.portmap.lastError.${code}`)
+  }
+  assert.equal(
+    translate('portmap.lastError.connect_failed').replace(
+      '{{target}}',
+      '10.0.0.5:3389',
+    ),
+    '对方 10.0.0.5:3389 连不上（没有服务监听或被防火墙拦住）',
   )
 })

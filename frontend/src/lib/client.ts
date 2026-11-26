@@ -41,6 +41,10 @@ import {
   rememberSession,
   sessionTokenFor,
 } from './session-store'
+import {
+  normalizeSessionIntent,
+  type SessionIntent,
+} from './session-intent'
 
 export type ClientPhase = 'idle' | 'connecting' | 'live' | 'error' | 'disconnected'
 
@@ -797,7 +801,12 @@ export class MolinkClient {
     clientId: string
     /// Six-digit TOTP when the host has two-factor enabled.
     totp: string
+    /// Purpose of this page. Only a desktop page takes video or input.
+    intent: SessionIntent
   } | null = null
+  /// The purpose that opened this connection. It outlives reconnects so a
+  /// files/chat/terminal page never starts pulling the picture again.
+  private intent: SessionIntent = 'desktop'
   /// The ICE proxy failed; use the resolved address directly from now on.
   private proxyFailed = false
   /// The same-LAN direct socket failed; use the ICE proxy instead.
@@ -931,7 +940,8 @@ export class MolinkClient {
 
   connect(host: string, port: number, token: string,
           requestAccess = false, targetId = '', forceRelay = false,
-          clientName = '', clientId = '', totp = ''): void {
+          clientName = '', clientId = '', totp = '',
+          intent: SessionIntent = 'desktop'): void {
     this.disconnect()
     this.stopRetryTimers()
     this.closedByUser = false
@@ -941,6 +951,9 @@ export class MolinkClient {
     this.directProxyFailed = false
     this.lastErrorCode = ''
     this.lastErrorMessage = ''
+    // A reconnect keeps the purpose of the original page. Only a new connect
+    // may change it.
+    this.intent = normalizeSessionIntent(intent)
     // Reuse the host session token for this address, even in a fresh tab or
     // after the client process was killed: a single-use code is already spent
     // by the time it reconnects.
@@ -952,7 +965,8 @@ export class MolinkClient {
     this.cellReceivedSeq.clear()
     this.lastSeqRequest = 0
     this.lastConnect = { host, port, token, requestAccess, targetId,
-                        forceRelay, clientName, clientId, totp }
+                        forceRelay, clientName, clientId, totp,
+                        intent: this.intent }
     this.openSocket()
   }
 
@@ -1102,6 +1116,10 @@ export class MolinkClient {
           type: 'request-access',
           name: clientName || 'moLink web',
           client: 'molink-web',
+          // A no-code session never sends a hello, so the purpose travels
+          // with the request: the host must not start capture for a page that
+          // only wants files, chat or a terminal.
+          intent: this.intent,
           // No hello follows an approved request, so the capabilities the
           // clipboard needs travel here.
           clipboard_stream: true,
@@ -1114,6 +1132,9 @@ export class MolinkClient {
         this.helloPayload = {
           type: 'hello',
           token,
+          // Which page opened this session. The host must not capture a
+          // picture for a files/chat/terminal tab.
+          intent: this.intent,
           // The host then attaches a per-block sequence map to every frame
           // response, which names the cells a lost frame left stale.
           seq_clock: true,
@@ -1123,10 +1144,10 @@ export class MolinkClient {
           video_push: this.wantsVideoPush(),
           // This browser can decode the host's H.264 stream through WebCodecs;
           // the host picks it when AV1 is not decodable by every viewer.
-          h264_stream: this.h264Capable,
-          vp9_stream: this.vp9Capable,
-          vp8_stream: this.vp8Capable,
-          av1_native: this.av1NativeCapable,
+          h264_stream: this.videoPage && this.h264Capable,
+          vp9_stream: this.videoPage && this.vp9Capable,
+          vp8_stream: this.videoPage && this.vp8Capable,
+          av1_native: this.videoPage && this.av1NativeCapable,
           // This page can answer a range fetch for a file on its local
           // clipboard, which lets the host paste virtual files straight into
           // the destination folder. The host confirms by echoing
@@ -1137,8 +1158,8 @@ export class MolinkClient {
           // list.
           clipboard_pull: true,
           // A browser with WebRTC lets the host send H.264 as a real video
-          // track instead of MOLK frames.
-          webrtc: typeof RTCPeerConnection !== 'undefined',
+          // track instead of MOLK frames. A non-desktop page has no track.
+          webrtc: this.videoPage && typeof RTCPeerConnection !== 'undefined',
           ...(this.resumeToken ? { session: this.resumeToken } : {}),
           ...(clientName ? { name: clientName } : {}),
           ...(clientId ? { device_id: clientId } : {}),
@@ -1527,8 +1548,15 @@ export class MolinkClient {
     this.visibilityListener?.()
   }
 
+  /// Only the desktop page paints remote pixels. A files/chat/terminal page
+  /// keeps its own control socket but never asks for a frame or a push clock.
+  private get videoPage(): boolean {
+    return normalizeSessionIntent(this.intent) === 'desktop'
+  }
+
   private wantsVideoPush(): boolean {
-    return this.foreground && document.visibilityState === 'visible'
+    return this.videoPage && this.foreground &&
+      document.visibilityState === 'visible'
   }
 
   /// The foreground hint is a lease: the host expires it after 15 s. A
@@ -1585,6 +1613,7 @@ export class MolinkClient {
 
   /** Asks for one synthetic frame. Returns false while one is in flight. */
   requestFrame(): boolean {
+    if (!this.videoPage) return false
     // The host owns the clock for this session: polling would make it send
     // every frame twice.
     if (this.pushVideo) return false
@@ -1738,6 +1767,7 @@ export class MolinkClient {
 
   /** Asks for the next capture to be a full keyframe (resync after a loss). */
   requestKeyframe(): void {
+    if (!this.videoPage) return
     // Route the repair through the local core even if RTC control is open.
     this.sendRelayText({ type: 'request-keyframe' })
   }
@@ -1748,7 +1778,7 @@ export class MolinkClient {
    * limit. Ignored by hosts that did not advertise `viewer_stats`.
    */
   sendViewerStats(fps: number, dropped: number, rxRate: number): void {
-    if (!this.isLive()) return
+    if (!this.isLive() || !this.videoPage) return
     this.sendJson({
       type: 'viewer',
       fps: Math.max(0, Math.round(fps)),
@@ -3714,12 +3744,13 @@ export class MolinkClient {
     const hello: Record<string, unknown> = {
       type: 'hello',
       token,
+      intent: this.intent,
       seq_clock: true,
       video_push: this.wantsVideoPush(),
-      h264_stream: this.h264Capable,
-      vp9_stream: this.vp9Capable,
-      vp8_stream: this.vp8Capable,
-      av1_native: this.av1NativeCapable,
+      h264_stream: this.videoPage && this.h264Capable,
+      vp9_stream: this.videoPage && this.vp9Capable,
+      vp8_stream: this.videoPage && this.vp8Capable,
+      av1_native: this.videoPage && this.av1NativeCapable,
       clipboard_stream: true,
       clipboard_pull: true,
       client: 'molink-web',

@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
+  buttonReleaseEvents,
+  clampPoint,
   createWheelAccumulator,
+  movePoint,
+  PressedButtons,
   remoteButton,
   wheelDeltaToNotches,
   wheelNotches,
@@ -99,4 +103,83 @@ test('negative trackpad deltas accumulate without losing the sign', () => {
   assert.deepEqual(wheelNotches(accumulator, { deltaY: -3 }), { dx: 0, dy: 0 })
   assert.deepEqual(wheelNotches(accumulator, { deltaY: -3 }), { dx: 0, dy: 0 })
   assert.deepEqual(wheelNotches(accumulator, { deltaY: -120 }), { dx: 0, dy: -1 })
+})
+
+test('clampPoint pins a position to the picture edges', () => {
+  assert.deepEqual(clampPoint(-0.4, 1.7), { x: 0, y: 1 })
+  assert.deepEqual(clampPoint(2, -3), { x: 1, y: 0 })
+  // Inside the picture the value is unchanged, rounded for the wire.
+  assert.deepEqual(clampPoint(0.5, 0.25), { x: 0.5, y: 0.25 })
+  assert.deepEqual(clampPoint(0.123456789, 0.9), { x: 0.12346, y: 0.9 })
+})
+
+test('an outside move is clamped while a button is held', () => {
+  assert.deepEqual(movePoint(-0.2, 0.5, true), { x: 0, y: 0.5 })
+  assert.deepEqual(movePoint(0.5, 1.3, true), { x: 0.5, y: 1 })
+  assert.deepEqual(movePoint(1.4, -0.1, true), { x: 1, y: 0 })
+})
+
+test('an outside move without a held button is dropped', () => {
+  assert.equal(movePoint(-0.01, 0.5, false), null)
+  assert.equal(movePoint(0.5, 1.01, false), null)
+  assert.deepEqual(movePoint(0.5, 0.5, false), { x: 0.5, y: 0.5 })
+})
+
+test('a drag that leaves the picture keeps sending moves at the edge', () => {
+  const held = new PressedButtons()
+  held.press(1)
+  const points = [
+    [0.4, 0.4],
+    [0.9, 0.5],
+    [1.05, 0.5],
+    [1.4, 0.55],
+  ]
+    .map(([x, y]) => movePoint(x, y, held.size > 0))
+    .filter((point) => point !== null)
+  assert.deepEqual(points, [
+    { x: 0.4, y: 0.4 },
+    { x: 0.9, y: 0.5 },
+    { x: 1, y: 0.5 },
+    { x: 1, y: 0.55 },
+  ])
+})
+
+test('draining releases every held button exactly once', () => {
+  const held = new PressedButtons()
+  held.press(1)
+  held.press(3)
+  assert.equal(held.size, 2)
+  assert.deepEqual(buttonReleaseEvents(held.drain()), [
+    { k: 'button', button: 1, down: false },
+    { k: 'button', button: 3, down: false },
+  ])
+  assert.equal(held.size, 0)
+  // The second release path (pointerup then lostpointercapture) sends nothing.
+  assert.deepEqual(buttonReleaseEvents(held.drain()), [])
+})
+
+test('down, moves outside the picture, then cancel leaves nothing pressed', () => {
+  const held = new PressedButtons()
+  const sent = []
+  held.press(1)
+  sent.push({ k: 'button', button: 1, down: true })
+  for (const [x, y] of [[0.5, 0.5], [1.3, 0.5], [0.5, -0.2]]) {
+    const point = movePoint(x, y, held.size > 0)
+    if (point) sent.push({ k: 'move', ...point })
+  }
+  // pointercancel (or window blur) drains what pointerup never reported.
+  sent.push(...buttonReleaseEvents(held.drain()))
+
+  assert.equal(held.size, 0)
+  assert.deepEqual(
+    sent.filter((event) => event.k === 'move').map(({ x, y }) => [x, y]),
+    [[0.5, 0.5], [1, 0.5], [0.5, 0]],
+  )
+  assert.deepEqual(
+    sent.filter((event) => event.k === 'button'),
+    [
+      { k: 'button', button: 1, down: true },
+      { k: 'button', button: 1, down: false },
+    ],
+  )
 })

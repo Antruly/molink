@@ -37,6 +37,7 @@ import type {
   Welcome,
 } from '../lib/client'
 import { cleanDeviceNote, deviceNoteKey } from '../lib/device-note'
+import type { SessionIntent } from '../lib/session-modes'
 import {
   normalizeComboForwardAsked,
   type ComboForwardChoice,
@@ -95,7 +96,10 @@ export type { SessionPresetId } from '../lib/session-presets'
 /// A control session starts with input enabled; a view-only session starts
 /// with it off. The session toolbar can still change it later.
 export type SessionMode = 'control' | 'view'
-export type SessionIntent = 'desktop' | 'files' | 'chat'
+import { nextVisibleTabId, type PaneKind } from '../lib/session-intent'
+// #136 established session-modes as the single list of connect modes; the pane
+// helper keeps the pure tab-ordering functions. Both must agree on the union.
+export type { SessionIntent } from '../lib/session-modes'
 export type UiMode = 'simple' | 'advanced'
 /// 'unknown_domain' means the code was revoked (the device left the group).
 export type DomainOutcome = 'ok' | 'unknown_domain' | 'failed'
@@ -169,8 +173,29 @@ export interface SessionTab {
   mode: SessionMode
   /// What the simple home asked for before the session started.
   intent: SessionIntent
+  /// Folded to a minimal state in the tab bar; the session stays alive.
+  minimized?: boolean
+  /// A pane tab (files/chat/terminal promoted out of a desktop drawer) reuses
+  /// the owner's connection instead of opening its own. This is the tab id
+  /// that owns the SessionConnection.
+  runtimeTabId?: string
+  /// The app-level pane this tab displays. Panes are mounted once in
+  /// PaneHost so moving one from a drawer to a tab keeps its state.
+  paneId?: string
   clipboardEnabled: boolean
   displayIndex: number
+}
+
+/// One chat/files/terminal panel. It lives in PaneHost for as long as it is
+/// open, so promoting it from a desktop drawer to its own tab does not rebuild
+/// its WebSocket, terminal buffer or scroll position.
+export interface SessionPane {
+  id: string
+  kind: PaneKind
+  /// Tab whose SessionConnection serves this pane.
+  ownerTabId: string
+  /// Set when the pane has its own tab; the slot lives in that page.
+  standaloneTabId?: string
 }
 
 export interface RecentConnection {
@@ -285,6 +310,10 @@ interface AppState {
   security: SecuritySettings | null
   nearby: DiscoveredPeer[]
   tabs: SessionTab[]
+  /// Chat/files/terminal panels mounted once at the app root. They outlive a
+  /// tab switch and can move from a desktop drawer to their own tab without
+  /// being rebuilt.
+  panes: SessionPane[]
   activeTabId: string
   recents: RecentConnection[]
   connectDraft: ConnectDraft
@@ -400,6 +429,17 @@ interface AppState {
   ) => string
   closeTab: (id: string) => void
   setActiveTab: (id: string) => void
+  /// Fold a tab to its minimal state in the tab bar without closing it. The
+  /// session and every pane it owns stay alive.
+  setTabMinimized: (id: string, minimized: boolean) => void
+  /// Opens (or re-focuses) one panel drawer for a desktop session. Other
+  /// panes of the same session close, matching the old exclusive drawer.
+  openPane: (ownerTabId: string, kind: PaneKind) => string
+  /// Ends one pane: a terminal WebSocket closes, a file panel disconnects.
+  closePane: (id: string) => void
+  /// Moves an embedded pane into its own tab, reusing the owner's connection
+  /// and the already mounted panel (no terminal/process rebuild).
+  promotePane: (id: string) => string | null
   setControlEnabled: (id: string, enabled: boolean) => void
   setClipboardEnabled: (id: string, enabled: boolean) => void
   forgetRecent: (at: number) => void
@@ -632,12 +672,24 @@ function initialDeviceNotes(): Record<string, string> {
 
 const runtimes = new Map<string, SessionConnection>()
 let nextId = 1
+let nextPaneId = 1
+
+/// Resolve a tab id to the connection that actually serves it. A promoted
+/// pane tab shares its owner's SessionConnection, so closing the drawer and
+/// opening the tab does not reconnect (or restart a terminal).
+function runtimeIdFor(tabId: string): string {
+  const tab = useAppStore.getState().tabs.find((item) => item.id === tabId)
+  return tab?.runtimeTabId ?? tabId
+}
 
 /// The active tab pulls at full rate (SessionView); the others keep a slow
 /// pull so their session stays live and their stored frame stays current.
 function setForegroundRuntime(activeId: string): void {
+  // `activeId` may be a promoted pane tab; its connection is registered under
+  // the owner's runtime id.
+  const runtimeId = runtimeIdFor(activeId)
   for (const [id, connection] of runtimes) {
-    connection.setForeground(id === activeId)
+    connection.setForeground(id === runtimeId)
   }
 }
 
@@ -654,14 +706,21 @@ const UI_CLIENT_ID = (() => {
 })()
 
 export function sessionConnection(id: string): SessionConnection | undefined {
-  return runtimes.get(id)
+  // `id` is a tab id; a promoted pane tab points at its owner's runtime.
+  const resolved = runtimeIdFor(id)
+  return runtimes.get(id) ?? runtimes.get(resolved)
 }
 
 export const useAppStore = create<AppState>((set, get) => {
   const patchTab = (id: string, patch: TabPatch): void => {
     set((state) => ({
       tabs: state.tabs.map((tab) =>
-        tab.id === id ? { ...tab, ...patch } : tab,
+        // A promoted pane tab shares the owner's connection; the welcome,
+        // phase and errors travel to both so the pane page and the desktop
+        // tab never disagree.
+        tab.id === id || tab.runtimeTabId === id
+          ? { ...tab, ...patch }
+          : tab,
       ),
     }))
     if (patch.phase !== undefined) get().syncUiState()
@@ -925,6 +984,7 @@ export const useAppStore = create<AppState>((set, get) => {
     security: null,
     nearby: [],
     tabs: [],
+    panes: [],
     activeTabId: 'home',
     recents: initialRecents(),
     connectDraft: initialConnectDraft(),
@@ -1679,9 +1739,16 @@ export const useAppStore = create<AppState>((set, get) => {
     syncUiState: () => {
       const token = get().token
       if (!token) return
-      const active = get().tabs.filter(
-        (tab) => tab.phase === 'live' || tab.phase === 'connecting',
-      ).length
+      // A promoted pane tab shares its owner's connection; count the runtime
+      // once so one desktop session with its files tab open is not reported
+      // as two active sessions.
+      const active = new Set(
+        get()
+          .tabs.filter(
+            (tab) => tab.phase === 'live' || tab.phase === 'connecting',
+          )
+          .map((tab) => tab.runtimeTabId ?? tab.id),
+      ).size
       void postUiState(token, UI_CLIENT_ID, active).catch(() => undefined)
     },
 
@@ -1707,6 +1774,11 @@ export const useAppStore = create<AppState>((set, get) => {
         get().advanced[advancedKey] ??
         readStoredAdvanced(trimmedHost, port) ??
         defaultAdvancedParams(preset)
+      // A files/chat/terminal tab is one independent page: create its pane
+      // right away so the app-level PaneHost can mount it once. Desktop tabs
+      // create panes only when a drawer is opened.
+      const paneId =
+        intent === 'desktop' ? undefined : `pane-${nextPaneId++}`
       const tab: SessionTab = {
         id,
         label: label?.trim() || host,
@@ -1716,6 +1788,8 @@ export const useAppStore = create<AppState>((set, get) => {
         deviceId,
         preset,
         advanced,
+        runtimeTabId: id,
+        ...(paneId ? { paneId } : {}),
         phase: 'connecting',
         welcome: null,
         frame: null,
@@ -1735,6 +1809,18 @@ export const useAppStore = create<AppState>((set, get) => {
       }
       set((state) => ({
         tabs: [...state.tabs, tab],
+        panes:
+          paneId && intent !== 'desktop'
+            ? [
+                ...state.panes,
+                {
+                  id: paneId,
+                  kind: intent,
+                  ownerTabId: id,
+                  standaloneTabId: id,
+                },
+              ]
+            : state.panes,
         activeTabId: id,
       }))
       logDiag('info', 'session.create', tab.label, {
@@ -1771,10 +1857,15 @@ export const useAppStore = create<AppState>((set, get) => {
         },
       }, id)
       runtimes.set(id, connection)
+      // A files/chat/terminal pane can be mounted by PaneHost before this
+      // point (the tab was added in the same action). Its first render saw no
+      // connection; nudge the store so it renders again with the runtime.
+      patchTab(id, {})
       setForegroundRuntime(id)
-      if (get().localMode) {
+      if (get().localMode && intent !== 'terminal') {
         // Local files go to every remote; the local core's clipboard API is
-        // only reachable when this UI is the local shell/browser.
+        // only reachable when this UI is the local shell/browser. A terminal
+        // page has no remote picture to paste into.
         connection.enableClipboardFileSync(() => get().token)
         // And the reverse: files copied on the remote can be put on this
         // machine's clipboard (mounted virtually when possible).
@@ -1817,7 +1908,8 @@ export const useAppStore = create<AppState>((set, get) => {
           /Windows NT 6\.1/i.test(navigator.userAgent)
         connection.connect(tab.host, port, trimmedToken, requestAccess,
                            deviceId, self.forceRelay || windows7,
-                           clientName, clientId, self.twoFactorCode || '')
+                           clientName, clientId, self.twoFactorCode || '',
+                           intent)
         if (trimmedToken !== '') {
           remember(tab.host, port, tab.label, trimmedToken, saveToken, {
             id: deviceId,
@@ -1831,34 +1923,159 @@ export const useAppStore = create<AppState>((set, get) => {
 
     closeTab: (id) => {
       const closing = get().tabs.find((tab) => tab.id === id)
-      if (closing) {
-        logDiag('info', 'session.close', closing.label, {
-          target: `${closing.host}:${closing.port}`,
-        })
-      }
-      const connection = runtimes.get(id)
-      connection?.disconnect()
-      runtimes.delete(id)
+      if (!closing) return
+      logDiag('info', 'session.close', closing.label, {
+        target: `${closing.host}:${closing.port}`,
+        intent: closing.intent,
+      })
+      const runtimeId = closing.runtimeTabId ?? id
       clearToastTimer(id)
-      forgetSessionScreenBuffer(id)
+      let disconnect: SessionConnection | undefined
       set((state) => {
         const index = state.tabs.findIndex((tab) => tab.id === id)
         const tabs = state.tabs.filter((tab) => tab.id !== id)
+        // A pane that lived in this tab goes with it. A promoted pane whose
+        // owner closes keeps its own tab and the shared runtime alive.
+        const panes = state.panes.filter((pane) => {
+          if (pane.id === closing.paneId) return false
+          if (pane.ownerTabId !== id) return true
+          return pane.standaloneTabId !== undefined &&
+                 tabs.some((tab) => tab.id === pane.standaloneTabId)
+        })
+        const runtimeStillUsed =
+          tabs.some((tab) => (tab.runtimeTabId ?? tab.id) === runtimeId) ||
+          panes.some((pane) => pane.ownerTabId === runtimeId)
+        if (!runtimeStillUsed) {
+          disconnect = runtimes.get(runtimeId) ?? runtimes.get(id)
+          runtimes.delete(runtimeId)
+          runtimes.delete(id)
+        }
         let activeTabId = state.activeTabId
         if (activeTabId === id) {
-          activeTabId = tabs.length
-            ? tabs[Math.max(0, Math.min(index - 1, tabs.length - 1))]!.id
-            : 'home'
+          const candidates = tabs.filter((tab) => !tab.minimized)
+          const neighbour = candidates[Math.max(0, Math.min(index - 1, candidates.length - 1))]
+          activeTabId = neighbour?.id ?? 'home'
         }
-        return { tabs, activeTabId }
+        return { tabs, panes, activeTabId }
       })
+      disconnect?.disconnect()
+      if (closing.intent === 'desktop') forgetSessionScreenBuffer(id)
       setForegroundRuntime(get().activeTabId)
       get().syncUiState()
     },
 
     setActiveTab: (id) => {
-      set({ activeTabId: id })
+      set((state) => ({
+        activeTabId: id,
+        tabs: state.tabs.map((tab) =>
+          tab.id === id && tab.minimized ? { ...tab, minimized: false } : tab,
+        ),
+      }))
       setForegroundRuntime(id)
+    },
+
+    setTabMinimized: (id, minimized) => {
+      set((state) => {
+        const tabs = state.tabs.map((tab) =>
+          tab.id === id ? { ...tab, minimized } : tab,
+        )
+        let activeTabId = state.activeTabId
+        if (minimized && activeTabId === id) {
+          activeTabId = nextVisibleTabId(tabs, id)
+        } else if (!minimized) {
+          activeTabId = id
+        }
+        return { tabs, activeTabId }
+      })
+      setForegroundRuntime(get().activeTabId)
+    },
+
+    openPane: (ownerTabId, kind) => {
+      const current = get().panes.find(
+        (pane) => pane.ownerTabId === ownerTabId && pane.kind === kind,
+      )
+      // A pane already promoted to its own tab is reached through that tab.
+      if (current?.standaloneTabId) {
+        get().setActiveTab(current.standaloneTabId)
+        return current.id
+      }
+      if (current) {
+        get().setActiveTab(ownerTabId)
+        return current.id
+      }
+      const id = `pane-${nextPaneId++}`
+      set((state) => ({
+        panes: [
+          // The desktop drawer is exclusive, like before: opening files
+          // while chat is shown replaces it.
+          ...state.panes.filter(
+            (pane) =>
+              pane.ownerTabId !== ownerTabId || pane.standaloneTabId !== undefined,
+          ),
+          { id, kind, ownerTabId },
+        ],
+        activeTabId: ownerTabId,
+      }))
+      return id
+    },
+
+    closePane: (id) => {
+      const pane = get().panes.find((item) => item.id === id)
+      if (!pane) return
+      if (
+        pane.standaloneTabId !== undefined &&
+        get().tabs.some((tab) => tab.id === pane.standaloneTabId)
+      ) {
+        get().closeTab(pane.standaloneTabId)
+        return
+      }
+      set((state) => ({ panes: state.panes.filter((item) => item.id !== id) }))
+    },
+
+    promotePane: (id) => {
+      const pane = get().panes.find((item) => item.id === id)
+      if (!pane) return null
+      if (
+        pane.standaloneTabId !== undefined &&
+        get().tabs.some((tab) => tab.id === pane.standaloneTabId)
+      ) {
+        get().setActiveTab(pane.standaloneTabId)
+        return pane.standaloneTabId
+      }
+      const owner = get().tabs.find((tab) => tab.id === pane.ownerTabId)
+      if (!owner) return null
+      const tabId = `session-${nextId++}`
+      const runtimeId = owner.runtimeTabId ?? owner.id
+      const tab: SessionTab = {
+        ...owner,
+        id: tabId,
+        intent: pane.kind,
+        runtimeTabId: runtimeId,
+        paneId: pane.id,
+        minimized: false,
+        // The picture tabs' input state is irrelevant on a panel page.
+        controlEnabled: false,
+        // The promoted page shares the owner's connection; it is already
+        // live, so no reconnect and no second hello.
+        phase: owner.phase,
+        error: owner.error,
+        errorCode: owner.errorCode,
+        notice: owner.notice,
+      }
+      set((state) => ({
+        tabs: [...state.tabs, tab],
+        panes: state.panes.map((item) =>
+          item.id === id ? { ...item, standaloneTabId: tabId } : item,
+        ),
+        activeTabId: tabId,
+      }))
+      logDiag('info', 'session.promote', owner.label, {
+        target: `${owner.host}:${owner.port}`,
+        intent: pane.kind,
+        runtime: runtimeId,
+      })
+      setForegroundRuntime(tabId)
+      return tabId
     },
 
     setControlEnabled: (id, enabled) =>

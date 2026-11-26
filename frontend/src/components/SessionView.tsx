@@ -50,7 +50,10 @@ import {
 import { useTranslation } from 'react-i18next'
 import { MIN_FPS, fpsPlan, nextFpsUp } from '../lib/frame-rate'
 import {
+  buttonReleaseEvents,
   createWheelAccumulator,
+  movePoint,
+  PressedButtons,
   remoteButton,
   wheelNotches,
 } from '../lib/pointer'
@@ -102,11 +105,8 @@ import {
 } from '../store/app'
 import { RemoteCursor } from './RemoteCursor'
 import { TileCanvas, type DisplayMode } from './TileCanvas'
-import { ChatPanel } from './ChatPanel'
-import { FileTransferPanel } from './FileTransferPanel'
-import { TerminalPanel } from './TerminalPanel'
+import { PaneSlot } from './PaneSlot'
 import { sessionToolEntries } from '../lib/session-tools'
-import type { ChatMessage } from '../lib/client'
 import { VoiceCall } from '../lib/voice'
 
 function formatBandwidth(bytesPerSecond: number): string {
@@ -524,7 +524,7 @@ export function SessionView({
   const pendingMove = useRef<{ x: number; y: number } | null>(null)
   const moveScheduled = useRef(false)
   const pressedKeys = useRef<Set<string>>(new Set())
-  const pressedButtons = useRef<Set<number>>(new Set())
+  const pressedButtons = useRef(new PressedButtons())
   const [surfaceSize, setSurfaceSize] = useState({ width: 0, height: 0 })
   /// First-use dialog for combo forwarding. `combo` is the toolbar sequence
   /// that opened it (null when the trigger was a physical Win key, which is
@@ -549,15 +549,28 @@ export function SessionView({
     () => document.fullscreenElement !== null,
   )
   const isFullscreen = elementFullscreen || immersive
-  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
-  const [chatOpen, setChatOpen] = useState(false)
+  // The desktop drawer is one of the app-level panes, shown when this tab's
+  // owner matches and it has not been promoted to its own tab. The pane is
+  // mounted by PaneHost, so switching tabs or minimising does not rebuild it.
+  const embeddedPane = useAppStore((state) =>
+    state.panes.find(
+      (pane) =>
+        pane.ownerTabId === tab.id && pane.standaloneTabId === undefined,
+    ),
+  )
+  const chatOpen = embeddedPane?.kind === 'chat'
+  const filesOpen = embeddedPane?.kind === 'files'
+  const terminalOpen = embeddedPane?.kind === 'terminal'
+  const openPane = useAppStore((state) => state.openPane)
+  // New messages while the chat drawer is closed still deserve a badge; the
+  // chat pane reads the same connection when it is open.
   const [chatUnread, setChatUnread] = useState(0)
   const chatOpenRef = useRef(false)
-  const [filesOpen, setFilesOpen] = useState(false)
-  const [terminalOpen, setTerminalOpen] = useState(false)
   /// The host answered `terminal_disabled`; never show its toolbar entry again
   /// for this session. Until then the panel itself explains the refusal.
-  const [terminalDisabled, setTerminalDisabled] = useState(false)
+  /// The pane itself explains a host that refuses the terminal; keeping the
+  /// entry visible lets it do so (an unset capability must not hide it).
+  const terminalDisabled = false
   /// The terminal endpoint authenticates with the host session token, so wait
   /// for the live welcome. A host that answered `terminal_disabled` never
   /// shows the entry again in this session.
@@ -571,9 +584,8 @@ export function SessionView({
     filesLabel: t('session.files'),
     terminalLabel: t('terminal.title'),
   })
-  /// The remote folder the file panel is showing, published by the panel. A
-  /// drop on the session is uploaded straight into it.
-  const [remoteDir, setRemoteDir] = useState('')
+  /// A drop with no file panel open cannot name a remote folder.
+  const remoteDir = ''
   const [dropActive, setDropActive] = useState(false)
   const dropDepth = useRef(0)
   // The player lives in the connection, so a background tab keeps playing and
@@ -999,15 +1011,17 @@ export function SessionView({
     }
   }
 
+  const hangupVoiceCall = () => {
+    connection()?.hangupCall()
+    stopVoiceCall()
+  }
+
+  /// Starting a call lives in the desktop toolbar now that chat is its own
+  /// pane: the call belongs to this picture session, not to the chat drawer.
   const startVoiceCall = () => {
     connection()?.inviteCall()
     setCallPhase('ringing')
     setCallNotice(null)
-  }
-
-  const hangupVoiceCall = () => {
-    connection()?.hangupCall()
-    stopVoiceCall()
   }
 
   const toggleCallMute = () => {
@@ -1028,14 +1042,10 @@ export function SessionView({
   useEffect(() => {
     const active = connection()
     if (!active) return
-    active.requestChatHistory()
+    // Chat has its own listener inside the app-level chat pane; this one only
+    // carries the desktop badge, voice call and input notices.
     return active.addListener((event) => {
-      if (event.kind === 'chat-history') {
-        setChatMessages(event.messages)
-      } else if (event.kind === 'chat') {
-        setChatMessages((previous) =>
-          [...previous, event.message].slice(-200),
-        )
+      if (event.kind === 'chat') {
         if (!chatOpenRef.current) setChatUnread((count) => count + 1)
       } else if (event.kind === 'voice') {
         voiceRef.current?.pushRemote(event.data)
@@ -1050,13 +1060,6 @@ export function SessionView({
       }
     })
   }, [connection, pushToast, tab.id, t])
-
-  // The automatic file clipboard sync lives in the connection so background
-  // tabs (and popouts) keep mirroring local files too; only the files panel
-  // needs to pause it while it uploads through the same ids.
-  useEffect(() => {
-    connection()?.setFilePanelOpen(filesOpen)
-  }, [connection, filesOpen])
 
   useEffect(() => {
     if (callPhase !== 'active' || callStartedAt === null) return
@@ -1073,24 +1076,6 @@ export function SessionView({
       sessionConnection(tab.id)?.hangupCall()
     }
   }, [tab.id])
-
-  // A files/chat connection from the simple home opens that panel as soon as
-  // the session is live; the desktop view stays available behind it.
-  useEffect(() => {
-    if (tab.phase !== 'live') return
-    if (tab.intent !== 'files' && tab.intent !== 'chat') return
-    const open = tab.intent
-    const timer = window.setTimeout(() => {
-      if (open === 'files') {
-        setFilesOpen(true)
-        setChatOpen(false)
-      } else {
-        setChatOpen(true)
-        setFilesOpen(false)
-      }
-    }, 0)
-    return () => window.clearTimeout(timer)
-  }, [tab.phase, tab.id, tab.intent])
 
 
   // Collapse the toolbar into menus when its content would not fit. Expand
@@ -1586,7 +1571,11 @@ export function SessionView({
     return () => observer.disconnect()
   }, [])
 
-  const normalize = (clientX: number, clientY: number) => {
+  const normalize = (
+    clientX: number,
+    clientY: number,
+    buttonHeld = false,
+  ) => {
     const element = surfaceRef.current
     if (!element) return null
     // TileCanvas sizes the canvas element to exactly the painted image (fit),
@@ -1598,8 +1587,18 @@ export function SessionView({
     if (!rect || rect.width <= 0 || rect.height <= 0) return null
     const nx = (clientX - rect.left) / rect.width
     const ny = (clientY - rect.top) / rect.height
-    if (nx < 0 || nx > 1 || ny < 0 || ny > 1) return null
-    return { x: Number(nx.toFixed(5)), y: Number(ny.toFixed(5)) }
+    // Held buttons turn an out-of-picture move into an edge move instead of a
+    // dropped event; see movePoint().
+    return movePoint(nx, ny, buttonHeld)
+  }
+
+  /// Releases every button the host still believes is down. Pointer capture
+  /// can end without a matching pointerup (cancel, lost capture, window
+  /// blur), and a stuck drag button would eat the next gesture.
+  const releasePressedButtons = () => {
+    for (const event of buttonReleaseEvents(pressedButtons.current.drain())) {
+      connection()?.sendInput(event)
+    }
   }
 
   const sendVirtualMove = () => {
@@ -2156,7 +2155,7 @@ export function SessionView({
     connection()?.sendInput({ k: 'move', ...point })
     const button = remoteButton(event.button)
     if (button !== null) {
-      pressedButtons.current.add(button)
+      pressedButtons.current.press(button)
       connection()?.sendInput({ k: 'button', button, down: true })
     }
   }
@@ -2165,16 +2164,30 @@ export function SessionView({
     if (!inputAvailable) return
     if (virtualMouse) {
       onTouchpadUp(event)
+      releasePressedButtons()
       return
     }
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId)
     }
-    const button = remoteButton(event.button)
-    if (button !== null) {
-      pressedButtons.current.delete(button)
-      connection()?.sendInput({ k: 'button', button, down: false })
+    // Release all of them, not just event.button: the drag may have started a
+    // second button, and a button left down would stick on the host.
+    releasePressedButtons()
+  }
+
+  const onPointerCancel = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (virtualMouse) onTouchpadCancel(event)
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
     }
+    // A cancelled gesture never delivers its pointerup.
+    releasePressedButtons()
+  }
+
+  const onLostPointerCapture = () => {
+    // No further moves (and no pointerup) are guaranteed from this element,
+    // so nothing it pressed may stay held on the host.
+    releasePressedButtons()
   }
 
   const onPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -2193,7 +2206,11 @@ export function SessionView({
     if (displayMode === 'actual') {
       panPointer.current = { x: event.clientX, y: event.clientY }
     }
-    const point = normalize(event.clientX, event.clientY)
+    const point = normalize(
+      event.clientX,
+      event.clientY,
+      pressedButtons.current.size > 0,
+    )
     if (!point) return
     pendingMove.current = point
     if (moveScheduled.current) return
@@ -2302,10 +2319,9 @@ export function SessionView({
         connection()?.sendInput({ k: 'key', code, down: false })
       }
       keys.clear()
-      for (const button of buttons) {
-        connection()?.sendInput({ k: 'button', button, down: false })
+      for (const event of buttonReleaseEvents(buttons.drain())) {
+        connection()?.sendInput(event)
       }
-      buttons.clear()
     }
     // The shell's escape combo (Ctrl+Alt+Shift+Escape) swallows the Escape
     // key, so without this the remote would keep the modifiers held. The
@@ -2826,7 +2842,8 @@ export function SessionView({
           onPointerDown={onPointerDown}
           onPointerUp={onPointerUp}
           onPointerMove={onPointerMove}
-          onPointerCancel={onTouchpadCancel}
+          onPointerCancel={onPointerCancel}
+          onLostPointerCapture={onLostPointerCapture}
           onPointerEnter={() => {
             pointerInSurface.current = true
             // Re-arm immediately instead of waiting for the shell's next poll.
@@ -3161,11 +3178,31 @@ export function SessionView({
                             : terminalOpen,
                       onSelect: () => {
                         if (entry.key === 'chat') setChatUnread(0)
-                        setChatOpen(entry.key === 'chat')
-                        setFilesOpen(entry.key === 'files')
-                        setTerminalOpen(entry.key === 'terminal')
+                        openPane(tab.id, entry.key)
                       },
                     })),
+                    ...(callAvailable
+                      ? [
+                          {
+                            key: 'call',
+                            label:
+                              callPhase === 'idle'
+                                ? t('call.start')
+                                : t('call.hangup'),
+                            icon:
+                              callPhase === 'idle' ? (
+                                <Phone size={12} />
+                              ) : (
+                                <PhoneOff size={12} />
+                              ),
+                            active: callPhase !== 'idle',
+                            onSelect:
+                              callPhase === 'idle'
+                                ? startVoiceCall
+                                : hangupVoiceCall,
+                          },
+                        ]
+                      : []),
                     ...(inputAvailable
                       ? [
                           {
@@ -3214,9 +3251,7 @@ export function SessionView({
                         type="button"
                         onClick={() => {
                           setChatUnread(0)
-                          setChatOpen(true)
-                          setFilesOpen(false)
-                          setTerminalOpen(false)
+                          openPane(tab.id, 'chat')
                         }}
                         className={
                           'relative btn h-7 w-7 shrink-0 !px-0 ' +
@@ -3236,11 +3271,7 @@ export function SessionView({
                       <button
                         key={entry.key}
                         type="button"
-                        onClick={() => {
-                          setFilesOpen(true)
-                          setChatOpen(false)
-                          setTerminalOpen(false)
-                        }}
+                        onClick={() => openPane(tab.id, 'files')}
                         className={
                           'btn h-7 w-7 shrink-0 !px-0 ' +
                           (filesOpen ? 'text-accent' : 'btn-quiet')
@@ -3254,11 +3285,7 @@ export function SessionView({
                       <button
                         key={entry.key}
                         type="button"
-                        onClick={() => {
-                          setChatOpen(false)
-                          setFilesOpen(false)
-                          setTerminalOpen(true)
-                        }}
+                        onClick={() => openPane(tab.id, 'terminal')}
                         className={
                           'btn h-7 w-7 shrink-0 !px-0 ' +
                           (terminalOpen ? 'text-accent' : 'btn-quiet')
@@ -3270,6 +3297,35 @@ export function SessionView({
                       </button>
                     ),
                   )}
+                  {callAvailable ? (
+                    <button
+                      type="button"
+                      onClick={
+                        callPhase === 'idle'
+                          ? startVoiceCall
+                          : hangupVoiceCall
+                      }
+                      className={
+                        'btn h-7 w-7 shrink-0 !px-0 ' +
+                        (callPhase === 'idle'
+                          ? 'btn-quiet'
+                          : 'border-accent/50 bg-accent-soft text-accent')
+                      }
+                      title={
+                        callPhase === 'idle' ? t('call.start') : t('call.hangup')
+                      }
+                      aria-label={
+                        callPhase === 'idle' ? t('call.start') : t('call.hangup')
+                      }
+                      aria-pressed={callPhase !== 'idle'}
+                    >
+                      {callPhase === 'idle' ? (
+                        <Phone size={13} />
+                      ) : (
+                        <PhoneOff size={13} />
+                      )}
+                    </button>
+                  ) : null}
                   {inputAvailable ? (
                     <>
                       <button
@@ -3847,38 +3903,10 @@ export function SessionView({
             </div>
           ) : null}
 
-          <ChatPanel
-            open={chatOpen}
-            onClose={() => setChatOpen(false)}
-            messages={chatMessages}
-            onSend={(text) => connection()?.sendChat(text)}
-            remoteLabel={tab.label}
-            remoteId={welcome?.device_id}
-            selfSessionId={welcome?.session_id}
-            callAvailable={callAvailable}
-            callPhase={callPhase}
-            onCall={startVoiceCall}
-          />
-
-          <FileTransferPanel
-            open={filesOpen}
-            onClose={() => setFilesOpen(false)}
-            connection={connection() ?? null}
-            onRemotePathChange={setRemoteDir}
-            onRequestOpen={() => setFilesOpen(true)}
-            onError={(message) => pushToast(tab.id, message)}
-          />
-
-          {terminalOpen ? (
-            <TerminalPanel
-              host={tab.host}
-              port={tab.port}
-              token={tab.token}
-              sessionToken={welcome?.session_token}
-              onClose={() => setTerminalOpen(false)}
-              onDisabled={() => setTerminalDisabled(true)}
-            />
-          ) : null}
+          {/* The drawer's panel is mounted once by PaneHost and moved into
+              this slot. Promoting it to its own tab only changes the slot,
+              so a terminal keeps its process and a file panel its state. */}
+          {embeddedPane ? <PaneSlot paneId={embeddedPane.id} /> : null}
 
 
           {touchDevice && inputAvailable ? (

@@ -5,7 +5,9 @@
   "tabs": {
     "home": "Home",
     "new": "New connection",
-    "close": "Close session"
+    "close": "Close session",
+    "minimize": "Minimize to tab bar",
+    "restore": "Restore from tab bar"
   },
   "home": {
     "title": "Connect your devices",
@@ -339,8 +341,10 @@
     "virtualKeyboard": "Keyboard",
     "virtualMouseHint": "Touchpad: drag to move, tap for left click, long-press for right click, two fingers to scroll.",
     "popOut": "Open in a new window",
+    "openInTab": "Open in its own tab",
     "closeWindow": "Close window",
     "quickActions": "Quick actions",
+    "collapseToolbar": "Collapse toolbar",
     "pinToolbar": "Pin toolbar",
     "unpinToolbar": "Unpin toolbar",
     "moveToolbar": "Drag toolbar",
@@ -620,11 +624,16 @@
     "host": "This device",
     "placeholder": "Type a message…",
     "send": "Send",
+    "clear": "Clear screen",
     "emptyHost": "No messages yet. A remote viewer can start a chat from the session toolbar."
   },
   "terminal": {
     "title": "Terminal",
     "close": "Close terminal",
+    "copy": "Copy",
+    "paste": "Paste",
+    "fontSmaller": "Smaller font",
+    "fontLarger": "Larger font",
     "new": "New terminal",
     "tab": "Terminal {{n}}",
     "closeTab": "Close this terminal",
@@ -751,6 +760,8 @@
     "sendTo": "Send over",
     "sendToHint": "Send the selected local items to the remote current folder",
     "receiveFrom": "Receive back",
+    "newFolder": "New folder",
+    "newFolderPrompt": "Name of the new folder on the host",
     "receiveFromHint": "Receive the selected remote items into the local current folder",
     "dirsSummary": "Folders {{done}}/{{total}}",
     "skippedCount": "{{count}} skipped",
@@ -819,6 +830,7 @@
     "modeDesktop": "Remote desktop",
     "modeFiles": "File transfer",
     "modeChat": "Chat",
+    "modeTerminal": "Remote terminal",
     "connectTitle": "Connect to a device",
     "connectHint": "Enter a device ID or an address; the port defaults to 28418",
     "targetPlaceholder": "Device ID or IP[:port]",
@@ -1007,6 +1019,12 @@
     "traffic": "in {{in}} · out {{out}}",
     "toggle": "Enable or disable this mapping",
     "delete": "Delete mapping",
+    "lastError": {
+      "no_session": "There is no remote session yet; connect first and try again",
+      "connect_failed": "Cannot reach {{target}} (nothing is listening, or a firewall is blocking it)",
+      "port_forward_disabled": "The host has not enabled port forwarding",
+      "port_in_use": "The local port is in use"
+    },
     "preset": {
       "rdp": "RDP",
       "ssh": "SSH",
