@@ -30,6 +30,9 @@
 #include <fstream>
 #include <string>
 #include <thread>
+#include <vector>
+
+#include "service_paths.h"
 
 namespace {
 
@@ -56,8 +59,14 @@ std::atomic<bool> g_running{true};
 // The full product installs "moLinkSession"; the host-only product passes
 // `--name moLinkHost`. Keeping moLinkSession as the default means existing
 // installers and the backend's service_control keep working unchanged.
-constexpr wchar_t kDefaultServiceName[] = L"moLinkSession";
+// The default name itself lives in service_paths.h because the mapping from
+// service name to directory/object names is now shared with molink-helper.
+constexpr const wchar_t* kDefaultServiceName =
+    molink::service_paths::kDefaultServiceName;
 std::wstring g_service_name = kDefaultServiceName;
+/// Data/log paths for this service; configured once in wmain().
+molink::service_paths::paths g_paths;
+std::wstring g_log_path;
 
 const wchar_t* service_name() { return g_service_name.c_str(); }
 
@@ -82,12 +91,13 @@ const wchar_t* service_display_name() {
                                                : L"moLink host helper";
 }
 
-constexpr wchar_t kHelperStopEventName[] = L"Global\\moLinkHelperStop";
-constexpr wchar_t kHelperDetachEventName[] = L"Global\\moLinkHelperDetach";
-constexpr wchar_t kLogPath[] = L"C:\\ProgramData\\moLink\\service\\service.log";
+constexpr wchar_t kPipeName[] = L"\\\\.\\pipe\\molink-session";
 
 void log_line(const std::string& message) {
-  std::ofstream out(kLogPath, std::ios::app);
+  // ProgramData is unset in some service environments; there is no safe
+  // relative fallback, so stay silent instead of writing to the cwd.
+  if (g_log_path.empty()) return;
+  std::ofstream out(g_log_path.c_str(), std::ios::app);
   if (out) out << message << "\n";
 }
 
@@ -111,7 +121,6 @@ bool enable_privilege(const wchar_t* name) {
   CloseHandle(token);
   return ok;
 }
-constexpr wchar_t kPipeName[] = L"\\\\.\\pipe\\molink-session";
 
 std::string wide_to_utf8(const wchar_t* text) {
   if (text == nullptr) return std::string();
@@ -231,6 +240,14 @@ bool launch_helper(std::string& err) {
   helper = (slash == std::wstring::npos ? std::wstring()
                                         : helper.substr(0, slash + 1)) +
            L"molink-helper.exe";
+  // The helper derives its data directory, log paths and Global\ object names
+  // from the service name. Pass it only for a non-default service: an
+  // invocation without --name must stay exactly what the full product used
+  // before services were isolated.
+  std::wstring helper_command;
+  if (!molink::service_paths::is_legacy_service(g_service_name)) {
+    helper_command = L"\"" + helper + L"\" --name " + g_service_name;
+  }
   STARTUPINFOW startup{};
   startup.cb = sizeof(startup);
   // Start on the interactive desktop; the helper switches each pipe thread to
@@ -240,8 +257,15 @@ bool launch_helper(std::string& err) {
   BOOL created = FALSE;
   for (const wchar_t* desktop : desktops) {
     startup.lpDesktop = const_cast<wchar_t*>(desktop);
+    // CreateProcessW is allowed to modify the command-line buffer, so hand it
+    // a fresh copy for every desktop attempt.
+    std::vector<wchar_t> command_line(helper_command.begin(),
+                                      helper_command.end());
+    command_line.push_back(L'\0');
     created = CreateProcessAsUserW(
-        token, helper.c_str(), nullptr, nullptr, nullptr, FALSE,
+        token, helper.c_str(),
+        helper_command.empty() ? nullptr : command_line.data(), nullptr,
+        nullptr, FALSE,
         CREATE_NEW_PROCESS_GROUP | CREATE_UNICODE_ENVIRONMENT |
             CREATE_NO_WINDOW,
         nullptr, nullptr, &startup, &g_helper);
@@ -313,12 +337,7 @@ DWORD helper_pid() {
   return g_helper.dwProcessId;
 }
 
-std::wstring core_pid_path() {
-  std::wstring path(kLogPath);
-  const std::size_t slash = path.find_last_of(L"\\/");
-  if (slash == std::wstring::npos) return L"core.pid";
-  return path.substr(0, slash + 1) + L"core.pid";
-}
+std::wstring core_pid_path() { return g_paths.core_pid; }
 
 unsigned long long process_creation_ticks(HANDLE process) {
   FILETIME creation{};
@@ -599,6 +618,11 @@ void WINAPI service_main(DWORD, wchar_t**) {
   g_stop_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
   report_running();
   log_line("service started");
+  // One line the field tests can use to prove two installs are isolated:
+  // their data directories and supervisor object names must differ.
+  log_line("service.name=" + wide_to_utf8(service_name()) +
+           " data_dir=" + wide_to_utf8(g_paths.data_dir.c_str()) +
+           " supervisor=" + wide_to_utf8(g_paths.supervisor_mutex.c_str()));
   enable_privilege(L"SeTcbPrivilege");
   enable_privilege(L"SeAssignPrimaryTokenPrivilege");
   enable_privilege(L"SeIncreaseQuotaPrivilege");
@@ -607,9 +631,9 @@ void WINAPI service_main(DWORD, wchar_t**) {
   // it must be in the global namespace.
   enable_privilege(L"SeCreateGlobalPrivilege");
   g_helper_stop_event =
-      CreateEventW(nullptr, TRUE, FALSE, kHelperStopEventName);
-  g_helper_detach_event =
-      CreateEventW(nullptr, TRUE, FALSE, kHelperDetachEventName);
+      CreateEventW(nullptr, TRUE, FALSE, g_paths.helper_stop_event.c_str());
+  g_helper_detach_event = CreateEventW(
+      nullptr, TRUE, FALSE, g_paths.helper_detach_event.c_str());
   if (g_helper_stop_event == nullptr || g_helper_detach_event == nullptr) {
     log_line("could not create helper stop events: " +
              std::to_string(GetLastError()));
@@ -689,12 +713,21 @@ void WINAPI service_main(DWORD, wchar_t**) {
   SetServiceStatus(g_status, &g_service_status);
 }
 
-std::wstring program_data_service_dir() {
+std::wstring program_data_service_dir() { return g_paths.data_dir; }
+
+/// Resolve every path and object name from the service name once, before
+/// install/uninstall or the SCM dispatcher uses them. ProgramData is read from
+/// the environment so a custom service stays in its own tree.
+void configure_service_paths() {
   wchar_t base[MAX_PATH * 2] = {};
   const DWORD length = GetEnvironmentVariableW(L"ProgramData", base,
                                                static_cast<DWORD>(std::size(base)));
-  if (length == 0 || length >= std::size(base)) return std::wstring();
-  return std::wstring(base) + L"\\moLink\\service";
+  std::wstring program_data;
+  if (length != 0 && length < std::size(base)) {
+    program_data.assign(base, length);
+  }
+  g_paths = molink::service_paths::resolve(program_data, g_service_name);
+  g_log_path = g_paths.service_log;
 }
 
 std::wstring module_path() {
@@ -792,9 +825,11 @@ bool install_service() {
       CopyFileW(helper_src.c_str(), helper_dst.c_str(), FALSE);
     }
   }
-  // The helper runs from %ProgramData%\moLink\service but the core normally
-  // stays next to the packaged app. Record that location so the supervisor
-  // does not have to guess (and so a package outside Program Files works).
+  // The helper runs from the service's data directory (%ProgramData%\moLink\
+  // service for the full product, %ProgramData%\<SVC>\service otherwise) but
+  // the core normally stays next to the packaged app. Record that location so
+  // the supervisor does not have to guess (and so a package outside Program
+  // Files works).
   if (slash != std::wstring::npos) {
     const std::wstring core_src =
         source.substr(0, slash + 1) + L"molink-core.exe";
@@ -921,6 +956,7 @@ bool uninstall_service() {
 
 int wmain(int argc, wchar_t** argv) {
   parse_service_name(argc, argv);
+  configure_service_paths();
   bool install = false;
   bool uninstall = false;
   for (int i = 1; i < argc; ++i) {

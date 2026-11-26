@@ -21,10 +21,12 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <iterator>
 #include <string>
 #include <vector>
 
 #include "core_supervisor.h"
+#include "service_paths.h"
 
 namespace {
 
@@ -69,11 +71,31 @@ static_assert(kWTSLocked != kWTSUnlocked, "lock and unlock must differ");
 thread_local HDESK g_desktop = nullptr;
 constexpr wchar_t kPipeName[] = L"\\\\.\\pipe\\molink-secure";
 constexpr wchar_t kInputPipeName[] = L"\\\\.\\pipe\\molink-secure-input";
-constexpr wchar_t kLogPath[] =
-    L"C:\\ProgramData\\moLink\\service\\helper.log";
+
+/// The service that launched us passes `--name <service>`; without it the
+/// helper behaves exactly like the pre-isolation full-product helper.
+std::wstring g_service_name = molink::service_paths::kDefaultServiceName;
+molink::service_paths::paths g_paths;
+std::wstring g_log_path;
+
+/// Scan all arguments so the order of `--name` does not matter. The service
+/// builds the command line, but a manual launch should work too.
+void parse_service_name(int argc, wchar_t** argv) {
+  for (int i = 1; i < argc; ++i) {
+    if (wcscmp(argv[i], L"--name") == 0) {
+      if (i + 1 < argc && argv[i + 1][0] != L'\0') {
+        g_service_name = argv[++i];
+      }
+    } else if (wcsncmp(argv[i], L"--name=", 7) == 0 &&
+               argv[i][7] != L'\0') {
+      g_service_name = argv[i] + 7;
+    }
+  }
+}
 
 void log_line(const std::string& message) {
-  std::ofstream out(kLogPath, std::ios::app);
+  if (g_log_path.empty()) return;
+  std::ofstream out(g_log_path.c_str(), std::ios::app);
   if (out) out << message << "\n";
 }
 
@@ -646,7 +668,18 @@ void poke_pipe(const wchar_t* name) {
 
 }  // namespace
 
-int wmain() {
+int wmain(int argc, wchar_t** argv) {
+  parse_service_name(argc, argv);
+  wchar_t program_data[32768] = {};
+  const DWORD program_data_length = GetEnvironmentVariableW(
+      L"ProgramData", program_data,
+      static_cast<DWORD>(std::size(program_data)));
+  const std::wstring program_data_value =
+      program_data_length > 0 && program_data_length < std::size(program_data)
+          ? std::wstring(program_data, program_data_length)
+          : std::wstring();
+  g_paths = molink::service_paths::resolve(program_data_value, g_service_name);
+  g_log_path = g_paths.helper_log;
   enable_physical_pixels();
   std::string err;
   if (!open_input_desktop(err)) {
@@ -655,6 +688,9 @@ int wmain() {
     return 1;
   }
   log_line("helper started, desktop=" + desktop_json());
+  log_line("service.name=" + utf8(g_service_name.c_str()) +
+           " data_dir=" + utf8(g_paths.data_dir.c_str()) +
+           " supervisor=" + utf8(g_paths.supervisor_mutex.c_str()));
   std::atomic<bool> running{true};
 
   // The helper hosts molink-core: wait for an existing core (the desktop shell
@@ -663,7 +699,8 @@ int wmain() {
   // desktop pipes must keep working -- but a stop request or a console session
   // change does.
   molink::supervisor::restart_policy policy;
-  auto core_backend = molink::supervisor::make_core_supervisor(running, policy);
+  auto core_backend =
+      molink::supervisor::make_core_supervisor(running, policy, g_service_name);
   std::thread supervisor_thread([&] {
     molink::supervisor::run(*core_backend, policy);
     // Supervision can end on its own (a normal core exit, or the restart

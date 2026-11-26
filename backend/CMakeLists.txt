@@ -1531,6 +1531,20 @@ set_target_properties(molink-core-service-control-test PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 add_test(NAME service_control COMMAND molink-core-service-control-test)
 
+# Service-name isolation: the data directory, log/pid paths and Global\ object
+# names are derived from the service name by a Win32-free helper, so the full
+# product and the host-only product can be installed side by side. Shared with
+# molink-service and molink-helper (both build the same .cpp).
+add_executable(molink-core-service-paths-test
+  tests/service_paths_test.cpp
+  "${CMAKE_CURRENT_SOURCE_DIR}/../shell/windows/service/service_paths.cpp"
+)
+target_include_directories(molink-core-service-paths-test PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../shell/windows/service")
+set_target_properties(molink-core-service-paths-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME service_paths COMMAND molink-core-service-paths-test)
+
 # The weight-based QoS controller: viewer feedback in, budget scale out.
 add_executable(molink-core-stream-qos-test
   tests/stream_qos_test.cpp
