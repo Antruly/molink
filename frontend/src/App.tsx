@@ -7,8 +7,11 @@ import { SimpleHomeView } from './components/simple/SimpleHomeView'
 import { HostChatDock } from './components/HostChatDock'
 import { Logo } from './components/Logo'
 import { AccessRequestDialog } from './components/AccessRequestDialog'
+import { PaneHost } from './components/PaneHost'
+import { PaneTabPage } from './components/PaneTabPage'
 import { ResizeFrame } from './components/ResizeFrame'
 import { SessionView } from './components/SessionView'
+import { normalizeSessionIntent, pageFeatures } from './lib/session-intent'
 import { SettingsPanel } from './components/SettingsPanel'
 import { TitleBar } from './components/TitleBar'
 import { useAppStore } from './store/app'
@@ -143,27 +146,40 @@ export default function App() {
       params.get('label') ?? undefined,
       false,
       token === '',
+      undefined,
+      normalizeSessionIntent(params.get('intent')),
     )
   }, [popout, createSession])
 
   const ready = authPhase === 'ready'
   const active = tabs.find((tab) => tab.id === activeTabId) ?? null
-  const showHome = !popout && (activeTabId === 'home' || active === null)
+  const showHome =
+    !popout && (activeTabId === 'home' || active === null || active.minimized)
+
+  // One tab, one page. A desktop tab owns the canvas; a files/chat/terminal
+  // tab renders its panel through PaneHost and never mounts SessionView.
+  const renderTab = (tab: typeof active) => {
+    if (!tab) return null
+    return pageFeatures(tab.intent).canvas ? (
+      <SessionView key={tab.id} tab={tab} popout={popout} />
+    ) : (
+      <PaneTabPage key={tab.id} tab={tab} />
+    )
+  }
 
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-canvas text-ink">
       {immersive ? null : <TitleBar />}
       <ResizeFrame />
       <AccessRequestDialog />
+      {/* Every pane lives here for its whole life, independent of tab switches
+          and of the drawer that currently shows it. */}
+      <PaneHost />
 
       {popout ? (
         <>
           <main className="flex min-h-0 flex-1 flex-col">
-            {active ? (
-              <SessionView key={active.id} tab={active} popout />
-            ) : (
-              <PopoutFallback />
-            )}
+            {active ? renderTab(active) : <PopoutFallback />}
           </main>
         </>
       ) : authPhase === 'booting' ? (
@@ -176,7 +192,7 @@ export default function App() {
           <main className="flex min-h-0 flex-1 flex-col">
             {popout ? (
               active ? (
-                <SessionView key={active.id} tab={active} popout />
+                renderTab(active)
               ) : (
                 <PopoutFallback />
               )
@@ -185,7 +201,7 @@ export default function App() {
                 <SimpleHomeView />
               </div>
             ) : active ? (
-              <SessionView key={active.id} tab={active} />
+              renderTab(active)
             ) : (
               <div className="grid flex-1 place-items-center text-sm text-muted">
                 {t('tabs.home')}

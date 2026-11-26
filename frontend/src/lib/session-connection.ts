@@ -31,6 +31,10 @@ import type {
   PresetApplied,
   SessionPresetMessage,
 } from './session-presets'
+import {
+  normalizeSessionIntent,
+  type SessionIntent,
+} from './session-intent'
 
 export interface Stats {
   /** Frames that were actually painted in the last second. */
@@ -173,6 +177,9 @@ export class SessionConnection {
   /// live tab pulls slowly here. Frames still land in that session's composited
   /// buffer, so switching back is instant instead of a black canvas.
   private foreground = true
+  /// Purpose this page was opened for. Reconnects keep it, so a files/chat/
+  /// terminal tab never re-subscribes to the picture.
+  private intent: SessionIntent = 'desktop'
   private backgroundTimer: number | null = null
   /// Files copied on this machine are pushed to every remote session, in the
   /// background too. Only the file panel's own uploads pause it.
@@ -889,12 +896,16 @@ export class SessionConnection {
 
   connect(host: string, port: number, token: string,
           requestAccess = false, deviceId = '', forceRelay?: boolean,
-          clientName?: string, clientId?: string, totp?: string): void {
+          clientName?: string, clientId?: string, totp?: string,
+          intent?: SessionIntent): void {
     // Keep the identity and TCP-only choice across manual reconnects; only the
     // first connect supplies them.
     if (forceRelay !== undefined) this.forceRelay = forceRelay
     if (clientName !== undefined) this.clientName = clientName
     if (clientId !== undefined) this.clientId = clientId
+    // The page purpose outlives a reconnect: a files/chat/terminal tab must
+    // not turn back into a desktop viewer after a network drop.
+    if (intent !== undefined) this.intent = normalizeSessionIntent(intent)
     // Kept only for this attempt: a TOTP is good for 30 seconds and must not
     // survive into a later reconnect.
     this.totp = totp ?? ''
@@ -945,7 +956,7 @@ export class SessionConnection {
     })
     this.client.connect(host, port, token, requestAccess, deviceId,
                         this.forceRelay, this.clientName, this.clientId,
-                        this.totp)
+                        this.totp, this.intent)
   }
 
   private stopAv1Indicator(): void {
@@ -998,6 +1009,8 @@ export class SessionConnection {
 
   private startBackgroundPull(): void {
     if (this.backgroundTimer !== null) return
+    // A panel-only page has no picture to keep warm.
+    if (this.intent !== 'desktop') return
     this.backgroundTimer = window.setInterval(() => {
       if (!this.client.isLive()) return
       this.client.requestFrame()

@@ -5,6 +5,9 @@ export interface SessionWindowTarget {
   port: number
   token: string
   label?: string
+  /// What the new window should render. Absent means a desktop session, so an
+  /// older caller keeps the behaviour it always had.
+  intent?: 'desktop' | 'files' | 'chat' | 'terminal'
 }
 
 export function sessionWindowUrl(target: SessionWindowTarget): string {
@@ -15,6 +18,7 @@ export function sessionWindowUrl(target: SessionWindowTarget): string {
     token: target.token,
   })
   if (target.label) params.set('label', target.label)
+  if (target.intent) params.set('intent', target.intent)
   const client = new URLSearchParams(window.location.search).get('client')
   if (client) params.set('client', client)
   if (shellInfo.enabled) {

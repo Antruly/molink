@@ -1304,6 +1304,15 @@ set_target_properties(molink-core-session-registry-test PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 add_test(NAME session_registry COMMAND molink-core-session-registry-test)
 
+# Session purpose gates capture and input. Pure header, no transport.
+add_executable(molink-core-session-intent-test
+  tests/session_intent_test.cpp
+)
+target_include_directories(molink-core-session-intent-test PRIVATE src)
+set_target_properties(molink-core-session-intent-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME session_intent COMMAND molink-core-session-intent-test)
+
 # The tile <-> AV1 stream hand-over is pure state machine.
 add_executable(molink-core-stream-policy-test
   tests/stream_policy_test.cpp

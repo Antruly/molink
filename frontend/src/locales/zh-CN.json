@@ -5,7 +5,9 @@
   "tabs": {
     "home": "首页",
     "new": "新连接",
-    "close": "关闭会话"
+    "close": "关闭会话",
+    "minimize": "最小化到标签栏",
+    "restore": "从标签栏恢复"
   },
   "home": {
     "title": "连接你的设备",
@@ -339,8 +341,10 @@
     "virtualKeyboard": "虚拟键盘",
     "virtualMouseHint": "触摸板模式：滑动移动光标，点击左键，长按右键，双指上下/左右滚动。",
     "popOut": "在新窗口打开",
+    "openInTab": "在独立标签页中打开",
     "closeWindow": "关闭窗口",
     "quickActions": "快捷操作",
+    "collapseToolbar": "收起工具栏",
     "pinToolbar": "固定工具栏",
     "unpinToolbar": "取消固定",
     "moveToolbar": "拖动工具栏",
@@ -620,11 +624,16 @@
     "host": "本机",
     "placeholder": "输入消息…",
     "send": "发送",
+    "clear": "清屏",
     "emptyHost": "暂无消息。远程查看者可以从会话工具栏发起聊天。"
   },
   "terminal": {
     "title": "终端",
     "close": "关闭终端",
+    "copy": "复制",
+    "paste": "粘贴",
+    "fontSmaller": "缩小字号",
+    "fontLarger": "放大字号",
     "new": "新建终端",
     "tab": "终端 {{n}}",
     "closeTab": "关闭此终端",
@@ -752,6 +761,8 @@
     "sendToHint": "把本地选中项传到远程当前目录",
     "receiveFrom": "← 传回来",
     "receiveFromHint": "把远程选中项拉回本地当前目录",
+    "newFolder": "新建目录",
+    "newFolderPrompt": "新目录名称（在当前远程目录下）",
     "dirsSummary": "目录 {{done}}/{{total}}",
     "skippedCount": "跳过 {{count}} 项",
     "summary": "成功 {{done}} · 失败 {{failed}} · 取消 {{cancelled}}",

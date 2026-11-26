@@ -1,4 +1,4 @@
-import { MessageSquare, Phone, Send, X } from 'lucide-react'
+import { ExternalLink, MessageSquare, Phone, Send, X } from 'lucide-react'
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { ChatMessage } from '../lib/client'
@@ -28,9 +28,15 @@ export function ChatPanel({
   callAvailable = false,
   callPhase = 'idle',
   onCall,
+  fullPage = false,
+  onPopOut,
 }: {
   open: boolean
   onClose: () => void
+  /// Standalone tab: fill the page instead of sliding in from the right.
+  fullPage?: boolean
+  /// Embedded drawer only: move this pane into its own tab.
+  onPopOut?: () => void
   messages: ChatMessage[]
   onSend: (text: string) => void
   remoteLabel: string
@@ -79,7 +85,11 @@ export function ChatPanel({
   return (
     <div
       data-local-input="true"
-      className="absolute inset-y-0 right-0 z-40 flex w-[min(92vw,340px)] flex-col border-l border-line bg-surface/95 shadow-2xl backdrop-blur-md"
+      className={
+        fullPage
+          ? 'relative flex h-full w-full min-h-0 flex-col bg-surface'
+          : 'absolute inset-y-0 right-0 z-40 flex w-[min(92vw,340px)] flex-col border-l border-line bg-surface/95 shadow-2xl backdrop-blur-md'
+      }
       onPointerDown={(event) => event.stopPropagation()}
       onPointerUp={(event) => event.stopPropagation()}
     >
@@ -106,6 +116,17 @@ export function ChatPanel({
             >
               <Phone size={12} />
               {callPhase === 'idle' ? t('call.start') : t('call.inCall')}
+            </button>
+          ) : null}
+          {onPopOut ? (
+            <button
+              type="button"
+              onClick={onPopOut}
+              className="grid h-7 w-7 place-items-center rounded-md text-muted transition hover:bg-panel hover:text-ink"
+              aria-label={t('session.openInTab')}
+              title={t('session.openInTab')}
+            >
+              <ExternalLink size={14} />
             </button>
           ) : null}
           <button

@@ -22,6 +22,10 @@ struct session_info {
   std::string peer_ip;
   unsigned int peer_port = 0;
   bool authenticated = false;
+  /// Which independent page opened this session: desktop (the default and the
+  /// only one that receives video), files, chat or terminal. Normalized from
+  /// hello by normalize_session_intent().
+  std::string intent = "desktop";
   /// What this viewer may do. Copied from the host's access policy when the
   /// session is created, and replaced when an access request is approved with
   /// a different preset. Read through session_registry so a concurrent update
