@@ -688,6 +688,62 @@ void fail_and_close(const wchar_t* message) {
 // WebView2 handlers
 // ---------------------------------------------------------------------------
 
+/// Quote a path for the small script that hands a native folder pick back to
+/// the page. Backslashes and quotes are the only characters an absolute
+/// Windows path can contain that would break the literal.
+std::wstring js_string_literal(const std::wstring& text) {
+  std::wstring out = L"\"";
+  for (wchar_t ch : text) {
+    switch (ch) {
+      case L'\\':
+        out += L"\\\\";
+        break;
+      case L'"':
+        out += L"\\\"";
+        break;
+      case L'\n':
+        out += L"\\n";
+        break;
+      case L'\r':
+        out += L"\\r";
+        break;
+      case L'\t':
+        out += L"\\t";
+        break;
+      default:
+        if (ch < 0x20) {
+          wchar_t escape[8] = {};
+          swprintf(escape, 8, L"\\u%04x", static_cast<unsigned>(ch));
+          out += escape;
+        } else {
+          out += ch;
+        }
+        break;
+    }
+  }
+  out += L"\"";
+  return out;
+}
+
+/// Settings -> 存储位置 -> 浏览: SHBrowseForFolder returns a real absolute
+/// path, which the File System Access API cannot (it exposes handles only).
+void pick_directory() {
+  BROWSEINFOW info{};
+  info.hwndOwner = g_window;
+  info.lpszTitle = L"选择存储位置";
+  info.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE | BIF_USENEWUI;
+  LPITEMIDLIST item = SHBrowseForFolderW(&info);
+  if (item == nullptr) return;
+  wchar_t path[MAX_PATH] = {};
+  const bool ok = SHGetPathFromIDListW(item, path) != 0;
+  CoTaskMemFree(item);
+  if (!ok || g_webview == nullptr) return;
+  const std::wstring script =
+      L"window.dispatchEvent(new CustomEvent('molink-directory', { detail: " +
+      js_string_literal(path) + L" }));";
+  g_webview->ExecuteScript(script.c_str(), nullptr);
+}
+
 class WebMessageHandler final
     : public ICoreWebView2WebMessageReceivedEventHandler {
  public:
@@ -734,6 +790,14 @@ class WebMessageHandler final
       if (!g_fullscreen) toggle_fullscreen(g_window);
     } else if (action == L"fullscreen-off") {
       if (g_fullscreen) toggle_fullscreen(g_window);
+    } else if (action == L"pick-directory") {
+      pick_directory();
+    } else if (action.rfind(L"open-folder:", 0) == 0) {
+      const std::wstring path = action.substr(12);
+      if (!path.empty()) {
+        ShellExecuteW(g_window, L"open", path.c_str(), nullptr, nullptr,
+                      SW_SHOWNORMAL);
+      }
     } else if (action.rfind(L"open-url:", 0) == 0) {
       const std::wstring url = action.substr(9);
       if (!url.empty()) {

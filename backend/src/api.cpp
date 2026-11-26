@@ -46,6 +46,7 @@
 #include "config.h"
 #include "directory_listing.h"
 #include "discovery.h"
+#include "download_root.h"
 #include "identity.h"
 #include "net/ip_allowlist.h"
 #include "portmap_api.h"
@@ -3100,6 +3101,8 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
             j["encrypt_lan"] = settings.encrypt_lan;
             j["file_sandbox"] = settings.file_sandbox;
             j["file_sandbox_roots"] = settings.file_sandbox_roots;
+            j["download_root"] = effective_download_root(settings);
+            j["download_root_default"] = default_download_root();
             j["terminal_enabled"] = settings.terminal_enabled;
             j["port_forward_enabled"] = settings.port_forward_enabled;
             j["ip_allowlist"] = settings.ip_allowlist;
@@ -3173,6 +3176,25 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
                  return;
                }
              }
+             // A bad storage root must not leave the other settings
+             // half-applied, so validate it before the first setter below.
+             // An empty value restores the platform default.
+             const std::string* download_root = req.query("download_root");
+             download_root_check storage_check;
+             if (download_root != nullptr && !download_root->empty()) {
+               storage_check = validate_download_root(*download_root);
+               if (!storage_check.ok) {
+                 uvcpp_json body;
+                 body["type"] = "error";
+                 body["code"] = "bad_download_root";
+                 body["reason"] =
+                     download_root_error_name(storage_check.error);
+                 body["message"] = storage_check.message;
+                 resp.status(400).json(body);
+                 resp.end();
+                 return;
+               }
+             }
              // Audio quality changes the samples on the wire, so validate it
              // before applying the other fields.
              const std::string* audio_quality = req.query("audio_quality");
@@ -3217,6 +3239,9 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
                  file_sandbox,
                  sandbox_roots != nullptr ? *sandbox_roots
                                           : before.file_sandbox_roots);
+             if (download_root != nullptr) {
+               deps.auth->set_download_root(*download_root);
+             }
              deps.auth->set_terminal_enabled(terminal_enabled);
              // The session controller reads this through a live callback, so
              // the next forward-open is refused or allowed without a restart.
@@ -3260,6 +3285,8 @@ void register_http_routes(uvcpp::uvcpp_web_app& app, const api_deps& deps) {
              j["encrypt_lan"] = after.encrypt_lan;
              j["file_sandbox"] = after.file_sandbox;
              j["file_sandbox_roots"] = after.file_sandbox_roots;
+             j["download_root"] = effective_download_root(after);
+             j["download_root_default"] = default_download_root();
              j["terminal_enabled"] = after.terminal_enabled;
              j["port_forward_enabled"] = after.port_forward_enabled;
              j["ip_allowlist"] = after.ip_allowlist;
