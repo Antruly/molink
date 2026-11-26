@@ -12,6 +12,7 @@
 #include <unistd.h>
 #endif
 
+#include "download_root.h"
 #include "identity.h"
 #include "version.h"
 #include "video_mode.h"
@@ -130,6 +131,10 @@ std::string bundled_directory_ca() {
 
 std::string default_server_url() { return MOLINK_DEFAULT_SERVER_URL; }
 
+std::string effective_download_root(const app_settings& settings) {
+  return resolve_download_root(settings.download_root);
+}
+
 std::string effective_server_url(const app_settings& settings) {
   if (!settings.server_enabled) return std::string();
   const std::string custom = trim(settings.server_url);
@@ -207,6 +212,8 @@ app_settings load_settings() {
       settings.file_sandbox = parse_bool(value, false);
     } else if (key == "file_sandbox_roots") {
       settings.file_sandbox_roots = value;
+    } else if (key == "download_root") {
+      settings.download_root = value;
     } else if (key == "terminal_enabled") {
       settings.terminal_enabled = parse_bool(value, false);
     } else if (key == "ip_allowlist") {
@@ -375,6 +382,7 @@ void save_settings(const app_settings& settings) {
          << (settings.port_forward_enabled ? 1 : 0) << "\n";
   stream << "file_sandbox=" << (settings.file_sandbox ? 1 : 0) << "\n";
   stream << "file_sandbox_roots=" << settings.file_sandbox_roots << "\n";
+  stream << "download_root=" << single_line(settings.download_root) << "\n";
   stream << "terminal_enabled="
          << (settings.terminal_enabled ? 1 : 0) << "\n";
   // The settings file is line-oriented; a textarea's newlines become spaces.

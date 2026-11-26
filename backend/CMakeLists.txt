@@ -263,6 +263,7 @@ set(MOLINK_CORE_SOURCES
   src/compression.cpp
   src/diag_log.cpp
   src/discovery.cpp
+  src/download_root.cpp
   src/settings.cpp
   src/totp.cpp
   src/ui_store.cpp
@@ -813,6 +814,7 @@ add_executable(molink-core-settings-test
   src/settings.cpp
   src/auth_state.cpp
   src/config.cpp
+  src/download_root.cpp
   src/identity.cpp
   src/totp.cpp
   src/util.cpp
@@ -836,6 +838,27 @@ foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
     "RUNTIME_OUTPUT_DIRECTORY_${uvp_config_upper}" "${CMAKE_BINARY_DIR}")
 endforeach()
 add_test(NAME settings COMMAND molink-core-settings-test)
+
+# Storage root for received files: default per platform, device/date layout,
+# unique names, and the validation /api/settings applies before persisting.
+# Pure path code, so this target does not need libuvcpp.
+add_executable(molink-core-download-root-test
+  tests/download_root_test.cpp
+  src/download_root.cpp
+)
+target_include_directories(molink-core-download-root-test PRIVATE src)
+if(MINGW AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
+   CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)
+  target_link_libraries(molink-core-download-root-test PRIVATE stdc++fs)
+endif()
+set_target_properties(molink-core-download-root-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
+  string(TOUPPER "${uvp_config}" uvp_config_upper)
+  set_target_properties(molink-core-download-root-test PROPERTIES
+    "RUNTIME_OUTPUT_DIRECTORY_${uvp_config_upper}" "${CMAKE_BINARY_DIR}")
+endforeach()
+add_test(NAME download_root COMMAND molink-core-download-root-test)
 
 # TCP port forwarding: mapping persistence, a real local listener paired with a
 # fake session bridge, byte counters, port release and the capability gate.
@@ -1763,6 +1786,7 @@ if(MOLINK_BUILD_CORE AND UVP_UVCPP_TARGET)
     src/file_transfer.cpp
     src/directory_listing.cpp
     src/diag_log.cpp
+    src/download_root.cpp
     src/util.cpp
   )
   target_include_directories(molink-core-file-transfer-backpressure-test PRIVATE
@@ -1787,6 +1811,7 @@ if(MOLINK_BUILD_CORE AND UVP_UVCPP_TARGET)
     src/file_transfer.cpp
     src/directory_listing.cpp
     src/diag_log.cpp
+    src/download_root.cpp
     src/util.cpp
   )
   target_include_directories(molink-core-file-browse-test PRIVATE

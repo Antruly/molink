@@ -16,6 +16,7 @@
 
 #include "auth_state.h"
 #include "settings.h"
+#include "util.h"
 
 namespace {
 
@@ -157,6 +158,42 @@ void test_host_only_upgrade_and_opt_out() {
   fs::remove_all(dir, ec);
 }
 
+// The storage root follows the same path as the other settings: the setter is
+// what POST /api/settings calls, the file is what a restart reads, and an
+// empty value means "platform default" rather than "write to a folder named ''".
+void test_download_root_round_trips(const fs::path& dir) {
+  set_config_dir(dir);
+  const fs::path settings_path = dir / "settings";
+
+  molink::app_settings seed;
+  seed.device_name = "settings-test-storage";
+  seed.long_term_code = "Test1234";
+  molink::save_settings(seed);
+
+  molink::auth_state auth(molink::load_settings());
+  expect(auth.settings().download_root.empty(),
+         "no stored root means the platform default");
+  expect(molink::effective_download_root(auth.settings()) ==
+             molink::effective_download_root(molink::app_settings{}),
+         "an empty setting resolves to the compiled default");
+
+  const std::string chosen =
+      molink::path_to_utf8(dir / "存储 位置");
+  auth.set_download_root(chosen);
+  expect(auth.settings().download_root == chosen,
+         "the setter flips the value the GET response reads");
+  expect(contains(read_text(settings_path), "download_root=" + chosen + "\n"),
+         "the settings file records download_root");
+  expect(molink::load_settings().download_root == chosen,
+         "the chosen root survives a save/load round trip");
+  expect(molink::effective_download_root(molink::load_settings()) == chosen,
+         "the effective root follows the stored value");
+
+  auth.set_download_root(std::string());
+  expect(molink::load_settings().download_root.empty(),
+         "clearing the setting persists and restores the default");
+}
+
 void test_one_setting_does_not_reset_another(const fs::path& dir) {
   const fs::path settings_path = dir / "settings";
 
@@ -184,6 +221,7 @@ int main() {
   const fs::path dir = make_temp_dir();
   set_config_dir(dir);
   test_port_forward_flag_round_trips(dir);
+  test_download_root_round_trips(dir);
   test_one_setting_does_not_reset_another(dir);
   test_host_only_default_source();
   test_host_only_upgrade_and_opt_out();

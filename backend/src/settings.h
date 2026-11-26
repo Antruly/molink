@@ -76,6 +76,12 @@ struct app_settings {
   /// `;`/newline separated write roots. Empty with `file_sandbox` on means the
   /// ordinary receive folder (`~/moLink`).
   std::string file_sandbox_roots;
+  /// Where files received from remote devices are stored. Empty means the
+  /// platform default (`%USERPROFILE%\moLink` / `~/moLink`). Received files
+  /// land under `<download_root>/<remote device id>/<YYYY-MM-DD>/`, and a
+  /// change applies to the next transfer; a transfer already running keeps
+  /// the destination it resolved at its offer.
+  std::string download_root;
   /// Remote terminal (`/ws/terminal`, host PTY). Off by default: a terminal is
   /// full access to the host user's account, so it is an explicit opt-in.
   bool terminal_enabled = false;
@@ -180,6 +186,10 @@ struct app_settings {
 
 app_settings load_settings();
 void save_settings(const app_settings& settings);
+
+/// The storage root in effect: the persisted choice, or the platform default
+/// when the setting is empty.
+std::string effective_download_root(const app_settings& settings);
 
 /// Human-readable default name for this machine.
 std::string default_device_name();

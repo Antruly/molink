@@ -3,7 +3,10 @@ import {
   ClipboardCopy,
   Cpu,
   Focus,
+  FolderOpen,
+  FolderSearch,
   Gauge,
+  HardDrive,
   KeyRound,
   Keyboard,
   Languages,
@@ -21,6 +24,7 @@ import {
   fetchAv1Settings,
   postAv1Settings,
   type Av1Settings,
+  type SecuritySettings,
   type ServerState,
 } from '../lib/api'
 import {
@@ -32,6 +36,10 @@ import {
 import {
   keyboardGrabApplicable,
   keyboardGrabAvailable,
+  onShellDirectoryPicked,
+  openFolder,
+  requestShellDirectoryPick,
+  shellDirectoryPickerCapable,
   subscribeKeyboardGrab,
 } from '../lib/shell'
 import {
@@ -189,6 +197,143 @@ function NetworkPortSettings({
       <p className="text-[11px] leading-relaxed text-muted">
         {t('settings.networkHint')}
       </p>
+    </div>
+  )
+}
+
+/// Storage location for files received from remote devices. The core owns the
+/// layout (`<root>/<device id>/<date>/`); this control only edits the root.
+function StorageControls({ security }: { security: SecuritySettings }) {
+  const { t } = useTranslation()
+  const saveDownloadRoot = useAppStore((state) => state.saveDownloadRoot)
+  // Initialised once from the loaded settings: the panel only mounts this
+  // control after /api/settings answered, so there is no empty flash. A
+  // successful save leaves the typed value in place while the store receives
+  // the canonical response.
+  const [root, setRoot] = useState(security.download_root ?? '')
+  const [note, setNote] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  // The native folder picker answers later with an absolute path.
+  useEffect(
+    () =>
+      onShellDirectoryPicked((path) => {
+        setRoot(path)
+        setNote(null)
+      }),
+    [],
+  )
+
+  const savedRoot = security.download_root ?? ''
+  const defaultRoot = security.download_root_default ?? ''
+  const canBrowse = shellDirectoryPickerCapable()
+
+  const failureText = (reason: string | undefined): string => {
+    switch (reason) {
+      case 'empty':
+        return t('settings.storageEmpty')
+      case 'relative_path':
+        return t('settings.storageRelative')
+      case 'system_directory':
+        return t('settings.storageSystem')
+      case 'install_directory':
+        return t('settings.storageInstall')
+      case 'not_a_directory':
+        return t('settings.storageNotDirectory')
+      case 'not_writable':
+        return t('settings.storageNotWritable')
+      default:
+        return t('error.settings_failed')
+    }
+  }
+
+  const save = async () => {
+    const value = root.trim()
+    if (value === '') {
+      setNote(t('settings.storageEmpty'))
+      return
+    }
+    setBusy(true)
+    const result = await saveDownloadRoot(value)
+    setBusy(false)
+    setNote(
+      result.ok
+        ? t('settings.storageSaved')
+        : failureText(result.reason || result.code),
+    )
+  }
+
+  const browse = () => {
+    if (!requestShellDirectoryPick()) {
+      setNote(t('settings.storageBrowseUnavailable'))
+      return
+    }
+    setNote(t('settings.storageBrowsePending'))
+  }
+
+  const open = () => {
+    if (!openFolder(savedRoot || root.trim())) {
+      setNote(t('settings.storageOpenUnavailable'))
+    }
+  }
+
+  const changed = root.trim() !== '' && root.trim() !== savedRoot
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-2 text-[12px] font-medium text-ink">
+        <HardDrive size={14} className="text-accent" />
+        {t('settings.storage')}
+      </div>
+      <p className="text-[11px] leading-relaxed text-muted">
+        {t('settings.storageHint')}
+      </p>
+      <label className="block">
+        <span className="mb-1 block text-[10px] uppercase tracking-[0.14em] text-muted">
+          {t('settings.storageCurrent')}
+        </span>
+        <input
+          value={root}
+          onChange={(event) => {
+            setRoot(event.target.value)
+            setNote(null)
+          }}
+          placeholder={defaultRoot}
+          spellCheck={false}
+          autoComplete="off"
+          className="field font-mono"
+        />
+      </label>
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          onClick={() => void save()}
+          disabled={busy || !changed}
+          className="btn"
+        >
+          <Check size={13} />
+          {t('settings.storageSave')}
+        </button>
+        <button
+          type="button"
+          onClick={browse}
+          disabled={!canBrowse}
+          title={canBrowse ? undefined : t('settings.storageBrowseUnavailable')}
+          className="btn"
+        >
+          <FolderSearch size={13} />
+          {t('settings.storageBrowse')}
+        </button>
+        <button type="button" onClick={open} className="btn">
+          <FolderOpen size={13} />
+          {t('settings.storageOpen')}
+        </button>
+      </div>
+      {note ? <p className="text-[11px] text-muted">{note}</p> : null}
+      {defaultRoot !== '' && defaultRoot !== savedRoot ? (
+        <p className="text-[10px] leading-relaxed text-muted">
+          {t('settings.storageDefault', { path: defaultRoot })}
+        </p>
+      ) : null}
     </div>
   )
 }
@@ -601,6 +746,7 @@ export function PreferencesControls({
     keyboardGrabAvailable(),
   )
   const localMode = useAppStore((state) => state.localMode)
+  const security = useAppStore((state) => state.security)
   const defaultPreset = useAppStore((state) => state.defaultPreset)
   const setDefaultPreset = useAppStore((state) => state.setDefaultPreset)
   const advancedQuality = useAppStore((state) => state.advancedQuality)
@@ -749,6 +895,13 @@ export function PreferencesControls({
               label={t('settings.localIme')}
             />
           </div>
+
+          {/* The storage root is a host setting: /api/settings is loopback
+              only, so a remote page cannot read or change another machine's
+              receive folder. */}
+          {localMode && security ? (
+            <StorageControls security={security} />
+          ) : null}
         </>
       ) : null}
 

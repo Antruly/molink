@@ -646,6 +646,12 @@ void auth_state::set_file_sandbox(bool enabled, std::string roots) {
   persist_locked();
 }
 
+void auth_state::set_download_root(std::string root) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  settings_.download_root = std::move(root);
+  persist_locked();
+}
+
 void auth_state::set_terminal_enabled(bool enabled) {
   std::lock_guard<std::mutex> lock(mutex_);
   settings_.terminal_enabled = enabled;

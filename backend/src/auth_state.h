@@ -134,6 +134,9 @@ class auth_state {
   /// Optional write sandbox for the file channel. Off by default; `roots` is
   /// the raw `;`/newline separated list the settings screen edits.
   void set_file_sandbox(bool enabled, std::string roots);
+  /// Storage root for received files. Empty restores the platform default.
+  /// The HTTP route validates the path before calling this setter.
+  void set_download_root(std::string root);
   /// Remote terminal opt-in. Off by default.
   void set_terminal_enabled(bool enabled);
   /// Port-forward opt-in: allow a viewer to open TCP tunnels to targets on
