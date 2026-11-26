@@ -50,6 +50,7 @@ abstract class CachedAttachmentAccess implements ChatAttachmentAccess {
   protected abstract fetchBlob(
     path: string,
     onProgress?: (received: number, total: number) => void,
+    expectedSize?: number,
   ): Promise<Blob>
 
   rememberLocal(id: string, file: File, thumb?: string | null): void {
@@ -85,12 +86,17 @@ abstract class CachedAttachmentAccess implements ChatAttachmentAccess {
     return this.localFiles.get(attachment.id) ?? null
   }
 
-  private fetchThumbBlob(attachment: ChatAttachment): Promise<Blob | null> {
+  /// Fetch the thumbnail bytes. This runs inside the caller's `serial` slot:
+  /// `thumbUrl` already holds the file channel, so queueing another task here
+  /// would wait on itself and the preview would never resolve.
+  private async fetchThumbBlob(
+    attachment: ChatAttachment,
+  ): Promise<Blob | null> {
     const path = attachment.thumb
-    if (path === '' || isDataUrl(path)) return Promise.resolve(null)
+    if (path === '' || isDataUrl(path)) return null
     const cached = this.thumbBlobs.get(path)
     if (cached) return cached
-    const pending = this.serial(async () => {
+    const pending = (async () => {
       try {
         const blob = await this.fetchBlob(path)
         if (blob.size === 0) {
@@ -103,7 +109,7 @@ abstract class CachedAttachmentAccess implements ChatAttachmentAccess {
         this.thumbBlobs.delete(path)
         return null
       }
-    })
+    })()
     this.thumbBlobs.set(path, pending)
     return pending
   }
@@ -127,28 +133,40 @@ abstract class CachedAttachmentAccess implements ChatAttachmentAccess {
     return pending
   }
 
-  private originalBlob(
+  /// Fetch the original bytes without queueing. Both public entry points take
+  /// exactly one `serial` slot first: nesting one here would make the task
+  /// wait for the slot it already holds (the file channel deadlocks).
+  private async fetchOriginalBlob(
     attachment: ChatAttachment,
     onProgress?: (received: number, total: number) => void,
   ): Promise<Blob | null> {
     const local = this.localFile(attachment)
-    if (local) return Promise.resolve(local)
+    if (local) return local
     const path = attachment.src
-    if (path === '') return Promise.resolve(null)
+    if (path === '') return null
     const cached = this.originalBlobs.get(path)
     if (cached) return cached
-    const pending = this.serial(async () => {
+    const pending = (async () => {
       try {
-        return await this.fetchBlob(path, onProgress)
+        return await this.fetchBlob(path, onProgress, attachment.size)
       } catch {
         // Keep no negative cache: the session may come back, and the user's
         // next Save click should be able to fetch the file again.
         this.originalBlobs.delete(path)
         return null
       }
-    })
+    })()
     this.originalBlobs.set(path, pending)
     return pending
+  }
+
+  private originalBlob(
+    attachment: ChatAttachment,
+    onProgress?: (received: number, total: number) => void,
+  ): Promise<Blob | null> {
+    return this.serial(() =>
+      this.fetchOriginalBlob(attachment, onProgress),
+    )
   }
 
   originalUrl(
@@ -165,7 +183,9 @@ abstract class CachedAttachmentAccess implements ChatAttachmentAccess {
     const cached = this.originalUrls.get(key)
     if (cached) return cached
     const pending = this.serial(async () => {
-      const blob = await this.originalBlob(attachment, onProgress)
+      // Already inside the channel's slot: use the raw fetch, not
+      // `originalBlob`, which would queue behind this very task.
+      const blob = await this.fetchOriginalBlob(attachment, onProgress)
       if (!blob || this.disposed) {
         this.originalUrls.delete(key)
         return null
@@ -241,12 +261,14 @@ export class RemoteAttachmentAccess extends CachedAttachmentAccess {
   protected async fetchBlob(
     path: string,
     onProgress?: (received: number, total: number) => void,
+    expectedSize?: number,
   ): Promise<Blob> {
     if (!this.connection) throw new Error('offline')
     return downloadChatFile({
       connection: this.connection,
       path,
       expectedName: baseName(path),
+      ...(expectedSize !== undefined ? { expectedSize } : {}),
       ...(onProgress ? { onProgress } : {}),
     })
   }

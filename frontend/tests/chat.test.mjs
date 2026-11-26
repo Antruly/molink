@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
+  attachmentHasThumb,
   avatarColorFor,
   baseName,
   attachmentKind,
+  buildOutgoingMessage,
   chatDisplayName,
   chatPayloadKey,
   chatTextBytes,
@@ -29,6 +31,7 @@ import {
   makeChatAttachment,
   mimeForName,
   parseChatPayload,
+  pickThumbSource,
   safeChatFileName,
   shouldInsertTimeSeparator,
   validateChatAttachment,
@@ -235,6 +238,81 @@ test('the message envelope round-trips and stays inside the chat limit', () => {
   assert.equal(fitsChatText('x'.repeat(4096)), true)
   assert.equal(fitsChatText('x'.repeat(4097)), false)
   assert.equal(chatPayloadKey(parsed), 'hi\u0000abc123')
+})
+
+test('thumbnail helpers prefer the local data URI over the remote file', () => {
+  const data = 'data:image/webp;base64,AAAA'
+  const path = 'C:\\Users\\me\\moLink\\x\\chat\\thumb-abc.webp'
+
+  // A file card is the only option when the descriptor names nothing.
+  assert.equal(attachmentHasThumb({ thumb: '' }), false)
+  assert.equal(attachmentHasThumb({ thumb: '   ' }), false)
+  assert.equal(attachmentHasThumb({}), false)
+  assert.equal(pickThumbSource({ thumb: '' }, null), null)
+  assert.equal(pickThumbSource({}, undefined), null)
+
+  // Both references exist: the inline preview wins; the remote file needs no
+  // transfer and would otherwise be the fallback.
+  assert.equal(attachmentHasThumb({ thumb: data }), true)
+  assert.equal(attachmentHasThumb({ thumb: path }), true)
+  assert.equal(pickThumbSource({ thumb: data }, 'blob:remote'), data)
+  assert.equal(pickThumbSource({ thumb: data }, null), data)
+
+  // A host path is not loadable by itself; it only renders once the thumb file
+  // has been downloaded and resolved to an object URL.
+  assert.equal(pickThumbSource({ thumb: path }, 'blob:remote'), 'blob:remote')
+  assert.equal(pickThumbSource({ thumb: path }, null), null)
+  assert.equal(pickThumbSource({ thumb: path }, ''), null)
+  assert.equal(pickThumbSource({ thumb: '' }, 'blob:remote'), 'blob:remote')
+})
+
+test('buildOutgoingMessage keeps the generated preview in the local copy', () => {
+  const data = 'data:image/webp;base64,AAAA'
+  const path = 'C:\\Users\\me\\moLink\\x\\chat\\thumb-abc.webp'
+  const attachment = makeChatAttachment({
+    id: 'abc',
+    name: 'photo.webp',
+    size: 2048,
+    mime: 'image/webp',
+    thumb: path,
+    src: 'C:\\Users\\me\\moLink\\x\\chat\\photo.webp',
+    w: 320,
+    h: 200,
+  })
+
+  const built = buildOutgoingMessage({ attachment, thumb: data })
+  // The sender's own copy keeps the data URI, so its bubble paints the image
+  // instead of the "tap to load" card.
+  assert.equal(built.local.attachments[0].thumb, data)
+  assert.ok(built.local.attachments[0].thumb.startsWith('data:'))
+  assert.equal(built.local.attachments[0].src, attachment.src)
+  assert.equal(built.local.attachments[0].w, 320)
+  // The wire copy names the uploaded file and stays inside the chat limit.
+  assert.equal(built.wire.attachments[0].thumb, path)
+  assert.equal(built.text, encodeChatPayload(built.wire))
+  assert.equal(fitsChatText(built.text), true)
+  const parsed = parseChatPayload(built.text)
+  assert.ok(parsed)
+  assert.equal(parsed.attachments[0].thumb, path)
+
+  // No uploaded thumb file (the upload failed): the wire has none, but the
+  // local copy still shows the preview.
+  const noFile = buildOutgoingMessage({
+    attachment: { ...attachment, thumb: '' },
+    thumb: data,
+  })
+  assert.equal(noFile.wire.attachments[0].thumb, '')
+  assert.equal(noFile.local.attachments[0].thumb, data)
+
+  // Without a generated preview both copies agree.
+  const plain = buildOutgoingMessage({ attachment })
+  assert.equal(plain.local.attachments[0].thumb, path)
+  assert.deepEqual(plain.local, plain.wire)
+
+  // Text rides along on both copies.
+  const withText = buildOutgoingMessage({ attachment, text: '看图', thumb: data })
+  assert.equal(withText.local.text, '看图')
+  assert.equal(parseChatPayload(withText.text)?.text, '看图')
 })
 
 test('safeChatFileName strips traversal, separators and reserved names', () => {

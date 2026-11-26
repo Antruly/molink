@@ -369,8 +369,13 @@ export async function downloadChatFile(options: {
         finish(new Error(message.message ?? 'download_rejected'))
         return
       }
+      // The host currently serialises `sending` after moving the download
+      // record, so `name` arrives empty. Only a reply that names a *different*
+      // file can be ruled out; an unnamed reply is accepted the same way the
+      // file panel accepts it, and the size check still disambiguates originals.
       if (options.expectedName !== undefined &&
-          !sameName(message.name ?? '', options.expectedName)) {
+          message.name !== undefined && message.name !== '' &&
+          !sameName(message.name, options.expectedName)) {
         return
       }
       if (options.expectedSize !== undefined &&

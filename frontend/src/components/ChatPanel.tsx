@@ -4,10 +4,10 @@ import { useTranslation } from 'react-i18next'
 import type { ChatMessage } from '../lib/client'
 import {
   attachmentKind,
+  buildOutgoingMessage,
   chatDisplayName,
   chatThumbName,
   chatUploadName,
-  encodeChatPayload,
   fitsChatText,
   MAX_CHAT_ATTACHMENT_BYTES,
   mimeForName,
@@ -226,14 +226,19 @@ export function ChatPanel({
             h: media?.h ?? 0,
             dur: media?.dur ?? 0,
           }
-          patchPending(localId, { attachments: [attachment], progress: 1 })
-          const encoded = encodeChatPayload({
-            type: 'chat',
-            text: '',
-            attachments: [attachment],
+          // The wire copy names the uploaded file; the local copy keeps the
+          // generated data URI so this client's own bubble paints the preview
+          // without a round trip.
+          const built = buildOutgoingMessage({
+            attachment,
+            thumb: media?.dataUrl ?? '',
           })
-          if (!fitsChatText(encoded)) throw new Error('message_too_long')
-          if (!onSend(encoded)) throw new Error('offline')
+          patchPending(localId, {
+            attachments: built.local.attachments,
+            progress: 1,
+          })
+          if (!fitsChatText(built.text)) throw new Error('message_too_long')
+          if (!onSend(built.text)) throw new Error('offline')
           patchPending(localId, { status: 'sent', progress: undefined })
         } catch (error) {
           patchPending(localId, { status: 'failed', progress: undefined })
