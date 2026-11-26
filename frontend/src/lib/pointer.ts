@@ -63,3 +63,65 @@ export function remoteButton(button: number): number | null {
     ? button + 1
     : null
 }
+
+/// A position on the picture in [0, 1] units, rounded the way it goes on the
+/// wire.
+export type PicturePoint = { x: number; y: number }
+
+/// Clamps a normalized position to the picture's edges.
+export function clampPoint(nx: number, ny: number): PicturePoint {
+  const clamp = (value: number) => Math.min(1, Math.max(0, value))
+  return {
+    x: Number(clamp(nx).toFixed(5)),
+    y: Number(clamp(ny).toFixed(5)),
+  }
+}
+
+/// The move to send for one pointer position, or null when there is none.
+///
+/// While a button is held the browser keeps sending moves after the pointer
+/// has left the picture (pointer capture), and the host's drag loop needs
+/// them: a gap makes Windows end the drag. Clamping to the edge is the
+/// closest honest position, so the drag continues. With no button held a
+/// move outside the picture has nowhere to put the remote cursor, so it is
+/// dropped as before.
+export function movePoint(
+  nx: number,
+  ny: number,
+  buttonHeld: boolean,
+): PicturePoint | null {
+  if (!buttonHeld && (nx < 0 || nx > 1 || ny < 0 || ny > 1)) return null
+  return clampPoint(nx, ny)
+}
+
+/// The `down:false` events for every button a gesture still holds. All
+/// release paths (pointerup, cancel, lost capture, window blur) use the same
+/// list so a button can never stay pressed on the host.
+export function buttonReleaseEvents(
+  buttons: Iterable<number>,
+): { k: 'button'; button: number; down: false }[] {
+  return [...buttons].map((button) => ({ k: 'button', button, down: false }))
+}
+
+/// The host buttons this page has pressed and not yet released.
+///
+/// `drain()` is the one way out: it empties the set and returns what still
+/// needs a `down:false`, which makes every release path idempotent even when
+/// a pointerup and the lost-capture notification both fire.
+export class PressedButtons {
+  private readonly buttons = new Set<number>()
+
+  press(button: number): void {
+    this.buttons.add(button)
+  }
+
+  get size(): number {
+    return this.buttons.size
+  }
+
+  drain(): number[] {
+    const held = [...this.buttons]
+    this.buttons.clear()
+    return held
+  }
+}
