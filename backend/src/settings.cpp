@@ -90,6 +90,19 @@ MOz2U0OBSif3FTkhCgZWQKOOLo1P42jHC3ssUZAtVNXrCk3fw9/E15k8NPkBazZ6
 -----END CERTIFICATE-----
 )PEM";
 
+/// Marks a settings file that a host-only build has already written. Until the
+/// marker exists, a persisted `host_only=0` may be a leftover from the full
+/// product (or from a release that predates the host-only default), so the
+/// compiled default wins once. After the host-only core saves anything, the
+/// file is the user's: turning host_only off persists.
+constexpr char kHostOnlyBuildMarker[] = "host_only_build";
+
+bool host_only_choice_recorded(const std::string& dir) {
+  if (dir.empty()) return false;
+  std::error_code ec;
+  return fs::exists(fs::path(dir) / kHostOnlyBuildMarker, ec);
+}
+
 /// Write the bundled CA into the config directory (where the process can read
 /// it) and return its path. Returns empty when the directory is unwritable.
 std::string bundled_directory_ca() {
@@ -165,7 +178,9 @@ app_settings load_settings() {
     if (key == "allow_remote_access") {
       settings.allow_remote_access = parse_bool(value, false);
     } else if (key == "host_only") {
-      settings.host_only = parse_bool(value, false);
+      // A host-only build defaults the missing/invalid value on; an explicit
+      // value in the file still wins (the user may turn the mode off).
+      settings.host_only = parse_bool(value, default_host_only());
     } else if (key == "allow_web_client") {
       settings.allow_web_client = parse_bool(value, false);
     } else if (key == "discovery_enabled") {
@@ -300,6 +315,13 @@ app_settings load_settings() {
   }
   // Discovery cannot be on without remote access.
   if (!settings.allow_remote_access) settings.discovery_enabled = false;
+  // A host-only build that has never written this file cannot have produced
+  // the persisted host_only value: it was left by the full product or by an
+  // older release. Start in host-only mode once; the first save writes the
+  // marker, after which an explicit `host_only=0` is the user's choice.
+  if (default_host_only() && !host_only_choice_recorded(dir)) {
+    settings.host_only = true;
+  }
   return settings;
 }
 
@@ -409,6 +431,13 @@ void save_settings(const app_settings& settings) {
 #if !defined(_WIN32)
   ::chmod(path.c_str(), 0600);
 #endif
+  // Ownership of the host_only default: only a host-only build records this,
+  // and nothing removes it. The full product keeps ignoring the file.
+  if (default_host_only()) {
+    std::ofstream marker(fs::path(dir) / kHostOnlyBuildMarker,
+                         std::ios::binary | std::ios::trunc);
+    if (marker) marker << "1\n";
+  }
 }
 
 }  // namespace molink

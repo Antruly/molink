@@ -56,11 +56,33 @@ if ($stageFull -eq $repoFull -or
   throw "refusing to clean -Stage '$Stage': it contains the repository"
 }
 
-if (-not $CoreBuild) { $CoreBuild = Join-Path $Repo 'backend\build' }
+# The core compiled in this tree is the one the host-only product ships. It
+# must have been configured with -DMOLINK_HOST_ONLY_BUILD=ON; the check right
+# below refuses to stage a full-product core. The default build directory is
+# separate from the full product's backend\build so a normal release build
+# cannot be reused by accident.
+if (-not $CoreBuild) { $CoreBuild = Join-Path $Repo 'backend\build-host-only' }
 if (-not $ShellBuild) { $ShellBuild = Join-Path $Repo 'shell\windows\build' }
 if (-not $ServiceBuild) { $ServiceBuild = Join-Path $Repo 'shell\windows\service\build' }
 if (-not $HelperBuild) { $HelperBuild = Join-Path $Repo 'shell\windows\helper\build' }
 if (-not $FrontendDist) { $FrontendDist = Join-Path $Repo 'frontend\dist' }
+
+# The host_only default is compiled into the core (backend/src/settings.h).
+# A full-product core staged here would look identical until someone points a
+# viewer at another machine, so verify the configure record before copying
+# anything. CMakeCache.txt is written by both the Visual Studio and Ninja/Make
+# generators, in the build root.
+$coreCache = Join-Path $CoreBuild 'CMakeCache.txt'
+if (-not (Test-Path $coreCache -PathType Leaf)) {
+  throw ("the core build has no CMakeCache.txt: $CoreBuild. Configure it " +
+         "with -DMOLINK_HOST_ONLY_BUILD=ON first.")
+}
+if (-not (Select-String -Path $coreCache -Pattern '^MOLINK_HOST_ONLY_BUILD:BOOL=ON$' -Quiet)) {
+  throw ("the core in '$CoreBuild' was not configured with " +
+         "-DMOLINK_HOST_ONLY_BUILD=ON; this stage would ship a core that can " +
+         "still connect to other machines. Reconfigure that build directory " +
+         "with -DMOLINK_HOST_ONLY_BUILD=ON and rebuild it.")
+}
 
 function Find-Built([string]$Directory, [string]$Name) {
   # Visual Studio generators put the exe in Release\; Ninja/Make put it in the

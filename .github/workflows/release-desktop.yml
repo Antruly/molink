@@ -343,6 +343,25 @@ jobs:
             -DCMAKE_PREFIX_PATH="$(cygpath -m "$VCPKG_INSTALLATION_ROOT/installed/x64-windows")"
           cmake --build backend/build --config Release --parallel
 
+      # The host-only product needs a core with the compiled host_only default
+      # on. It is the same source, so it gets a second build directory rather
+      # than sharing backend/build with the full product. build-host-only.ps1
+      # verifies this flag in CMakeCache.txt before staging.
+      - name: Build host-only core
+        shell: bash
+        run: |
+          cmake -S backend -B backend/build-host-only \
+            -DMOLINK_UVCPP_PREFIX="$(cygpath -m "$RUNNER_TEMP/uvcpp")" \
+            -DOPENSSL_ROOT_DIR="$(cygpath -m "$OPENSSL_ROOT_DIR")" \
+            -DMOLINK_ENABLE_AV1=ON \
+            -DMOLINK_ENABLE_VPX=ON \
+            -DMOLINK_REQUIRE_VPX=ON \
+            -DMOLINK_REQUIRE_DAV1D=ON \
+            -DMOLINK_ENABLE_WEBRTC=ON \
+            -DMOLINK_HOST_ONLY_BUILD=ON \
+            -DCMAKE_PREFIX_PATH="$(cygpath -m "$VCPKG_INSTALLATION_ROOT/installed/x64-windows")"
+          cmake --build backend/build-host-only --config Release --parallel
+
       - name: Build frontend
         shell: bash
         working-directory: frontend
@@ -418,6 +437,7 @@ jobs:
           $version = '${{ env.PKG_VERSION }}' -replace '^v',''
           ./packaging/windows/build-host-only.ps1 `
             -Version $version -Arch x64 `
+            -CoreBuild "$PWD\backend\build-host-only" `
             -Stage "$PWD\build\host-only\stage"
 
       - name: Build the host-only installer

@@ -28,6 +28,26 @@ option(MOLINK_OPTION_WEBTRANSPORT
 option(MOLINK_BUILD_CORE
   "Build the molink-core executable (requires libuvcpp with WEB and WEBAPP)" ON)
 
+# The host-only product (被控端专用, moLink Host) ships the same core source but
+# must refuse outbound sessions from the start, without relying on the shell,
+# the installer order or a pre-existing settings file. Configuring the build
+# that provides the host-only package's molink-core.exe with this ON flips the
+# compiled default in settings.h (default_host_only()) to true.
+#
+# It is deliberately a default, not a lock: the user may still turn host_only
+# off in settings, and the settings file wins after the host-only core has
+# written it. The full product's build never passes this option, so its core
+# keeps host_only=false. The settings test is compiled in the same build and
+# asserts the resulting default.
+option(MOLINK_HOST_ONLY_BUILD
+  "Default host_only to true (被控端专用 core build)" OFF)
+if(MOLINK_HOST_ONLY_BUILD)
+  # Directory scope so molink-core and every test target that compiles
+  # settings.cpp see the same default.
+  add_compile_definitions(MOLINK_HOST_ONLY_BUILD=1)
+  message(STATUS "molink: host-only build; host_only defaults to true")
+endif()
+
 # libuvcpp is found two ways, because it ships two ways and neither covers the
 # other:
 #
