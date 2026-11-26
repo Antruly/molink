@@ -33,11 +33,36 @@
 
 CI 或本地已经完成：
 
-1. `backend/build/Release/molink-core.exe`
+1. `backend/build-host-only/Release/molink-core.exe`，且该构建目录配置时带
+   `-DMOLINK_HOST_ONLY_BUILD=ON`（见下一节）
 2. `shell/windows/build/Release/moLink-host.exe`
 3. `shell/windows/service/build/Release/molink-service.exe`
 4. `shell/windows/helper/build/Release/molink-helper.exe`
 5. `frontend/dist/index.html`
+
+### host_only 默认值（构建期）
+
+被控端专用版的 core 必须在**服务端**就拒绝出站会话，不能只靠 UI 隐藏“连接设备”
+表单。默认值在 `backend/src/settings.h` 的 `default_host_only()` 里编译进来：
+
+- 全功能版默认构建：`host_only=false`（行为不变）；
+- 被控端专用 core：configure 时加 `-DMOLINK_HOST_ONLY_BUILD=ON`，默认
+  `host_only=true`。
+
+这是一个**默认值、不是编译期锁**：设置页 / `POST /api/settings?host_only=0`
+仍然可以关掉，关掉后会持久化。为了让升级安装也立即生效，host-only 构建第一次
+读取旧 `settings` 文件（没有 `host_only_build` 标记文件）时按默认值强制开启；
+它自己保存过一次设置后，文件里的值就是用户的最终选择。该标记只由 host-only
+构建写入，全功能版完全忽略。
+
+```bash
+cmake -S backend -B backend/build-host-only \
+  -DMOLINK_HOST_ONLY_BUILD=ON \
+  -DMOLINK_UVCPP_PREFIX="<libuvcpp 前缀>"
+cmake --build backend/build-host-only --config Release --parallel
+```
+
+全功能版的 `backend/build` 不需要（也不应该）带这个选项。
 
 ### 生成 stage
 
@@ -45,11 +70,15 @@ CI 或本地已经完成：
 ./packaging/windows/build-host-only.ps1 `
   -Version 0.12.24 `
   -Arch x64 `
+  -CoreBuild .\backend\build-host-only `
   -Stage .\build\host-only\stage
 ```
 
 脚本会：
 
+- 检查 `-CoreBuild` 的 `CMakeCache.txt` 里有
+  `MOLINK_HOST_ONLY_BUILD:BOOL=ON`，否则拒绝打包（防止把全功能版 core 打进
+  host-only 包）；
 - 清空并重建 `-Stage`（如果它包含仓库根目录则拒绝执行，避免误删）；
 - 复制上面四个 exe、`molink.ico` 和 `web\`；
 - 从 build 目录、libuvcpp 前缀、vcpkg、OpenSSL 和最新的 MSVC redist 收集运行时 DLL；
@@ -57,7 +86,8 @@ CI 或本地已经完成：
   `molink.ico` / `web\index.html` / `msvcp140.dll` / `vcruntime140.dll` 都存在，否则失败。
 
 可用参数：`-Repo`、`-CoreBuild`、`-ShellBuild`、`-ServiceBuild`、`-HelperBuild`、
-`-FrontendDist`、`-UvcppRoot`、`-VcpkgRoot`。默认值对应 CI 的构建目录；
+`-FrontendDist`、`-UvcppRoot`、`-VcpkgRoot`。`-CoreBuild` 默认是
+`backend\build-host-only`（全功能版用 `backend\build`，两者不能混用）；其余默认值对应 CI 的构建目录；
 libuvcpp 默认取 `$env:UVCPP_ROOT` 或 `$env:RUNNER_TEMP\uvcpp`，
 vcpkg 默认取 `$env:VCPKG_INSTALLATION_ROOT`。
 

@@ -2,6 +2,10 @@
 // in api.cpp parses `port_forward_enabled` into auth_state's setter and reads
 // it back through settings(), so exercising the setter plus the persisted
 // file covers both directions of /api/settings for this field.
+//
+// It also pins the compiled host_only default: false in the full product, true
+// when configured with -DMOLINK_HOST_ONLY_BUILD=ON, and always overridable by
+// the persisted file after the host-only build has written it.
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -90,6 +94,69 @@ void test_port_forward_flag_round_trips(const fs::path& dir) {
          "false survives a save/load round trip");
 }
 
+// The host_only default is compiled in: off for the full product, on for the
+// host-only product. default_host_only() is the single source of truth, so the
+// test asserts both the function and the struct's member initializer.
+void test_host_only_default_source() {
+  const fs::path dir = make_temp_dir();
+  set_config_dir(dir);
+
+  const molink::app_settings fresh;
+  expect(fresh.host_only == molink::default_host_only(),
+         "app_settings takes host_only from the compiled default");
+#if defined(MOLINK_HOST_ONLY_BUILD) && MOLINK_HOST_ONLY_BUILD
+  expect(molink::default_host_only(),
+         "MOLINK_HOST_ONLY_BUILD=ON makes host_only default true");
+#else
+  expect(!molink::default_host_only(),
+         "a normal build keeps host_only default false");
+#endif
+  expect(molink::load_settings().host_only == molink::default_host_only(),
+         "a missing settings file keeps the compiled default");
+
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
+// A settings file can already contain host_only=0: written by the full product
+// (the two products share %APPDATA%\moLink) or by a release that predates the
+// host-only default. The host-only build must start in host-only mode anyway,
+// then honour the user turning it off.
+void test_host_only_upgrade_and_opt_out() {
+  const fs::path dir = make_temp_dir();
+  set_config_dir(dir);
+  {
+    std::ofstream out(dir / "settings", std::ios::binary | std::ios::trunc);
+    out << "device_name=settings-test-upgrade\n";
+    out << "host_only=0\n";
+  }
+
+  molink::app_settings loaded = molink::load_settings();
+  if (molink::default_host_only()) {
+    expect(loaded.host_only,
+           "the host-only build overrides a pre-host-only host_only=0");
+    // The first save records that this build owns the setting. After that, an
+    // explicit off is the user's choice and survives a reload.
+    loaded.host_only = false;
+    molink::save_settings(loaded);
+    expect(fs::exists(dir / "host_only_build"),
+           "a host-only save records the ownership marker");
+    expect(!molink::load_settings().host_only,
+           "after the marker, the user's host_only=0 is honoured");
+  } else {
+    expect(!loaded.host_only, "the full build honours host_only=0");
+    loaded.host_only = true;
+    molink::save_settings(loaded);
+    expect(molink::load_settings().host_only,
+           "the full build honours host_only=1");
+    expect(!fs::exists(dir / "host_only_build"),
+           "the full build never writes the host-only marker");
+  }
+
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
 void test_one_setting_does_not_reset_another(const fs::path& dir) {
   const fs::path settings_path = dir / "settings";
 
@@ -118,6 +185,8 @@ int main() {
   set_config_dir(dir);
   test_port_forward_flag_round_trips(dir);
   test_one_setting_does_not_reset_another(dir);
+  test_host_only_default_source();
+  test_host_only_upgrade_and_opt_out();
   std::error_code ec;
   fs::remove_all(dir, ec);
   std::printf("%d checks, %d failures\n", checks, failures);

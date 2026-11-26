@@ -4,6 +4,25 @@
 
 namespace molink {
 
+/// The compiled-in default for app_settings::host_only.
+///
+/// The host-only product (被控端专用, moLink Host) is built with
+/// -DMOLINK_HOST_ONLY_BUILD=ON, which makes this true. Every other build --
+/// including the full product's default build -- keeps false, so their
+/// behaviour is unchanged.
+///
+/// This is a default, not a compile-time lock: the settings file and
+/// POST /api/settings can still turn host_only off. Keeping it in a single
+/// constexpr function lets the settings test assert the source of the default
+/// under both build configurations without duplicating the #ifdef.
+constexpr bool default_host_only() {
+#if defined(MOLINK_HOST_ONLY_BUILD) && MOLINK_HOST_ONLY_BUILD
+  return true;
+#else
+  return false;
+#endif
+}
+
 /// User-visible security and identity settings. Secrets live in this file
 /// (0600) until the SQLite/OS-keychain migration; it is never served to a
 /// remote authenticated peer.
@@ -12,8 +31,9 @@ struct app_settings {
   bool allow_remote_access = false;
   /// This machine may only be controlled. Outbound sessions this core opens
   /// on behalf of a local page or shell are refused unless they target
-  /// loopback (the "view this screen" path). Off by default.
-  bool host_only = false;
+  /// loopback (the "view this screen" path). Off by default; a host-only
+  /// build compiles the default on (see default_host_only()).
+  bool host_only = default_host_only();
   /// Allow a normal browser (not the desktop shell) to load the web UI.
   bool allow_web_client = false;
   /// Multicast LAN discovery. Requires allow_remote_access.
