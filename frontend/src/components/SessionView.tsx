@@ -50,7 +50,10 @@ import {
 import { useTranslation } from 'react-i18next'
 import { MIN_FPS, fpsPlan, nextFpsUp } from '../lib/frame-rate'
 import {
+  buttonReleaseEvents,
   createWheelAccumulator,
+  movePoint,
+  PressedButtons,
   remoteButton,
   wheelNotches,
 } from '../lib/pointer'
@@ -521,7 +524,7 @@ export function SessionView({
   const pendingMove = useRef<{ x: number; y: number } | null>(null)
   const moveScheduled = useRef(false)
   const pressedKeys = useRef<Set<string>>(new Set())
-  const pressedButtons = useRef<Set<number>>(new Set())
+  const pressedButtons = useRef(new PressedButtons())
   const [surfaceSize, setSurfaceSize] = useState({ width: 0, height: 0 })
   /// First-use dialog for combo forwarding. `combo` is the toolbar sequence
   /// that opened it (null when the trigger was a physical Win key, which is
@@ -1568,7 +1571,11 @@ export function SessionView({
     return () => observer.disconnect()
   }, [])
 
-  const normalize = (clientX: number, clientY: number) => {
+  const normalize = (
+    clientX: number,
+    clientY: number,
+    buttonHeld = false,
+  ) => {
     const element = surfaceRef.current
     if (!element) return null
     // TileCanvas sizes the canvas element to exactly the painted image (fit),
@@ -1580,8 +1587,18 @@ export function SessionView({
     if (!rect || rect.width <= 0 || rect.height <= 0) return null
     const nx = (clientX - rect.left) / rect.width
     const ny = (clientY - rect.top) / rect.height
-    if (nx < 0 || nx > 1 || ny < 0 || ny > 1) return null
-    return { x: Number(nx.toFixed(5)), y: Number(ny.toFixed(5)) }
+    // Held buttons turn an out-of-picture move into an edge move instead of a
+    // dropped event; see movePoint().
+    return movePoint(nx, ny, buttonHeld)
+  }
+
+  /// Releases every button the host still believes is down. Pointer capture
+  /// can end without a matching pointerup (cancel, lost capture, window
+  /// blur), and a stuck drag button would eat the next gesture.
+  const releasePressedButtons = () => {
+    for (const event of buttonReleaseEvents(pressedButtons.current.drain())) {
+      connection()?.sendInput(event)
+    }
   }
 
   const sendVirtualMove = () => {
@@ -2138,7 +2155,7 @@ export function SessionView({
     connection()?.sendInput({ k: 'move', ...point })
     const button = remoteButton(event.button)
     if (button !== null) {
-      pressedButtons.current.add(button)
+      pressedButtons.current.press(button)
       connection()?.sendInput({ k: 'button', button, down: true })
     }
   }
@@ -2147,16 +2164,30 @@ export function SessionView({
     if (!inputAvailable) return
     if (virtualMouse) {
       onTouchpadUp(event)
+      releasePressedButtons()
       return
     }
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId)
     }
-    const button = remoteButton(event.button)
-    if (button !== null) {
-      pressedButtons.current.delete(button)
-      connection()?.sendInput({ k: 'button', button, down: false })
+    // Release all of them, not just event.button: the drag may have started a
+    // second button, and a button left down would stick on the host.
+    releasePressedButtons()
+  }
+
+  const onPointerCancel = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (virtualMouse) onTouchpadCancel(event)
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
     }
+    // A cancelled gesture never delivers its pointerup.
+    releasePressedButtons()
+  }
+
+  const onLostPointerCapture = () => {
+    // No further moves (and no pointerup) are guaranteed from this element,
+    // so nothing it pressed may stay held on the host.
+    releasePressedButtons()
   }
 
   const onPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -2175,7 +2206,11 @@ export function SessionView({
     if (displayMode === 'actual') {
       panPointer.current = { x: event.clientX, y: event.clientY }
     }
-    const point = normalize(event.clientX, event.clientY)
+    const point = normalize(
+      event.clientX,
+      event.clientY,
+      pressedButtons.current.size > 0,
+    )
     if (!point) return
     pendingMove.current = point
     if (moveScheduled.current) return
@@ -2284,10 +2319,9 @@ export function SessionView({
         connection()?.sendInput({ k: 'key', code, down: false })
       }
       keys.clear()
-      for (const button of buttons) {
-        connection()?.sendInput({ k: 'button', button, down: false })
+      for (const event of buttonReleaseEvents(buttons.drain())) {
+        connection()?.sendInput(event)
       }
-      buttons.clear()
     }
     // The shell's escape combo (Ctrl+Alt+Shift+Escape) swallows the Escape
     // key, so without this the remote would keep the modifiers held. The
@@ -2808,7 +2842,8 @@ export function SessionView({
           onPointerDown={onPointerDown}
           onPointerUp={onPointerUp}
           onPointerMove={onPointerMove}
-          onPointerCancel={onTouchpadCancel}
+          onPointerCancel={onPointerCancel}
+          onLostPointerCapture={onLostPointerCapture}
           onPointerEnter={() => {
             pointerInSurface.current = true
             // Re-arm immediately instead of waiting for the shell's next poll.
