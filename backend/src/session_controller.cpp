@@ -4215,6 +4215,11 @@ void session_controller::on_text(const std::string& text) {
 
   if (type == "call") {
     if (!require_auth()) return;
+    if (!intent_wants_video(session->intent)) {
+      send_error(transport.get(), "intent_mismatch",
+                 "a panel-only session cannot start a voice call");
+      return;
+    }
     if (!require_cap(capability::audio)) return;
     if (!options_.call) {
       send_error(transport.get(), "call_unavailable",
@@ -4235,6 +4240,11 @@ void session_controller::on_text(const std::string& text) {
 
   if (type == "audio") {
     if (!require_auth()) return;
+    if (!intent_wants_video(session->intent)) {
+      send_error(transport.get(), "intent_mismatch",
+                 "a panel-only session has no picture to accompany audio");
+      return;
+    }
     if (!require_cap(capability::audio)) return;
     const std::string action = string_field(j, "action");
     if (!options_.audio || !options_.audio->available()) {

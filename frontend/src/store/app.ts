@@ -1740,9 +1740,16 @@ export const useAppStore = create<AppState>((set, get) => {
     syncUiState: () => {
       const token = get().token
       if (!token) return
-      const active = get().tabs.filter(
-        (tab) => tab.phase === 'live' || tab.phase === 'connecting',
-      ).length
+      // A promoted pane tab shares its owner's connection; count the runtime
+      // once so one desktop session with its files tab open is not reported
+      // as two active sessions.
+      const active = new Set(
+        get()
+          .tabs.filter(
+            (tab) => tab.phase === 'live' || tab.phase === 'connecting',
+          )
+          .map((tab) => tab.runtimeTabId ?? tab.id),
+      ).size
       void postUiState(token, UI_CLIENT_ID, active).catch(() => undefined)
     },
 
