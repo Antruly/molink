@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">moLink 远程</string>
+
+    <string name="setup_title">连接主机</string>
+    <string name="setup_subtitle">输入被控电脑上显示的地址和验证码。</string>
+    <string name="setup_address">主机地址</string>
+    <string name="setup_address_hint">192.168.1.10:28418</string>
+    <string name="setup_code">验证码</string>
+    <string name="setup_code_hint">主机上显示的验证码</string>
+    <string name="setup_connect">连接</string>
+    <string name="setup_note">格式：host:port，端口默认 28418。只会记住地址。</string>
+    <string name="setup_error_address">请输入有效的主机地址。</string>
+    <string name="setup_error_port">端口必须在 1 到 65535 之间。</string>
+
+    <string name="action_keyboard">键盘</string>
+    <string name="action_reload">重连</string>
+    <string name="action_host">主机</string>
+
+    <string name="status_loading">正在加载…</string>
+    <string name="status_ready">已就绪</string>
+    <string name="status_error">加载失败</string>
+
+    <string name="download_started">开始下载</string>
+    <string name="download_saved">已保存到 Download 目录</string>
+    <string name="download_description">正在从 moLink 主机下载</string>
+    <string name="download_failed">无法保存下载文件</string>
+    <string name="download_unsupported">暂不支持该下载类型</string>
+    <string name="storage_permission_denied">保存下载需要存储权限</string>
+    <string name="file_picker_unavailable">没有可用的文件选择器</string>
+
+    <string name="web_error">页面加载失败：%1$s</string>
+    <string name="web_http_error">主机返回 HTTP %1$d</string>
+</resources>
