@@ -48,7 +48,10 @@ std::wstring env_value(const wchar_t* name) {
 }
 
 /// molink-service.exe next to this shell, then the copy the installer keeps
-/// under %ProgramData%\moLink\service.
+/// under %ProgramData%\moLinkHost\service (and the full product's legacy
+/// %ProgramData%\moLink\service as a last resort). The helper derives the
+/// actual install directory from `--name moLinkHost`; only the lookup is
+/// hard-coded here.
 std::wstring find_service_helper() {
   const std::wstring override_path = env_value(L"MOLINK_SERVICE_EXE");
   if (file_exists(override_path)) return override_path;
@@ -60,9 +63,12 @@ std::wstring find_service_helper() {
   }
   const std::wstring program_data = env_value(L"ProgramData");
   if (!program_data.empty()) {
-    const std::wstring candidate =
-        program_data + L"\\moLink\\service\\" + kHelperName;
+    const std::wstring candidate = program_data + L"\\" + kServiceName +
+                                   L"\\service\\" + kHelperName;
     if (file_exists(candidate)) return candidate;
+    const std::wstring legacy =
+        program_data + L"\\moLink\\service\\" + kHelperName;
+    if (file_exists(legacy)) return legacy;
   }
   return std::wstring();
 }

@@ -20,6 +20,12 @@ sc start moLinkSession
 It listens on `\\.\pipe\molink-session` with an ACL for SYSTEM and
 Administrators only. One line per request, JSON response:
 
+All data paths and named objects are derived from the service name (`--name`,
+default `moLinkSession`): the default product keeps `%ProgramData%\moLink\
+service` and `Global\moLink*`; `--name moLinkHost` uses
+`%ProgramData%\moLinkHost\service` and `Global\moLinkHost*`. The two installs
+therefore do not overwrite each other's binaries, logs or supervisor mutex.
+
 - `sessions` — enumerate WTS sessions (`id`, `state`, `station`, `user`)
 - `kick <session-id>` — `WTSLogoffSession` (refuses the console session)
 - `switch <rdp-session-id>` — `tscon <id> /dest:console`
@@ -43,8 +49,10 @@ Core supervision:
   final: `core restart gave up` (the first five are restarted, matching the
   field test of six kills).
 - An exit code of 0 is a normal exit and is never restarted.
-- A named mutex (`Global\moLinkCoreSupervisor`) and a scan for an existing
-  `molink-core.exe` keep one helper from racing another onto port 28418.
+- A named mutex (`Global\moLinkCoreSupervisor` for the default service,
+  `Global\moLinkHostCoreSupervisor` for the host-only service) and a scan for
+  an existing `molink-core.exe` keep one helper from racing another onto port
+  28418.
 - On a console session change the helper stops the old core (Ctrl+Break, 3 s
   grace, then terminate) before the service relaunches it in the new session.
   The service temporarily refuses `SERVICE_CONTROL_STOP` during that hand-off,
@@ -55,9 +63,10 @@ Core supervision:
 - Stopping the service itself (the app's Stop button, or `secure-stop`) only
   stops the helper: it receives a separate detach event and leaves the core
   running, which then falls back from the secure-desktop pipe to DXGI capture.
-- `molink-service.exe --install` records the core path in
-  `%ProgramData%\moLink\service\core.path` (one line, the absolute path); the
-  helper also checks `MOLINK_CORE`, its own directory and
+- `molink-service.exe --install` records the core path in the service's data
+  directory (`%ProgramData%\moLink\service\core.path` by default,
+  `%ProgramData%\<service>\service\core.path` with `--name`) (one line, the
+  absolute path); the helper also checks `MOLINK_CORE`, its own directory and
   `Program Files\moLink`. If the core lives somewhere else, write that file by
   hand.
 

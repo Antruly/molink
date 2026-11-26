@@ -36,6 +36,7 @@
 #include <vector>
 
 #include "diag_log.h"
+#include "service_paths.h"
 
 namespace molink {
 namespace supervisor {
@@ -43,30 +44,25 @@ namespace {
 
 namespace fs = std::filesystem;
 
-constexpr wchar_t kServiceLogPath[] =
-    L"C:\\ProgramData\\moLink\\service\\service.log";
-constexpr wchar_t kHelperLogPath[] =
-    L"C:\\ProgramData\\moLink\\service\\helper.log";
-constexpr wchar_t kCorePidPath[] =
-    L"C:\\ProgramData\\moLink\\service\\core.pid";
-constexpr wchar_t kCorePathHint[] =
-    L"C:\\ProgramData\\moLink\\service\\core.path";
-constexpr wchar_t kStopEventName[] = L"Global\\moLinkHelperStop";
-constexpr wchar_t kDetachEventName[] = L"Global\\moLinkHelperDetach";
-constexpr wchar_t kInstanceMutexName[] = L"Global\\moLinkCoreSupervisor";
+/// Paths and Global\ object names for the service that launched this helper.
+/// Configured by make_core_supervisor() before the backend is constructed; the
+/// helper runs one supervisor per process.
+molink::service_paths::paths g_paths;
+
 constexpr wchar_t kCoreExeName[] = L"molink-core.exe";
 
 void append_line(const std::wstring& path, const std::string& line) {
+  if (path.empty()) return;
   std::ofstream out(fs::path(path), std::ios::app | std::ios::binary);
   if (out) out << line << "\n";
 }
 
 void write_helper_log(const std::string& line) {
-  append_line(kHelperLogPath, line);
+  append_line(g_paths.helper_log, line);
 }
 
 void write_service_log(const std::string& line) {
-  append_line(kServiceLogPath, line);
+  append_line(g_paths.service_log, line);
 }
 
 bool enable_privilege(const wchar_t* name) {
@@ -153,7 +149,7 @@ std::wstring join_path(const std::wstring& dir, const wchar_t* name) {
 /// still works; the environment and conventional install locations follow.
 std::wstring resolve_core_path() {
   std::vector<std::wstring> candidates;
-  const std::wstring hint = read_first_line(kCorePathHint);
+  const std::wstring hint = read_first_line(g_paths.core_path_hint);
   if (!hint.empty()) candidates.push_back(hint);
   const std::wstring env = trim(env_var(L"MOLINK_CORE"));
   if (!env.empty()) candidates.push_back(env);
@@ -264,11 +260,15 @@ unsigned long long process_creation_ticks(HANDLE process) {
 /// The service uses this to avoid killing an unrelated process after Windows
 /// reuses the pid, so store the process creation time next to the pid.
 void write_core_pid(DWORD pid, HANDLE process) {
-  std::ofstream out(fs::path(kCorePidPath), std::ios::trunc);
+  if (g_paths.core_pid.empty()) return;
+  std::ofstream out(fs::path(g_paths.core_pid), std::ios::trunc);
   if (out) out << pid << " " << process_creation_ticks(process) << "\n";
 }
 
-void clear_core_pid() { DeleteFileW(kCorePidPath); }
+void clear_core_pid() {
+  if (g_paths.core_pid.empty()) return;
+  DeleteFileW(g_paths.core_pid.c_str());
+}
 
 class core_supervisor_backend final : public backend {
  public:
@@ -277,8 +277,10 @@ class core_supervisor_backend final : public backend {
       : running_(running),
         policy_(policy),
         session_(own_session_id()),
-        stop_event_(OpenEventW(SYNCHRONIZE, FALSE, kStopEventName)),
-        detach_event_(OpenEventW(SYNCHRONIZE, FALSE, kDetachEventName)) {}
+        stop_event_(OpenEventW(SYNCHRONIZE, FALSE,
+                               g_paths.helper_stop_event.c_str())),
+        detach_event_(OpenEventW(SYNCHRONIZE, FALSE,
+                                 g_paths.helper_detach_event.c_str())) {}
 
   ~core_supervisor_backend() override {
     close_core();
@@ -292,7 +294,8 @@ class core_supervisor_backend final : public backend {
     // A short wait covers the service's stop-old-helper/start-new-helper
     // hand-off, where the previous mutex may still be closing.
     for (int attempt = 0; attempt < 10; ++attempt) {
-      instance_ = CreateMutexW(nullptr, TRUE, kInstanceMutexName);
+      instance_ = CreateMutexW(nullptr, TRUE,
+                               g_paths.supervisor_mutex.c_str());
       if (instance_ == nullptr) return false;
       if (GetLastError() != ERROR_ALREADY_EXISTS) return true;
       CloseHandle(instance_);
@@ -691,7 +694,13 @@ class core_supervisor_backend final : public backend {
 }  // namespace
 
 std::unique_ptr<backend> make_core_supervisor(std::atomic<bool>& running,
-                                              const restart_policy& policy) {
+                                              const restart_policy& policy,
+                                              std::wstring service_name) {
+  // Resolve the service's directory, logs and object names before the backend
+  // opens its events and mutex. molink-helper's main() has already logged the
+  // service.name/data_dir/supervisor line after parsing --name.
+  g_paths =
+      molink::service_paths::resolve(env_var(L"ProgramData"), service_name);
   // These are already held by LocalSystem; enabling them lets the helper ask
   // WTS for the console user's token and create the global objects the
   // service and helper share.

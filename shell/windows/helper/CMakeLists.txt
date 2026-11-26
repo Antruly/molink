@@ -9,7 +9,10 @@ target_include_directories(molink-supervisor-policy
   PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 
 if(WIN32)
-  add_executable(molink-helper main.cpp core_supervisor.cpp)
+  add_executable(molink-helper main.cpp core_supervisor.cpp
+    "${CMAKE_CURRENT_SOURCE_DIR}/../service/service_paths.cpp")
+  target_include_directories(molink-helper PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/../service")
   target_link_libraries(molink-helper PRIVATE
     molink-supervisor-policy
     advapi32 wtsapi32 user32 gdi32 userenv)
