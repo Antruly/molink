@@ -110,6 +110,12 @@ class session_controller final
   void on_text(const std::string& text);
   void on_binary(const uint8_t* data, std::size_t len);
   void on_close(int code, const std::string& reason);
+  /// Closes the transport from this side. Stops the push clock, drops the
+  /// registry's weak view, then closes libuvcpp (a locally initiated close
+  /// never reports back through on_close), and finally tears the session down.
+  void close_transport(int code, const std::string& reason);
+  /// Idempotent session teardown shared by peer close and local close.
+  void finish_close(int code, const std::string& reason);
   void send_welcome_message();
   /// Creates the reconnect credential handed out in the welcome. A client
   /// that drops and reconnects presents it instead of spending another use of
@@ -176,8 +182,16 @@ class session_controller final
   void deny_access_request();
 
   std::shared_ptr<session_registry> registry_;
-  std::weak_ptr<session_transport> transport_;
+  /// Owning reference to the transport for this controller's whole life. The
+  /// registry record only carries a weak view, which close_transport() drops
+  /// before the connection can be recycled; the owner is deliberately not
+  /// reset there because clipboard/audio callbacks may copy it from other
+  /// threads. The transport itself is latched closed by its close().
+  std::shared_ptr<session_transport> transport_;
   std::weak_ptr<session_info> session_;
+  /// Set by finish_close(); a local close and a late peer-close callback must
+  /// not run the teardown twice.
+  bool finished_ = false;
   session_options options_;
   /// Issued once per connection; unknown to the host after a restart, in
   /// which case the client falls back to its verification code.

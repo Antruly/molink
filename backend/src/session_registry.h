@@ -136,9 +136,15 @@ struct session_info {
   int cursor_y = INT32_MIN;
   bool cursor_visible = false;
   bool cursor_has_shape = false;
-  /// Transport-independent channel. The registry owns this reference; the
-  /// controller/transport handlers do not keep a stronger one.
-  std::shared_ptr<session_transport> transport;
+  /// Transport-independent channel. Deliberately **weak**: the controller
+  /// owns the transport for as long as the session is live (`transport_`), so
+  /// a record that outlives teardown (a snapshot held by a worker, a posted
+  /// push lambda) cannot keep a closed connection alive or dereference one.
+  /// Every send path locks this first and skips the work when it is expired.
+  std::weak_ptr<session_transport> transport;
+  /// Last `video.drop reason=no_transport` line (monotonic ms), so a push clock
+  /// that keeps winning the race against teardown does not flood the log.
+  uint64_t last_no_transport_log_ms = 0;
   /// Keeps the session state machine alive while the transport handlers are
   /// installed. Set by session_controller::start().
   std::shared_ptr<session_controller> controller;

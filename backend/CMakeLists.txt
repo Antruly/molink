@@ -286,6 +286,7 @@ set(MOLINK_CORE_SOURCES
   src/service_control.cpp
   src/test_pattern.cpp
   src/transport/ws_transport.cpp
+  src/transport/video_send.cpp
   src/transport/juice_transport.cpp
   src/transport/relay_transport.cpp
   src/transport/channel_scheduler.cpp
@@ -1741,6 +1742,18 @@ target_include_directories(molink-core-session-channel-test PRIVATE src)
 set_target_properties(molink-core-session-channel-test PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 add_test(NAME session_channel COMMAND molink-core-session-channel-test)
+
+# Frame sending must never dereference a transport that teardown already
+# released (issue #146). Pure state: fake transport, no libuvcpp or network.
+add_executable(molink-core-video-send-test
+  tests/video_send_test.cpp
+  src/transport/video_send.cpp
+  src/protocol/frame_packet.cpp
+)
+target_include_directories(molink-core-video-send-test PRIVATE src)
+set_target_properties(molink-core-video-send-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME video_send COMMAND molink-core-video-send-test)
 
 # Channel queues are transport-independent and enforce Phase 1 backpressure.
 add_executable(molink-core-channel-scheduler-test
