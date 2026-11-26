@@ -39,8 +39,18 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <string>
 #include <vector>
+
+#include "../common/tray_settings.h"
+
+namespace tray = molink::tray;
+
+// Defined after the anonymous namespace with the other tray helpers. The
+// window-state handler below defers to it when the WM iconifies the window.
+void hide_to_tray(GtkWidget* window);
 
 namespace {
 
@@ -52,6 +62,16 @@ bool g_smoke_done = false;
 int g_exit_code = 0;
 std::string g_core_host;
 bool g_core_tls = false;
+
+// Tray / autostart. `--tray` is the login launch: create everything, stay in
+// the tray and do not map the main window. `g_quitting` makes the window's
+// delete-event a real exit instead of another hide.
+bool g_start_hidden = false;
+bool g_quitting = false;
+bool g_autostart = false;
+bool g_close_to_tray = false;
+int g_active_port = 0;
+tray::prefs g_shell_prefs;
 
 // Single-instance guard: the first shell listens on a per-user Unix socket;
 // later launches send "show" and exit. Pop-outs (--url) and smoke tests are
@@ -1398,7 +1418,12 @@ gboolean smoke_timeout(gpointer) {
 GtkStatusIcon* g_tray_icon = nullptr;
 GtkWidget* g_tray_menu = nullptr;
 GtkWidget* g_tray_show_item = nullptr;
+GtkWidget* g_tray_copy_item = nullptr;
+GtkWidget* g_tray_autostart_item = nullptr;
+GtkWidget* g_tray_close_item = nullptr;
 GtkWidget* g_tray_quit_item = nullptr;
+gulong g_tray_autostart_handler = 0;
+gulong g_tray_close_handler = 0;
 /// Native picture window over the core's shared-memory frame surface
 /// (surface_window.cpp). Defined there to keep this file about the web shell.
 int run_surface_window(const std::string& path);
@@ -1414,6 +1439,147 @@ std::string exe_path() {
   buffer[length] = '\0';
   return std::string(buffer);
 }
+
+// ---------------------------------------------------------------------------
+// Autostart and shell preferences
+//
+// The rules (Run value format, .desktop contents, close_to_tray default) live
+// in shell/common/tray_settings.h and are unit-tested on Linux. This file only
+// performs the filesystem writes and keeps the live values.
+// ---------------------------------------------------------------------------
+
+bool tray_uses_chinese();
+
+std::string linux_autostart_path() {
+  return (fs::path(g_get_user_config_dir()) / "autostart" / "molink.desktop")
+      .string();
+}
+
+/// The executable a login autostart entry should launch. An AppImage runs from
+/// a temporary mount, so /proc/self/exe would point at a path that disappears
+/// on exit; $APPIMAGE is the stable file the user launched.
+std::string autostart_executable() {
+  const char* appimage = std::getenv("APPIMAGE");
+  if (appimage != nullptr && appimage[0] != '\0') {
+    std::error_code ec;
+    if (fs::is_regular_file(appimage, ec)) return appimage;
+  }
+  return exe_path();
+}
+
+bool read_linux_autostart() {
+  const std::string path = linux_autostart_path();
+  std::error_code ec;
+  const bool exists = fs::is_regular_file(path, ec);
+  if (!exists) return false;
+  std::ifstream in(path, std::ios::binary);
+  if (!in) return false;
+  const std::string contents((std::istreambuf_iterator<char>(in)),
+                             std::istreambuf_iterator<char>());
+  return tray::linux_desktop_enabled(true, contents);
+}
+
+bool write_linux_autostart(bool enabled) {
+  const std::string path = linux_autostart_path();
+  std::error_code ec;
+  if (!enabled) {
+    fs::remove(path, ec);
+    return !ec;
+  }
+  fs::create_directories(fs::path(path).parent_path(), ec);
+  if (ec) return false;
+  const std::string contents = tray::linux_desktop_entry(autostart_executable());
+  std::ofstream out(path, std::ios::binary | std::ios::trunc);
+  if (!out) return false;
+  out << contents;
+  return out.good();
+}
+
+std::string shell_prefs_path() {
+  const std::string dir = shell_config_directory();
+  return dir.empty() ? std::string() : (fs::path(dir) / "shell.conf").string();
+}
+
+tray::prefs load_shell_prefs() {
+  const std::string path = shell_prefs_path();
+  if (path.empty()) return tray::prefs{};
+  std::ifstream in(path, std::ios::binary);
+  if (!in) return tray::prefs{};
+  const std::string contents((std::istreambuf_iterator<char>(in)),
+                             std::istreambuf_iterator<char>());
+  return tray::parse_prefs(contents);
+}
+
+bool save_shell_prefs() {
+  const std::string path = shell_prefs_path();
+  if (path.empty()) return false;
+  std::error_code ec;
+  fs::create_directories(fs::path(path).parent_path(), ec);
+  if (ec) return false;
+  std::ofstream out(path, std::ios::binary | std::ios::trunc);
+  if (!out) return false;
+  out << tray::serialize_prefs(g_shell_prefs);
+  return out.good();
+}
+
+/// Re-read the real OS autostart state and the local override. Called at
+/// startup and after a tray menu toggle.
+void refresh_tray_settings() {
+  g_autostart = read_linux_autostart();
+  g_shell_prefs = load_shell_prefs();
+  g_close_to_tray = tray::effective_close_to_tray(
+      g_autostart, g_shell_prefs.close_to_tray_set, g_shell_prefs.close_to_tray);
+}
+
+void set_linux_autostart(bool enabled) {
+  if (!write_linux_autostart(enabled)) {
+    shell_log("shell.tray autostart write failed enabled=%d",
+              enabled ? 1 : 0);
+    return;
+  }
+  g_autostart = enabled;
+  if (!g_shell_prefs.close_to_tray_set) {
+    g_close_to_tray = tray::default_close_to_tray(enabled);
+  }
+}
+
+void set_close_to_tray(bool enabled) {
+  tray::set_close_to_tray(g_shell_prefs, enabled);
+  g_close_to_tray = enabled;
+  save_shell_prefs();
+}
+
+void log_tray(const char* action) {
+  shell_log("%s", tray::log_line(action, g_autostart, g_close_to_tray).c_str());
+}
+
+/// One notification, not gated by the first-time flag. Used for the
+/// "running in the background" balloon and for copy failures.
+void show_tray_notification(const std::string& body) {
+  const gchar* title = "moLink";
+  gchar* command = g_strdup_printf("notify-send -a moLink '%s' '%s'", title,
+                                   body.c_str());
+  GError* error = nullptr;
+  if (!g_spawn_command_line_async(command, &error)) {
+    if (error != nullptr) {
+      shell_log("shell.tray notify failed: %s", error->message);
+      g_error_free(error);
+    }
+  }
+  g_free(command);
+}
+
+void maybe_show_tray_balloon() {
+  if (g_shell_prefs.balloon_seen) return;
+  tray::mark_balloon_seen(g_shell_prefs);
+  save_shell_prefs();
+  show_tray_notification(
+      tray_uses_chinese()
+          ? "已在后台运行。双击托盘图标打开主界面。"
+          : "moLink is running in the background. Double-click the tray icon "
+            "to open it.");
+}
+
 
 GtkWidget* on_create_web_view(WebKitWebView*, WebKitNavigationAction* action,
                               gpointer) {
@@ -1522,12 +1688,26 @@ gboolean on_size_allocate(GtkWidget* widget, GdkRectangle*, gpointer) {
   return FALSE;
 }
 
+/// A WM-driven minimise must also end in the tray. Deferred out of the state
+/// event so the WM finishes the iconify before we unmap the window.
+gboolean hide_iconified_idle(gpointer data) {
+  GtkWidget* window = GTK_WIDGET(data);
+  if (window == nullptr || g_quitting) return G_SOURCE_REMOVE;
+  GdkWindow* gdk_window = gtk_widget_get_window(window);
+  if (gdk_window != nullptr &&
+      (gdk_window_get_state(gdk_window) & GDK_WINDOW_STATE_ICONIFIED) != 0) {
+    hide_to_tray(window);
+  }
+  return G_SOURCE_REMOVE;
+}
+
 gboolean on_window_state(GtkWidget* widget, GdkEventWindowState* event,
                          gpointer) {
   // A minimized window must never keep the keyboard grabbed.
   if ((event->changed_mask & GDK_WINDOW_STATE_ICONIFIED) != 0 &&
       (event->new_window_state & GDK_WINDOW_STATE_ICONIFIED) != 0) {
     release_keyboard_grab("iconified");
+    if (!g_url_mode) g_idle_add(hide_iconified_idle, widget);
   }
   const GdkWindowState square_mask = static_cast<GdkWindowState>(
       GDK_WINDOW_STATE_MAXIMIZED | GDK_WINDOW_STATE_FULLSCREEN);
@@ -1591,19 +1771,24 @@ int connect_instance(const std::string& path) {
 
 gboolean on_instance_accept(GIOChannel*, GIOCondition, gpointer) {
   const int fd = ::accept(g_instance_fd, nullptr, nullptr);
+  bool show = false;
   if (fd >= 0) {
-    char buffer[32];
-    const ssize_t got = ::read(fd, buffer, sizeof(buffer));
-    (void)got;
+    char buffer[32] = {};
+    const ssize_t got = ::read(fd, buffer, sizeof(buffer) - 1);
+    if (got > 0) show = std::strncmp(buffer, "show", 4) == 0;
     ::close(fd);
   }
-  if (g_main_window != nullptr) show_window(g_main_window);
+  // A --tray launch must stay silent even when another instance owns the
+  // socket: it asks for nothing and exits.
+  if (show && g_main_window != nullptr) show_window(g_main_window);
   return G_SOURCE_CONTINUE;
 }
 
 /// Returns true when this process owns the instance socket. Sets
-/// @p already_running when another shell accepted the "show" request.
-bool claim_instance_socket(const std::string& path, bool& already_running) {
+/// @p already_running when another shell owns it; @p request_show asks that
+/// instance to bring its window forward (a login launch with --tray does not).
+bool claim_instance_socket(const std::string& path, bool& already_running,
+                           bool request_show) {
   already_running = false;
   for (int attempt = 0; attempt < 2; ++attempt) {
     const int fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
@@ -1631,8 +1816,10 @@ bool claim_instance_socket(const std::string& path, bool& already_running) {
 
     const int client = connect_instance(path);
     if (client >= 0) {
-      const ssize_t sent = ::write(client, "show\n", 5);
-      (void)sent;
+      if (request_show) {
+        const ssize_t sent = ::write(client, "show\n", 5);
+        (void)sent;
+      }
       ::close(client);
       already_running = true;
       return false;
@@ -1655,6 +1842,72 @@ void cleanup_instance_socket() {
 void hide_to_tray(GtkWidget* window) {
   gtk_widget_hide(window);
   if (g_tray_icon != nullptr) gtk_status_icon_set_visible(g_tray_icon, TRUE);
+  maybe_show_tray_balloon();
+  log_tray("hide");
+}
+
+/// Read the device id from the core the shell is attached to and put it on the
+/// clipboard. The tray menu cannot run page JavaScript, so it asks the same
+/// loopback endpoint the page uses.
+void copy_device_id() {
+  const bool zh = tray_uses_chinese();
+  std::string body;
+  std::string id;
+  if (g_active_port > 0 && core_http_get(g_active_port, "/api/device", body)) {
+    json_string(body, "device_id", id);
+  }
+  if (id.empty()) {
+    show_tray_notification(zh ? "设备 ID 尚未就绪。" : "The device ID is not ready yet.");
+    return;
+  }
+  GtkClipboard* clipboard = gtk_clipboard_get(GDK_SELECTION_CLIPBOARD);
+  if (clipboard == nullptr) return;
+  gtk_clipboard_set_text(clipboard, id.c_str(), -1);
+  gtk_clipboard_store(clipboard);
+  show_tray_notification(zh ? "已复制设备 ID" : "Device ID copied");
+}
+
+/// Exit is always a real exit. An autostart entry survives it, so warn once
+/// before ending a process the next login will recreate.
+bool confirm_tray_quit() {
+  if (!g_autostart) return true;
+  const bool zh = tray_uses_chinese();
+  GtkWidget* dialog = gtk_message_dialog_new(
+      g_main_window != nullptr ? GTK_WINDOW(g_main_window) : nullptr,
+      GTK_DIALOG_MODAL, GTK_MESSAGE_INFO, GTK_BUTTONS_OK_CANCEL, "%s",
+      zh ? "moLink 已设为开机自启。退出只结束本次运行，下次开机仍会自启。\n\n仍要退出吗？"
+         : "moLink starts automatically at login. Quitting ends this session, "
+           "but it will still start at the next login.\n\nQuit anyway?");
+  const gint response = gtk_dialog_run(GTK_DIALOG(dialog));
+  gtk_widget_destroy(dialog);
+  return response == GTK_RESPONSE_OK;
+}
+
+void request_quit() {
+  if (g_quitting) return;
+  if (!confirm_tray_quit()) return;
+  log_tray("quit");
+  g_quitting = true;
+  gtk_main_quit();
+}
+
+/// The page's window close and the WM close button share this rule.
+void handle_close_request(GtkWidget* window) {
+  if (g_url_mode) {
+    gtk_widget_destroy(window);
+    return;
+  }
+  if (g_quitting) {
+    gtk_widget_destroy(window);
+    return;
+  }
+  if (g_close_to_tray) {
+    hide_to_tray(window);
+    return;
+  }
+  log_tray("quit");
+  g_quitting = true;
+  gtk_widget_destroy(window);
 }
 
 /// The page mirrors its language into the core's ui.json; the native tray
@@ -1696,11 +1949,47 @@ bool tray_uses_chinese() {
   return lang != nullptr && std::strncmp(lang, "zh", 2) == 0;
 }
 
+void on_menu_autostart(GtkCheckMenuItem* item, gpointer);
+void on_menu_close_to_tray(GtkCheckMenuItem* item, gpointer);
+
 void apply_tray_language() {
   const bool zh = tray_uses_chinese();
   if (g_tray_show_item != nullptr) {
     gtk_menu_item_set_label(GTK_MENU_ITEM(g_tray_show_item),
                             zh ? "显示 moLink" : "Show moLink");
+  }
+  if (g_tray_copy_item != nullptr) {
+    gtk_menu_item_set_label(GTK_MENU_ITEM(g_tray_copy_item),
+                            zh ? "复制设备 ID" : "Copy device ID");
+  }
+  if (g_tray_autostart_item != nullptr) {
+    gtk_menu_item_set_label(GTK_MENU_ITEM(g_tray_autostart_item),
+                            zh ? "开机自启" : "Start at login");
+    // Setting the state emits "toggled"; block the handler so a language
+    // refresh does not rewrite the preference.
+    if (g_tray_autostart_handler != 0) {
+      g_signal_handler_block(g_tray_autostart_item,
+                             g_tray_autostart_handler);
+    }
+    gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(g_tray_autostart_item),
+                                   g_autostart ? TRUE : FALSE);
+    if (g_tray_autostart_handler != 0) {
+      g_signal_handler_unblock(g_tray_autostart_item,
+                               g_tray_autostart_handler);
+    }
+  }
+  if (g_tray_close_item != nullptr) {
+    gtk_menu_item_set_label(GTK_MENU_ITEM(g_tray_close_item),
+                            zh ? "关闭窗口时隐藏到托盘"
+                               : "Close window to tray");
+    if (g_tray_close_handler != 0) {
+      g_signal_handler_block(g_tray_close_item, g_tray_close_handler);
+    }
+    gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(g_tray_close_item),
+                                   g_close_to_tray ? TRUE : FALSE);
+    if (g_tray_close_handler != 0) {
+      g_signal_handler_unblock(g_tray_close_item, g_tray_close_handler);
+    }
   }
   if (g_tray_quit_item != nullptr) {
     gtk_menu_item_set_label(GTK_MENU_ITEM(g_tray_quit_item),
@@ -1709,6 +1998,7 @@ void apply_tray_language() {
 }
 
 void on_tray_activate(GtkStatusIcon*, gpointer data) {
+  log_tray("show");
   show_window(GTK_WIDGET(data));
 }
 
@@ -1719,14 +2009,35 @@ void on_tray_popup(GtkStatusIcon* icon, guint button, guint time, gpointer) {
                  gtk_status_icon_position_menu, icon, button, time);
 }
 
-void on_menu_show(GtkMenuItem*, gpointer data) { show_window(GTK_WIDGET(data)); }
+void on_menu_show(GtkMenuItem*, gpointer data) {
+  log_tray("show");
+  show_window(GTK_WIDGET(data));
+}
 
-void on_menu_quit(GtkMenuItem*, gpointer) { gtk_main_quit(); }
+void on_menu_copy_id(GtkMenuItem*, gpointer) { copy_device_id(); }
+
+void on_menu_autostart(GtkCheckMenuItem* item, gpointer) {
+  set_linux_autostart(gtk_check_menu_item_get_active(item) != FALSE);
+  apply_tray_language();
+}
+
+void on_menu_close_to_tray(GtkCheckMenuItem* item, gpointer) {
+  set_close_to_tray(gtk_check_menu_item_get_active(item) != FALSE);
+  apply_tray_language();
+}
+
+void on_menu_quit(GtkMenuItem*, gpointer) { request_quit(); }
 
 gboolean on_delete_event(GtkWidget* window, GdkEvent*, gpointer) {
   if (g_url_mode) return FALSE;
-  hide_to_tray(window);
-  return TRUE;
+  if (g_quitting) return FALSE;
+  if (g_close_to_tray) {
+    hide_to_tray(window);
+    return TRUE;
+  }
+  log_tray("quit");
+  g_quitting = true;
+  return FALSE;
 }
 
 void setup_tray(GtkWidget* window) {
@@ -1742,12 +2053,31 @@ void setup_tray(GtkWidget* window) {
 
   g_tray_menu = gtk_menu_new();
   g_tray_show_item = gtk_menu_item_new_with_label("Show moLink");
+  g_tray_copy_item = gtk_menu_item_new_with_label("Copy device ID");
+  g_tray_autostart_item = gtk_check_menu_item_new_with_label("Start at login");
+  g_tray_close_item =
+      gtk_check_menu_item_new_with_label("Close window to tray");
   g_tray_quit_item = gtk_menu_item_new_with_label("Quit");
   gtk_menu_shell_append(GTK_MENU_SHELL(g_tray_menu), g_tray_show_item);
+  gtk_menu_shell_append(GTK_MENU_SHELL(g_tray_menu), g_tray_copy_item);
+  gtk_menu_shell_append(GTK_MENU_SHELL(g_tray_menu),
+                        gtk_separator_menu_item_new());
+  gtk_menu_shell_append(GTK_MENU_SHELL(g_tray_menu), g_tray_autostart_item);
+  gtk_menu_shell_append(GTK_MENU_SHELL(g_tray_menu), g_tray_close_item);
+  gtk_menu_shell_append(GTK_MENU_SHELL(g_tray_menu),
+                        gtk_separator_menu_item_new());
   gtk_menu_shell_append(GTK_MENU_SHELL(g_tray_menu), g_tray_quit_item);
   apply_tray_language();
   g_signal_connect(g_tray_show_item, "activate", G_CALLBACK(on_menu_show),
                    window);
+  g_signal_connect(g_tray_copy_item, "activate", G_CALLBACK(on_menu_copy_id),
+                   nullptr);
+  g_tray_autostart_handler =
+      g_signal_connect(g_tray_autostart_item, "toggled",
+                       G_CALLBACK(on_menu_autostart), nullptr);
+  g_tray_close_handler =
+      g_signal_connect(g_tray_close_item, "toggled",
+                       G_CALLBACK(on_menu_close_to_tray), nullptr);
   g_signal_connect(g_tray_quit_item, "activate", G_CALLBACK(on_menu_quit),
                    nullptr);
   gtk_widget_show_all(g_tray_menu);
@@ -2073,7 +2403,8 @@ void on_script_message(WebKitUserContentManager*, WebKitJavascriptResult* result
   } else if (action == "pick-directory") {
     pick_directory(window);
   } else if (action == "minimize") {
-    gtk_window_iconify(GTK_WINDOW(window));
+    // Minimising always lives in the tray, regardless of the close setting.
+    hide_to_tray(window);
   } else if (action == "maximize") {
     if (gtk_window_is_maximized(GTK_WINDOW(window))) {
       gtk_window_unmaximize(GTK_WINDOW(window));
@@ -2118,11 +2449,7 @@ void on_script_message(WebKitUserContentManager*, WebKitJavascriptResult* result
   } else if (action == "open-log-dir") {
     open_log_directory(window);
   } else if (action == "close") {
-    if (g_url_mode) {
-      gtk_widget_destroy(window);
-    } else {
-      hide_to_tray(window);
-    }
+    handle_close_request(window);
   } else if (action == "drag") {
     GdkDisplay* display = gtk_widget_get_display(window);
     GdkSeat* seat = gdk_display_get_default_seat(display);
@@ -2154,7 +2481,7 @@ void on_script_message(WebKitUserContentManager*, WebKitJavascriptResult* result
   } else if (action.rfind("drag-out:", 0) == 0) {
     start_drag_out(jsc_value_get_context(value), action.substr(9));
   } else if (action == "quit") {
-    gtk_main_quit();
+    request_quit();
   }
 }
 
@@ -2236,6 +2563,9 @@ int main(int argc, char** argv) {
       g_core_host = argv[++i];
     } else if (std::strcmp(argv[i], "--surface") == 0 && i + 1 < argc) {
       g_surface_path = argv[++i];
+    } else if (std::strcmp(argv[i], "--tray") == 0) {
+      // Login launch: keep the core and tray, do not map the main window.
+      g_start_hidden = true;
     }
   }
   g_url_mode = !g_url_override.empty();
@@ -2243,7 +2573,9 @@ int main(int argc, char** argv) {
   if (!g_url_mode && !g_smoke && g_surface_path.empty()) {
     const std::string instance_path = instance_socket_path();
     bool already_running = false;
-    if (!claim_instance_socket(instance_path, already_running)) {
+    // --tray must not bring an existing window forward; it exits silently.
+    if (!claim_instance_socket(instance_path, already_running,
+                               !g_start_hidden)) {
       if (already_running) return 0;
       std::fprintf(stderr,
                    "moLink shell: could not create the single-instance socket "
@@ -2255,6 +2587,7 @@ int main(int argc, char** argv) {
   }
 
   gtk_init(&argc, &argv);
+  refresh_tray_settings();
 
   if (!g_surface_path.empty()) {
     // A native picture window for the core's frame surface: no WebView is
@@ -2348,6 +2681,7 @@ int main(int argc, char** argv) {
     }
 
     g_core_tls = tls;
+    g_active_port = port;
     const std::string host = ui_host();
     url = std::string(g_core_tls ? "https://" : "http://") + url_host(host) +
           ":" + std::to_string(port) + "/?host=";
@@ -2469,8 +2803,21 @@ int main(int argc, char** argv) {
       GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
 
   webkit_web_view_load_uri(WEBKIT_WEB_VIEW(view), url.c_str());
-  gtk_widget_show_all(window);
-  apply_window_shape(window);
+  if (g_start_hidden && !g_url_mode) {
+    // Login launch: realize the window long enough to start the WebView, then
+    // unmap it before the main loop paints the first frame. The core and tray
+    // stay alive; the tray/hotkey restore shows the already-loaded page.
+    gtk_widget_show_all(window);
+    gtk_widget_hide(window);
+    if (g_tray_icon != nullptr) {
+      gtk_status_icon_set_visible(g_tray_icon, TRUE);
+    }
+    maybe_show_tray_balloon();
+    log_tray("hide");
+  } else {
+    gtk_widget_show_all(window);
+    apply_window_shape(window);
+  }
   // Safety net for the paths that never deliver another size-allocate to the
   // WebView (notably a window the WM restores maximized at startup). The
   // check is a cheap no-op when the allocation already matches.

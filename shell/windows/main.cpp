@@ -40,7 +40,10 @@
 #include <thread>
 #include <vector>
 
+#include "../common/tray_settings.h"
+
 namespace fs = std::filesystem;
+namespace tray = molink::tray;
 
 /// Native picture window over the core's shared-memory frame surface
 /// (surface_window.cpp), defined outside the anonymous namespace.
@@ -72,9 +75,22 @@ HMENU g_tray_menu = nullptr;
 HICON g_app_icon = nullptr;
 HANDLE g_instance_mutex = nullptr;
 
+// Tray / autostart. `--tray` is the login launch: create the window (and the
+// WebView) but do not show it, and stay in the notification area.
+bool g_start_hidden = false;
+bool g_autostart = false;
+bool g_close_to_tray = false;
+bool g_close_to_tray_set = false;
+bool g_balloon_seen = false;
+int g_active_port = 0;
+
 void spawn_self(const std::wstring& uri);
 void toggle_fullscreen(HWND window);
 void start_update(const std::wstring& url);
+void refresh_tray_settings();
+void request_quit();
+void minimize_to_tray();
+void add_tray_icon();
 
 void fail_box(const wchar_t* message) {
   MessageBoxW(g_window, message, L"moLink", MB_ICONERROR | MB_OK);
@@ -763,7 +779,8 @@ class WebMessageHandler final
     // focus/blur/escape release rules, and no page-side switch is exposed for
     // Windows until that exists.
     if (action == L"minimize") {
-      ShowWindow(g_window, SW_MINIMIZE);
+      // Minimising always lives in the tray, regardless of close_to_tray.
+      minimize_to_tray();
     } else if (action == L"maximize") {
       if (IsZoomed(g_window)) ShowWindow(g_window, SW_RESTORE);
       else ShowWindow(g_window, SW_MAXIMIZE);
@@ -831,7 +848,7 @@ class WebMessageHandler final
     } else if (action == L"close") {
       PostMessageW(g_window, WM_CLOSE, 0, 0);
     } else if (action == L"quit") {
-      PostQuitMessage(0);
+      request_quit();
     }
     return S_OK;
   }
@@ -1212,6 +1229,212 @@ std::wstring exe_path() {
   return length > 0 ? std::wstring(buffer, length) : std::wstring();
 }
 
+// ---------------------------------------------------------------------------
+// Autostart and shell preferences
+//
+// The rules (Run value format and match, close_to_tray default, log line)
+// live in shell/common/tray_settings.h and are unit-tested on Linux. This file
+// owns the registry calls and the live values.
+// ---------------------------------------------------------------------------
+
+constexpr wchar_t kShellPrefsKey[] = L"Software\\moLink\\Ui";
+
+bool read_reg_dword(const wchar_t* name, DWORD& out) {
+  DWORD value = 0;
+  DWORD size = sizeof(value);
+  if (RegGetValueW(HKEY_CURRENT_USER, kShellPrefsKey, name, RRF_RT_REG_DWORD,
+                   nullptr, &value, &size) != ERROR_SUCCESS) {
+    return false;
+  }
+  out = value;
+  return true;
+}
+
+void write_reg_dword(const wchar_t* name, DWORD value) {
+  HKEY key = nullptr;
+  if (RegCreateKeyExW(HKEY_CURRENT_USER, kShellPrefsKey, 0, nullptr, 0,
+                      KEY_SET_VALUE, nullptr, &key, nullptr) != ERROR_SUCCESS) {
+    return;
+  }
+  RegSetValueExW(key, name, 0, REG_DWORD,
+                 reinterpret_cast<const BYTE*>(&value), sizeof(value));
+  RegCloseKey(key);
+}
+
+bool load_close_to_tray_override(bool& value) {
+  DWORD raw = 0;
+  if (!read_reg_dword(L"CloseToTray", raw)) return false;
+  value = raw != 0;
+  return true;
+}
+
+void save_close_to_tray_override(bool value) {
+  write_reg_dword(L"CloseToTray", value ? 1 : 0);
+}
+
+bool load_balloon_seen() {
+  DWORD raw = 0;
+  return read_reg_dword(L"TrayBalloonSeen", raw) && raw != 0;
+}
+
+void save_balloon_seen() { write_reg_dword(L"TrayBalloonSeen", 1); }
+
+const std::wstring& run_key_path() {
+  static const std::wstring path = widen(tray::windows_run_key());
+  return path;
+}
+
+std::wstring run_value_name() {
+  return widen(tray::windows_run_value_name());
+}
+
+/// The real autostart state: the Run value must launch this executable.
+bool read_windows_autostart() {
+  HKEY key = nullptr;
+  if (RegOpenKeyExW(HKEY_CURRENT_USER, run_key_path().c_str(), 0,
+                    KEY_QUERY_VALUE, &key) != ERROR_SUCCESS) {
+    return false;
+  }
+  wchar_t buffer[32768] = {};
+  DWORD size = sizeof(buffer);
+  DWORD type = 0;
+  const LSTATUS status =
+      RegQueryValueExW(key, run_value_name().c_str(), nullptr, &type,
+                       reinterpret_cast<BYTE*>(buffer), &size);
+  RegCloseKey(key);
+  if (status != ERROR_SUCCESS ||
+      (type != REG_SZ && type != REG_EXPAND_SZ)) {
+    return false;
+  }
+  std::wstring value(buffer, size / sizeof(wchar_t));
+  while (!value.empty() && value.back() == L'\0') value.pop_back();
+  return tray::windows_run_command_matches(narrow(value), narrow(exe_path()));
+}
+
+bool write_windows_autostart(bool enabled) {
+  HKEY key = nullptr;
+  if (RegCreateKeyExW(HKEY_CURRENT_USER, run_key_path().c_str(), 0, nullptr, 0,
+                      KEY_SET_VALUE | KEY_QUERY_VALUE, nullptr, &key,
+                      nullptr) != ERROR_SUCCESS) {
+    return false;
+  }
+  bool ok = false;
+  if (enabled) {
+    const std::wstring command =
+        widen(tray::windows_run_command(narrow(exe_path())));
+    ok = RegSetValueExW(
+             key, run_value_name().c_str(), 0, REG_SZ,
+             reinterpret_cast<const BYTE*>(command.c_str()),
+             static_cast<DWORD>((command.size() + 1) * sizeof(wchar_t))) ==
+         ERROR_SUCCESS;
+  } else {
+    const LSTATUS status = RegDeleteValueW(key, run_value_name().c_str());
+    ok = status == ERROR_SUCCESS || status == ERROR_FILE_NOT_FOUND;
+  }
+  RegCloseKey(key);
+  return ok;
+}
+
+void refresh_tray_settings() {
+  g_autostart = read_windows_autostart();
+  g_close_to_tray_set = load_close_to_tray_override(g_close_to_tray);
+  g_close_to_tray = tray::effective_close_to_tray(
+      g_autostart, g_close_to_tray_set, g_close_to_tray);
+  g_balloon_seen = load_balloon_seen();
+}
+
+void set_autostart(bool enabled) {
+  if (!write_windows_autostart(enabled)) {
+    shell_log("shell.tray autostart write failed");
+    return;
+  }
+  g_autostart = enabled;
+  if (!g_close_to_tray_set) {
+    g_close_to_tray = tray::default_close_to_tray(enabled);
+  }
+}
+
+void set_close_to_tray(bool enabled) {
+  g_close_to_tray_set = true;
+  g_close_to_tray = enabled;
+  save_close_to_tray_override(enabled);
+}
+
+void log_tray(const char* action) {
+  shell_log(tray::log_line(action, g_autostart, g_close_to_tray));
+}
+
+bool copy_text_to_clipboard(const std::wstring& text) {
+  if (g_window == nullptr || !OpenClipboard(g_window)) return false;
+  EmptyClipboard();
+  const std::size_t bytes = (text.size() + 1) * sizeof(wchar_t);
+  HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, bytes);
+  if (memory == nullptr) {
+    CloseClipboard();
+    return false;
+  }
+  void* destination = GlobalLock(memory);
+  if (destination == nullptr) {
+    GlobalFree(memory);
+    CloseClipboard();
+    return false;
+  }
+  std::memcpy(destination, text.c_str(), bytes);
+  GlobalUnlock(memory);
+  if (SetClipboardData(CF_UNICODETEXT, memory) == nullptr) {
+    GlobalFree(memory);
+    CloseClipboard();
+    return false;
+  }
+  CloseClipboard();
+  return true;
+}
+
+void show_tray_balloon(const wchar_t* body) {
+  if (!g_tray_added) add_tray_icon();
+  NOTIFYICONDATAW data = g_tray_data;
+  data.uFlags = NIF_INFO;
+  data.dwInfoFlags = NIIF_INFO;
+  data.uTimeout = 5000;
+  wcscpy_s(data.szInfoTitle, L"moLink");
+  wcscpy_s(data.szInfo, body != nullptr ? body : L"");
+  Shell_NotifyIconW(NIM_MODIFY, &data);
+}
+
+/// The "running in the background" balloon appears once per user, not once per
+/// hide: the preference survives restarts in HKCU.
+void maybe_show_tray_balloon() {
+  if (g_balloon_seen) return;
+  g_balloon_seen = true;
+  save_balloon_seen();
+  show_tray_balloon(
+      tray_uses_chinese()
+          ? L"\u5df2\u5728\u540e\u53f0\u8fd0\u884c\u3002\u53cc\u51fb\u6258\u76d8\u56fe\u6807\u6253\u5f00\u4e3b\u754c\u9762\u3002"
+          : L"moLink is running in the background. Double-click the tray icon "
+            L"to open it.");
+}
+
+/// The tray cannot run the page's JavaScript, so it asks the core's loopback
+/// endpoint for the same device id the page shows.
+void copy_device_id() {
+  const bool zh = tray_uses_chinese();
+  std::string body;
+  std::string id;
+  DWORD status = 0;
+  if (g_active_port > 0 &&
+      core_http_get(g_active_port, g_core_tls, L"/api/device", body, status) &&
+      status == 200) {
+    json_string(body, "device_id", id);
+  }
+  if (id.empty()) {
+    show_tray_balloon(zh ? L"\u8bbe\u5907 ID \u5c1a\u672a\u5c31\u7eea\u3002" : L"The device ID is not ready yet.");
+    return;
+  }
+  show_tray_balloon(copy_text_to_clipboard(widen(id))
+                        ? (zh ? L"\u5df2\u590d\u5236\u8bbe\u5907 ID\u3002" : L"Device ID copied.")
+                        : (zh ? L"\u65e0\u6cd5\u8bbf\u95ee\u526a\u8d34\u677f\u3002" : L"Could not access the clipboard."));
+}
+
 void spawn_self(const std::wstring& uri) {
   std::wstring command = L"\"" + exe_path() + L"\" --url \"" + uri + L"\"";
   STARTUPINFOW startup{};
@@ -1228,7 +1451,7 @@ void spawn_self(const std::wstring& uri) {
 // cannot start its own core. Instead of failing after the readiness timeout,
 // focus the window of the instance that is already running. --url pop-outs
 // must bypass this: they are deliberately separate shells.
-bool focus_running_instance() {
+bool focus_running_instance(bool show) {
   g_instance_mutex =
       CreateMutexW(nullptr, FALSE, L"Local\\moLinkShellInstance");
   if (g_instance_mutex == nullptr) return false;
@@ -1239,7 +1462,8 @@ bool focus_running_instance() {
     existing = FindWindowW(L"MoLinkShell", L"moLink");
     if (existing == nullptr) Sleep(100);
   }
-  if (existing != nullptr) {
+  // A --tray launch at login must not pull an existing window to the front.
+  if (show && existing != nullptr) {
     ShowWindow(existing, IsIconic(existing) ? SW_RESTORE : SW_SHOW);
     SetForegroundWindow(existing);
   }
@@ -1287,20 +1511,76 @@ void remove_tray_icon() {
 void show_main_window() {
   ShowWindow(g_window, SW_SHOW);
   SetForegroundWindow(g_window);
+  log_tray("show");
 }
+
+/// Hide the window and keep the process (and the core it owns) alive.
+void minimize_to_tray() {
+  ShowWindow(g_window, SW_HIDE);
+  add_tray_icon();
+  maybe_show_tray_balloon();
+  log_tray("hide");
+}
+
+/// The tray menu's Exit always exits. When autostart is on, say so first: the
+/// next login will recreate the process the user is about to end.
+void request_quit() {
+  if (g_quitting) return;
+  if (!g_url_mode && g_autostart) {
+    const bool zh = tray_uses_chinese();
+    const wchar_t* text =
+        zh ? L"moLink \u5df2\u8bbe\u4e3a\u5f00\u673a\u81ea\u542f\u3002\u9000\u51fa\u53ea\u7ed3\u675f\u672c\u6b21\u8fd0\u884c\uff0c\u4e0b\u6b21\u5f00\u673a\u4ecd\u4f1a\u81ea\u542f\u3002\n\n"
+             L"\u4ecd\u8981\u9000\u51fa\u5417\uff1f"
+           : L"moLink starts automatically at login. Quitting ends this "
+             L"session, but it will still start at the next login.\n\nQuit "
+             L"anyway?";
+    if (MessageBoxW(g_window, text, L"moLink",
+                    MB_ICONINFORMATION | MB_OKCANCEL) != IDOK) {
+      return;
+    }
+  }
+  log_tray("quit");
+  g_quitting = true;
+  DestroyWindow(g_window);
+}
+
+enum : UINT {
+  kTrayShow = 1,
+  kTrayQuit = 2,
+  kTrayCopyId = 3,
+  kTrayAutostart = 4,
+  kTrayCloseToTray = 5,
+};
 
 void show_tray_menu() {
   if (g_tray_menu != nullptr) DestroyMenu(g_tray_menu);
   g_tray_menu = CreatePopupMenu();
   const bool zh = tray_uses_chinese();
-  AppendMenuW(g_tray_menu, MF_STRING, 1,
-              zh ? L"\u663e\u793a moLink" : L"Show moLink");
-  AppendMenuW(g_tray_menu, MF_STRING, 2, zh ? L"\u9000\u51fa" : L"Quit");
+  const wchar_t* open_label = zh ? L"\u6253\u5f00\u4e3b\u754c\u9762" : L"Open moLink";
+  const wchar_t* copy_label = zh ? L"\u590d\u5236\u8bbe\u5907 ID" : L"Copy device ID";
+  const wchar_t* autostart_label = zh ? L"\u5f00\u673a\u81ea\u542f" : L"Start at login";
+  const wchar_t* close_label =
+      zh ? L"\u5173\u95ed\u7a97\u53e3\u65f6\u9690\u85cf\u5230\u6258\u76d8" : L"Close window to tray";
+  const wchar_t* quit_label = zh ? L"\u9000\u51fa" : L"Quit";
+  AppendMenuW(g_tray_menu, MF_STRING, kTrayShow, open_label);
+  AppendMenuW(g_tray_menu, MF_STRING, kTrayCopyId, copy_label);
+  AppendMenuW(g_tray_menu, MF_SEPARATOR, 0, nullptr);
+  AppendMenuW(g_tray_menu,
+              MF_STRING | (g_autostart ? MF_CHECKED : MF_UNCHECKED),
+              kTrayAutostart, autostart_label);
+  AppendMenuW(g_tray_menu,
+              MF_STRING | (g_close_to_tray ? MF_CHECKED : MF_UNCHECKED),
+              kTrayCloseToTray, close_label);
+  AppendMenuW(g_tray_menu, MF_SEPARATOR, 0, nullptr);
+  AppendMenuW(g_tray_menu, MF_STRING, kTrayQuit, quit_label);
+  SetMenuDefaultItem(g_tray_menu, kTrayShow, FALSE);
   POINT point;
   GetCursorPos(&point);
   SetForegroundWindow(g_window);
   TrackPopupMenu(g_tray_menu, TPM_RIGHTBUTTON, point.x, point.y, 0, g_window,
                  nullptr);
+  DestroyMenu(g_tray_menu);
+  g_tray_menu = nullptr;
 }
 
 LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
@@ -1380,10 +1660,24 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
       return 0;
     }
     case WM_COMMAND:
-      if (LOWORD(wparam) == 1) show_main_window();
-      else if (LOWORD(wparam) == 2) {
-        g_quitting = true;
-        DestroyWindow(window);
+      switch (LOWORD(wparam)) {
+        case kTrayShow:
+          show_main_window();
+          break;
+        case kTrayQuit:
+          request_quit();
+          break;
+        case kTrayCopyId:
+          copy_device_id();
+          break;
+        case kTrayAutostart:
+          set_autostart(!g_autostart);
+          break;
+        case kTrayCloseToTray:
+          set_close_to_tray(!g_close_to_tray);
+          break;
+        default:
+          break;
       }
       return 0;
     case WM_APP + 1:
@@ -1391,11 +1685,14 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
       else if (lparam == WM_RBUTTONUP) show_tray_menu();
       return 0;
     case WM_CLOSE:
-      if (g_url_mode) {
+      if (g_url_mode || g_quitting) {
         DestroyWindow(window);
+      } else if (g_close_to_tray) {
+        minimize_to_tray();
       } else {
-        ShowWindow(window, SW_HIDE);
-        add_tray_icon();
+        log_tray("quit");
+        g_quitting = true;
+        DestroyWindow(window);
       }
       return 0;
     case WM_TIMER:
@@ -1415,7 +1712,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
       if ((GetKeyState(VK_CONTROL) & 0x8000) != 0 &&
           (GetKeyState(VK_SHIFT) & 0x8000) != 0 &&
           (wparam == 'Q' || wparam == 'q')) {
-        DestroyWindow(window);
+        request_quit();
         return 0;
       }
       break;
@@ -1516,7 +1813,8 @@ class environment_options final : public ICoreWebView2EnvironmentOptions {
 int run(HINSTANCE instance) {
   CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
-  if (!g_url_mode && !g_smoke && !g_standalone && focus_running_instance()) {
+  if (!g_url_mode && !g_smoke && !g_standalone &&
+      focus_running_instance(!g_start_hidden)) {
     CoUninitialize();
     return 0;
   }
@@ -1617,6 +1915,7 @@ int run(HINSTANCE instance) {
   }
 
   g_core_tls = tls;
+  g_active_port = port;
   const std::wstring host = ui_host_w();
   const std::wstring authority = url_host_w(host);
   const std::wstring scheme = g_core_tls ? L"https://" : L"http://";
@@ -1740,8 +2039,17 @@ int run(HINSTANCE instance) {
     }
   }
 
-  ShowWindow(g_window, SW_SHOW);
-  UpdateWindow(g_window);
+  refresh_tray_settings();
+  if (g_start_hidden && !g_url_mode && !g_smoke) {
+    // Login launch: the window and the WebView exist, but the window is never
+    // mapped. The core keeps listening and the tray is the only entry point.
+    add_tray_icon();
+    maybe_show_tray_balloon();
+    log_tray("hide");
+  } else {
+    ShowWindow(g_window, SW_SHOW);
+    UpdateWindow(g_window);
+  }
   if (g_smoke) SetTimer(g_window, 1, 15000, nullptr);
 
   MSG message{};
@@ -1792,6 +2100,9 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int) {
         const std::wstring surface_path = argv[++i];
         LocalFree(argv);
         return run_surface_window(surface_path);
+      } else if (wcscmp(argv[i], L"--tray") == 0) {
+        // Autostart/login launch: stay in the notification area.
+        g_start_hidden = true;
       }
     }
     LocalFree(argv);
