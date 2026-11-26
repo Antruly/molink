@@ -30,7 +30,7 @@ param(
   # Win7 x86).
   [switch]$NativeOnly = $false,
   [string]$Repo = "",
-  [string]$Version = "0.12.27",
+  [string]$Version = "0.12.28",
   [string]$Out = ""
 )
 
