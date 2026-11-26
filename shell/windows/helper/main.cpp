@@ -12,9 +12,11 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <wtsapi32.h>
+#include <userenv.h>
 #include <sddl.h>
 
 #include <atomic>
+#include <algorithm>
 #include <fstream>
 #include <functional>
 #include <thread>
@@ -27,6 +29,7 @@
 
 #include "core_supervisor.h"
 #include "service_paths.h"
+#include "terminal/helper_protocol.h"
 
 namespace {
 
@@ -69,7 +72,7 @@ static_assert(kWTSLocked != kWTSUnlocked, "lock and unlock must differ");
 // the calling thread, and a shared handle made the input thread believe it had
 // already switched when the capture thread changed desktops.
 thread_local HDESK g_desktop = nullptr;
-constexpr wchar_t kPipeName[] = L"\\\\.\\pipe\\molink-secure";
+const wchar_t* const kPipeName = molink::terminal_bridge::kPipeName;
 constexpr wchar_t kInputPipeName[] = L"\\\\.\\pipe\\molink-secure-input";
 
 /// The service that launched us passes `--name <service>`; without it the
@@ -536,6 +539,404 @@ std::string handle_line(const std::string& line, std::vector<uint8_t>& frame,
   return R"({"ok":false,"error":"unknown command"})";
 }
 
+// ---- terminal bridge -------------------------------------------------------
+//
+// A service-hosted core cannot start a shell as the console user: its own
+// token belongs to the service account. The helper already runs in the
+// interactive session and has SeTcbPrivilege, so it does the spawn with
+// WTSQueryUserToken and forwards PTY bytes over this same pipe.
+//
+// ConPTY is resolved at runtime instead of linked: the Win7 x86 helper must
+// still load on Windows 7, where kernel32 has no CreatePseudoConsole export.
+// A static import would make the whole helper fail to start there.
+#ifndef PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE
+// ProcThreadAttributeValue(22, FALSE, TRUE, FALSE)
+#define PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE 0x00020016
+#endif
+
+using create_pseudo_console_fn =
+    HRESULT(WINAPI*)(COORD, HANDLE, HANDLE, DWORD, HANDLE*);
+using resize_pseudo_console_fn = HRESULT(WINAPI*)(HANDLE, COORD);
+using close_pseudo_console_fn = VOID(WINAPI*)(HANDLE);
+
+struct conpty_api {
+  create_pseudo_console_fn create = nullptr;
+  resize_pseudo_console_fn resize = nullptr;
+  close_pseudo_console_fn close = nullptr;
+};
+
+const conpty_api* conpty_api_instance() {
+  static const conpty_api api = [] {
+    conpty_api found;
+    HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
+    if (kernel == nullptr) return found;
+    found.create = reinterpret_cast<create_pseudo_console_fn>(
+        GetProcAddress(kernel, "CreatePseudoConsole"));
+    found.resize = reinterpret_cast<resize_pseudo_console_fn>(
+        GetProcAddress(kernel, "ResizePseudoConsole"));
+    found.close = reinterpret_cast<close_pseudo_console_fn>(
+        GetProcAddress(kernel, "ClosePseudoConsole"));
+    return found;
+  }();
+  if (api.create == nullptr || api.resize == nullptr ||
+      api.close == nullptr) {
+    return nullptr;
+  }
+  return &api;
+}
+
+int clamp_terminal_dimension(int value, int fallback) {
+  if (value <= 0) return fallback;
+  if (value > 1000) return 1000;
+  return value;
+}
+
+std::wstring widen_utf8(const std::string& text) {
+  if (text.empty()) return std::wstring();
+  const int length = static_cast<int>(text.size());
+  const int needed =
+      MultiByteToWideChar(CP_UTF8, 0, text.data(), length, nullptr, 0);
+  if (needed <= 0) return std::wstring();
+  std::wstring out(static_cast<std::size_t>(needed), L'\0');
+  MultiByteToWideChar(CP_UTF8, 0, text.data(), length, out.data(), needed);
+  return out;
+}
+
+std::string utf8(const std::wstring& text) { return utf8(text.c_str()); }
+
+/// Look a name up in a CreateEnvironmentBlock block. The block is a sequence
+/// of NUL-terminated "NAME=VALUE" strings ended by a second NUL.
+std::wstring environment_value(void* environment, const wchar_t* name) {
+  if (environment == nullptr) return std::wstring();
+  const auto* entry = static_cast<const wchar_t*>(environment);
+  const std::size_t length = wcslen(name);
+  while (*entry != L'\0') {
+    if (_wcsnicmp(entry, name, length) == 0 && entry[length] == L'=') {
+      return std::wstring(entry + length + 1);
+    }
+    entry += wcslen(entry) + 1;
+  }
+  return std::wstring();
+}
+
+std::wstring wts_string(DWORD session, WTS_INFO_CLASS info) {
+  LPWSTR buffer = nullptr;
+  DWORD bytes = 0;
+  if (!WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, session, info,
+                                   &buffer, &bytes) ||
+      buffer == nullptr || bytes == 0) {
+    return std::wstring();
+  }
+  std::wstring value(buffer);
+  WTSFreeMemory(buffer);
+  return value;
+}
+
+void terminal_reply(HANDLE pipe, const std::string& text) {
+  DWORD written = 0;
+  WriteFile(pipe, text.data(), static_cast<DWORD>(text.size()), &written,
+            nullptr);
+}
+
+void terminal_error(HANDLE pipe, const char* reason,
+                    const std::string& message) {
+  log_line(std::string("term.open failed reason=") + reason + " " + message);
+  terminal_reply(pipe,
+                 std::string(molink::terminal_bridge::kErrorPrefix) + "reason=" +
+                     reason + " message=" + message);
+}
+
+void put_u32(unsigned char* out, std::uint32_t value) {
+  out[0] = static_cast<unsigned char>(value & 0xff);
+  out[1] = static_cast<unsigned char>((value >> 8) & 0xff);
+  out[2] = static_cast<unsigned char>((value >> 16) & 0xff);
+  out[3] = static_cast<unsigned char>((value >> 24) & 0xff);
+}
+
+std::uint32_t get_u32(const unsigned char* in) {
+  return static_cast<std::uint32_t>(in[0]) |
+         (static_cast<std::uint32_t>(in[1]) << 8) |
+         (static_cast<std::uint32_t>(in[2]) << 16) |
+         (static_cast<std::uint32_t>(in[3]) << 24);
+}
+
+/// Serve one `term-open` connection: start the shell as the console user, then
+/// pump ConPTY bytes until the shell exits or the core disconnects.
+void serve_terminal(HANDLE pipe, const std::string& request) {
+  const std::size_t prefix_len = std::strlen(molink::terminal_bridge::kOpenPrefix);
+  const std::string rest = request.substr(
+      request.size() > prefix_len ? prefix_len : request.size());
+  int cols = 0;
+  int rows = 0;
+  int consumed = 0;
+  if (std::sscanf(rest.c_str(), " %d %d%n", &cols, &rows, &consumed) != 2) {
+    terminal_error(pipe, "bad_request", "expected term-open <cols> <rows>");
+    return;
+  }
+  std::string shell;
+  if (consumed > 0 && static_cast<std::size_t>(consumed) < rest.size()) {
+    shell = rest.substr(static_cast<std::size_t>(consumed));
+    if (!shell.empty() && shell[0] == ' ') shell.erase(0, 1);
+  }
+  cols = clamp_terminal_dimension(cols, 80);
+  rows = clamp_terminal_dimension(rows, 24);
+
+  const conpty_api* api = conpty_api_instance();
+  if (api == nullptr) {
+    terminal_error(pipe, "terminal_unavailable",
+                   "ConPTY requires Windows 10 1809 or newer");
+    return;
+  }
+
+  const DWORD session = WTSGetActiveConsoleSessionId();
+  if (session == 0xFFFFFFFF) {
+    terminal_error(pipe, "no_active_session", "no active console session");
+    return;
+  }
+  HANDLE token = nullptr;
+  if (!WTSQueryUserToken(session, &token)) {
+    terminal_error(pipe, "no_session_user",
+                   "WTSQueryUserToken failed error=" +
+                       std::to_string(GetLastError()));
+    return;
+  }
+
+  void* environment = nullptr;
+  if (!CreateEnvironmentBlock(&environment, token, FALSE)) {
+    log_line("term.open environment unavailable error=" +
+             std::to_string(GetLastError()));
+    environment = nullptr;
+  }
+  std::wstring comspec = environment_value(environment, L"ComSpec");
+  if (comspec.empty()) comspec = L"cmd.exe";
+  const std::wstring workdir = environment_value(environment, L"USERPROFILE");
+
+  std::wstring application;
+  std::wstring command_line;
+  if (shell.empty()) {
+    application = comspec;
+    command_line = L"\"" + comspec + L"\"";
+  } else {
+    command_line = widen_utf8(shell);
+    if (command_line.empty()) {
+      terminal_error(pipe, "bad_request", "shell command is not valid UTF-8");
+      if (environment != nullptr) DestroyEnvironmentBlock(environment);
+      CloseHandle(token);
+      return;
+    }
+  }
+
+  HANDLE in_read = nullptr;
+  HANDLE in_write = nullptr;
+  HANDLE out_read = nullptr;
+  HANDLE out_write = nullptr;
+  auto close_handle = [](HANDLE& value) {
+    if (value != nullptr) {
+      CloseHandle(value);
+      value = nullptr;
+    }
+  };
+  if (!CreatePipe(&in_read, &in_write, nullptr, 0) ||
+      !CreatePipe(&out_read, &out_write, nullptr, 0)) {
+    terminal_error(pipe, "spawn_failed",
+                   "CreatePipe failed error=" +
+                       std::to_string(GetLastError()));
+    close_handle(in_read);
+    close_handle(in_write);
+    close_handle(out_read);
+    close_handle(out_write);
+    if (environment != nullptr) DestroyEnvironmentBlock(environment);
+    CloseHandle(token);
+    return;
+  }
+
+  HANDLE pc = nullptr;
+  const COORD size = {static_cast<SHORT>(cols), static_cast<SHORT>(rows)};
+  const HRESULT console_created =
+      api->create(size, in_read, out_write, 0, &pc);
+  if (FAILED(console_created) || pc == nullptr) {
+    terminal_error(pipe, "spawn_failed",
+                   "CreatePseudoConsole failed hr=" +
+                       std::to_string(static_cast<long long>(console_created)));
+    close_handle(in_read);
+    close_handle(in_write);
+    close_handle(out_read);
+    close_handle(out_write);
+    if (environment != nullptr) DestroyEnvironmentBlock(environment);
+    CloseHandle(token);
+    return;
+  }
+  // The pseudoconsole keeps its own references to these two.
+  close_handle(in_read);
+  close_handle(out_write);
+
+  SIZE_T attribute_bytes = 0;
+  InitializeProcThreadAttributeList(nullptr, 1, 0, &attribute_bytes);
+  std::vector<unsigned char> attribute_storage(attribute_bytes);
+  auto* attributes = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(
+      attribute_storage.data());
+  bool attributes_ready =
+      attribute_bytes != 0 &&
+      InitializeProcThreadAttributeList(attributes, 1, 0, &attribute_bytes) != 0;
+  if (attributes_ready &&
+      !UpdateProcThreadAttribute(attributes, 0,
+                                 PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, pc,
+                                 sizeof(pc), nullptr, nullptr)) {
+    DeleteProcThreadAttributeList(attributes);
+    attributes_ready = false;
+  }
+
+  STARTUPINFOEXW startup = {};
+  startup.StartupInfo.cb = sizeof(startup);
+  startup.lpAttributeList = attributes;
+  PROCESS_INFORMATION process_info = {};
+  std::vector<wchar_t> mutable_command(command_line.begin(),
+                                       command_line.end());
+  mutable_command.push_back(L'\0');
+  DWORD flags = EXTENDED_STARTUPINFO_PRESENT;
+  if (environment != nullptr) flags |= CREATE_UNICODE_ENVIRONMENT;
+  BOOL created = FALSE;
+  DWORD spawn_error = ERROR_INVALID_PARAMETER;
+  if (attributes_ready) {
+    created = CreateProcessAsUserW(
+        token,
+        application.empty() ? nullptr : application.c_str(),
+        mutable_command.data(), nullptr, nullptr, FALSE, flags, environment,
+        workdir.empty() ? nullptr : workdir.c_str(), &startup.StartupInfo,
+        &process_info);
+    spawn_error = GetLastError();
+    DeleteProcThreadAttributeList(attributes);
+  }
+  if (!created) {
+    terminal_error(pipe, "spawn_failed",
+                   "CreateProcessAsUser failed error=" +
+                       std::to_string(spawn_error));
+    close_handle(in_write);
+    close_handle(out_read);
+    if (pc != nullptr) api->close(pc);
+    if (environment != nullptr) DestroyEnvironmentBlock(environment);
+    CloseHandle(token);
+    return;
+  }
+  CloseHandle(process_info.hThread);
+  if (environment != nullptr) DestroyEnvironmentBlock(environment);
+  CloseHandle(token);
+
+  std::wstring display_user = wts_string(session, WTSUserName);
+  const std::wstring domain = wts_string(session, WTSDomainName);
+  if (!domain.empty() && !display_user.empty()) {
+    display_user = domain + L"\\" + display_user;
+  }
+  const std::string user_text = display_user.empty() ? "?" : utf8(display_user);
+  log_line("term.open backend=helper user=" + user_text +
+           " session=" + std::to_string(session) +
+           " pid=" + std::to_string(process_info.dwProcessId));
+  terminal_reply(pipe, std::string(molink::terminal_bridge::kOkPrefix) +
+                           "pid=" + std::to_string(process_info.dwProcessId) +
+                           " session=" + std::to_string(session) +
+                           " user=" + user_text);
+
+  std::atomic<bool> stop{false};
+  std::thread input_thread([&] {
+    std::vector<char> buffer(64 * 1024);
+    while (!stop.load()) {
+      DWORD read = 0;
+      const BOOL ok = ReadFile(pipe, buffer.data(),
+                               static_cast<DWORD>(buffer.size()), &read,
+                               nullptr);
+      if (!ok || read == 0) {
+        // The core went away (or the message was malformed): the shell must
+        // not outlive the terminal tab.
+        if (!stop.load()) TerminateProcess(process_info.hProcess, 0);
+        break;
+      }
+      const auto* bytes = reinterpret_cast<const unsigned char*>(buffer.data());
+      const auto kind = static_cast<molink::terminal_bridge::to_helper>(bytes[0]);
+      if (kind == molink::terminal_bridge::to_helper::input) {
+        if (read > 1) {
+          DWORD written = 0;
+          WriteFile(in_write, buffer.data() + 1, read - 1, &written, nullptr);
+        }
+      } else if (kind == molink::terminal_bridge::to_helper::resize) {
+        if (read >= 1 + molink::terminal_bridge::kResizePayload) {
+          const COORD new_size = {
+              static_cast<SHORT>(get_u32(bytes + 1)),
+              static_cast<SHORT>(get_u32(bytes + 5))};
+          api->resize(pc, new_size);
+        }
+      } else if (kind == molink::terminal_bridge::to_helper::close) {
+        TerminateProcess(process_info.hProcess, 0);
+        break;
+      }
+    }
+  });
+
+  std::vector<unsigned char> frame(
+      1 + molink::terminal_bridge::kMaxFramePayload);
+  for (;;) {
+    DWORD available = 0;
+    if (!PeekNamedPipe(out_read, nullptr, 0, nullptr, &available, nullptr)) {
+      break;
+    }
+    if (available != 0) {
+      const DWORD chunk = static_cast<DWORD>((std::min)(
+          static_cast<std::size_t>(available),
+          molink::terminal_bridge::kMaxFramePayload));
+      DWORD read = 0;
+      if (!ReadFile(out_read, frame.data() + 1, chunk, &read, nullptr) ||
+          read == 0) {
+        break;
+      }
+      frame[0] = static_cast<unsigned char>(
+          molink::terminal_bridge::from_helper::output);
+      DWORD written = 0;
+      if (!WriteFile(pipe, frame.data(), read + 1, &written, nullptr)) {
+        TerminateProcess(process_info.hProcess, 0);
+        break;
+      }
+      continue;
+    }
+    if (WaitForSingleObject(process_info.hProcess, 0) == WAIT_OBJECT_0) {
+      // Let the pseudoconsole flush its last bytes before reporting exit.
+      bool pending = false;
+      for (int attempt = 0; attempt < 20; ++attempt) {
+        DWORD left = 0;
+        if (PeekNamedPipe(out_read, nullptr, 0, nullptr, &left, nullptr) &&
+            left != 0) {
+          pending = true;
+          break;
+        }
+        Sleep(5);
+      }
+      if (!pending) break;
+      continue;
+    }
+    Sleep(5);
+  }
+
+  stop.store(true);
+  // Wake the input thread out of ReadFile(pipe).
+  CancelSynchronousIo(input_thread.native_handle());
+  input_thread.join();
+
+  DWORD exit_code = 0;
+  if (!GetExitCodeProcess(process_info.hProcess, &exit_code)) exit_code = 1;
+  unsigned char exit_frame[1 + molink::terminal_bridge::kExitPayload] = {};
+  exit_frame[0] =
+      static_cast<unsigned char>(molink::terminal_bridge::from_helper::exit);
+  put_u32(exit_frame + 1, static_cast<std::uint32_t>(exit_code));
+  DWORD written = 0;
+  WriteFile(pipe, exit_frame, static_cast<DWORD>(sizeof(exit_frame)), &written,
+            nullptr);
+
+  log_line("term.close pid=" + std::to_string(process_info.dwProcessId) +
+           " code=" + std::to_string(exit_code));
+  CloseHandle(process_info.hProcess);
+  close_handle(in_write);
+  close_handle(out_read);
+  if (pc != nullptr) api->close(pc);
+}
+
 void pipe_loop(std::atomic<bool>& running) {
   SECURITY_ATTRIBUTES attributes{};
   attributes.nLength = sizeof(attributes);
@@ -550,7 +951,7 @@ void pipe_loop(std::atomic<bool>& running) {
     // see the secure desktop.
     HANDLE pipe = CreateNamedPipeW(
         kPipeName, PIPE_ACCESS_DUPLEX,
-        PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT, 8,
+        PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT, 16,
         64 * 1024 * 1024, 64 * 1024 * 1024, 0, &attributes);
     if (pipe == INVALID_HANDLE_VALUE) {
       Sleep(500);
@@ -577,14 +978,26 @@ void pipe_loop(std::atomic<bool>& running) {
         } else {
           buffer[read] = '\0';
           const std::string command(buffer.data(), read);
-          int width = 0;
-          int height = 0;
-          const std::string reply = handle_line(command, frame, width, height);
-          DWORD written = 0;
-          if (!WriteFile(pipe, reply.data(), static_cast<DWORD>(reply.size()),
-                         &written, nullptr)) {
-            log_line("pipe write failed: " + std::to_string(GetLastError()) +
-                     " bytes=" + std::to_string(reply.size()));
+          // A terminal session owns the connection for its whole lifetime
+          // instead of replying once and disconnecting.
+          const std::string open_prefix =
+              std::string(molink::terminal_bridge::kOpenPrefix) + " ";
+          std::string reply;
+          if (command == molink::terminal_bridge::kOpenPrefix ||
+              command.rfind(open_prefix, 0) == 0) {
+            serve_terminal(pipe, command);
+          } else {
+            int width = 0;
+            int height = 0;
+            reply = handle_line(command, frame, width, height);
+            DWORD written = 0;
+            if (!WriteFile(pipe, reply.data(),
+                           static_cast<DWORD>(reply.size()), &written,
+                           nullptr)) {
+              log_line("pipe write failed: " +
+                       std::to_string(GetLastError()) +
+                       " bytes=" + std::to_string(reply.size()));
+            }
           }
           // DisconnectNamedPipe discards messages the client has not read yet.
           // Flush waits for the read to drain, so the reply is never lost.
