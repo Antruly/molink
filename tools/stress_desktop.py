@@ -17,9 +17,15 @@ def fetch_code(port: int) -> str:
         return json.loads(reply.read())["code"]["value"]
 
 
+RESUME = {"token": ""}
+
+
 async def cycle(port: int, token: str) -> str:
+    # 第一次用一次性验证码，之后用服务端回的 session_token —— 一次性码只能花一次，
+    # 拿它循环会被判 unauthorized，看起来像稳定性问题。
+    use = RESUME["token"] or token
     async with websockets.connect(
-        f"ws://127.0.0.1:{port}/ws/session?token={token}", max_size=None, open_timeout=5
+        f"ws://127.0.0.1:{port}/ws/session?token={use}", max_size=None, open_timeout=5
     ) as ws:
         await ws.send(
             json.dumps(
@@ -47,6 +53,8 @@ async def cycle(port: int, token: str) -> str:
                     break
             else:
                 data = json.loads(message)
+                if data.get("type") == "welcome" and data.get("session_token"):
+                    RESUME["token"] = data["session_token"]
                 if data.get("type") == "error":
                     return data.get("code", "error")
         ws.transport.abort()  # abrupt: no close frame, just RST
