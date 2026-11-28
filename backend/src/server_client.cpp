@@ -144,6 +144,28 @@ std::string credentials_path() {
   return (std::filesystem::path(dir) / "server.json").string();
 }
 
+/// Per-thread HTTP client cache. Every `uvcpp_http_client` owns its own uv
+/// loop, and the heartbeat used to build and tear one down (loop included) for
+/// every request. The client and its TLS context are kept until the thread
+/// exits and rebuilt only when the endpoint changes.
+///
+/// The context is declared before the client because the client keeps a raw
+/// pointer to it: members are destroyed in reverse order, so the client goes
+/// first (issue #56).
+struct cached_http_client {
+#if UVCPP_OPENSSL_ENABLE
+  uvcpp::uvcpp_ssl_context tls_context{uvcpp::tls_mode::CLIENT};
+#endif
+  uvcpp::uvcpp_http_client client;
+  std::string host;
+  int port = 0;
+  bool tls = false;
+#if UVCPP_OPENSSL_ENABLE
+  std::string ca_path;
+#endif
+  bool configured = false;
+};
+
 }  // namespace
 
 server_client::server_client(std::shared_ptr<auth_state> auth,
@@ -911,37 +933,66 @@ bool server_client::request(bool post_method, const std::string& base_url,
   if (!query.empty()) target += "?" + query;
 
 #if UVCPP_OPENSSL_ENABLE
-  // The HTTP client keeps a raw pointer to this context. Declare it first so
-  // the client is destroyed first; the other order frees the context before
-  // ~uvcpp_http_client runs and has crashed intermittently.
-  uvcpp::uvcpp_ssl_context tls_context(uvcpp::tls_mode::CLIENT);
-#endif
-  uvcpp::uvcpp_http_client client;
-#if UVCPP_OPENSSL_ENABLE
-  if (parsed.tls) {
-    const std::string ca_path =
-        auth_ ? effective_server_ca(auth_->settings()) : std::string();
-    tls_context.set_verify_mode(uvcpp::tls_verify_mode::PEER_STRICT);
-    if (!ca_path.empty() && !tls_context.load_ca_file(ca_path)) {
-      error = "could not load the server CA file";
-      return false;
-    }
-    client.set_ssl_context(&tls_context);
-  }
+  const std::string ca_path =
+      parsed.tls && auth_ ? effective_server_ca(auth_->settings())
+                          : std::string();
 #else
   if (parsed.tls) {
     error = "this build has no TLS support; use an http:// server URL";
     return false;
   }
 #endif
-  if (client.connect_wait(parsed.host.c_str(), parsed.port, kHttpTimeoutMs) !=
-      0) {
+
+  // One client per thread, alive until the thread ends. libuvcpp's client is
+  // not safe to drive from two threads at once, which the http_mutex_ above
+  // also guarantees; the cache is worth it because each client brings its own
+  // uv loop, and heartbeat failures used to build and destroy one per retry.
+  thread_local std::unique_ptr<cached_http_client> cached;
+
+  const auto matches_endpoint = [&](const cached_http_client& candidate) {
+    if (!candidate.configured || candidate.host != parsed.host ||
+        candidate.port != parsed.port || candidate.tls != parsed.tls) {
+      return false;
+    }
+#if UVCPP_OPENSSL_ENABLE
+    // A settings change can swap the CA file; reload it with a fresh context.
+    if (candidate.ca_path != ca_path) return false;
+#endif
+    return true;
+  };
+
+  const auto configure = [&](cached_http_client& candidate) {
+    candidate.host = parsed.host;
+    candidate.port = parsed.port;
+    candidate.tls = parsed.tls;
+#if UVCPP_OPENSSL_ENABLE
+    candidate.ca_path = ca_path;
+    if (parsed.tls) {
+      candidate.tls_context.set_verify_mode(
+          uvcpp::tls_verify_mode::PEER_STRICT);
+      if (!ca_path.empty() &&
+          !candidate.tls_context.load_ca_file(ca_path)) {
+        error = "could not load the server CA file";
+        return false;
+      }
+      candidate.client.set_ssl_context(&candidate.tls_context);
+    }
+#endif
+    candidate.configured = true;
+    return true;
+  };
+
+  const auto connect_client = [&](cached_http_client& candidate) {
+    if (candidate.client.connect_wait(parsed.host.c_str(), parsed.port,
+                                      kHttpTimeoutMs) == 0) {
+      return true;
+    }
 #if UVCPP_OPENSSL_ENABLE
     if (parsed.tls) {
       // Surface the TLS reason: "could not connect" alone cannot tell a
       // reachability problem from a certificate/handshake failure.
-      const std::string verify = client.peer_verify_error();
-      const int code = client.get_last_error();
+      const std::string verify = candidate.client.peer_verify_error();
+      const int code = candidate.client.get_last_error();
       if (!verify.empty()) {
         error = "could not connect to the server: " + verify;
       } else if (code != 0) {
@@ -957,7 +1008,32 @@ bool server_client::request(bool post_method, const std::string& base_url,
     error = "could not connect to the server";
 #endif
     return false;
+  };
+
+  // A connected keep-alive connection can carry the next request. Anything
+  // else needs a new client: libuvcpp's client owns exactly one TCP handle and
+  // cannot reconnect it once it closed (UV_EALREADY), so a dead idle connection
+  // forces a rebuild. That is the one exception to "rebuild only when the URL
+  // changes". Exactly one request is sent per call; a failed write is reported
+  // to the caller rather than retried, so non-idempotent POSTs (a domain
+  // rotate, a signaling create) are never delivered twice.
+  const bool reuse_connection =
+      cached && matches_endpoint(*cached) &&
+      cached->client.has_status(uvcpp::HTTP_CLIENT_CONNECTED);
+  if (!reuse_connection) {
+    // Rebuild when the endpoint changed, when this is the thread's first
+    // request, or when the previous keep-alive connection is gone.
+    cached.reset(new cached_http_client());
+    if (!configure(*cached)) {
+      cached.reset();
+      return false;
+    }
+    if (!connect_client(*cached)) {
+      cached.reset();
+      return false;
+    }
   }
+
   auto outgoing = post_method
                       ? uvcpp::uvcpp_http_request::make_post(
                             target.c_str(), payload.c_str(), payload.size(),
@@ -967,14 +1043,17 @@ bool server_client::request(bool post_method, const std::string& base_url,
   int rc = 0;
 #if UVCPP_OPENSSL_ENABLE
   if (parsed.tls) {
-    rc = client.send_wait_ssl(outgoing, response, kHttpTimeoutMs);
+    rc = cached->client.send_wait_ssl(outgoing, response, kHttpTimeoutMs);
   } else {
-    rc = client.send_wait(outgoing, response, kHttpTimeoutMs);
+    rc = cached->client.send_wait(outgoing, response, kHttpTimeoutMs);
   }
 #else
-  rc = client.send_wait(outgoing, response, kHttpTimeoutMs);
+  rc = cached->client.send_wait(outgoing, response, kHttpTimeoutMs);
 #endif
   if (rc != 0) {
+    // Drop the cached client: after a failed request libuvcpp's handle cannot
+    // be reconnected, and the next request starts from a clean context.
+    cached.reset();
     error = "server request failed (" + std::to_string(rc) + ")";
     return false;
   }

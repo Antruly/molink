@@ -217,6 +217,7 @@ endif()
 
 set(MOLINK_CORE_SOURCES
   src/main.cpp
+  src/crash_dump.cpp
   src/api.cpp
   src/chat_hub.cpp
   src/directory_listing.cpp
@@ -633,7 +634,9 @@ if(MOLINK_BUILD_CORE)
       # The Windows terminal bridge compares this process with the console
       # session user (WTSQuerySessionInformation) before deciding that a
       # direct ConPTY is safe.
-      wtsapi32)
+      wtsapi32
+      # MiniDumpWriteDump for the in-process crash dump.
+      dbghelp)
     if(MINGW)
       # WASAPI format GUIDs (KSDATAFORMAT_SUBTYPE_*) live in ksguid on MinGW;
       # MSVC pulls them in through the SDK's default libraries.
@@ -839,6 +842,31 @@ foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
     "RUNTIME_OUTPUT_DIRECTORY_${uvp_config_upper}" "${CMAKE_BINARY_DIR}")
 endforeach()
 add_test(NAME settings COMMAND molink-core-settings-test)
+
+# In-process crash dump: a forked child raises SIGSEGV and the installed
+# handler must leave a non-empty report with the signal name and raw frame
+# addresses. Windows has no fork; the test prints a skip reason and exits 77.
+add_executable(molink-core-crash-dump-test
+  tests/crash_dump_test.cpp
+  src/crash_dump.cpp
+)
+target_include_directories(molink-core-crash-dump-test PRIVATE src)
+if(WIN32)
+  target_link_libraries(molink-core-crash-dump-test PRIVATE dbghelp)
+endif()
+if(MINGW AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
+   CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)
+  target_link_libraries(molink-core-crash-dump-test PRIVATE stdc++fs)
+endif()
+set_target_properties(molink-core-crash-dump-test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+foreach(uvp_config ${CMAKE_CONFIGURATION_TYPES})
+  string(TOUPPER "${uvp_config}" uvp_config_upper)
+  set_target_properties(molink-core-crash-dump-test PROPERTIES
+    "RUNTIME_OUTPUT_DIRECTORY_${uvp_config_upper}" "${CMAKE_BINARY_DIR}")
+endforeach()
+add_test(NAME crash_dump COMMAND molink-core-crash-dump-test)
+set_tests_properties(crash_dump PROPERTIES SKIP_RETURN_CODE 77)
 
 # Storage root for received files: default per platform, device/date layout,
 # unique names, and the validation /api/settings applies before persisting.
