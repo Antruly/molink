@@ -23,7 +23,7 @@ permissions:
 # artifacts, using the version in backend/src/version.h. Without this, manual
 # runs produced packages named after the branch ("main").
 env:
-  PKG_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '0.12.31' }}
+  PKG_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '0.12.32' }}
 
 # Linux and Windows download the prebuilt libuvcpp archive (UVCPP_VERSION,
 # default 1.8.7); macOS has no prebuilt asset yet and builds it from the
@@ -263,7 +263,7 @@ jobs:
         shell: bash
         env:
           UVCPP_VERSION: ${{ vars.UVCPP_VERSION }}
-        run: ./packaging/fetch-uvcpp.sh msvc-x64 "${UVCPP_VERSION:-1.11.0}" "$RUNNER_TEMP/uvcpp"
+        run: ./packaging/fetch-uvcpp.sh msvc-x64 "${UVCPP_VERSION:-1.12.0}" "$RUNNER_TEMP/uvcpp"
 
       # The archive ships zlib.h (libuvcpp's public headers include it) but no
       # zlib library, and molink compresses tiles itself. Build a static zlib

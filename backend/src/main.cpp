@@ -35,6 +35,7 @@
 #include "clipboard/clipboard.h"
 #include "clipboard_lazy.h"
 #include "config.h"
+#include "crash_dump.h"
 #include "surface/frame_surface.h"
 #include "diag_log.h"
 #include "display/session_type.h"
@@ -128,72 +129,15 @@ void on_signal(int signal_number) {
   note_exit_reason(exit_reason::signal);
 }
 
-#if !defined(_WIN32)
-/// A pre-opened diagnostic file for the fatal-signal handler. diag() uses
-/// mutexes and stdio and cannot run there; write(2) on this descriptor can.
-int g_crash_fd = -1;
-
-void refresh_crash_log() {
-  try {
-    const auto epoch_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                              std::chrono::system_clock::now().time_since_epoch())
-                              .count();
-    const std::string path =
-        molink::default_diag_directory() + "/" +
-        molink::diag_log::file_name_for_day(epoch_ms);
-    std::error_code ec;
-    std::filesystem::create_directories(
-        std::filesystem::path(path).parent_path(), ec);
-    const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
-    if (fd < 0) return;
-    const int previous = g_crash_fd;
-    g_crash_fd = fd;
-    if (previous >= 0) ::close(previous);
-  } catch (...) {
-  }
+/// Today's diagnostic file. The crash handler receives it at startup and again
+/// once a day, so its app.crash line lands on the current day's timeline.
+std::string current_diag_file() {
+  const auto epoch_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::system_clock::now().time_since_epoch())
+                            .count();
+  return molink::default_diag_directory() + "/" +
+         molink::diag_log::file_name_for_day(epoch_ms);
 }
-
-/// Async-signal-safe integer append (no stdio, no allocation).
-void append_int(char*& cursor, char* end, unsigned value) {
-  char digits[16] = {};
-  int count = 0;
-  do {
-    digits[count++] = static_cast<char>('0' + (value % 10));
-    value /= 10;
-  } while (value != 0 && count < static_cast<int>(sizeof(digits)));
-  while (count > 0 && cursor < end) *cursor++ = digits[--count];
-}
-
-void write_crash_line(int signal_number) {
-  if (g_crash_fd < 0) return;
-  char line[96] = {};
-  char* cursor = line;
-  char* end = line + sizeof(line) - 2;
-  const char prefix[] = "app.exit reason=signal code=";
-  for (const char* p = prefix; *p != '\0' && cursor < end; ++p) {
-    *cursor++ = *p;
-  }
-  append_int(cursor, end, static_cast<unsigned>(signal_number));
-  if (cursor < end) *cursor++ = '\n';
-  const std::size_t length = static_cast<std::size_t>(cursor - line);
-  std::size_t written = 0;
-  while (written < length) {
-    const ssize_t n = ::write(g_crash_fd, line + written, length - written);
-    if (n <= 0) break;
-    written += static_cast<std::size_t>(n);
-  }
-}
-
-void on_fatal_signal(int signal_number) {
-  note_exit_reason(exit_reason::exception);
-  g_stop = 1;
-  write_crash_line(signal_number);
-  // Restore the default action and re-raise, so the OS still produces a core
-  // dump (and Windows Error Reporting, on that platform).
-  std::signal(signal_number, SIG_DFL);
-  std::raise(signal_number);
-}
-#endif  // !_WIN32
 
 #if defined(_WIN32)
 BOOL WINAPI on_console_ctrl(DWORD type) {
@@ -225,15 +169,6 @@ BOOL WINAPI on_console_ctrl(DWORD type) {
   return FALSE;
 }
 
-LONG WINAPI on_unhandled_exception(EXCEPTION_POINTERS* info) {
-  note_exit_reason(exit_reason::exception);
-  int code = 0;
-  if (info != nullptr && info->ExceptionRecord != nullptr) {
-    code = static_cast<int>(info->ExceptionRecord->ExceptionCode);
-  }
-  log_app_exit("exception", code);
-  return EXCEPTION_EXECUTE_HANDLER;
-}
 #endif
 
 bool process_alive(long pid) {
@@ -613,19 +548,17 @@ int main(int argc, char** argv) {
   }
 #endif
 #if defined(_WIN32)
-  // Console signals, logoff/shutdown and an unhandled C++/SEH exception all
-  // leave one app.exit line before the process disappears. Without this a
-  // core killed during a clipboard-pull left no trace at all.
+  // Console logoff/shutdown still leaves one app.exit line before the process
+  // disappears.
   SetConsoleCtrlHandler(on_console_ctrl, TRUE);
-  SetUnhandledExceptionFilter(on_unhandled_exception);
-#else
-  refresh_crash_log();
-  std::signal(SIGSEGV, on_fatal_signal);
-  std::signal(SIGABRT, on_fatal_signal);
-  std::signal(SIGFPE, on_fatal_signal);
-  std::signal(SIGILL, on_fatal_signal);
-  std::signal(SIGBUS, on_fatal_signal);
 #endif
+  // Fatal signals (POSIX) and unhandled exceptions (Windows) write an
+  // in-process crash report. The systemd coredump for our own builds is
+  // frequently unreadable (coredumpctl permission), so a SIGSEGV seen only as
+  // "uv_run in connect_wait" would otherwise leave no usable evidence.
+  install_crash_handlers(config_directory(),
+                         diag().enabled() ? current_diag_file()
+                                          : std::string());
   std::set_terminate([] {
     note_exit_reason(exit_reason::exception);
     log_app_exit("exception", 134);
@@ -639,11 +572,10 @@ int main(int argc, char** argv) {
       std::this_thread::sleep_for(std::chrono::minutes(30));
       if (g_stop) break;
       diag().cleanup_old_files();
-#if !defined(_WIN32)
-      // A long-running host crosses midnight; keep the fatal-signal log on
-      // the current day's file.
-      refresh_crash_log();
-#endif
+      // A long-running host crosses midnight; keep the crash handler's
+      // app.crash line on the current day's file.
+      set_crash_diag_file(diag().enabled() ? current_diag_file()
+                                           : std::string());
     }
   }).detach();
   auto auth = std::make_shared<auth_state>(std::move(stored_settings));
