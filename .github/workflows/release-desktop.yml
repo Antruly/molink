@@ -955,12 +955,58 @@ jobs:
             build/package/*native-portable-x86.zip
             build/package/*native-setup-x86.exe
 
+  android:
+    # The mobile shell is a plain Gradle project (mobile/android) and shares
+    # nothing with the CMake tree. It ships a **debug-signed** APK so testers
+    # can install straight from the release page; a store-signed build needs
+    # the keystore secrets (ANDROID_KEYSTORE_BASE64 / _PASSWORD, ANDROID_KEY_ALIAS,
+    # ANDROID_KEY_PASSWORD) wired into a release variant later.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: mobile/android
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Install SDK packages
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "platforms;android-34" "build-tools;34.0.0" "platform-tools" > /dev/null
+
+      - name: Assemble the APK
+        run: ./gradlew --no-daemon :app:assembleDebug
+
+      - name: Name the APK after the release
+        run: |
+          set -euo pipefail
+          ver="${PKG_VERSION#v}"
+          apk=$(ls app/build/outputs/apk/debug/*.apk | head -1)
+          out="$GITHUB_WORKSPACE/build/mobile/moLink-${ver}-android.apk"
+          mkdir -p "$(dirname "$out")"
+          cp "$apk" "$out"
+          "$ANDROID_HOME/build-tools/34.0.0/aapt2" dump badging "$out" | head -3
+          ls -lh "$out"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: moLink-android
+          if-no-files-found: error
+          path: build/mobile/*.apk
+
   release:
     # Publish once, after every builder succeeded. Each job used to attach its
     # own files, so a failed platform still left a partially populated release
     # behind (and the tag could ship without the missing assets).
     if: ${{ always() && github.ref_type == 'tag' && !failure() && !cancelled() }}
-    needs: [linux, windows, macos, win7-x86]
+    needs: [linux, windows, macos, win7-x86, android]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

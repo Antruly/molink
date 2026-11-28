@@ -81,7 +81,7 @@ coturn 或 libjuice 自带的 `juice_server`（见服务端仓库 `docs/p2p-rela
 
 ```
 molink/
-├── .github/workflows/   ci.yml · release-desktop.yml · release-mobile.yml（占位）
+├── .github/workflows/   ci.yml · release-desktop.yml · release-mobile.yml（签名包，二阶段）
 ├── backend/             molink-core（CMake，libuvcpp）
 ├── frontend/            React 前端
 ├── shell/native/        Linux 壳层（GTK3 + WebKitGTK）
