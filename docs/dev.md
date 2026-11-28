@@ -373,9 +373,11 @@ yaml
 
 “不上传 zip”的落实：tauri-action 只会扫描并上传平台特定的 bundle（.dmg、.msi/.exe、.AppImage/.deb），不会自动生成 zip。Windows 侧确保 Inno Setup 安装包（以及 NSIS 免安装单文件）已配置，不要额外添加 zip 打包步骤。
 
-6.3 移动端发布（release-mobile.yml，二阶段启用）
+6.3 移动端发布（release-desktop.yml 的 android job + release-mobile.yml 二阶段）
 Android
-Android 签名发布需要四个 GitHub Actions secrets：ANDROID_KEYSTORE_BASE64、ANDROID_KEYSTORE_PASSWORD、ANDROID_KEY_ALIAS、ANDROID_KEY_PASSWORD。工作流在推送 v* 标签时构建签名 APK/AAB，并附加到同一 Release。
+日常可安装的 APK 随 **Release Desktop** 一起发：推 `v*` 标签时 `release-desktop.yml` 的 `android` job 跑 `mobile/android` 的 `assembleDebug`，产出 `moLink-<版本>-android.apk`（debug 签名，可直接装），和桌面安装包在同一个 Release 里。
+
+商店签名（Play 上架）走 `release-mobile.yml`（手动触发），需要四个 secrets：ANDROID_KEYSTORE_BASE64、ANDROID_KEYSTORE_PASSWORD、ANDROID_KEY_ALIAS、ANDROID_KEY_PASSWORD；启用前要把构建步骤从早期的 Tauri 写法改成 `./gradlew :app:assembleRelease`。
 
 yaml
 name: Release Mobile
