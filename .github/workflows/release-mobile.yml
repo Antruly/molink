@@ -1,15 +1,18 @@
 name: Release Mobile
 
-# Phase 2. Enabled once the mobile shell targets exist and the signing secrets
-# are configured:
+# 第二阶段：**签名**包（Play 上架用）。日常可安装的 APK 已经随 Release Desktop
+# 一起发（debug 签名，见 release-desktop.yml 的 android job），这里只做商店签名。
+#
+# 启用前需要这些 secret：
 #
 #   ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD,
 #   ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD
 #
-# iOS is expected to ship through TestFlight first; attaching an .ipa to a
-# GitHub Release needs a certificate and provisioning profile as well.
+# iOS 先走 TestFlight；把 .ipa 挂到 GitHub Release 还需要证书与描述文件。
 #
-# Run manually while the mobile targets are still being built out.
+# 注意：下面这条 `pnpm tauri android build` 是早期 Tauri 壳的写法，当前的安卓壳
+# 是 mobile/android 这个独立 Gradle 工程 —— 启用前把构建步骤改成
+# `./gradlew :app:assembleRelease`（带上面的 keystore 参数），否则这条流水线跑不起来。
 
 on:
   workflow_dispatch:
